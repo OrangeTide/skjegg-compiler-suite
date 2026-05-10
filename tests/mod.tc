@@ -1,0 +1,21 @@
+/* mod.tc : test the modulo operator, including under register pressure */
+
+define mod6(int a, int b, int c, int d, int e, int f) -> int
+{
+    return a % b + c % d + e % f;
+}
+
+define main() -> int
+{
+    int r;
+
+    if (17 % 5 != 2) return 1;
+    if (100 % 13 != 9) return 1;
+    if (7 % 1 != 0) return 1;
+
+    /* Six live values force spills around the modulo operations. */
+    r = mod6(17, 5, 23, 7, 100, 13);
+    if (r != 13) return 1;
+
+    return 0;
+}

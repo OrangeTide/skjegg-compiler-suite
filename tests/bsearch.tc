@@ -1,0 +1,41 @@
+int sorted[] = { 1, 3, 5, 7, 9, 11, 13, 17, 19, 23, 29, 31 };
+int nsorted = 12;
+
+define bsearch(int key) -> int
+{
+    int lo;
+    int hi;
+    int mid;
+    int x;
+    int found;
+
+    lo = 0;
+    hi = nsorted;
+    found = -1;
+    while (lo < hi) {
+        mid = (lo + hi) / 2;
+        x = sorted[mid];
+        if (x == key) {
+            found = mid;
+            break;
+        }
+        if (x < key) {
+            lo = mid + 1;
+            continue;
+        }
+        hi = mid;
+    }
+    return found;
+}
+
+define main() -> int
+{
+    if (bsearch(7)   !=  3)  return 1;
+    if (bsearch(29)  != 10)  return 1;
+    if (bsearch(1)   !=  0)  return 1;
+    if (bsearch(31)  != 11)  return 1;
+    if (bsearch(2)   != -1)  return 1;
+    if (bsearch(100) != -1)  return 1;
+    if (bsearch(0)   != -1)  return 1;
+    return 0;
+}

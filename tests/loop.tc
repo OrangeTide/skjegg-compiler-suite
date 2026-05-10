@@ -1,0 +1,88 @@
+/* loop.tc - primitive fnmatch: '*' matches any run, '?' matches one char.
+ *
+ * States, driven by (pc = pat[pi], tc = txt[ti]):
+ *   S_READ       : load pc, tc at loop top
+ *   S_ACCEPT     : both strings exhausted -> success
+ *   S_BACKTRACK  : pattern dead but text remains; retry from last '*'
+ *   S_STAR       : record (pi, ti), advance pattern past '*'
+ *   S_MATCH      : '?' or literal match; advance both
+ *   S_REJECT     : mismatch with no '*' to fall back to
+ */
+
+define fnmatch(byte pat[], byte txt[]) -> int
+{
+    int pi;
+    int ti;
+    int star_pi;
+    int star_ti;
+    int pc;
+    int tc;
+    int matched;
+
+    pi = 0;
+    ti = 0;
+    star_pi = -1;
+    star_ti = 0;
+    matched = 0;
+
+    while (1) {
+        pc = pat[pi];
+        tc = txt[ti];
+
+        if (pc == 0 && tc == 0) {
+            matched = 1;
+            break;
+        }
+
+        if (pc == 0) {
+            if (star_pi < 0) break;
+            star_ti = star_ti + 1;
+            ti = star_ti;
+            pi = star_pi + 1;
+            continue;
+        }
+
+        if (pc == '*') {
+            star_pi = pi;
+            star_ti = ti;
+            pi = pi + 1;
+            continue;
+        }
+
+        if (tc == 0) break;
+
+        if (pc == '?' || pc == tc) {
+            pi = pi + 1;
+            ti = ti + 1;
+            continue;
+        }
+
+        if (star_pi < 0) break;
+        star_ti = star_ti + 1;
+        ti = star_ti;
+        pi = star_pi + 1;
+    }
+    return matched;
+}
+
+define main() -> int
+{
+    int ok;
+
+    ok = 1;
+    if (fnmatch("*.c",    "hello.c")  != 1) ok = 0;
+    if (fnmatch("*.c",    "hello.h")  != 0) ok = 0;
+    if (fnmatch("h?llo",  "hello")    != 1) ok = 0;
+    if (fnmatch("h?llo",  "hxllo")    != 1) ok = 0;
+    if (fnmatch("h?llo",  "hello!")   != 0) ok = 0;
+    if (fnmatch("a*b*c",  "axxbyyc")  != 1) ok = 0;
+    if (fnmatch("a*b*c",  "axxbyyd")  != 0) ok = 0;
+    if (fnmatch("",       "")         != 1) ok = 0;
+    if (fnmatch("*",      "")         != 1) ok = 0;
+    if (fnmatch("*",      "anything") != 1) ok = 0;
+    if (fnmatch("a*",     "a")        != 1) ok = 0;
+    if (fnmatch("*a",     "a")        != 1) ok = 0;
+
+    if (ok) return 0;
+    return 1;
+}

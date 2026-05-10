@@ -1,0 +1,45 @@
+/* varret.tc : test variable return values */
+
+define range(int lo, int hi) -> int..
+{
+    int i;
+
+    i = lo;
+    while (i < hi) {
+        return.. i;
+        i += 1;
+    }
+    return;
+}
+
+define sum_range(int lo, int hi) -> int
+{
+    int a;
+    int b;
+    int c;
+    int d;
+
+    (a, b, c, d) = range(lo, lo + 4);
+    return a + b + c + d;
+}
+
+define main() -> int
+{
+    int a;
+    int b;
+
+    /* range(0,4) pushes 0,1,2,3 and returns count=4 */
+    (a, b) = range(0, 4);
+    if (a != 0) return 1;
+    if (b != 1) return 1;
+
+    /* range(10,14) pushes 10,11,12,13 */
+    if (sum_range(10, 14) != 46) return 1;
+
+    /* range(0,0) pushes nothing, returns count=0 */
+    (a, b) = range(5, 7);
+    if (a != 5) return 1;
+    if (b != 6) return 1;
+
+    return 0;
+}

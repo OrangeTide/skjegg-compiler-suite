@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install cross toolchain and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-m68k-linux-gnu binutils-m68k-linux-gnu binutils-riscv64-linux-gnu qemu-user
+
+      - name: Build all tools
+        run: make
+
+      - name: GC unit tests
+        run: make test-gc
+
+      - name: ColdFire tests (qemu-m68k)
+        run: make check
+
+      - name: RISC-V tests (qemu-riscv32)
+        run: make check-rv
+
+      - name: 64-bit integer tests
+        run: make test-i64 test-i64-rv
+
+      - name: Unsigned 32-bit ops tests
+        run: make test-ops test-ops-rv
+
+      - name: C compiler tests (skj-cc)
+        run: make check-cc
+
+      - name: C preprocessor tests
+        run: make check-cpp
+
+      - name: Smoke test (full in-tree toolchain)
+        run: make check-smoke

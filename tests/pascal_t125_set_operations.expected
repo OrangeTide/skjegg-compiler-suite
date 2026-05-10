@@ -1,0 +1,7 @@
+3 in s1
+4 not in s1
+union ok
+intersection ok
+difference ok
+empty ok
+range ok

@@ -1,0 +1,15 @@
+byte msg[] = "hello, world\n";
+
+define strlen(byte s[]) -> int
+{
+    int n;
+    n = 0;
+    while (s[n] != 0) n = n + 1;
+    return n;
+}
+
+define main() -> int
+{
+    write(1, msg, strlen(msg));
+    return 0;
+}

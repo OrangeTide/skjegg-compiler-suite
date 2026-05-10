@@ -1,0 +1,25 @@
+define sum6(int a, int b, int c, int d, int e, int f) -> int
+{
+    return a + b + c + d + e + f;
+}
+
+/* Nested 6-arg calls: the front-end evaluates all six outer args into temps
+ * before emitting ARG/CALL, so peak live-temp count exceeds available data
+ * registers on ColdFire. Forces the linear-scan allocator's spill path. */
+define mix(int x) -> int
+{
+    return sum6(
+        sum6(x + 1, x + 2, x + 3,  x + 4,  x + 5,  x + 6),
+        sum6(x + 7, x + 8, x + 9,  x + 10, x + 11, x + 12),
+        x * 2,
+        x * 3,
+        x * 4,
+        x * 5);
+}
+
+define main() -> int
+{
+    if (mix(1) != 104) return 1;
+    if (mix(0) !=  78) return 1;
+    return 0;
+}
