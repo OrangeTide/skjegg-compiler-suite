@@ -1,6 +1,7 @@
 /* main.c : TinScheme compiler driver */
 
 #include "scheme.h"
+#include "version.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +53,9 @@ main(int argc, char **argv)
             outpath = argv[++i];
         } else if (strcmp(argv[i], "-p") == 0) {
             print_only = 1;
+        } else if (strcmp(argv[i], "-V") == 0) {
+            printf("skj-sc %s\n", SKJ_VERSION);
+            return 0;
         } else if (argv[i][0] == '-') {
             die("unknown option: %s", argv[i]);
         } else {

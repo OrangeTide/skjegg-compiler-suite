@@ -1,6 +1,7 @@
 /* main.c : MooScript compiler driver */
 
 #include "moo.h"
+#include "version.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -346,6 +347,7 @@ usage(const char *prog)
     fprintf(stderr, "usage: %s [options] <file.moo>\n", prog);
     fprintf(stderr, "  -o <file>   output assembly file\n");
     fprintf(stderr, "  -t          enable trace comments\n");
+    fprintf(stderr, "  -V          show version\n");
     fprintf(stderr, "  --tokens    dump token stream and exit\n");
     fprintf(stderr, "  --ast       dump AST and exit\n");
     exit(1);
@@ -374,6 +376,9 @@ main(int argc, char **argv)
             if (++i >= argc)
                 usage(argv[0]);
             outfile = argv[i];
+        } else if (strcmp(argv[i], "-V") == 0) {
+            printf("skj-mooc %s\n", SKJ_VERSION);
+            return 0;
         } else if (strcmp(argv[i], "-t") == 0) {
             trace = 1;
         } else if (strcmp(argv[i], "--tokens") == 0) {

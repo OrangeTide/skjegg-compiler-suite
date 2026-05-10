@@ -360,7 +360,6 @@ encode_eor(struct assembler *a, int size,
     int sz_code;
     int total;
 
-    if (src->type != OP_DREG) return -1;
     if (ea_mode_reg(dst, &dm, &dr) < 0) return -1;
 
     switch (size) {
@@ -368,6 +367,26 @@ encode_eor(struct assembler *a, int size,
     case 2: sz_code = 1; break;
     default: sz_code = 2; break;
     }
+
+    if (src->type == OP_IMM) {
+        int imm_size = (size <= 2) ? 2 : 4;
+        total = 2 + imm_size + ea_ext_size(dst);
+        if (emit) {
+            struct section *s = &a->sections[a->cur_section];
+            uint16_t w = (uint16_t)(0x0A00
+                       | (sz_code << 6)
+                       | ea_bits(dm, dr));
+            sec_emit16(s, w);
+            if (size <= 2)
+                sec_emit16(s, (uint16_t)(src->imm & 0xFFFF));
+            else
+                sec_emit32(s, (uint32_t)src->imm);
+            ea_emit_ext(a, dst);
+        }
+        return total;
+    }
+
+    if (src->type != OP_DREG) return -1;
 
     total = 2 + ea_ext_size(dst);
 
@@ -460,6 +479,19 @@ encode_unary(struct assembler *a, uint16_t opcode,
 }
 
 static int
+encode_addsubx(struct assembler *a, uint16_t base,
+               struct operand *src, struct operand *dst, int emit)
+{
+    if (src->type != OP_DREG || dst->type != OP_DREG) return -1;
+
+    if (emit) {
+        struct section *s = &a->sections[a->cur_section];
+        sec_emit16(s, (uint16_t)(base | (dst->reg << 9) | src->reg));
+    }
+    return 2;
+}
+
+static int
 encode_ext(struct assembler *a, uint16_t opcode,
            struct operand *op, int emit)
 {
@@ -535,6 +567,32 @@ encode_cmp(struct assembler *a, int size,
 }
 
 static int
+encode_cmpa(struct assembler *a, int size,
+            struct operand *src, struct operand *dst, int emit)
+{
+    int sm, sr;
+    int opmode;
+    int total;
+
+    if (dst->type != OP_AREG) return -1;
+    if (ea_mode_reg(src, &sm, &sr) < 0) return -1;
+
+    opmode = (size == 2) ? 3 : 7;
+    total = 2 + ea_ext_size(src);
+
+    if (emit) {
+        struct section *s = &a->sections[a->cur_section];
+        uint16_t w = (uint16_t)(0xB000
+                   | (dst->reg << 9)
+                   | (opmode << 6)
+                   | ea_bits(sm, sr));
+        sec_emit16(s, w);
+        ea_emit_ext(a, src);
+    }
+    return total;
+}
+
+static int
 cc_code(const char *cc)
 {
     if (strcmp(cc, "eq") == 0) return 0x7;
@@ -544,8 +602,10 @@ cc_code(const char *cc)
     if (strcmp(cc, "gt") == 0) return 0xE;
     if (strcmp(cc, "ge") == 0) return 0xC;
     if (strcmp(cc, "cs") == 0) return 0x5;
+    if (strcmp(cc, "lo") == 0) return 0x5;
     if (strcmp(cc, "ls") == 0) return 0x3;
     if (strcmp(cc, "hi") == 0) return 0x2;
+    if (strcmp(cc, "hs") == 0) return 0x4;
     if (strcmp(cc, "cc") == 0) return 0x4;
     if (strcmp(cc, "pl") == 0) return 0xA;
     if (strcmp(cc, "mi") == 0) return 0xB;
@@ -824,8 +884,15 @@ do_encode(struct assembler *a, const char *mnemonic, int size,
         return encode_alu(a, 0x8000, size, op1, op2, emit);
     if (strcmp(mnemonic, "cmp") == 0)
         return encode_cmp(a, size, op1, op2, emit);
+    if (strcmp(mnemonic, "cmpa") == 0)
+        return encode_cmpa(a, size, op1, op2, emit);
     if (strcmp(mnemonic, "eor") == 0)
         return encode_eor(a, size, op1, op2, emit);
+
+    if (strcmp(mnemonic, "addx") == 0)
+        return encode_addsubx(a, 0xD180, op1, op2, emit);
+    if (strcmp(mnemonic, "subx") == 0)
+        return encode_addsubx(a, 0x9180, op1, op2, emit);
 
     if (strcmp(mnemonic, "addq") == 0)
         return encode_addq_subq(a, 0x5000, size, op1, op2, emit);
@@ -883,6 +950,8 @@ do_encode(struct assembler *a, const char *mnemonic, int size,
 
     if (strcmp(mnemonic, "bra") == 0)
         return encode_branch(a, 0x6000, op1, emit);
+    if (strcmp(mnemonic, "bsr") == 0)
+        return encode_branch(a, 0x6100, op1, emit);
     if (strcmp(mnemonic, "beq") == 0)
         return encode_branch(a, 0x6700, op1, emit);
     if (strcmp(mnemonic, "bne") == 0)
@@ -899,9 +968,9 @@ do_encode(struct assembler *a, const char *mnemonic, int size,
         return encode_branch(a, 0x6F00, op1, emit);
     if (strcmp(mnemonic, "bge") == 0)
         return encode_branch(a, 0x6C00, op1, emit);
-    if (strcmp(mnemonic, "bcs") == 0)
+    if (strcmp(mnemonic, "bcs") == 0 || strcmp(mnemonic, "blo") == 0)
         return encode_branch(a, 0x6500, op1, emit);
-    if (strcmp(mnemonic, "bcc") == 0)
+    if (strcmp(mnemonic, "bcc") == 0 || strcmp(mnemonic, "bhs") == 0)
         return encode_branch(a, 0x6400, op1, emit);
     if (strcmp(mnemonic, "bhi") == 0)
         return encode_branch(a, 0x6200, op1, emit);

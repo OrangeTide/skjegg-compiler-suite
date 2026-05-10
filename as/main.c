@@ -2,11 +2,10 @@
 /* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 #include "as.h"
+#include "version.h"
 
 #include <stdlib.h>
 #include <string.h>
-
-#define SKJ_AS_VERSION "0.1.0"
 
 static void
 cleanup_as(void *p)
@@ -55,7 +54,7 @@ main(int argc, char **argv)
             return 0;
         }
         if (strcmp(argv[k], "-V") == 0) {
-            printf("skj-as %s\n", SKJ_AS_VERSION);
+            printf("skj-as %s\n", SKJ_VERSION);
             return 0;
         }
         if (strcmp(argv[k], "-o") == 0 && k + 1 < argc) {

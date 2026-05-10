@@ -27,6 +27,7 @@ $M68K_CC -std=c99 -O2 -Wall -ffreestanding -c -o "$BDIR/pascal_rt.o" "$ROOT/runt
 $M68K_CC -std=c99 -O2 -Wall -ffreestanding -c -o "$BDIR/str.o" "$ROOT/runtime/str.c"
 $M68K_CC -std=c99 -O2 -Wall -ffreestanding -c -o "$BDIR/list.o" "$ROOT/runtime/list.c"
 $M68K_CC -std=c99 -O2 -Wall -ffreestanding -c -o "$BDIR/host_stub.o" "$ROOT/runtime/host_stub.c"
+$M68K_CC -std=c99 -O2 -Wall -ffreestanding -c -o "$BDIR/toy_host.o" "$ROOT/runtime/toy_host.c"
 
 pass=0
 fail=0
@@ -92,14 +93,24 @@ for f in "$HERE"/scm_*.scm; do
     run_test "$name"
 done
 
-# MooScript tests
+# MooScript tests (host_stub runtime)
 for f in "$HERE"/moo_*.moo; do
-    case "$f" in *moo_room.moo) continue ;; esac
+    case "$f" in *moo_room.moo|*moo_toy_*.moo) continue ;; esac
     name=$(basename "$f" .moo)
     "$ROOT/build/skj-mooc" -o "$BDIR/${name}.s" "$f"
     "$AS" -o "$BDIR/${name}.o" "$BDIR/${name}.s"
     $LD -o "$BDIR/$name" "$BDIR/start.o" "$BDIR/str.o" "$BDIR/list.o" \
        "$BDIR/host_stub.o" "$BDIR/${name}.o" 2>/dev/null
+    run_test "$name"
+done
+
+# MooScript toy tests (toy_host runtime)
+for f in "$HERE"/moo_toy_*.moo; do
+    name=$(basename "$f" .moo)
+    "$ROOT/build/skj-mooc" -o "$BDIR/${name}.s" "$f"
+    "$AS" -o "$BDIR/${name}.o" "$BDIR/${name}.s"
+    $LD -o "$BDIR/$name" "$BDIR/start.o" "$BDIR/str.o" "$BDIR/list.o" \
+       "$BDIR/toy_host.o" "$BDIR/${name}.o" 2>/dev/null
     run_test "$name"
 done
 

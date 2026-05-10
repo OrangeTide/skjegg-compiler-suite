@@ -21,6 +21,8 @@
 
 CC      ?= cc
 CFLAGS  ?= -std=c99 -O2 -Wall -Wextra -Wpedantic -Wno-unused-parameter
+CFLAGS  += -Ibuild
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "0.2.0-dev")
 M68K_CC ?= m68k-linux-gnu-gcc
 M68K_AS ?= m68k-linux-gnu-as
 M68K_LD ?= m68k-linux-gnu-ld
@@ -28,13 +30,18 @@ QEMU    ?= qemu-m68k
 RV_AS   ?= riscv64-linux-gnu-as
 RV_LD   ?= riscv64-linux-gnu-ld
 QEMU_RV ?= qemu-riscv32
+X86_ASM ?= nasm
+X86_LD  ?= ld
+QEMU_X86 ?= qemu-i386
 
 IR_SRC  := ir/ir.c ir/util.c ir/arena.c
 BE_CF   := backend/regalloc_cf.c backend/cf_emit.c
 BE_RV   := backend/regalloc_rv.c backend/rv_emit.c
+BE_X86  := backend/regalloc_x86.c backend/x86_emit.c
 TC_SRC  := tinc/lex.c tinc/parse.c tinc/lower.c tinc/main.c
 SRC     := $(IR_SRC) $(BE_CF) $(TC_SRC)
 SRC_RV  := $(IR_SRC) $(BE_RV) $(TC_SRC)
+SRC_X86 := $(IR_SRC) $(BE_X86) $(TC_SRC)
 
 TESTS     := $(wildcard tests/*.tc)
 SCM_TESTS := $(wildcard tests/scm_*.scm)
@@ -42,13 +49,21 @@ MOO_TESTS := $(filter-out tests/moo_room.moo tests/moo_toy_%.moo,$(wildcard test
 MOO_TOY_TESTS := $(wildcard tests/moo_toy_*.moo)
 PAS_TESTS := $(wildcard tests/pascal_*.pas)
 
-all: build/skj-tinc build/skj-sc build/skj-mooc build/skj-pc build/skj-as build/skj-ld build/skj-cpp build/skj-cc build/skj-tinc-rv build/skj-sc-rv
+TOOLS := build/skj-tinc build/skj-tinc-rv build/skj-tinc-x86 \
+         build/skj-sc build/skj-sc-rv build/skj-sc-x86 \
+         build/skj-mooc build/skj-pc build/skj-as build/skj-ld \
+         build/skj-cpp build/skj-cc
+
+all: $(TOOLS)
 
 build/skj-tinc: $(SRC) ir/ir.h tinc/tinc.h | build
 	$(CC) $(CFLAGS) -Iir -Itinc -o $@ $(SRC)
 
 build/skj-tinc-rv: $(SRC_RV) ir/ir.h tinc/tinc.h | build
 	$(CC) $(CFLAGS) -Iir -Itinc -o $@ $(SRC_RV)
+
+build/skj-tinc-x86: $(SRC_X86) ir/ir.h tinc/tinc.h | build
+	$(CC) $(CFLAGS) -Iir -Itinc -o $@ $(SRC_X86)
 
 ## C preprocessor
 CPP_SRC := cpp/tok.c cpp/macro.c cpp/cond.c cpp/dir.c ir/util.c ir/arena.c
@@ -93,12 +108,21 @@ build/%: build/%.o build/start.o build/skj-ld
 build:
 	mkdir -p build
 
+build/version.h: FORCE | build
+	@printf '#ifndef SKJ_VERSION_H\n#define SKJ_VERSION_H\n#define SKJ_VERSION "%s"\n#endif\n' '$(VERSION)' > $@.tmp
+	@cmp -s $@.tmp $@ || mv $@.tmp $@
+	@rm -f $@.tmp
+
+$(TOOLS): build/version.h
+
+FORCE:
+
 check: build/skj-tinc build/skj-mooc build/skj-pc $(TESTS:tests/%.tc=build/%) $(SCM_TESTS:tests/%.scm=build/%) $(MOO_TESTS:tests/%.moo=build/%) $(MOO_TOY_TESTS:tests/%.moo=build/%) $(PAS_TESTS:tests/%.pas=build/%)
 	@sh tests/run-tests.sh "$(QEMU)"
 
 ## RISC-V per-test rules: tests/<name>.tc -> build/rv/<name>.s -> .o -> binary
-RV_TESTS     := $(filter-out tests/cont.tc,$(TESTS))
-RV_SCM_TESTS := $(filter-out tests/scm_shift.scm,$(SCM_TESTS))
+RV_TESTS     := $(TESTS)
+RV_SCM_TESTS := $(SCM_TESTS)
 
 build/rv/%.s: tests/%.tc build/skj-tinc-rv | build/rv
 	./build/skj-tinc-rv -o $@ $<
@@ -118,17 +142,47 @@ build/rv:
 check-rv: build/skj-tinc-rv build/skj-sc-rv $(RV_TESTS:tests/%.tc=build/rv/%) $(RV_SCM_TESTS:tests/%.scm=build/rv/%)
 	@sh tests/run-tests.sh "$(QEMU_RV)" build/rv
 
+## x86 per-test rules: tests/<name>.tc -> build/x86/<name>.s -> .o -> binary
+X86_TESTS := $(TESTS)
+X86_SCM_TESTS := $(SCM_TESTS)
+
+build/x86/%.s: tests/%.tc build/skj-tinc-x86 | build/x86
+	./build/skj-tinc-x86 -o $@ $<
+
+build/x86/scm_%.s: tests/scm_%.scm build/skj-sc-x86 | build/x86
+	./build/skj-sc-x86 -o $@ $<
+
+build/x86/%.o: build/x86/%.s
+	$(X86_ASM) -f elf32 -o $@ $<
+
+build/x86/start.o: runtime/start_x86.asm | build/x86
+	$(X86_ASM) -f elf32 -o $@ $<
+
+build/x86/%: build/x86/%.o build/x86/start.o
+	$(X86_LD) -m elf_i386 -o $@ build/x86/start.o $<
+
+build/x86:
+	mkdir -p build/x86
+
+check-x86: build/skj-tinc-x86 build/skj-sc-x86 $(X86_TESTS:tests/%.tc=build/x86/%) $(X86_SCM_TESTS:tests/%.scm=build/x86/%)
+	@sh tests/run-tests.sh "$(QEMU_X86)" build/x86
+
 ## TinScheme compiler
 SC_SRC := scheme/lex.c scheme/parse.c scheme/print.c scheme/main.c scheme/gc.c \
           scheme/lower.c $(IR_SRC) $(BE_CF)
 SC_SRC_RV := scheme/lex.c scheme/parse.c scheme/print.c scheme/main.c scheme/gc.c \
              scheme/lower.c $(IR_SRC) $(BE_RV)
+SC_SRC_X86 := scheme/lex.c scheme/parse.c scheme/print.c scheme/main.c scheme/gc.c \
+              scheme/lower.c $(IR_SRC) $(BE_X86)
 
 build/skj-sc: $(SC_SRC) scheme/scheme.h scheme/gc.h ir/ir.h | build
 	$(CC) $(CFLAGS) -Ischeme -Iir -o $@ $(SC_SRC)
 
 build/skj-sc-rv: $(SC_SRC_RV) scheme/scheme.h scheme/gc.h ir/ir.h | build
 	$(CC) $(CFLAGS) -Ischeme -Iir -o $@ $(SC_SRC_RV)
+
+build/skj-sc-x86: $(SC_SRC_X86) scheme/scheme.h scheme/gc.h ir/ir.h | build
+	$(CC) $(CFLAGS) -Ischeme -Iir -o $@ $(SC_SRC_X86)
 
 ## TinScheme codegen tests (.scm -> .s via skj-sc)
 build/scm_%.s: tests/scm_%.scm build/skj-sc | build
@@ -295,6 +349,63 @@ test-ops-rv: build/rv/ops_test
 	@echo "Running unsigned ops test under qemu-riscv32..."
 	@$(QEMU_RV) ./build/rv/ops_test && echo "PASS: ops_test (RISC-V)" || (echo "FAIL: ops_test (RISC-V)"; exit 1)
 
+## I64 integration test (IR builder → x86 asm → qemu-i386)
+I64_TEST_X86_SRC := tests/test_i64.c $(IR_SRC) $(BE_X86)
+
+build/test_i64_x86: $(I64_TEST_X86_SRC) ir/ir.h | build
+	$(CC) $(CFLAGS) -Iir -o $@ $(I64_TEST_X86_SRC)
+
+build/x86/i64_test.s: build/test_i64_x86 | build/x86
+	./build/test_i64_x86 -o $@
+
+build/x86/i64_test.o: build/x86/i64_test.s
+	$(X86_ASM) -f elf32 -o $@ $<
+
+build/x86/i64_test: build/x86/i64_test.o build/x86/start.o
+	$(X86_LD) -m elf_i386 -o $@ build/x86/start.o $<
+
+test-i64-x86: build/x86/i64_test
+	@echo "Running I64 test under qemu-i386..."
+	@$(QEMU_X86) ./build/x86/i64_test && echo "PASS: i64_test (x86)" || (echo "FAIL: i64_test (x86)"; exit 1)
+
+## Unsigned 32-bit ops integration test (IR builder → x86 asm → qemu-i386)
+OPS_TEST_X86_SRC := tests/test_ops.c $(IR_SRC) $(BE_X86)
+
+build/test_ops_x86: $(OPS_TEST_X86_SRC) ir/ir.h | build
+	$(CC) $(CFLAGS) -Iir -o $@ $(OPS_TEST_X86_SRC)
+
+build/x86/ops_test.s: build/test_ops_x86 | build/x86
+	./build/test_ops_x86 -o $@
+
+build/x86/ops_test.o: build/x86/ops_test.s
+	$(X86_ASM) -f elf32 -o $@ $<
+
+build/x86/ops_test: build/x86/ops_test.o build/x86/start.o
+	$(X86_LD) -m elf_i386 -o $@ build/x86/start.o $<
+
+test-ops-x86: build/x86/ops_test
+	@echo "Running unsigned ops test under qemu-i386..."
+	@$(QEMU_X86) ./build/x86/ops_test && echo "PASS: ops_test (x86)" || (echo "FAIL: ops_test (x86)"; exit 1)
+
+## FPU integration test (IR builder → x86 asm → qemu-i386)
+FPU_TEST_X86_SRC := tests/test_fpu.c $(IR_SRC) $(BE_X86)
+
+build/test_fpu_x86: $(FPU_TEST_X86_SRC) ir/ir.h | build
+	$(CC) $(CFLAGS) -Iir -o $@ $(FPU_TEST_X86_SRC)
+
+build/x86/fpu_test.s: build/test_fpu_x86 | build/x86
+	./build/test_fpu_x86 -o $@
+
+build/x86/fpu_test.o: build/x86/fpu_test.s
+	$(X86_ASM) -f elf32 -o $@ $<
+
+build/x86/fpu_test: build/x86/fpu_test.o build/x86/start.o
+	$(X86_LD) -m elf_i386 -o $@ build/x86/start.o $<
+
+test-fpu-x86: build/x86/fpu_test
+	@echo "Running FPU test under qemu-i386..."
+	@$(QEMU_X86) ./build/x86/fpu_test && echo "PASS: fpu_test (x86)" || (echo "FAIL: fpu_test (x86)"; exit 1)
+
 ## C preprocessor tests
 check-cc: build/skj-cc build/skj-as build/start.o
 	@sh tests/run-cc-tests.sh
@@ -313,4 +424,4 @@ check-as: build/skj-tinc build/skj-sc build/skj-mooc build/skj-pc build/skj-as
 clean:
 	rm -rf build
 
-.PHONY: all check check-rv check-cc check-cpp check-as check-smoke test-gc test-fpu test-i64 test-i64-rv test-ops test-ops-rv test-parse clean
+.PHONY: all check check-rv check-x86 check-cc check-cpp check-as check-smoke test-gc test-fpu test-fpu-x86 test-i64 test-i64-rv test-i64-x86 test-ops test-ops-rv test-ops-x86 test-parse clean FORCE

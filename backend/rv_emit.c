@@ -575,11 +575,53 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
     }
 
-    case IR_MARK:
-    case IR_CAPTURE:
-    case IR_RESUME:
-        die("rv_emit: continuations not yet supported on RISC-V");
+    case IR_MARK: {
+        const char *sd = rd(fn, i->dst, 0);
+        int off = slot_offset(fn, i->slot);
+
+        fprintf(out, "\tsw s0, %d(s0)\n", off);
+        fprintf(out, "\tsw sp, %d(s0)\n", off + 4);
+        fprintf(out, "\tla t0, .Lmark%d_%d\n",
+            label_prefix, i->label);
+        fprintf(out, "\tsw t0, %d(s0)\n", off + 8);
+        fprintf(out, "\taddi t0, s0, %d\n", off);
+        fprintf(out, "\tla t1, __cont_mark_sp\n");
+        fprintf(out, "\tsw t0, 0(t1)\n");
+        fprintf(out, "\tli a0, 0\n");
+        fprintf(out, ".Lmark%d_%d:\n", label_prefix, i->label);
+        if (strcmp(sd, "a0") != 0)
+            fprintf(out, "\tmv %s, a0\n", sd);
+        wd(out, fn, i->dst, sd);
         break;
+    }
+
+    case IR_CAPTURE: {
+        const char *sd = rd(fn, i->dst, 0);
+        int k;
+
+        for (k = 0; k < NSAVED; k++)
+            fprintf(out, "\taddi sp, sp, -4\n\tsw %s, 0(sp)\n",
+                regs[k + 2]);
+        fprintf(out, "\tjal ra, __cont_capture\n");
+        for (k = NSAVED - 1; k >= 0; k--)
+            fprintf(out, "\tlw %s, 0(sp)\n\taddi sp, sp, 4\n",
+                regs[k + 2]);
+        if (strcmp(sd, "a0") != 0)
+            fprintf(out, "\tmv %s, a0\n", sd);
+        wd(out, fn, i->dst, sd);
+        break;
+    }
+
+    case IR_RESUME: {
+        const char *sa = rs(out, fn, i->a, 0);
+        const char *sb = rs(out, fn, i->b, 1);
+
+        fprintf(out, "\taddi sp, sp, -8\n");
+        fprintf(out, "\tsw %s, 0(sp)\n", sa);
+        fprintf(out, "\tsw %s, 4(sp)\n", sb);
+        fprintf(out, "\tjal ra, __cont_resume\n");
+        break;
+    }
 
     case IR_FADD: case IR_FSUB: case IR_FMUL: case IR_FDIV:
     case IR_FNEG: case IR_FABS:

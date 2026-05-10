@@ -10,6 +10,7 @@
 static struct cc_type ty_void_s  = { .kind = TY_VOID };
 static struct cc_type ty_char_s  = { .kind = TY_CHAR };
 static struct cc_type ty_int_s   = { .kind = TY_INT };
+static struct cc_type ty_llong_s = { .kind = TY_LONG_LONG };
 
 struct cc_type *
 cc_type_void(void)
@@ -27,6 +28,12 @@ struct cc_type *
 cc_type_int(void)
 {
     return &ty_int_s;
+}
+
+struct cc_type *
+cc_type_long_long(void)
+{
+    return &ty_llong_s;
 }
 
 struct cc_type *
@@ -67,7 +74,8 @@ cc_type_size(struct cc_type *t)
     case TY_CHAR:   return 1;
     case TY_SHORT:  return 2;
     case TY_INT:    return 4;
-    case TY_LONG:   return 4;
+    case TY_LONG:      return 4;
+    case TY_LONG_LONG: return 8;
     case TY_FLOAT:  return 4;
     case TY_DOUBLE: return 8;
     case TY_PTR:    return 4;
@@ -87,13 +95,14 @@ cc_type_align(struct cc_type *t)
     if (!t)
         return 4;
     switch (t->kind) {
-    case TY_VOID:   return 1;
-    case TY_CHAR:   return 1;
-    case TY_SHORT:  return 2;
-    case TY_INT:    return 4;
-    case TY_LONG:   return 4;
-    case TY_FLOAT:  return 4;
-    case TY_DOUBLE: return 4;
+    case TY_VOID:      return 1;
+    case TY_CHAR:      return 1;
+    case TY_SHORT:     return 2;
+    case TY_INT:       return 4;
+    case TY_LONG:      return 4;
+    case TY_LONG_LONG: return 4;
+    case TY_FLOAT:     return 4;
+    case TY_DOUBLE:    return 4;
     case TY_PTR:    return 4;
     case TY_ARRAY:  return cc_type_align(t->base);
     case TY_ENUM:   return 4;
@@ -108,7 +117,7 @@ cc_type_align(struct cc_type *t)
 int
 cc_type_is_integer(struct cc_type *t)
 {
-    return t->kind >= TY_CHAR && t->kind <= TY_LONG;
+    return t->kind >= TY_CHAR && t->kind <= TY_LONG_LONG;
 }
 
 int

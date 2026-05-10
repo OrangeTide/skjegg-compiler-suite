@@ -246,6 +246,200 @@ __lshrdi3:
     movem.l (%sp)+, %d2-%d4
     rts
 
+| __udivmoddi3(a_hi, a_lo, b_hi, b_lo) -> d0:d1 = quotient, d2:d3 = remainder
+|   Unsigned 64-bit division via binary long division (shift-and-subtract).
+|   Internal helper; __udivdi3/__umoddi3/__divdi3/__moddi3 are wrappers.
+__udivmoddi3:
+    movem.l %d4-%d7, -(%sp)
+    | load args (offset by 16 for 4 saved regs + 4 for return addr)
+    move.l  20(%sp), %d4        | d4 = a_hi (dividend high)
+    move.l  24(%sp), %d5        | d5 = a_lo (dividend low)
+    move.l  28(%sp), %d6        | d6 = b_hi (divisor high)
+    move.l  32(%sp), %d7        | d7 = b_lo (divisor low)
+    | check for division by zero (return 0 quotient, 0 remainder)
+    move.l  %d6, %d0
+    or.l    %d7, %d0
+    beq     .Ludm_zero
+    | quotient = 0
+    clr.l   %d0                 | q_hi = 0
+    clr.l   %d1                 | q_lo = 0
+    | remainder = 0
+    clr.l   %d2                 | r_hi = 0
+    clr.l   %d3                 | r_lo = 0
+    | iterate 64 bits
+    move.l  #63, -(%sp)         | bit counter on stack (saves a reg)
+.Ludm_loop:
+    | shift remainder left by 1, shifting in top bit of dividend
+    lsl.l   #1, %d3             | r_lo <<= 1
+    addx.l  %d2, %d2            | r_hi <<= 1 (with carry from r_lo)
+    | shift top bit of dividend (d4:d5) into remainder low bit
+    tst.l   %d4
+    bpl     .Ludm_no_bit        | branch if bit 31 of d4 is clear
+    or.l    #1, %d3             | r_lo |= 1
+.Ludm_no_bit:
+    | shift dividend left by 1
+    lsl.l   #1, %d5             | a_lo <<= 1
+    addx.l  %d4, %d4            | a_hi <<= 1 (with carry from a_lo)
+    | shift quotient left by 1
+    lsl.l   #1, %d1             | q_lo <<= 1
+    addx.l  %d0, %d0            | q_hi <<= 1
+    | compare remainder >= divisor: (r_hi:r_lo) >= (b_hi:b_lo)?
+    cmp.l   %d6, %d2            | compare r_hi vs b_hi
+    bhi     .Ludm_sub           | r_hi > b_hi: subtract
+    blo     .Ludm_next          | r_hi < b_hi: skip
+    cmp.l   %d7, %d3            | r_hi == b_hi: compare r_lo vs b_lo
+    blo     .Ludm_next          | r_lo < b_lo: skip
+.Ludm_sub:
+    | remainder -= divisor
+    sub.l   %d7, %d3            | r_lo -= b_lo
+    subx.l  %d6, %d2            | r_hi -= b_hi (with borrow)
+    | quotient |= 1
+    or.l    #1, %d1
+.Ludm_next:
+    subq.l  #1, (%sp)           | decrement bit counter
+    bge     .Ludm_loop
+    addq.l  #4, %sp             | pop bit counter
+    movem.l (%sp)+, %d4-%d7
+    rts
+.Ludm_zero:
+    clr.l   %d0
+    clr.l   %d1
+    clr.l   %d2
+    clr.l   %d3
+    movem.l (%sp)+, %d4-%d7
+    rts
+
+| __udivdi3(a_hi, a_lo, b_hi, b_lo) -> d0:d1 = quotient
+|   Unsigned 64-bit division.
+    .globl __udivdi3
+__udivdi3:
+    move.l  16(%sp), -(%sp)     | push b_lo
+    move.l  16(%sp), -(%sp)     | push b_hi
+    move.l  16(%sp), -(%sp)     | push a_lo
+    move.l  16(%sp), -(%sp)     | push a_hi
+    bsr     __udivmoddi3
+    lea     16(%sp), %sp        | pop args
+    | d0:d1 = quotient (already there)
+    rts
+
+| __umoddi3(a_hi, a_lo, b_hi, b_lo) -> d0:d1 = remainder
+|   Unsigned 64-bit modulo.
+    .globl __umoddi3
+__umoddi3:
+    move.l  16(%sp), -(%sp)     | push b_lo
+    move.l  16(%sp), -(%sp)     | push b_hi
+    move.l  16(%sp), -(%sp)     | push a_lo
+    move.l  16(%sp), -(%sp)     | push a_hi
+    bsr     __udivmoddi3
+    lea     16(%sp), %sp        | pop args
+    move.l  %d2, %d0            | remainder hi
+    move.l  %d3, %d1            | remainder lo
+    rts
+
+| __divdi3(a_hi, a_lo, b_hi, b_lo) -> d0:d1 = quotient
+|   Signed 64-bit division. Negates operands as needed, calls __udivmoddi3,
+|   negates result if signs differ.
+    .globl __divdi3
+__divdi3:
+    movem.l %d4-%d5, -(%sp)
+    | load args (offset by 8 for 2 saved regs)
+    move.l  12(%sp), %d0        | a_hi
+    move.l  16(%sp), %d1        | a_lo
+    move.l  20(%sp), %d2        | b_hi
+    move.l  24(%sp), %d3        | b_lo
+    | d4 = sign flag (1 if result should be negated)
+    clr.l   %d4
+    tst.l   %d0
+    bpl     .Ldiv_a_pos
+    | negate a (two's complement: ~a + 1)
+    not.l   %d1
+    not.l   %d0
+    addq.l  #1, %d1
+    bcc     .Ldiv_a_neg_nc
+    addq.l  #1, %d0
+.Ldiv_a_neg_nc:
+    eor.l   #1, %d4             | flip sign flag
+.Ldiv_a_pos:
+    tst.l   %d2
+    bpl     .Ldiv_b_pos
+    | negate b
+    not.l   %d3
+    not.l   %d2
+    addq.l  #1, %d3
+    bcc     .Ldiv_b_neg_nc
+    addq.l  #1, %d2
+.Ldiv_b_neg_nc:
+    eor.l   #1, %d4             | flip sign flag
+.Ldiv_b_pos:
+    | push args for __udivmoddi3
+    move.l  %d3, -(%sp)         | b_lo
+    move.l  %d2, -(%sp)         | b_hi
+    move.l  %d1, -(%sp)         | a_lo (abs)
+    move.l  %d0, -(%sp)         | a_hi (abs)
+    bsr     __udivmoddi3
+    lea     16(%sp), %sp
+    | d0:d1 = quotient; negate if d4 is set
+    tst.l   %d4
+    beq     .Ldiv_done
+    not.l   %d1
+    not.l   %d0
+    addq.l  #1, %d1
+    bcc     .Ldiv_done
+    addq.l  #1, %d0
+.Ldiv_done:
+    movem.l (%sp)+, %d4-%d5
+    rts
+
+| __moddi3(a_hi, a_lo, b_hi, b_lo) -> d0:d1 = remainder
+|   Signed 64-bit modulo. Remainder has same sign as dividend.
+    .globl __moddi3
+__moddi3:
+    movem.l %d4-%d5, -(%sp)
+    move.l  12(%sp), %d0        | a_hi
+    move.l  16(%sp), %d1        | a_lo
+    move.l  20(%sp), %d2        | b_hi
+    move.l  24(%sp), %d3        | b_lo
+    | d4 = sign of dividend (remainder gets this sign)
+    clr.l   %d4
+    tst.l   %d0
+    bpl     .Lmod_a_pos
+    not.l   %d1
+    not.l   %d0
+    addq.l  #1, %d1
+    bcc     .Lmod_a_neg_nc
+    addq.l  #1, %d0
+.Lmod_a_neg_nc:
+    move.l  #1, %d4
+.Lmod_a_pos:
+    tst.l   %d2
+    bpl     .Lmod_b_pos
+    not.l   %d3
+    not.l   %d2
+    addq.l  #1, %d3
+    bcc     .Lmod_b_pos
+    addq.l  #1, %d2
+.Lmod_b_pos:
+    move.l  %d3, -(%sp)
+    move.l  %d2, -(%sp)
+    move.l  %d1, -(%sp)
+    move.l  %d0, -(%sp)
+    bsr     __udivmoddi3
+    lea     16(%sp), %sp
+    | d2:d3 = remainder; move to d0:d1
+    move.l  %d2, %d0
+    move.l  %d3, %d1
+    | negate if dividend was negative
+    tst.l   %d4
+    beq     .Lmod_done
+    not.l   %d1
+    not.l   %d0
+    addq.l  #1, %d1
+    bcc     .Lmod_done
+    addq.l  #1, %d0
+.Lmod_done:
+    movem.l (%sp)+, %d4-%d5
+    rts
+
 | __moo_arena_alloc(size)
 |   Bump allocator for strings, lists, and other runtime values.
 |   Aligns size up to 4 bytes.  Returns pointer in d0.

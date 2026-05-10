@@ -2,6 +2,7 @@
 /* made by a machine. PUBLIC DOMAIN */
 
 #include "ld.h"
+#include "version.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -16,7 +17,7 @@ static void
 usage(void)
 {
     fprintf(stderr,
-            "usage: skj-ld [-T script.ld] [-e entry] -o output"
+            "usage: skj-ld [-V] [-T script.ld] [-e entry] -o output"
             " input.o [...]\n");
     exit(1);
 }
@@ -39,7 +40,10 @@ main(int argc, char **argv)
     inputs = NULL;
     ninputs = 0;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-T") == 0) {
+        if (strcmp(argv[i], "-V") == 0) {
+            printf("skj-ld %s\n", SKJ_VERSION);
+            return 0;
+        } else if (strcmp(argv[i], "-T") == 0) {
             if (++i >= argc) usage();
             script_path = argv[i];
         } else if (strcmp(argv[i], "-e") == 0) {

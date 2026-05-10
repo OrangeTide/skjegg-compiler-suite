@@ -4,6 +4,7 @@
 #include "cc.h"
 #include "cpp.h"
 #include "arena.h"
+#include "version.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,6 +27,7 @@ main(int argc, char **argv)
 {
     const char *inpath;
     const char *outpath;
+    int preprocess_only;
     struct cpp *pp;
     char ppbuf[65536];
     int pplen;
@@ -44,6 +46,7 @@ main(int argc, char **argv)
 
     inpath = NULL;
     outpath = NULL;
+    preprocess_only = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             outpath = argv[++i];
@@ -63,8 +66,12 @@ main(int argc, char **argv)
             } else {
                 cpp_define(pp, def, "1");
             }
+        } else if (strcmp(argv[i], "-V") == 0) {
+            printf("skj-cc %s\n", SKJ_VERSION);
+            cpp_free(pp);
+            return 0;
         } else if (strcmp(argv[i], "-E") == 0) {
-            /* preprocess only -- not yet implemented */
+            preprocess_only = 1;
         } else if (argv[i][0] == '-') {
             /* ignore unknown options silently */
         } else {
@@ -73,7 +80,7 @@ main(int argc, char **argv)
     }
 
     if (!inpath)
-        die("usage: skj-cc [-o out.s] [-I path] [-D name[=val]] input.c");
+        die("usage: skj-cc [-V] [-o out.s] [-I path] [-D name[=val]] input.c");
 
     if (setjmp(util_die_env) != 0)
         return 1;
@@ -96,6 +103,17 @@ main(int argc, char **argv)
     ppbuf[pplen] = '\0';
     cpp_free(pp);
     util_cleanup_pop();
+
+    if (preprocess_only) {
+        out = outpath ? fopen(outpath, "w") : stdout;
+        if (!out)
+            die("cannot write '%s'", outpath);
+        fwrite(ppbuf, 1, pplen, out);
+        if (out != stdout)
+            fclose(out);
+        util_cleanup_run();
+        return 0;
+    }
 
     /* parse */
     cc_lex_init(&a, ppbuf, inpath);

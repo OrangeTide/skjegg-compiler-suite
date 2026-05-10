@@ -1,6 +1,7 @@
 /* main.c : TinC compiler driver */
 
 #include "tinc.h"
+#include "version.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +39,9 @@ main(int argc, char **argv)
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             outpath = argv[++i];
+        } else if (strcmp(argv[i], "-V") == 0) {
+            printf("skj-tinc %s\n", SKJ_VERSION);
+            return 0;
         } else if (argv[i][0] == '-') {
             die("unknown option: %s", argv[i]);
         } else {
@@ -45,7 +49,7 @@ main(int argc, char **argv)
         }
     }
     if (inpath == NULL)
-        die("usage: skj-tinc [-o out.s] input.tc");
+        die("usage: skj-tinc [-V] [-o out.s] input.tc");
 
     if (setjmp(util_die_env) != 0)
         return 1;

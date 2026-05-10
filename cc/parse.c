@@ -415,7 +415,9 @@ done:
 
     if (!result) {
         if (base == -1) {
-            if (long_count > 0)
+            if (long_count >= 2)
+                base = TY_LONG_LONG;
+            else if (long_count == 1)
                 base = TY_LONG;
             else
                 base = TY_INT;
@@ -426,6 +428,64 @@ done:
         result->is_unsigned = is_unsigned;
     }
     return result;
+}
+
+static long
+const_eval(struct cc_node *n)
+{
+    if (!n)
+        die("expected constant expression");
+    switch (n->kind) {
+    case ND_INTLIT:
+        return n->ival;
+    case ND_BINOP: {
+        long a = const_eval(n->a);
+        long b = const_eval(n->b);
+        switch (n->op) {
+        case TOK_PLUS:    return a + b;
+        case TOK_MINUS:   return a - b;
+        case TOK_STAR:    return a * b;
+        case TOK_SLASH:   return b ? a / b : 0;
+        case TOK_PERCENT: return b ? a % b : 0;
+        case TOK_AMP:     return a & b;
+        case TOK_PIPE:    return a | b;
+        case TOK_CARET:   return a ^ b;
+        case TOK_SHL:     return a << b;
+        case TOK_SHR:     return a >> b;
+        case TOK_ANDAND:  return a && b;
+        case TOK_OROR:    return a || b;
+        case TOK_EQ:      return a == b;
+        case TOK_NE:      return a != b;
+        case TOK_LT:      return a < b;
+        case TOK_LE:      return a <= b;
+        case TOK_GT:      return a > b;
+        case TOK_GE:      return a >= b;
+        default:
+            die("unsupported operator in constant expression");
+            return 0;
+        }
+    }
+    case ND_UNOP: {
+        long a = const_eval(n->a);
+        switch (n->op) {
+        case TOK_MINUS: return -a;
+        case TOK_TILDE: return ~a;
+        case TOK_BANG:  return !a;
+        default:
+            die("unsupported unary operator in constant expression");
+            return 0;
+        }
+    }
+    case ND_TERNARY:
+        return const_eval(n->a) ? const_eval(n->b) : const_eval(n->c);
+    case ND_SIZEOF:
+        return cc_type_size(n->decl_type);
+    case ND_CAST:
+        return const_eval(n->a);
+    default:
+        die("expected constant expression at line %d", n->line);
+        return 0;
+    }
 }
 
 /* parse abstract or concrete declarator */
@@ -468,8 +528,8 @@ parse_declarator(struct cc_type *base, char **name_out)
         if (consume(TOK_LBRACK)) {
             int len = -1;
             if (peek().kind != TOK_RBRACK) {
-                struct cc_token t = next();
-                len = (int)t.ival;
+                struct cc_node *e = parse_assign_expr();
+                len = (int)const_eval(e);
             }
             expect(TOK_RBRACK);
             base = cc_type_array(parse_arena,base, len);
@@ -571,7 +631,7 @@ parse_primary(void)
         n->fval = t.fval;
         struct cc_type *ft = arena_alloc(parse_arena, sizeof *ft);
         memset(ft, 0, sizeof *ft);
-        ft->kind = TY_DOUBLE;
+        ft->kind = t.is_float ? TY_FLOAT : TY_DOUBLE;
         n->type = ft;
         return n;
     }

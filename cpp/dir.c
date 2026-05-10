@@ -477,6 +477,55 @@ process_directive(struct cpp *p, const char *line, int len)
     return 0;
 }
 
+static void
+strip_block_comments(struct cpp *p)
+{
+    char *src = p->linebuf;
+    char *dst = p->linebuf;
+
+    if (p->in_comment) {
+        char *close = strstr(src, "*/");
+        if (!close) {
+            p->linebuf[0] = '\0';
+            return;
+        }
+        src = close + 2;
+        p->in_comment = 0;
+        *dst++ = ' ';
+    }
+
+    while (*src) {
+        if (*src == '"' || *src == '\'') {
+            char quote = *src;
+            *dst++ = *src++;
+            while (*src && *src != quote) {
+                if (*src == '\\' && src[1])
+                    *dst++ = *src++;
+                *dst++ = *src++;
+            }
+            if (*src)
+                *dst++ = *src++;
+            continue;
+        }
+        if (src[0] == '/' && src[1] == '/') {
+            break;
+        }
+        if (src[0] == '/' && src[1] == '*') {
+            char *close = strstr(src + 2, "*/");
+            if (close) {
+                *dst++ = ' ';
+                src = close + 2;
+                continue;
+            }
+            p->in_comment = 1;
+            break;
+        }
+        *dst++ = *src++;
+    }
+
+    *dst = '\0';
+}
+
 /* Public API implementation */
 
 static unsigned
@@ -617,6 +666,8 @@ cpp_next_line(struct cpp *p, char *buf, int bufsize)
             file_pop(p);
             continue;
         }
+
+        strip_block_comments(p);
 
         const char *s = skip_ws(p->linebuf);
         if (*s == '#') {

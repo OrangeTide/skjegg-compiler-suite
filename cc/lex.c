@@ -236,8 +236,12 @@ lex_token(void)
         if (is_float) {
             t.kind = TOK_FLOATLIT;
             t.fval = strtod(p, (char **)&p);
-            if (*p == 'f' || *p == 'F' || *p == 'l' || *p == 'L')
+            if (*p == 'f' || *p == 'F') {
+                t.is_float = 1;
                 p++;
+            } else if (*p == 'l' || *p == 'L') {
+                p++;
+            }
         } else {
             t.kind = TOK_INTLIT;
             t.ival = parse_int_literal();

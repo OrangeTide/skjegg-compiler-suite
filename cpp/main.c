@@ -3,6 +3,7 @@
 
 #include "cpp.h"
 #include "util.h"
+#include "version.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -17,7 +18,7 @@ cleanup_cpp(void *p)
 static void
 usage(void)
 {
-    fprintf(stderr, "usage: skj-cpp [-I dir] [-D name[=value]] [-o outfile] input.c\n");
+    fprintf(stderr, "usage: skj-cpp [-V] [-I dir] [-D name[=value]] [-o outfile] input.c\n");
     exit(1);
 }
 
@@ -61,6 +62,10 @@ main(int argc, char **argv)
             } else {
                 cpp_define(p, arg, "1");
             }
+        } else if (strcmp(argv[i], "-V") == 0) {
+            printf("skj-cpp %s\n", SKJ_VERSION);
+            cpp_free(p);
+            return 0;
         } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             outpath = argv[++i];
         } else if (argv[i][0] != '-') {

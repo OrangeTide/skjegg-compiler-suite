@@ -2,6 +2,7 @@
 
 #include "pascal.h"
 #include "arena.h"
+#include "version.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +40,9 @@ main(int argc, char **argv)
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             outpath = argv[++i];
+        } else if (strcmp(argv[i], "-V") == 0) {
+            printf("skj-pc %s\n", SKJ_VERSION);
+            return 0;
         } else if (argv[i][0] == '-') {
             die("unknown option: %s", argv[i]);
         } else {
@@ -46,7 +50,7 @@ main(int argc, char **argv)
         }
     }
     if (inpath == NULL)
-        die("usage: skj-pc [-o out.s] input.pas");
+        die("usage: skj-pc [-V] [-o out.s] input.pas");
 
     if (setjmp(util_die_env) != 0)
         return 1;

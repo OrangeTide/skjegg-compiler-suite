@@ -12,6 +12,7 @@ static struct ir_func *cur_fn;
 static struct ir_program *cur_prog;
 static const char *cur_fn_name;
 static int cur_fn_returns_float;
+static int cur_fn_returns_i64;
 
 static struct ir_insn *
 emit(int op)
@@ -35,6 +36,15 @@ static int
 lower_const(long v)
 {
     struct ir_insn *ins = emit(IR_LIC);
+    ins->dst = new_temp();
+    ins->imm = v;
+    return ins->dst;
+}
+
+static int
+lower_const64(long v)
+{
+    struct ir_insn *ins = emit(IR_LIC64);
     ins->dst = new_temp();
     ins->imm = v;
     return ins->dst;
@@ -209,11 +219,12 @@ type_to_ir(struct cc_type *t)
     if (!t)
         return IR_I32;
     switch (t->kind) {
-    case TY_CHAR:   return IR_I8;
-    case TY_SHORT:  return IR_I16;
-    case TY_FLOAT:  return IR_F64;
-    case TY_DOUBLE: return IR_F64;
-    default:        return IR_I32;
+    case TY_CHAR:      return IR_I8;
+    case TY_SHORT:     return IR_I16;
+    case TY_LONG_LONG: return IR_I64;
+    case TY_FLOAT:     return IR_F64;
+    case TY_DOUBLE:    return IR_F64;
+    default:           return IR_I32;
     }
 }
 
@@ -236,6 +247,24 @@ static int
 is_float_type(struct cc_type *t)
 {
     return t && (t->kind == TY_FLOAT || t->kind == TY_DOUBLE);
+}
+
+static int
+is_i64_type(struct cc_type *t)
+{
+    return t && t->kind == TY_LONG_LONG;
+}
+
+static int
+widen_to_i64(int val, struct cc_type *src_type)
+{
+    if (src_type && is_i64_type(src_type))
+        return val;
+    int op = (src_type && src_type->is_unsigned) ? IR_ZEXT64 : IR_SEXT64;
+    struct ir_insn *ins = emit(op);
+    ins->dst = new_temp();
+    ins->a = val;
+    return ins->dst;
 }
 
 /****************************************************************
@@ -262,6 +291,12 @@ emit_load(int addr_temp, struct cc_type *t)
         ins->a = addr_temp;
         return ins->dst;
     }
+    if (is_i64_type(t)) {
+        ins = emit(IR_LD64);
+        ins->dst = new_temp();
+        ins->a = addr_temp;
+        return ins->dst;
+    }
     int sz = cc_type_size(t);
     if (sz == 1) {
         ins = emit(t->is_unsigned ? IR_LB : IR_LBS);
@@ -281,6 +316,12 @@ emit_store(int addr_temp, int val_temp, struct cc_type *t)
     struct ir_insn *ins;
     if (is_float_type(t)) {
         ins = emit(t->kind == TY_FLOAT ? IR_FSS : IR_FSD);
+        ins->a = addr_temp;
+        ins->b = val_temp;
+        return;
+    }
+    if (is_i64_type(t)) {
+        ins = emit(IR_ST64);
         ins->a = addr_temp;
         ins->b = val_temp;
         return;
@@ -526,10 +567,10 @@ lvalue_type(struct cc_node *n)
         struct cc_type *base = lvalue_type(n->a);
         return cc_type_ptr(lower_arena,base);
     }
-    case ND_FLOATLIT: {
-        static struct cc_type ty_double = { .kind = TY_DOUBLE };
-        return &ty_double;
-    }
+    case ND_FLOATLIT:
+        return n->type ? n->type : cc_type_int();
+    case ND_INTLIT:
+        return n->type ? n->type : cc_type_int();
     case ND_UNOP:
         return lvalue_type(n->a);
     case ND_BINOP: {
@@ -539,6 +580,8 @@ lvalue_type(struct cc_node *n)
             static struct cc_type ty_double = { .kind = TY_DOUBLE };
             return &ty_double;
         }
+        if (is_i64_type(lt) || is_i64_type(rt))
+            return cc_type_long_long();
         return lt;
     }
     case ND_CALL: {
@@ -568,6 +611,8 @@ lower_expr(struct cc_node *n)
 
     switch (n->kind) {
     case ND_INTLIT:
+        if (n->type && is_i64_type(n->type))
+            return lower_const64(n->ival);
         return lower_const(n->ival);
 
     case ND_FLOATLIT: {
@@ -575,12 +620,20 @@ lower_expr(struct cc_node *n)
         snprintf(namebuf, sizeof namebuf, "__flt_%d", str_counter++);
         struct ir_global *fg = arena_zalloc(lower_arena, sizeof *fg);
         fg->name = arena_strdup(lower_arena, namebuf);
-        fg->base_type = IR_F64;
         fg->is_local = 1;
         fg->init_ivals = arena_alloc(lower_arena, sizeof(int64_t));
-        union { double d; int64_t i; } u;
-        u.d = n->fval;
-        fg->init_ivals[0] = u.i;
+        int use_single = n->type && n->type->kind == TY_FLOAT;
+        if (use_single) {
+            union { float f; int32_t i; } u;
+            u.f = (float)n->fval;
+            fg->base_type = IR_I32;
+            fg->init_ivals[0] = u.i;
+        } else {
+            union { double d; int64_t i; } u;
+            u.d = n->fval;
+            fg->base_type = IR_F64;
+            fg->init_ivals[0] = u.i;
+        }
         fg->init_count = 1;
         fg->next = cur_prog->globals;
         cur_prog->globals = fg;
@@ -588,7 +641,7 @@ lower_expr(struct cc_node *n)
         ins = emit(IR_LEA);
         ins->dst = addr;
         ins->sym = arena_strdup(lower_arena, namebuf);
-        ins = emit(IR_FLD);
+        ins = emit(use_single ? IR_FLS : IR_FLD);
         ins->dst = new_temp();
         ins->a = addr;
         return ins->dst;
@@ -621,6 +674,12 @@ lower_expr(struct cc_node *n)
             }
             if (is_float_type(t)) {
                 ins = emit(IR_FLDL);
+                ins->dst = new_temp();
+                ins->slot = lc->slot;
+                return ins->dst;
+            }
+            if (is_i64_type(t)) {
+                ins = emit(IR_LDL64);
                 ins->dst = new_temp();
                 ins->slot = lc->slot;
                 return ins->dst;
@@ -682,27 +741,54 @@ lower_expr(struct cc_node *n)
 
     case ND_UNOP: {
         int val = lower_expr(n->a);
+        struct cc_type *ot = lvalue_type(n->a);
         switch (n->op) {
-        case TOK_MINUS: {
-            struct cc_type *ot = lvalue_type(n->a);
-            ins = emit(is_float_type(ot) ? IR_FNEG : IR_NEG);
+        case TOK_MINUS:
+            if (is_float_type(ot)) {
+                ins = emit(IR_FNEG);
+                ins->dst = new_temp();
+                ins->a = val;
+                return ins->dst;
+            }
+            if (is_i64_type(ot)) {
+                ins = emit(IR_NEG64);
+                ins->dst = new_temp();
+                ins->a = val;
+                return ins->dst;
+            }
+            ins = emit(IR_NEG);
             ins->dst = new_temp();
             ins->a = val;
             return ins->dst;
-        }
         case TOK_TILDE:
+            if (is_i64_type(ot)) {
+                int mask = lower_const64(-1);
+                ins = emit(IR_XOR64);
+                ins->dst = new_temp();
+                ins->a = val;
+                ins->b = mask;
+                return ins->dst;
+            }
             ins = emit(IR_NOT);
             ins->dst = new_temp();
             ins->a = val;
             return ins->dst;
-        case TOK_BANG: {
-            int zero = lower_const(0);
-            ins = emit(IR_CMPEQ);
-            ins->dst = new_temp();
-            ins->a = val;
-            ins->b = zero;
-            return ins->dst;
-        }
+        case TOK_BANG:
+            if (is_i64_type(ot)) {
+                int zero = lower_const64(0);
+                ins = emit(IR_CMP64EQ);
+                ins->dst = new_temp();
+                ins->a = val;
+                ins->b = zero;
+                return ins->dst;
+            } else {
+                int zero = lower_const(0);
+                ins = emit(IR_CMPEQ);
+                ins->dst = new_temp();
+                ins->a = val;
+                ins->b = zero;
+                return ins->dst;
+            }
         default:
             die("lower:%d: unknown unop %d", n->line, n->op);
             return -1;
@@ -832,6 +918,69 @@ lower_expr(struct cc_node *n)
             return ins->dst;
         }
 
+        int use_i64 = is_i64_type(lt) || is_i64_type(rt);
+        int is_shift = (n->op == TOK_SHL || n->op == TOK_SHR);
+        if (use_i64) {
+            if (!is_i64_type(lt)) {
+                ins = emit(lt && lt->is_unsigned ? IR_ZEXT64 : IR_SEXT64);
+                ins->dst = new_temp();
+                ins->a = lhs;
+                lhs = ins->dst;
+            }
+            if (!is_shift && !is_i64_type(rt)) {
+                ins = emit(rt && rt->is_unsigned ? IR_ZEXT64 : IR_SEXT64);
+                ins->dst = new_temp();
+                ins->a = rhs;
+                rhs = ins->dst;
+            }
+            int is_uns = (lt && lt->is_unsigned) || (rt && rt->is_unsigned);
+            int ir_op;
+            switch (n->op) {
+            case TOK_PLUS:    ir_op = IR_ADD64; break;
+            case TOK_MINUS:   ir_op = IR_SUB64; break;
+            case TOK_STAR:    ir_op = IR_MUL64; break;
+            case TOK_SLASH: {
+                const char *helper = is_uns ? "__udivdi3" : "__divdi3";
+                ins = emit(IR_ARG64); ins->a = lhs; ins->imm = 0;
+                ins = emit(IR_ARG64); ins->a = rhs; ins->imm = 1;
+                ins = emit(IR_CALL64);
+                ins->dst = new_temp();
+                ins->sym = arena_strdup(lower_arena, helper);
+                ins->nargs = 2;
+                return ins->dst;
+            }
+            case TOK_PERCENT: {
+                const char *helper = is_uns ? "__umoddi3" : "__moddi3";
+                ins = emit(IR_ARG64); ins->a = lhs; ins->imm = 0;
+                ins = emit(IR_ARG64); ins->a = rhs; ins->imm = 1;
+                ins = emit(IR_CALL64);
+                ins->dst = new_temp();
+                ins->sym = arena_strdup(lower_arena, helper);
+                ins->nargs = 2;
+                return ins->dst;
+            }
+            case TOK_AMP:     ir_op = IR_AND64; break;
+            case TOK_PIPE:    ir_op = IR_OR64; break;
+            case TOK_CARET:   ir_op = IR_XOR64; break;
+            case TOK_SHL:     ir_op = IR_SHL64; break;
+            case TOK_SHR:     ir_op = is_uns ? IR_SHRU64 : IR_SHRS64; break;
+            case TOK_EQ:      ir_op = IR_CMP64EQ; break;
+            case TOK_NE:      ir_op = IR_CMP64NE; break;
+            case TOK_LT:      ir_op = is_uns ? IR_CMP64LTU : IR_CMP64LTS; break;
+            case TOK_LE:      ir_op = is_uns ? IR_CMP64LEU : IR_CMP64LES; break;
+            case TOK_GT:      ir_op = is_uns ? IR_CMP64GTU : IR_CMP64GTS; break;
+            case TOK_GE:      ir_op = is_uns ? IR_CMP64GEU : IR_CMP64GES; break;
+            default:
+                die("lower:%d: unknown i64 binop %d", n->line, n->op);
+                return -1;
+            }
+            ins = emit(ir_op);
+            ins->dst = new_temp();
+            ins->a = lhs;
+            ins->b = rhs;
+            return ins->dst;
+        }
+
         int ir_op;
         switch (n->op) {
         case TOK_PLUS:    ir_op = IR_ADD; break;
@@ -868,7 +1017,15 @@ lower_expr(struct cc_node *n)
             if (lc && !lc->static_name && lc->type &&
                 lc->type->kind != TY_ARRAY &&
                 lc->type->kind != TY_STRUCT && lc->type->kind != TY_UNION) {
-                ins = emit(is_float_type(lc->type) ? IR_FSTL : IR_STL);
+                int op;
+                if (is_float_type(lc->type))
+                    op = IR_FSTL;
+                else if (is_i64_type(lc->type)) {
+                    op = IR_STL64;
+                    val = widen_to_i64(val, lvalue_type(n->b));
+                } else
+                    op = IR_STL;
+                ins = emit(op);
                 ins->a = val;
                 ins->slot = lc->slot;
                 return val;
@@ -876,6 +1033,8 @@ lower_expr(struct cc_node *n)
         }
         int addr = lower_addr(n->a);
         struct cc_type *t = lvalue_type(n->a);
+        if (is_i64_type(t))
+            val = widen_to_i64(val, lvalue_type(n->b));
         emit_store(addr, val, t);
         return val;
     }
@@ -918,6 +1077,71 @@ lower_expr(struct cc_node *n)
                     n->line, n->op);
                 return -1;
             }
+        } else if (is_i64_type(t)) {
+            if (!is_i64_type(lvalue_type(n->b))) {
+                struct cc_type *rt = lvalue_type(n->b);
+                ins = emit(rt && rt->is_unsigned ? IR_ZEXT64 : IR_SEXT64);
+                ins->dst = new_temp();
+                ins->a = rhs;
+                rhs = ins->dst;
+            }
+            switch (n->op) {
+            case TOK_PLUS_EQ:    ir_op = IR_ADD64; break;
+            case TOK_MINUS_EQ:   ir_op = IR_SUB64; break;
+            case TOK_STAR_EQ:    ir_op = IR_MUL64; break;
+            case TOK_SLASH_EQ: {
+                const char *h = t->is_unsigned ? "__udivdi3" : "__divdi3";
+                ins = emit(IR_ARG64); ins->a = old_val; ins->imm = 0;
+                ins = emit(IR_ARG64); ins->a = rhs; ins->imm = 1;
+                ins = emit(IR_CALL64);
+                ins->dst = new_temp();
+                ins->sym = arena_strdup(lower_arena, h);
+                ins->nargs = 2;
+                int new_val = ins->dst;
+                if (n->a->kind == ND_VAR) {
+                    struct local *lc = find_local(n->a->name);
+                    if (lc && !lc->static_name && lc->type &&
+                        lc->type->kind != TY_ARRAY) {
+                        ins = emit(IR_STL64);
+                        ins->a = new_val;
+                        ins->slot = lc->slot;
+                        return new_val;
+                    }
+                }
+                emit_store(addr, new_val, t);
+                return new_val;
+            }
+            case TOK_PERCENT_EQ: {
+                const char *h = t->is_unsigned ? "__umoddi3" : "__moddi3";
+                ins = emit(IR_ARG64); ins->a = old_val; ins->imm = 0;
+                ins = emit(IR_ARG64); ins->a = rhs; ins->imm = 1;
+                ins = emit(IR_CALL64);
+                ins->dst = new_temp();
+                ins->sym = arena_strdup(lower_arena, h);
+                ins->nargs = 2;
+                int new_val = ins->dst;
+                if (n->a->kind == ND_VAR) {
+                    struct local *lc = find_local(n->a->name);
+                    if (lc && !lc->static_name && lc->type &&
+                        lc->type->kind != TY_ARRAY) {
+                        ins = emit(IR_STL64);
+                        ins->a = new_val;
+                        ins->slot = lc->slot;
+                        return new_val;
+                    }
+                }
+                emit_store(addr, new_val, t);
+                return new_val;
+            }
+            case TOK_AMP_EQ:     ir_op = IR_AND64; break;
+            case TOK_PIPE_EQ:    ir_op = IR_OR64; break;
+            case TOK_CARET_EQ:   ir_op = IR_XOR64; break;
+            case TOK_SHL_EQ:     ir_op = IR_SHL64; break;
+            case TOK_SHR_EQ:     ir_op = t->is_unsigned ? IR_SHRU64 : IR_SHRS64; break;
+            default:
+                die("lower:%d: unknown i64 compound assign", n->line);
+                return -1;
+            }
         } else {
             switch (n->op) {
             case TOK_PLUS_EQ:    ir_op = IR_ADD; break;
@@ -945,7 +1169,14 @@ lower_expr(struct cc_node *n)
         if (n->a->kind == ND_VAR) {
             struct local *lc = find_local(n->a->name);
             if (lc && !lc->static_name && lc->type && lc->type->kind != TY_ARRAY) {
-                ins = emit(is_float_type(lc->type) ? IR_FSTL : IR_STL);
+                int op;
+                if (is_float_type(lc->type))
+                    op = IR_FSTL;
+                else if (is_i64_type(lc->type))
+                    op = IR_STL64;
+                else
+                    op = IR_STL;
+                ins = emit(op);
                 ins->a = new_val;
                 ins->slot = lc->slot;
                 return new_val;
@@ -963,8 +1194,19 @@ lower_expr(struct cc_node *n)
         int delta = 1;
         if (t && cc_type_is_ptr(t))
             delta = pointee_size(t);
-        int dc = lower_const(n->kind == ND_PRE_INC ? delta : -delta);
-        ins = emit(IR_ADD);
+        int dc;
+        int add_op;
+        int stl_op;
+        if (is_i64_type(t)) {
+            dc = lower_const64(n->kind == ND_PRE_INC ? delta : -delta);
+            add_op = IR_ADD64;
+            stl_op = IR_STL64;
+        } else {
+            dc = lower_const(n->kind == ND_PRE_INC ? delta : -delta);
+            add_op = IR_ADD;
+            stl_op = IR_STL;
+        }
+        ins = emit(add_op);
         ins->dst = new_temp();
         ins->a = old_val;
         ins->b = dc;
@@ -972,7 +1214,7 @@ lower_expr(struct cc_node *n)
         if (n->a->kind == ND_VAR) {
             struct local *lc = find_local(n->a->name);
             if (lc && !lc->static_name && lc->type && lc->type->kind != TY_ARRAY) {
-                ins = emit(IR_STL);
+                ins = emit(stl_op);
                 ins->a = new_val;
                 ins->slot = lc->slot;
                 return new_val;
@@ -990,8 +1232,19 @@ lower_expr(struct cc_node *n)
         int delta = 1;
         if (t && cc_type_is_ptr(t))
             delta = pointee_size(t);
-        int dc = lower_const(n->kind == ND_POST_INC ? delta : -delta);
-        ins = emit(IR_ADD);
+        int dc;
+        int add_op;
+        int stl_op;
+        if (is_i64_type(t)) {
+            dc = lower_const64(n->kind == ND_POST_INC ? delta : -delta);
+            add_op = IR_ADD64;
+            stl_op = IR_STL64;
+        } else {
+            dc = lower_const(n->kind == ND_POST_INC ? delta : -delta);
+            add_op = IR_ADD;
+            stl_op = IR_STL;
+        }
+        ins = emit(add_op);
         ins->dst = new_temp();
         ins->a = old_val;
         ins->b = dc;
@@ -999,7 +1252,7 @@ lower_expr(struct cc_node *n)
         if (n->a->kind == ND_VAR) {
             struct local *lc = find_local(n->a->name);
             if (lc && !lc->static_name && lc->type && lc->type->kind != TY_ARRAY) {
-                ins = emit(IR_STL);
+                ins = emit(stl_op);
                 ins->a = new_val;
                 ins->slot = lc->slot;
                 return old_val;
@@ -1043,6 +1296,12 @@ lower_expr(struct cc_node *n)
         struct cc_type *from = lvalue_type(n->a);
         struct cc_type *to = n->decl_type;
         if (to && is_float_type(to) && !is_float_type(from)) {
+            if (is_i64_type(from)) {
+                ins = emit(IR_TRUNC64);
+                ins->dst = new_temp();
+                ins->a = val;
+                val = ins->dst;
+            }
             ins = emit(IR_ITOF);
             ins->dst = new_temp();
             ins->a = val;
@@ -1050,6 +1309,25 @@ lower_expr(struct cc_node *n)
         }
         if (to && !is_float_type(to) && is_float_type(from)) {
             ins = emit(IR_FTOI);
+            ins->dst = new_temp();
+            ins->a = val;
+            val = ins->dst;
+            if (is_i64_type(to)) {
+                ins = emit(IR_SEXT64);
+                ins->dst = new_temp();
+                ins->a = val;
+                return ins->dst;
+            }
+            return val;
+        }
+        if (to && is_i64_type(to) && !is_i64_type(from)) {
+            ins = emit(from && from->is_unsigned ? IR_ZEXT64 : IR_SEXT64);
+            ins->dst = new_temp();
+            ins->a = val;
+            return ins->dst;
+        }
+        if (to && !is_i64_type(to) && is_i64_type(from)) {
+            ins = emit(IR_TRUNC64);
             ins->dst = new_temp();
             ins->a = val;
             return ins->dst;
@@ -1091,7 +1369,7 @@ lower_expr(struct cc_node *n)
             fptr = lower_expr(n->a);
         }
         int args[32];
-        int arg_float[32];
+        int arg_kind[32];
         int nargs = 0;
         struct cc_param *pp = (callee_type && callee_type->kind == TY_FUNC)
                               ? callee_type->params : NULL;
@@ -1099,26 +1377,39 @@ lower_expr(struct cc_node *n)
             if (nargs >= 32)
                 die("lower:%d: too many arguments", n->line);
             args[nargs] = lower_expr(a);
-            arg_float[nargs] = pp ? is_float_type(pp->type)
-                                  : is_float_type(lvalue_type(a));
+            struct cc_type *at = pp ? pp->type : lvalue_type(a);
+            if (is_float_type(at))
+                arg_kind[nargs] = 1;
+            else if (is_i64_type(at)) {
+                arg_kind[nargs] = 2;
+                args[nargs] = widen_to_i64(args[nargs], lvalue_type(a));
+            } else
+                arg_kind[nargs] = 0;
             if (pp)
                 pp = pp->next;
             nargs++;
         }
         for (int i = 0; i < nargs; i++) {
-            ins = emit(arg_float[i] ? IR_FARG : IR_ARG);
+            int op = arg_kind[i] == 1 ? IR_FARG
+                   : arg_kind[i] == 2 ? IR_ARG64
+                   : IR_ARG;
+            ins = emit(op);
             ins->a = args[i];
             ins->imm = i;
         }
         int fret = callee_type && callee_type->kind == TY_FUNC &&
                    is_float_type(callee_type->base);
+        int i64ret = callee_type && callee_type->kind == TY_FUNC &&
+                     is_i64_type(callee_type->base);
         if (is_indirect) {
-            ins = emit(fret ? IR_FCALLI : IR_CALLI);
+            int op = fret ? IR_FCALLI : i64ret ? IR_CALLI64 : IR_CALLI;
+            ins = emit(op);
             ins->dst = new_temp();
             ins->a = fptr;
             ins->nargs = nargs;
         } else {
-            ins = emit(fret ? IR_FCALL : IR_CALL);
+            int op = fret ? IR_FCALL : i64ret ? IR_CALL64 : IR_CALL;
+            ins = emit(op);
             ins->dst = new_temp();
             ins->sym = arena_strdup(lower_arena, n->a->name);
             ins->nargs = nargs;
@@ -1176,6 +1467,11 @@ static void
 lower_local_decl(struct cc_node *n)
 {
     struct cc_type *t = n->decl_type;
+
+    if (n->is_extern || t->kind == TY_FUNC) {
+        add_global(n->name, t, t->kind == TY_FUNC);
+        return;
+    }
 
     if (n->is_static) {
         char mangled[128];
@@ -1246,6 +1542,8 @@ lower_local_decl(struct cc_node *n)
     int sz = cc_type_size(t);
     if (is_float_type(t) && sz < 8)
         sz = 8;
+    if (is_i64_type(t) && sz < 8)
+        sz = 8;
     int slot = alloc_slot(sz);
     if (n->name)
         add_local(n->name, slot, t);
@@ -1296,7 +1594,15 @@ lower_local_decl(struct cc_node *n)
         }
     } else {
         int val = lower_expr(n->a);
-        struct ir_insn *ins = emit(is_float_type(t) ? IR_FSTL : IR_STL);
+        int op;
+        if (is_float_type(t))
+            op = IR_FSTL;
+        else if (is_i64_type(t)) {
+            op = IR_STL64;
+            val = widen_to_i64(val, lvalue_type(n->a));
+        } else
+            op = IR_STL;
+        struct ir_insn *ins = emit(op);
         ins->a = val;
         ins->slot = slot;
     }
@@ -1503,7 +1809,12 @@ lower_stmt(struct cc_node *n)
     case ND_RETURN:
         if (n->a) {
             int val = lower_expr(n->a);
-            ins = emit(cur_fn_returns_float ? IR_FRETV : IR_RETV);
+            if (cur_fn_returns_i64)
+                val = widen_to_i64(val, lvalue_type(n->a));
+            int op = cur_fn_returns_float ? IR_FRETV
+                   : cur_fn_returns_i64   ? IR_RETV64
+                   : IR_RETV;
+            ins = emit(op);
             ins->a = val;
         } else {
             emit(IR_RET);
@@ -1532,6 +1843,7 @@ static struct ir_func *
 lower_function(struct cc_node *fndef)
 {
     struct ir_func *fn = ir_new_func(lower_arena, fndef->name);
+    fn->is_local = fndef->is_static;
     cur_fn = fn;
     cur_fn_name = fndef->name;
     nloops = 0;
@@ -1542,12 +1854,15 @@ lower_function(struct cc_node *fndef)
 
     struct cc_type *ftype = fndef->decl_type;
     cur_fn_returns_float = is_float_type(ftype->base);
+    cur_fn_returns_i64 = is_i64_type(ftype->base);
     int nparams = 0;
 
     /* allocate slots for params */
     for (struct cc_param *p = ftype->params; p; p = p->next) {
         int sz = cc_type_size(p->type);
         if (is_float_type(p->type) && sz < 8)
+            sz = 8;
+        else if (is_i64_type(p->type) && sz < 8)
             sz = 8;
         else if (sz < 4)
             sz = 4;
@@ -1565,10 +1880,17 @@ lower_function(struct cc_node *fndef)
     lower_stmt(fndef->body);
 
     /* ensure function ends with a return */
-    if (!fn->tail || (fn->tail->op != IR_RET && fn->tail->op != IR_RETV)) {
-        int z = lower_const(0);
-        ins = emit(IR_RETV);
-        ins->a = z;
+    if (!fn->tail || (fn->tail->op != IR_RET && fn->tail->op != IR_RETV &&
+                      fn->tail->op != IR_RETV64 && fn->tail->op != IR_FRETV)) {
+        if (cur_fn_returns_i64) {
+            int z = lower_const64(0);
+            ins = emit(IR_RETV64);
+            ins->a = z;
+        } else {
+            int z = lower_const(0);
+            ins = emit(IR_RETV);
+            ins->a = z;
+        }
     }
 
     emit(IR_ENDF);

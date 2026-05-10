@@ -65,6 +65,7 @@ struct cc_token {
     char *sval;
     int slen;
     int line;
+    int is_float;
 };
 
 /****************************************************************
@@ -77,6 +78,7 @@ enum cc_type_kind {
     TY_SHORT,
     TY_INT,
     TY_LONG,
+    TY_LONG_LONG,
     TY_FLOAT,
     TY_DOUBLE,
     TY_PTR,
@@ -224,6 +226,7 @@ struct ir_program *cc_lower_program(struct arena *a, struct cc_node *ast);
  ****************************************************************/
 
 struct cc_type *cc_type_int(void);
+struct cc_type *cc_type_long_long(void);
 struct cc_type *cc_type_char(void);
 struct cc_type *cc_type_void(void);
 struct cc_type *cc_type_ptr(struct arena *a, struct cc_type *base);

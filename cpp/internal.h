@@ -84,6 +84,7 @@ struct cpp {
     char linebuf[8192];
     char outbuf[8192];
     int errors;
+    int in_comment;
 };
 
 /* tok.c */
