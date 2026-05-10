@@ -6,7 +6,7 @@
 # Running it generates update-skjegg.sh with your component selection
 # baked in for easy re-vendoring.
 #
-# Usage: vendor-skjegg.sh [-d DIR] [-r REF] component ...
+# Usage: vendor-skjegg.sh [-d DIR] [-r REF] [-u DIR] component ...
 #        update-skjegg.sh                      (re-vendor)
 #
 # Backends:  coldfire  riscv
@@ -19,12 +19,13 @@ ORIGIN="https://github.com/OrangeTide/skjegg-compiler-suite.git"
 COMPONENTS=""
 DEST="skjegg"
 REF="main"
+UPDATE_DIR="."
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'USAGE'
-Usage: vendor-skjegg.sh [-d DIR] [-r REF] component ...
+Usage: vendor-skjegg.sh [-d DIR] [-r REF] [-u DIR] component ...
        update-skjegg.sh                      (re-vendor)
 
 Backends:  coldfire  riscv
@@ -34,6 +35,7 @@ Tools:     as  ld  cpp
 Options:
   -d DIR   destination directory (default: skjegg)
   -r REF   git ref — branch or tag (default: main)
+  -u DIR   install update-skjegg.sh to DIR (default: cwd)
   -h       show this help
 USAGE
     exit 1
@@ -41,10 +43,12 @@ USAGE
 
 # ---- option parsing ----
 
-while getopts d:r:h opt; do
+_u_explicit=0
+while getopts d:r:u:h opt; do
     case "$opt" in
         d) DEST="$OPTARG" ;;
         r) REF="$OPTARG" ;;
+        u) UPDATE_DIR="$OPTARG"; _u_explicit=1 ;;
         *) usage ;;
     esac
 done
@@ -191,14 +195,28 @@ fi
 
 # ---- generate update-skjegg.sh ----
 
+if [ -n "$UPDATE_DIR" ]; then
+    _upd_dir="$UPDATE_DIR"
+else
+    _upd_dir="$(dirname "$0")"
+fi
+
+if [ "$_u_explicit" -eq 1 ]; then
+    _baked_upd="$UPDATE_DIR"
+else
+    _baked_upd=""
+fi
+
 tmp_upd=$(mktemp)
 sed -e "s|^ORIGIN=.*|ORIGIN=\"$ORIGIN\"|" \
     -e "s|^COMPONENTS=.*|COMPONENTS=\"$COMPONENTS\"|" \
     -e "s|^DEST=.*|DEST=\"$DEST\"|" \
     -e "s|^REF=.*|REF=\"$REF\"|" \
+    -e "s|^UPDATE_DIR=.*|UPDATE_DIR=\"$_baked_upd\"|" \
     "$0" > "$tmp_upd"
 chmod +x "$tmp_upd"
-mv "$tmp_upd" update-skjegg.sh
+mkdir -p "$_upd_dir"
+mv "$tmp_upd" "$_upd_dir/update-skjegg.sh"
 
 # ---- generate skjegg.mk ----
 
@@ -425,4 +443,4 @@ MK
 printf '\nVendored into %s/ (%s)\n' "$DEST" "$commit"
 printf 'Components: %s\n' "$COMPONENTS"
 printf 'Generated:  %s/skjegg.mk\n' "$DEST"
-printf 'Update:     ./update-skjegg.sh\n'
+printf 'Update:     %s/update-skjegg.sh\n' "$_upd_dir"
