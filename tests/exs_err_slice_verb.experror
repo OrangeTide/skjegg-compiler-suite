@@ -1,0 +1,1 @@
+this is an object slice, which permits only `open`, `close`; `smash` is not one of them

@@ -4,6 +4,11 @@
 # (one integer per file). Tests without an .exitcode file are run for
 # their side effects (stdout) and only required to exit 0.
 #
+# A build/<name> binary is only run when a matching tests/<name>.* exists
+# (a source file or a fixture); a binary with no fixture is a stray build
+# (e.g. a one-off) and is skipped, not reported as a failing test. This
+# script only runs binaries; building them is the Makefile's job.
+#
 # Usage: run-tests.sh [qemu-binary] [build-dir]
 
 set -eu
@@ -22,6 +27,13 @@ for bin in "$ROOT"/"$BUILDDIR"/*; do
     case $name in
         *.o|*.out|start*|skj-*|test_*) continue ;;
     esac
+    # only a binary with a matching tests/<name>.* (source or fixture) is a
+    # real test; skip a stray build so it is not a phantom failure
+    has_fixture=0
+    for f in "$HERE/$name".*; do
+        [ -e "$f" ] && { has_fixture=1; break; }
+    done
+    [ "$has_fixture" -eq 1 ] || continue
     expect_file="$HERE/$name.exitcode"
     input_file="$HERE/$name.input"
     set +e

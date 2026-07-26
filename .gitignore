@@ -1,1 +1,34 @@
 build/
+/OLD
+/REF
+
+# AI assistant scaffolding (kept on full-history, scrubbed from main by
+# drop-to-main.sh). Ignore local/untracked instances so they are not
+# committed by accident.
+.claude/
+.cursor/
+.aider*
+.codeium/
+.continue/
+.windsurf/
+
+# Credentials and secrets, never commit.
+*.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+id_dsa
+id_ecdsa
+.netrc
+.npmrc
+.pypirc
+secrets.json
+credentials.json
+*.secret
+*.credentials
+.env
+.env.local

@@ -1,0 +1,3 @@
+# the parse error names the one rule and the parenthesized form
+an if-expression binds loosest, so it is parenthesized when it is not the whole expression
+if (cond then A else B) then

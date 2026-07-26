@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <setjmp.h>
 
 static struct arena *lower_arena;
 static struct ir_func *cur_fn;
@@ -13,6 +14,10 @@ static struct ir_program *cur_prog;
 static const char *cur_fn_name;
 static int cur_fn_returns_float;
 static int cur_fn_returns_i64;
+static int cur_fn_ret_neb;              /* psABI: struct-return eightbytes (>0) */
+static int cur_fn_ret_mem;             /* psABI: MEMORY struct return (hidden ptr) */
+static int cur_fn_sret_slot;           /* slot holding the hidden result pointer */
+static struct cc_type *cur_fn_ret_type;
 
 static struct ir_insn *
 emit(int op)
@@ -213,6 +218,8 @@ get_named_label(const char *name)
  * Type helpers for lowering
  ****************************************************************/
 
+static void hit_ldouble(int line);
+
 static int
 type_to_ir(struct cc_type *t)
 {
@@ -222,10 +229,57 @@ type_to_ir(struct cc_type *t)
     case TY_CHAR:      return IR_I8;
     case TY_SHORT:     return IR_I16;
     case TY_LONG_LONG: return IR_I64;
-    case TY_FLOAT:     return IR_F64;
+    case TY_LONG:      return CC_LONG_SIZE == 8 ? IR_I64 : IR_I32;
+    case TY_PTR:
+    case TY_FUNC:      return CC_PTR_SIZE == 8 ? IR_I64 : IR_I32;
+    case TY_FLOAT16:   return IR_F64;   /* _Float16 computes as double */
+    case TY_FLOAT:     return IR_F32;   /* native single precision */
     case TY_DOUBLE:    return IR_F64;
+    case TY_LDOUBLE:
+        hit_ldouble(0);
+        return IR_I64;              /* unreachable: hit_ldouble does not return */
     default:           return IR_I32;
     }
+}
+
+/* long double has the correct ABI size for sizeof and struct layout, but no
+   codegen representation (its value is 80-bit x87 on x86-64, 128-bit quad on
+   arm64, neither of which the backends implement).  Every point where a long
+   double value would be materialized or cross the ABI calls reject_ldouble;
+   those points (emit_load / emit_store / a cast / a parameter, return,
+   argument, local, or call) are the single source of truth for "uses long
+   double".
+
+   The reject is resolved by whether an `inline` function is being lowered.
+   An inline definition may be omitted, which is exactly how musl's header
+   helpers like __islessf (they reach long double only through a sizeof-guarded
+   dead branch) are meant to work, so an inline that hits a reject is dropped:
+   we longjmp back to a recovery point armed in lower_function and return no
+   function.  Any other use is a hard error via die() -- the same longjmp-to-
+   main machinery every other compile error already uses.  Because the recovery
+   piggybacks on the actual reject points, the drop is complete by construction
+   (no separate pre-scan to keep in sync).  A bare declaration (a header
+   prototype) reaches no reject and is unaffected. */
+static jmp_buf ldouble_recover;         /* function-scope drop for an inline */
+static int ldouble_recover_active;
+
+static void
+hit_ldouble(int line)
+{
+    if (ldouble_recover_active)
+        longjmp(ldouble_recover, 1);    /* drop the inline being lowered */
+    if (line)
+        die("lower:%d: long double is not supported (no 80-bit/128-bit float "
+            "in this backend); use double", line);
+    die("long double is not supported (no 80-bit/128-bit float in this "
+        "backend); use double");
+}
+
+static void
+reject_ldouble(struct cc_type *t, int line)
+{
+    if (t && t->kind == TY_LDOUBLE)
+        hit_ldouble(line);
 }
 
 static int
@@ -246,13 +300,88 @@ pointee_size(struct cc_type *t)
 static int
 is_float_type(struct cc_type *t)
 {
-    return t && (t->kind == TY_FLOAT || t->kind == TY_DOUBLE);
+    return t && (t->kind == TY_FLOAT16 ||
+                 t->kind == TY_FLOAT || t->kind == TY_DOUBLE);
+}
+
+/*
+ * Float opcode width tag for a C type: `float` is native single precision
+ * (FWIDTH_F32); `double` and `_Float16` compute as double (0).  A cc temp
+ * holding a `float` value lives in an F32 register; float<->double
+ * conversions go through IR_F32TOF64 / IR_F64TOF32.
+ */
+static int
+fwidth(struct cc_type *t)
+{
+    return t && t->kind == TY_FLOAT ? FWIDTH_F32 : 0;
+}
+
+static int
+is_double_type(struct cc_type *t)
+{
+    return t && (t->kind == TY_DOUBLE || t->kind == TY_FLOAT16);
+}
+
+/* Convert a double to an IEEE-754 binary16 (half) bit pattern, rounding to
+ * nearest with ties to even. Used to fold a _Float16 literal into a 2-byte
+ * global; the runtime uses the same mapping for load/store conversion. */
+static uint16_t
+double_to_half(double d)
+{
+    union { double d; uint64_t u; } v;
+    v.d = d;
+    uint64_t bits = v.u;
+    uint16_t sign = (uint16_t)((bits >> 48) & 0x8000u);
+    int exp = (int)((bits >> 52) & 0x7ff);
+    uint64_t mant = bits & 0xfffffffffffffULL;
+
+    if (exp == 0x7ff)                       /* inf / NaN */
+        return sign | (mant ? 0x7e00u : 0x7c00u);
+    if (exp == 0)                           /* double subnormal/zero underflows */
+        return sign;
+
+    int e = exp - 1023 + 15;                /* rebias to half's exponent */
+    if (e >= 0x1f)                          /* overflow to inf */
+        return sign | 0x7c00u;
+
+    if (e <= 0) {                           /* subnormal half */
+        mant |= 0x10000000000000ULL;        /* restore the implicit leading 1 */
+        int shift = 43 - e;
+        if (shift >= 64)
+            return sign;                    /* too small, flush to zero */
+        uint64_t q = mant >> shift;
+        uint64_t rem = mant & (((uint64_t)1 << shift) - 1);
+        uint64_t half = (uint64_t)1 << (shift - 1);
+        if (rem > half || (rem == half && (q & 1)))
+            q++;                            /* a carry into the exp field is intended */
+        return sign | (uint16_t)q;
+    }
+
+    uint64_t frac = mant >> 42;             /* top 10 bits become the half fraction */
+    uint64_t rem = mant & (((uint64_t)1 << 42) - 1);
+    uint64_t half = (uint64_t)1 << 41;
+    uint16_t out = sign | (uint16_t)(e << 10) | (uint16_t)frac;
+    if (rem > half || (rem == half && (frac & 1)))
+        out++;                              /* carry ripples correctly into exp */
+    return out;
 }
 
 static int
 is_i64_type(struct cc_type *t)
 {
-    return t && t->kind == TY_LONG_LONG;
+    if (!t)
+        return 0;
+    if (t->kind == TY_LONG_LONG)
+        return 1;
+    /* under LP64, `long` is a 64-bit type too (same IR_I64 machinery) */
+    if (CC_LONG_SIZE == 8 && t->kind == TY_LONG)
+        return 1;
+    /* under LP64 a pointer / function designator is an 8-byte value, so it
+       rides the i64 storage, comparison, and int<->pointer cast paths;
+       pointer arithmetic is handled separately with the address helpers */
+    if (CC_PTR_SIZE == 8 && (t->kind == TY_PTR || t->kind == TY_FUNC))
+        return 1;
+    return 0;
 }
 
 static int
@@ -273,6 +402,7 @@ widen_to_i64(int val, struct cc_type *src_type)
 
 static int lower_expr(struct cc_node *n);
 static int lower_addr(struct cc_node *n);
+static int val_is_wide(struct cc_type *t);
 static void lower_stmt(struct cc_node *n);
 static void lower_cond(struct cc_node *n, int ltrue, int lfalse);
 static struct cc_type *lvalue_type(struct cc_node *n);
@@ -285,13 +415,21 @@ static int
 emit_load(int addr_temp, struct cc_type *t)
 {
     struct ir_insn *ins;
+    /* the universal value-load path: catch a long double loaded from a struct
+       field, global, or array element, which bypasses the ABI-boundary checks */
+    reject_ldouble(t, 0);
     if (is_float_type(t)) {
-        ins = emit(t->kind == TY_FLOAT ? IR_FLS : IR_FLD);
+        if (t->kind == TY_FLOAT16) {
+            ins = emit(IR_FLH);
+        } else {
+            ins = emit(IR_FLD);
+            ins->imm = fwidth(t);       /* native single for float */
+        }
         ins->dst = new_temp();
         ins->a = addr_temp;
         return ins->dst;
     }
-    if (is_i64_type(t)) {
+    if (val_is_wide(t)) {
         ins = emit(IR_LD64);
         ins->dst = new_temp();
         ins->a = addr_temp;
@@ -310,17 +448,32 @@ emit_load(int addr_temp, struct cc_type *t)
     return ins->dst;
 }
 
+static int is_aggregate(struct cc_type *t);
+static void emit_aggregate_copy(int dst, int src, int size);
+static int emit_addr_sym(const char *sym);
+
 static void
 emit_store(int addr_temp, int val_temp, struct cc_type *t)
 {
     struct ir_insn *ins;
+    reject_ldouble(t, 0);           /* a long double stored to a field/global */
+    if (is_aggregate(t)) {
+        /* value-semantic copy: val_temp is the source aggregate's address */
+        emit_aggregate_copy(addr_temp, val_temp, cc_type_size(t));
+        return;
+    }
     if (is_float_type(t)) {
-        ins = emit(t->kind == TY_FLOAT ? IR_FSS : IR_FSD);
+        if (t->kind == TY_FLOAT16) {
+            ins = emit(IR_FSH);
+        } else {
+            ins = emit(IR_FSD);
+            ins->imm = fwidth(t);       /* native single for float */
+        }
         ins->a = addr_temp;
         ins->b = val_temp;
         return;
     }
-    if (is_i64_type(t)) {
+    if (val_is_wide(t)) {
         ins = emit(IR_ST64);
         ins->a = addr_temp;
         ins->b = val_temp;
@@ -335,6 +488,41 @@ emit_store(int addr_temp, int val_temp, struct cc_type *t)
         ins = emit(IR_SW);
     ins->a = addr_temp;
     ins->b = val_temp;
+}
+
+/*
+ * Convert a value of type `from` to a float type `to`, inserting the needed
+ * conversion op (int -> float via IR_ITOF, or float <-> double via
+ * IR_F32TOF64 / IR_F64TOF32).  Used where a value is stored or passed into a
+ * float slot whose width may differ (e.g. `float x = 10;`).
+ */
+static int
+to_float(int val, struct cc_type *from, struct cc_type *to)
+{
+    struct ir_insn *ins;
+
+    if (!is_float_type(to))
+        return val;
+    if (!is_float_type(from)) {                 /* int -> float */
+        if (is_i64_type(from)) {
+            ins = emit(IR_TRUNC64);
+            ins->dst = new_temp();
+            ins->a = val;
+            val = ins->dst;
+        }
+        ins = emit(IR_ITOF);
+        ins->dst = new_temp();
+        ins->a = val;
+        ins->imm = fwidth(to);
+        return ins->dst;
+    }
+    if (fwidth(from) != fwidth(to)) {            /* float <-> double */
+        ins = emit(fwidth(to) == FWIDTH_F32 ? IR_F64TOF32 : IR_F32TOF64);
+        ins->dst = new_temp();
+        ins->a = val;
+        return ins->dst;
+    }
+    return val;
 }
 
 /****************************************************************
@@ -361,10 +549,8 @@ emit_string_literal(const char *s, int len)
     g->next = cur_prog->globals;
     cur_prog->globals = g;
 
-    struct ir_insn *ins = emit(IR_LEA);
-    ins->dst = new_temp();
-    ins->sym = arena_strdup(lower_arena, namebuf);
-    return ins->dst;
+    /* a string literal's address is address-width (LEA64 under LP64) */
+    return emit_addr_sym(namebuf);
 }
 
 /****************************************************************
@@ -435,36 +621,651 @@ flatten_init(struct cc_node *n, int64_t *ivals, char **syms, int *pos)
 }
 
 /****************************************************************
+ * Aggregate global initializer -> byte image
+ *
+ * An initialized struct/union global (or an array whose element is one) is
+ * lowered to a list of ir_init chunks: the type tree is walked in declaration
+ * order, and each scalar leaf of a flattened initializer is placed at its
+ * field/element byte offset (so padding is left as zero and doubles/i64/ptr
+ * fields land aligned).  Brace elision falls out naturally: the initializer is
+ * flattened to a leaf list and consumed by a cursor as the type is walked, so
+ * both {1,{2,3}} and {1,2,3} fill the same slots.
+ ****************************************************************/
+
+/* a cursor over the elements of one initializer-list level */
+struct init_cursor {
+    struct cc_node *cur;
+};
+
+/* true when the type must be laid out through the byte-image builder rather
+   than the flat init_ivals path (an aggregate, or an array of one) */
+static int
+needs_image(struct cc_type *t)
+{
+    if (!t)
+        return 0;
+    if (t->kind == TY_STRUCT || t->kind == TY_UNION)
+        return 1;
+    if (t->kind == TY_ARRAY)
+        return needs_image(t->base);
+    return 0;
+}
+
+/* use the byte-image path for an aggregate, or for any array with a designated
+   initializer (indexed placement and zeroed gaps need the image, not the flat
+   sequential init_ivals) */
+static int
+wants_image(struct cc_type *t, struct cc_node *init)
+{
+    if (needs_image(t))
+        return 1;
+    if (t && t->kind == TY_ARRAY && init && init->kind == ND_INIT_LIST) {
+        for (struct cc_node *e = init->body; e; e = e->next)
+            if (e->kind == ND_DESIG)
+                return 1;
+    }
+    return 0;
+}
+
+/* encode one scalar leaf against its slot type into (val, sym) */
+static void
+encode_scalar(struct cc_type *t, struct cc_node *e, int64_t *val, char **sym)
+{
+    *val = 0;
+    *sym = NULL;
+    if (e->kind == ND_INTLIT) {
+        if (t->kind == TY_DOUBLE) {
+            union { double d; int64_t i; } u;
+            u.d = (double)e->ival;
+            *val = u.i;
+        } else if (t->kind == TY_FLOAT) {
+            union { float f; int32_t i; } u;
+            u.f = (float)e->ival;
+            *val = (uint32_t)u.i;
+        } else if (t->kind == TY_FLOAT16) {
+            *val = (uint16_t)double_to_half((double)e->ival);
+        } else {
+            *val = e->ival;
+        }
+    } else if (e->kind == ND_UNOP && e->op == TOK_MINUS &&
+               e->a && e->a->kind == ND_INTLIT) {
+        encode_scalar(t, e->a, val, sym);
+        *val = -*val;
+    } else if (e->kind == ND_FLOATLIT) {
+        if (t->kind == TY_FLOAT) {
+            union { float f; int32_t i; } u;
+            u.f = (float)e->fval;
+            *val = (uint32_t)u.i;
+        } else if (t->kind == TY_FLOAT16) {
+            *val = (uint16_t)double_to_half(e->fval);
+        } else {
+            union { double d; int64_t i; } u;
+            u.d = e->fval;
+            *val = u.i;
+        }
+    } else if (e->kind == ND_STRLIT) {
+        *sym = emit_string_global(e->sval, e->slen);
+    } else if (e->kind == ND_VAR) {
+        *sym = arena_strdup(lower_arena, e->name);
+    } else if (e->kind == ND_ADDR && e->a && e->a->kind == ND_VAR) {
+        *sym = arena_strdup(lower_arena, e->a->name);
+    } else {
+        die("lower:%d: non-constant initializer", e->line);
+    }
+}
+
+/* number of initializable slots at aggregate level t */
+static int
+agg_nslots(struct cc_type *t)
+{
+    if (t->kind == TY_ARRAY)
+        return t->array_len > 0 ? t->array_len : 0;
+    if (t->kind == TY_UNION)
+        return t->fields ? 1 : 0;
+    int n = 0;
+    for (struct cc_field *f = t->fields; f; f = f->next)
+        n++;
+    return n;
+}
+
+/* type and byte offset (within t) of slot `pos` */
+static struct cc_type *
+agg_slot(struct cc_type *t, int pos, int *off)
+{
+    if (t->kind == TY_ARRAY) {
+        *off = pos * cc_type_size(t->base);
+        return t->base;
+    }
+    struct cc_field *f = t->fields;
+    for (int i = 0; i < pos && f; i++)
+        f = f->next;
+    if (!f) {
+        *off = 0;
+        return NULL;
+    }
+    *off = f->offset;
+    return f->type;
+}
+
+static int
+field_index(struct cc_type *t, const char *name)
+{
+    int i = 0;
+    for (struct cc_field *f = t->fields; f; f = f->next, i++)
+        if (f->name && strcmp(f->name, name) == 0)
+            return i;
+    return -1;
+}
+
+static int
+is_aggregate(struct cc_type *t)
+{
+    return t && (t->kind == TY_STRUCT || t->kind == TY_UNION ||
+                 t->kind == TY_ARRAY);
+}
+
+#ifdef CC_STRUCT_ABI
+/* merge two SysV eightbyte classes (0 INTEGER, 1 SSE, -1 NO_CLASS); INTEGER
+   dominates SSE, and either dominates NO_CLASS */
+static int
+eb_merge(int a, int b)
+{
+    if (a == -1)
+        return b;
+    if (b == -1)
+        return a;
+    if (a == 0 || b == 0)       /* INTEGER wins */
+        return 0;
+    return 1;                   /* both SSE */
+}
+
+/* accumulate the class of each eightbyte of `t` (placed at byte `base` inside
+   the top-level aggregate) into cls[0..1] */
+static void
+eb_classify(struct cc_type *t, int base, int *cls)
+{
+    if (!t)
+        return;
+    if (t->kind == TY_STRUCT || t->kind == TY_UNION) {
+        for (struct cc_field *f = t->fields; f; f = f->next)
+            eb_classify(f->type, base + f->offset, cls);
+        return;
+    }
+    if (t->kind == TY_ARRAY) {
+        int es = cc_type_size(t->base), n = es ? cc_type_size(t) / es : 0;
+        for (int k = 0; k < n; k++)
+            eb_classify(t->base, base + k * es, cls);
+        return;
+    }
+    /* a scalar leaf: class its eightbyte(s).  Well-aligned scalars do not
+       cross an eightbyte boundary; class both ends to be safe. */
+    int lo = base / 8, hi = (base + cc_type_size(t) - 1) / 8;
+    int c = is_float_type(t) ? 1 : 0;
+    if (lo <= 1)
+        cls[lo] = eb_merge(cls[lo], c);
+    if (hi <= 1 && hi != lo)
+        cls[hi] = eb_merge(cls[hi], c);
+}
+#endif /* CC_STRUCT_ABI */
+
+#ifndef CC_ARM64
+/* SysV eightbyte classification of a struct/union type.  Returns the number
+   of eightbytes passed in registers (1 or 2) and fills cls[] with each one's
+   class (0 INTEGER, 1 SSE); returns -1 for the MEMORY class (larger than 16
+   bytes), or 0 if `t` is not a struct/union.  Gated to the psABI cc targets. */
+static int
+sysv_eightbytes(struct cc_type *t, int *cls)
+{
+#ifdef CC_STRUCT_ABI
+    int sz, neb;
+    cls[0] = cls[1] = -1;
+    if (!t || (t->kind != TY_STRUCT && t->kind != TY_UNION))
+        return 0;
+    sz = cc_type_size(t);
+    if (sz < 1)
+        return 0;
+    if (sz > 16)
+        return -1;              /* MEMORY */
+    neb = (sz + 7) / 8;
+    eb_classify(t, 0, cls);
+    if (cls[0] == -1)
+        cls[0] = 0;
+    if (neb == 2 && cls[1] == -1)
+        cls[1] = 0;
+    return neb;
+#else
+    (void)t;
+    cls[0] = cls[1] = -1;
+    return 0;
+#endif
+}
+#endif /* !CC_ARM64 */
+
+#ifdef CC_ARM64
+/* walk the leaves of a candidate HFA: every leaf must be the same floating
+   type (float or double).  *elem records that type's kind, *n counts leaves. */
+static int
+hfa_walk(struct cc_type *t, int *elem, int *n)
+{
+    if (!t)
+        return 0;
+    if (t->kind == TY_UNION)
+        return 0;                       /* unions are not HFAs here */
+    if (t->kind == TY_STRUCT) {
+        for (struct cc_field *f = t->fields; f; f = f->next)
+            if (!hfa_walk(f->type, elem, n))
+                return 0;
+        return 1;
+    }
+    if (t->kind == TY_ARRAY) {
+        int es = cc_type_size(t->base), cnt = es ? cc_type_size(t) / es : 0;
+        for (int k = 0; k < cnt; k++)
+            if (!hfa_walk(t->base, elem, n))
+                return 0;
+        return 1;
+    }
+    if (t->kind == TY_FLOAT || t->kind == TY_DOUBLE) {
+        if (*elem == -1)
+            *elem = t->kind;
+        else if (*elem != t->kind)
+            return 0;
+        (*n)++;
+        return 1;
+    }
+    return 0;                           /* a non-float leaf: not an HFA */
+}
+
+/* AAPCS64 aggregate classification.  Returns the number of register slots
+   (1-4) and fills cls[] with each slot's class (0 = INTEGER/x-reg, 1 =
+   double/d-reg, 2 = float/s-reg); returns -1 for the indirect (>16 byte)
+   class, or 0 if `t` is not a struct/union.  A Homogeneous Floating-point
+   Aggregate (1-4 members of one float type) rides the FP registers; any other
+   aggregate of 16 bytes or less rides 1-2 x-registers; a larger one is passed
+   by a pointer to a copy and returned through x8. */
+static int
+aapcs_agg(struct cc_type *t, int *cls)
+{
+    int sz, elem = -1, n = 0, j;
+    cls[0] = cls[1] = cls[2] = cls[3] = -1;
+    if (!t || (t->kind != TY_STRUCT && t->kind != TY_UNION))
+        return 0;
+    sz = cc_type_size(t);
+    if (sz < 1)
+        return 0;
+    if (t->kind == TY_STRUCT && hfa_walk(t, &elem, &n) && n >= 1 && n <= 4) {
+        /* a Homogeneous Floating-point Aggregate rides consecutive fp regs:
+           a double HFA in d0..d3, a float HFA in s0..s3 */
+        for (j = 0; j < n; j++)
+            cls[j] = (elem == TY_FLOAT) ? 2 : 1;
+        return n;
+    }
+    if (sz > 16)
+        return -1;                      /* indirect */
+    for (j = 0; j < (sz + 7) / 8; j++)
+        cls[j] = 0;
+    return (sz + 7) / 8;
+}
+#endif
+
+/* target-neutral aggregate classifier: AAPCS64 on arm64, SysV eightbytes
+   elsewhere.  Fills cls[0..3]; returns slot count (1-4), -1 for the
+   memory/indirect class, or 0 if not a struct/union. */
+static int
+abi_agg(struct cc_type *t, int *cls)
+{
+#ifdef CC_ARM64
+    return aapcs_agg(t, cls);
+#else
+    cls[2] = cls[3] = -1;
+    return sysv_eightbytes(t, cls);
+#endif
+}
+
+/* true if `t` is passed in memory (SysV: a >16-byte stack copy; AAPCS64: a
+   pointer to a copy, returned through x8) */
+static int
+abi_struct_mem(struct cc_type *t)
+{
+    int cls[4];
+    return abi_agg(t, cls) < 0;
+}
+
+/* emit one scalar (or char[]-from-string) leaf at byte offset off */
+static struct ir_init *
+emit_leaf(struct cc_type *t, struct cc_node *e, int off, struct ir_init *tail)
+{
+    if (t && t->kind == TY_ARRAY && cc_type_size(t->base) == 1 &&
+        e->kind == ND_STRLIT) {
+        for (int i = 0; i < e->slen; i++) {
+            struct ir_init *it = arena_zalloc(lower_arena, sizeof *it);
+            it->offset = off + i;
+            it->size = 1;
+            it->ival = (unsigned char)e->sval[i];
+            tail->next = it;
+            tail = it;
+        }
+        return tail;
+    }
+    struct ir_init *it = arena_zalloc(lower_arena, sizeof *it);
+    it->offset = off;
+    it->size = cc_type_size(t);
+    encode_scalar(t, e, &it->ival, &it->sym);
+    tail->next = it;
+    return it;
+}
+
+/* the first scalar leaf inside a braced value (for a braced scalar {x}) */
+static struct cc_node *
+first_leaf(struct cc_node *e)
+{
+    while (e && e->kind == ND_INIT_LIST)
+        e = e->body;
+    if (e && e->kind == ND_DESIG)
+        e = e->a;
+    return e;
+}
+
+/*
+ * Fill aggregate t (at byte offset `base`) from the element cursor.  Elements
+ * are consumed in order; a `.field` / `[index]` designator repositions the
+ * slot; a braced element initializes a sub-aggregate (recurse on its own
+ * elements); an unbraced aggregate slot draws from the same cursor (brace
+ * elision).  A missing initializer leaves the slot zero.
+ */
+static struct ir_init *
+build_image(struct cc_type *t, struct init_cursor *cur, int base,
+            struct ir_init *tail)
+{
+    if (!t)
+        return tail;
+
+    /* a whole char array initialized directly by a string literal */
+    if (t->kind == TY_ARRAY && cc_type_size(t->base) == 1 &&
+        cur->cur && cur->cur->kind == ND_STRLIT) {
+        struct cc_node *s = cur->cur;
+        cur->cur = s->next;
+        return emit_leaf(t, s, base, tail);
+    }
+
+    int nslots = agg_nslots(t);
+    int pos = 0;
+    while (cur->cur) {
+        struct cc_node *e = cur->cur;
+        struct cc_type *ft;
+        int off;
+
+        if (e->kind == ND_DESIG) {
+            if (t->kind == TY_ARRAY)
+                pos = (int)e->ival;
+            else {
+                int fi = field_index(t, e->name);
+                if (fi < 0)
+                    die("lower:%d: no field named '%s'", e->line, e->name);
+                pos = fi;
+            }
+            if (pos < 0 || pos >= nslots)
+                die("lower:%d: designator out of range", e->line);
+            ft = agg_slot(t, pos, &off);
+            cur->cur = e->next;                /* consume the designator */
+            if (e->a->kind == ND_INIT_LIST) {
+                struct init_cursor sub = { e->a->body };
+                tail = build_image(ft, &sub, base + off, tail);
+            } else {
+                tail = emit_leaf(ft, e->a, base + off, tail);
+            }
+            pos++;
+            continue;
+        }
+
+        /* positional element: stop once the slots are full */
+        if (pos >= nslots)
+            break;
+        ft = agg_slot(t, pos, &off);
+        if (!ft)
+            break;
+        if (e->kind == ND_INIT_LIST) {
+            cur->cur = e->next;
+            if (is_aggregate(ft)) {
+                struct init_cursor sub = { e->body };
+                tail = build_image(ft, &sub, base + off, tail);
+            } else {
+                struct cc_node *lf = first_leaf(e);
+                if (lf)
+                    tail = emit_leaf(ft, lf, base + off, tail);
+            }
+        } else if (is_aggregate(ft) &&
+                   !(ft->kind == TY_ARRAY &&
+                     cc_type_size(ft->base) == 1 && e->kind == ND_STRLIT)) {
+            /* brace elision: consume from the same cursor into ft */
+            tail = build_image(ft, cur, base + off, tail);
+        } else {
+            cur->cur = e->next;
+            tail = emit_leaf(ft, e, base + off, tail);
+        }
+        pos++;
+    }
+    return tail;
+}
+
+/* build the ir_init list for an aggregate global from its initializer node.
+   Items are then sorted by offset (a designator can write out of order, and
+   emit_globals pads forward), and an earlier write to a slot a later one
+   overrode is dropped (same offset, last wins). */
+static struct ir_init *
+lower_aggregate_init(struct cc_type *t, struct cc_node *init)
+{
+    struct ir_init head = {0};
+    struct init_cursor cur = { init->body };
+    int n = 0, i;
+
+    build_image(t, &cur, 0, &head);
+
+    for (struct ir_init *it = head.next; it; it = it->next)
+        n++;
+    if (n <= 1)
+        return head.next;
+
+    struct ir_init **arr = arena_alloc(lower_arena, n * sizeof *arr);
+    i = 0;
+    for (struct ir_init *it = head.next; it; it = it->next)
+        arr[i++] = it;
+
+    /* stable insertion sort by offset (n is small); keeps append order among
+       equal offsets so the last write to a slot stays last in its run */
+    for (i = 1; i < n; i++) {
+        struct ir_init *key = arr[i];
+        int j = i - 1;
+        while (j >= 0 && arr[j]->offset > key->offset) {
+            arr[j + 1] = arr[j];
+            j--;
+        }
+        arr[j + 1] = key;
+    }
+
+    struct ir_init *out = NULL, *tail = NULL;
+    for (i = 0; i < n; i++) {
+        if (i + 1 < n && arr[i + 1]->offset == arr[i]->offset)
+            continue;   /* overridden by a later write to the same slot */
+        arr[i]->next = NULL;
+        if (!tail)
+            out = arr[i];
+        else
+            tail->next = arr[i];
+        tail = arr[i];
+    }
+    return out;
+}
+
+/* array length from an initializer, honoring [index] designators (C rule:
+   the length is one past the highest index written) */
+static int
+infer_array_len(struct cc_node *initlist)
+{
+    int idx = 0, max = 0;
+    for (struct cc_node *e = initlist->body; e; e = e->next) {
+        if (e->kind == ND_DESIG && e->name == NULL)
+            idx = (int)e->ival;
+        if (idx + 1 > max)
+            max = idx + 1;
+        idx++;
+    }
+    return max;
+}
+
+/****************************************************************
  * Address of lvalue (returns temp holding the address)
  ****************************************************************/
+
+/****************************************************************
+ * Address model
+ *
+ * Under LP64 an address (and a pointer value) is 64-bit: the roots are
+ * IR_LEA64 / IR_ADL64, arithmetic uses the *64 ops, and a pointer value is
+ * loaded/stored 8 bytes wide.  Under ILP32 (CC_PTR_SIZE == 4) every helper
+ * reduces to the original 32-bit ops, so the lowering is byte-identical.
+ ****************************************************************/
+
+#define ADDR64 (CC_PTR_SIZE == 8)
+
+/* a value that occupies pointer width (8 bytes under LP64): a pointer or a
+   function designator, on top of the genuine 64-bit integer types */
+static int
+val_is_wide(struct cc_type *t)
+{
+    if (is_i64_type(t))
+        return 1;
+    return ADDR64 && t && (t->kind == TY_PTR || t->kind == TY_FUNC);
+}
+
+static int
+emit_addr_sym(const char *sym)
+{
+    struct ir_insn *ins = emit(ADDR64 ? IR_LEA64 : IR_LEA);
+    ins->dst = new_temp();
+    ins->sym = arena_strdup(lower_arena, sym);
+    return ins->dst;
+}
+
+static int
+emit_addr_slot(int slot)
+{
+    struct ir_insn *ins = emit(ADDR64 ? IR_ADL64 : IR_ADL);
+    ins->dst = new_temp();
+    ins->slot = slot;
+    return ins->dst;
+}
+
+/* an address-width integer constant (for a field offset / element size) */
+static int
+emit_addr_const(long v)
+{
+    struct ir_insn *ins = emit(ADDR64 ? IR_LIC64 : IR_LIC);
+    ins->dst = new_temp();
+    ins->imm = v;
+    return ins->dst;
+}
+
+/* base + off, both already address-width */
+static int
+emit_addr_add(int base, int off)
+{
+    struct ir_insn *ins = emit(ADDR64 ? IR_ADD64 : IR_ADD);
+    ins->dst = new_temp();
+    ins->a = base;
+    ins->b = off;
+    return ins->dst;
+}
+
+/* copy `size` bytes from address src to address dst.  This is the aggregate
+   (struct/union/array) value-semantic copy: an assignment, a local init from
+   another aggregate, and, for the psABI, packing/unpacking a small struct
+   argument all route through it.  Unrolled into 4/2/1-byte chunks. */
+static void
+emit_aggregate_copy(int dst, int src, int size)
+{
+    struct ir_insn *ins;
+    int off = 0;
+    while (size - off >= 4) {
+        int sa = off ? emit_addr_add(src, emit_addr_const(off)) : src;
+        ins = emit(IR_LW); ins->dst = new_temp(); ins->a = sa;
+        int v = ins->dst;
+        int da = off ? emit_addr_add(dst, emit_addr_const(off)) : dst;
+        ins = emit(IR_SW); ins->a = da; ins->b = v;
+        off += 4;
+    }
+    if (size - off >= 2) {
+        int sa = off ? emit_addr_add(src, emit_addr_const(off)) : src;
+        ins = emit(IR_LH); ins->dst = new_temp(); ins->a = sa;
+        int v = ins->dst;
+        int da = off ? emit_addr_add(dst, emit_addr_const(off)) : dst;
+        ins = emit(IR_SH); ins->a = da; ins->b = v;
+        off += 2;
+    }
+    if (size - off >= 1) {
+        int sa = off ? emit_addr_add(src, emit_addr_const(off)) : src;
+        ins = emit(IR_LB); ins->dst = new_temp(); ins->a = sa;
+        int v = ins->dst;
+        int da = off ? emit_addr_add(dst, emit_addr_const(off)) : dst;
+        ins = emit(IR_SB); ins->a = da; ins->b = v;
+    }
+}
+
+/* a - b, both already address-width */
+static int
+emit_addr_sub(int a, int b)
+{
+    struct ir_insn *ins = emit(ADDR64 ? IR_SUB64 : IR_SUB);
+    ins->dst = new_temp();
+    ins->a = a;
+    ins->b = b;
+    return ins->dst;
+}
+
+/* widen an integer index to address width (sign per its type) */
+static int
+widen_to_addr(int val, struct cc_type *src)
+{
+    if (!ADDR64 || val_is_wide(src))
+        return val;
+    struct ir_insn *ins = emit(src && src->is_unsigned ? IR_ZEXT64 : IR_SEXT64);
+    ins->dst = new_temp();
+    ins->a = val;
+    return ins->dst;
+}
+
+/* index * elem_sz, address-width */
+static int
+emit_addr_scale(int idx, struct cc_type *idx_type, int elem_sz)
+{
+    int w = widen_to_addr(idx, idx_type);
+    if (elem_sz == 1)
+        return w;
+    int sc = emit_addr_const(elem_sz);
+    struct ir_insn *ins = emit(ADDR64 ? IR_MUL64 : IR_MUL);
+    ins->dst = new_temp();
+    ins->a = w;
+    ins->b = sc;
+    return ins->dst;
+}
 
 static int
 lower_addr(struct cc_node *n)
 {
     struct ir_insn *ins;
+    (void)ins;
 
     switch (n->kind) {
     case ND_VAR: {
         struct local *lc = find_local(n->name);
         if (lc) {
-            if (lc->static_name) {
-                ins = emit(IR_LEA);
-                ins->dst = new_temp();
-                ins->sym = arena_strdup(lower_arena, lc->static_name);
-                return ins->dst;
-            }
-            ins = emit(IR_ADL);
-            ins->dst = new_temp();
-            ins->slot = lc->slot;
-            return ins->dst;
+            if (lc->static_name)
+                return emit_addr_sym(lc->static_name);
+            return emit_addr_slot(lc->slot);
         }
         struct global *gl = find_global(n->name);
         if (!gl)
             die("lower:%d: undefined '%s'", n->line, n->name);
-        ins = emit(IR_LEA);
-        ins->dst = new_temp();
-        ins->sym = arena_strdup(lower_arena, n->name);
-        return ins->dst;
+        return emit_addr_sym(n->name);
     }
     case ND_DEREF:
         return lower_expr(n->a);
@@ -474,19 +1275,8 @@ lower_addr(struct cc_node *n)
         int idx = lower_expr(n->b);
         struct cc_type *arr_type = lvalue_type(n->a);
         int elem_sz = pointee_size(arr_type);
-        if (elem_sz != 1) {
-            int sc = lower_const(elem_sz);
-            ins = emit(IR_MUL);
-            ins->dst = new_temp();
-            ins->a = idx;
-            ins->b = sc;
-            idx = ins->dst;
-        }
-        ins = emit(IR_ADD);
-        ins->dst = new_temp();
-        ins->a = base;
-        ins->b = idx;
-        return ins->dst;
+        int scaled = emit_addr_scale(idx, n->b->type, elem_sz);
+        return emit_addr_add(base, scaled);
     }
     case ND_MEMBER: {
         struct cc_type *obj_type = lvalue_type(n->a);
@@ -508,12 +1298,7 @@ lower_addr(struct cc_node *n)
             die("lower:%d: no field '%s'", n->line, n->name);
         if (f->offset == 0)
             return obj_addr;
-        int off = lower_const(f->offset);
-        ins = emit(IR_ADD);
-        ins->dst = new_temp();
-        ins->a = obj_addr;
-        ins->b = off;
-        return ins->dst;
+        return emit_addr_add(obj_addr, emit_addr_const(f->offset));
     }
     default:
         die("lower:%d: not an lvalue", n->line);
@@ -578,7 +1363,9 @@ lvalue_type(struct cc_node *n)
         struct cc_type *rt = lvalue_type(n->b);
         if (is_float_type(lt) || is_float_type(rt)) {
             static struct cc_type ty_double = { .kind = TY_DOUBLE };
-            return &ty_double;
+            static struct cc_type ty_float  = { .kind = TY_FLOAT };
+            return is_double_type(lt) || is_double_type(rt)
+                   ? &ty_double : &ty_float;
         }
         if (is_i64_type(lt) || is_i64_type(rt))
             return cc_type_long_long();
@@ -595,6 +1382,118 @@ lvalue_type(struct cc_node *n)
     default:
         return cc_type_int();
     }
+}
+
+/****************************************************************
+ * Bit-fields
+ *
+ * A bit-field packs LSB-first into a storage unit of its declared type.
+ * lower_addr(ND_MEMBER) already yields the unit's address (f->offset is the
+ * unit's byte offset), so a read is load-shift-mask and a write is a
+ * read-modify-write on that unit.
+ ****************************************************************/
+
+/* the cc_field for `n->a . n->name` (n->a may be a pointer), or NULL */
+static struct cc_field *
+member_field(struct cc_node *n)
+{
+    struct cc_type *ot = lvalue_type(n->a);
+    if (ot && ot->kind == TY_PTR)
+        ot = ot->base;
+    if (!ot || (ot->kind != TY_STRUCT && ot->kind != TY_UNION))
+        return NULL;
+    for (struct cc_field *f = ot->fields; f; f = f->next)
+        if (f->name && strcmp(f->name, n->name) == 0)
+            return f;
+    return NULL;
+}
+
+static int
+emit_shift(int op, int a, int amt)
+{
+    if (amt == 0)
+        return a;
+    int c = lower_const(amt);   /* materialize the operand before the op */
+    struct ir_insn *ins = emit(op);
+    ins->dst = new_temp();
+    ins->a = a;
+    ins->b = c;
+    return ins->dst;
+}
+
+static int
+emit_and_const(int a, int mask)
+{
+    int m = lower_const(mask);   /* materialize the operand before the op */
+    struct ir_insn *ins = emit(IR_AND);
+    ins->dst = new_temp();
+    ins->a = a;
+    ins->b = m;
+    return ins->dst;
+}
+
+/* read a bit-field from the storage unit at `addr` */
+static int
+lower_bitfield_read(int addr, struct cc_field *f)
+{
+    int w = cc_type_size(f->type) * 8;
+    int unit = emit_load(addr, f->type);
+    if (f->type->is_unsigned) {
+        int v = emit_shift(IR_SHRU, unit, f->bit_off);
+        if (f->bits < w)
+            v = emit_and_const(v, (int)(((unsigned)1 << f->bits) - 1));
+        return v;
+    }
+    /* signed: land the field in the top bits, then arithmetic-shift down */
+    int v = emit_shift(IR_SHL, unit, w - f->bit_off - f->bits);
+    return emit_shift(IR_SHRS, v, w - f->bits);
+}
+
+/* write `val` into the bit-field at `addr` (read-modify-write); returns val */
+static int
+lower_bitfield_write(int addr, struct cc_field *f, int val)
+{
+    int w = cc_type_size(f->type) * 8;
+    unsigned mask = (f->bits >= w) ? ~0u : (((unsigned)1 << f->bits) - 1);
+    int field = val;
+    if (f->bits < w)
+        field = emit_and_const(field, (int)mask);
+    field = emit_shift(IR_SHL, field, f->bit_off);
+    int unit = emit_load(addr, f->type);
+    int cleared = emit_and_const(unit, (int)~(mask << f->bit_off));
+    struct ir_insn *ins = emit(IR_OR);
+    ins->dst = new_temp();
+    ins->a = cleared;
+    ins->b = field;
+    emit_store(addr, ins->dst, f->type);
+    return val;
+}
+
+/* apply a compound-assignment operator to two int temps (bit-fields are
+   always integer), honoring signedness for divide/modulo/right-shift */
+static int
+emit_compound_int(int optok, int a, int b, struct cc_type *t)
+{
+    int uns = t && t->is_unsigned;
+    int op;
+    switch (optok) {
+    case TOK_PLUS_EQ:    op = IR_ADD; break;
+    case TOK_MINUS_EQ:   op = IR_SUB; break;
+    case TOK_STAR_EQ:    op = IR_MUL; break;
+    case TOK_SLASH_EQ:   op = uns ? IR_DIVU : IR_DIVS; break;
+    case TOK_PERCENT_EQ: op = uns ? IR_MODU : IR_MODS; break;
+    case TOK_AMP_EQ:     op = IR_AND; break;
+    case TOK_PIPE_EQ:    op = IR_OR; break;
+    case TOK_CARET_EQ:   op = IR_XOR; break;
+    case TOK_SHL_EQ:     op = IR_SHL; break;
+    case TOK_SHR_EQ:     op = uns ? IR_SHRU : IR_SHRS; break;
+    default: die("lower: bad compound operator %d", optok); return -1;
+    }
+    struct ir_insn *ins = emit(op);
+    ins->dst = new_temp();
+    ins->a = a;
+    ins->b = b;
+    return ins->dst;
 }
 
 /****************************************************************
@@ -622,12 +1521,16 @@ lower_expr(struct cc_node *n)
         fg->name = arena_strdup(lower_arena, namebuf);
         fg->is_local = 1;
         fg->init_ivals = arena_alloc(lower_arena, sizeof(int64_t));
+        int is_half = n->type && n->type->kind == TY_FLOAT16;
         int use_single = n->type && n->type->kind == TY_FLOAT;
-        if (use_single) {
+        if (is_half) {
+            fg->base_type = IR_I16;
+            fg->init_ivals[0] = (int16_t)double_to_half(n->fval);
+        } else if (use_single) {
             union { float f; int32_t i; } u;
             u.f = (float)n->fval;
-            fg->base_type = IR_I32;
-            fg->init_ivals[0] = u.i;
+            fg->base_type = IR_F32;
+            fg->init_ivals[0] = u.i;        /* 32-bit single bit pattern */
         } else {
             union { double d; int64_t i; } u;
             u.d = n->fval;
@@ -637,11 +1540,13 @@ lower_expr(struct cc_node *n)
         fg->init_count = 1;
         fg->next = cur_prog->globals;
         cur_prog->globals = fg;
-        int addr = new_temp();
-        ins = emit(IR_LEA);
-        ins->dst = addr;
-        ins->sym = arena_strdup(lower_arena, namebuf);
-        ins = emit(use_single ? IR_FLS : IR_FLD);
+        int addr = emit_addr_sym(namebuf);   /* LEA64 under LP64 */
+        if (is_half) {
+            ins = emit(IR_FLH);
+        } else {
+            ins = emit(IR_FLD);
+            ins->imm = use_single ? FWIDTH_F32 : 0;
+        }
         ins->dst = new_temp();
         ins->a = addr;
         return ins->dst;
@@ -655,10 +1560,7 @@ lower_expr(struct cc_node *n)
         if (lc) {
             if (lc->static_name) {
                 struct cc_type *t = lc->type;
-                int addr = new_temp();
-                ins = emit(IR_LEA);
-                ins->dst = addr;
-                ins->sym = arena_strdup(lower_arena, lc->static_name);
+                int addr = emit_addr_sym(lc->static_name);
                 if (t && (t->kind == TY_ARRAY || t->kind == TY_STRUCT ||
                           t->kind == TY_UNION))
                     return addr;
@@ -666,19 +1568,16 @@ lower_expr(struct cc_node *n)
             }
             struct cc_type *t = lc->type;
             if (t && (t->kind == TY_ARRAY || t->kind == TY_STRUCT ||
-                      t->kind == TY_UNION)) {
-                ins = emit(IR_ADL);
-                ins->dst = new_temp();
-                ins->slot = lc->slot;
-                return ins->dst;
-            }
+                      t->kind == TY_UNION))
+                return emit_addr_slot(lc->slot);
             if (is_float_type(t)) {
                 ins = emit(IR_FLDL);
                 ins->dst = new_temp();
                 ins->slot = lc->slot;
+                ins->imm = fwidth(t);
                 return ins->dst;
             }
-            if (is_i64_type(t)) {
+            if (val_is_wide(t)) {
                 ins = emit(IR_LDL64);
                 ins->dst = new_temp();
                 ins->slot = lc->slot;
@@ -695,16 +1594,9 @@ lower_expr(struct cc_node *n)
             gl = find_global(n->name);
         }
         if (gl->is_func || (gl->type &&
-            (gl->type->kind == TY_ARRAY || gl->type->kind == TY_FUNC))) {
-            ins = emit(IR_LEA);
-            ins->dst = new_temp();
-            ins->sym = arena_strdup(lower_arena, n->name);
-            return ins->dst;
-        }
-        int addr = new_temp();
-        ins = emit(IR_LEA);
-        ins->dst = addr;
-        ins->sym = arena_strdup(lower_arena, n->name);
+            (gl->type->kind == TY_ARRAY || gl->type->kind == TY_FUNC)))
+            return emit_addr_sym(n->name);
+        int addr = emit_addr_sym(n->name);
         return emit_load(addr, gl->type ? gl->type : cc_type_int());
     }
 
@@ -731,6 +1623,9 @@ lower_expr(struct cc_node *n)
     }
 
     case ND_MEMBER: {
+        struct cc_field *bf = member_field(n);
+        if (bf && bf->bits > 0)
+            return lower_bitfield_read(lower_addr(n), bf);
         int addr = lower_addr(n);
         struct cc_type *ft = lvalue_type(n);
         if (ft && (ft->kind == TY_STRUCT || ft->kind == TY_UNION ||
@@ -748,6 +1643,7 @@ lower_expr(struct cc_node *n)
                 ins = emit(IR_FNEG);
                 ins->dst = new_temp();
                 ins->a = val;
+                ins->imm = fwidth(ot);
                 return ins->dst;
             }
             if (is_i64_type(ot)) {
@@ -822,39 +1718,52 @@ lower_expr(struct cc_node *n)
         int lhs = lower_expr(n->a);
         int rhs = lower_expr(n->b);
 
-        /* pointer arithmetic scaling */
+        /* pointer arithmetic: scale by the element size, address-width.  These
+           cases are self-contained so a pointer never reaches the integer
+           binop below (where it would be treated as a plain i64). */
         if (n->op == TOK_PLUS || n->op == TOK_MINUS) {
             struct cc_type *lt = lvalue_type(n->a);
             struct cc_type *rt = lvalue_type(n->b);
-            if (lt && cc_type_is_ptr(lt) && !(rt && cc_type_is_ptr(rt))) {
+            int l_ptr = lt && cc_type_is_ptr(lt);
+            int r_ptr = rt && cc_type_is_ptr(rt);
+
+            if (l_ptr && r_ptr && n->op == TOK_MINUS) {
+                /* ptr - ptr -> byte difference / element size */
+                int diff = emit_addr_sub(lhs, rhs);
                 int sz = pointee_size(lt);
-                if (sz > 1) {
-                    int sc = lower_const(sz);
-                    ins = emit(IR_MUL);
-                    ins->dst = new_temp();
-                    ins->a = rhs;
-                    ins->b = sc;
-                    rhs = ins->dst;
-                }
-            }
-            /* ptr - ptr → divide by element size */
-            if (n->op == TOK_MINUS && lt && cc_type_is_ptr(lt) &&
-                rt && cc_type_is_ptr(rt)) {
-                ins = emit(IR_SUB);
-                ins->dst = new_temp();
-                ins->a = lhs;
-                ins->b = rhs;
-                int diff = ins->dst;
-                int sz = pointee_size(lt);
-                if (sz > 1) {
-                    int sc = lower_const(sz);
-                    ins = emit(IR_DIVS);
+                if (sz <= 1)
+                    return diff;
+                /* the divide runs at 32 bits (no i64 divide op); an object's
+                   element count fits there.  Narrow, divide, widen back. */
+                int d = diff, sc = lower_const(sz);
+                if (ADDR64) {
+                    ins = emit(IR_TRUNC64);
                     ins->dst = new_temp();
                     ins->a = diff;
-                    ins->b = sc;
-                    return ins->dst;
+                    d = ins->dst;
                 }
-                return diff;
+                ins = emit(IR_DIVS);
+                ins->dst = new_temp();
+                ins->a = d;
+                ins->b = sc;
+                int q = ins->dst;
+                if (ADDR64) {
+                    ins = emit(IR_SEXT64);
+                    ins->dst = new_temp();
+                    ins->a = q;
+                    q = ins->dst;
+                }
+                return q;
+            }
+            if (l_ptr && !r_ptr) {
+                int scaled = emit_addr_scale(rhs, rt, pointee_size(lt));
+                return n->op == TOK_PLUS ? emit_addr_add(lhs, scaled)
+                                         : emit_addr_sub(lhs, scaled);
+            }
+            if (r_ptr && !l_ptr && n->op == TOK_PLUS) {
+                /* int + ptr */
+                int scaled = emit_addr_scale(lhs, lt, pointee_size(rt));
+                return emit_addr_add(rhs, scaled);
             }
         }
 
@@ -863,14 +1772,31 @@ lower_expr(struct cc_node *n)
         int use_float = is_float_type(lt) || is_float_type(rt);
 
         if (use_float) {
+            /* usual arithmetic conversion: single unless a double/_Float16
+             * operand forces double; convert each operand to the target. */
+            int target_dbl = is_double_type(lt) || is_double_type(rt);
+            int w = target_dbl ? 0 : FWIDTH_F32;
+
             if (!is_float_type(lt)) {
                 ins = emit(IR_ITOF);
+                ins->dst = new_temp();
+                ins->a = lhs;
+                ins->imm = w;
+                lhs = ins->dst;
+            } else if (lt->kind == TY_FLOAT && target_dbl) {
+                ins = emit(IR_F32TOF64);
                 ins->dst = new_temp();
                 ins->a = lhs;
                 lhs = ins->dst;
             }
             if (!is_float_type(rt)) {
                 ins = emit(IR_ITOF);
+                ins->dst = new_temp();
+                ins->a = rhs;
+                ins->imm = w;
+                rhs = ins->dst;
+            } else if (rt->kind == TY_FLOAT && target_dbl) {
+                ins = emit(IR_F32TOF64);
                 ins->dst = new_temp();
                 ins->a = rhs;
                 rhs = ins->dst;
@@ -899,6 +1825,7 @@ lower_expr(struct cc_node *n)
                 ins->dst = new_temp();
                 ins->a = lhs;
                 ins->b = rhs;
+                ins->imm = w;
                 int eq = ins->dst;
                 int zero = lower_const(0);
                 ins = emit(IR_CMPEQ);
@@ -915,6 +1842,7 @@ lower_expr(struct cc_node *n)
             ins->dst = new_temp();
             ins->a = lhs;
             ins->b = rhs;
+            ins->imm = w;
             return ins->dst;
         }
 
@@ -1012,15 +1940,21 @@ lower_expr(struct cc_node *n)
 
     case ND_ASSIGN: {
         int val = lower_expr(n->b);
+        if (n->a->kind == ND_MEMBER) {
+            struct cc_field *bf = member_field(n->a);
+            if (bf && bf->bits > 0)
+                return lower_bitfield_write(lower_addr(n->a), bf, val);
+        }
         if (n->a->kind == ND_VAR) {
             struct local *lc = find_local(n->a->name);
             if (lc && !lc->static_name && lc->type &&
                 lc->type->kind != TY_ARRAY &&
                 lc->type->kind != TY_STRUCT && lc->type->kind != TY_UNION) {
                 int op;
-                if (is_float_type(lc->type))
+                if (is_float_type(lc->type)) {
                     op = IR_FSTL;
-                else if (is_i64_type(lc->type)) {
+                    val = to_float(val, lvalue_type(n->b), lc->type);
+                } else if (is_i64_type(lc->type)) {
                     op = IR_STL64;
                     val = widen_to_i64(val, lvalue_type(n->b));
                 } else
@@ -1028,6 +1962,8 @@ lower_expr(struct cc_node *n)
                 ins = emit(op);
                 ins->a = val;
                 ins->slot = lc->slot;
+                if (op == IR_FSTL)
+                    ins->imm = fwidth(lc->type);
                 return val;
             }
         }
@@ -1040,6 +1976,16 @@ lower_expr(struct cc_node *n)
     }
 
     case ND_COMPOUND_ASSIGN: {
+        if (n->a->kind == ND_MEMBER) {
+            struct cc_field *bf = member_field(n->a);
+            if (bf && bf->bits > 0) {
+                int a = lower_addr(n->a);
+                int old = lower_bitfield_read(a, bf);
+                int rhs = lower_expr(n->b);
+                int nv = emit_compound_int(n->op, old, rhs, bf->type);
+                return lower_bitfield_write(a, bf, nv);
+            }
+        }
         int addr = lower_addr(n->a);
         struct cc_type *t = lvalue_type(n->a);
         int old_val = emit_load(addr, t);
@@ -1179,6 +2125,8 @@ lower_expr(struct cc_node *n)
                 ins = emit(op);
                 ins->a = new_val;
                 ins->slot = lc->slot;
+                if (op == IR_FSTL)
+                    ins->imm = fwidth(lc->type);
                 return new_val;
             }
         }
@@ -1188,6 +2136,19 @@ lower_expr(struct cc_node *n)
 
     case ND_PRE_INC:
     case ND_PRE_DEC: {
+        if (n->a->kind == ND_MEMBER) {
+            struct cc_field *bf = member_field(n->a);
+            if (bf && bf->bits > 0) {
+                int a = lower_addr(n->a);
+                int old = lower_bitfield_read(a, bf);
+                int one = lower_const(n->kind == ND_PRE_INC ? 1 : -1);
+                struct ir_insn *ai = emit(IR_ADD);
+                ai->dst = new_temp();
+                ai->a = old;
+                ai->b = one;
+                return lower_bitfield_write(a, bf, ai->dst);  /* pre: new */
+            }
+        }
         int addr = lower_addr(n->a);
         struct cc_type *t = lvalue_type(n->a);
         int old_val = emit_load(addr, t);
@@ -1226,6 +2187,20 @@ lower_expr(struct cc_node *n)
 
     case ND_POST_INC:
     case ND_POST_DEC: {
+        if (n->a->kind == ND_MEMBER) {
+            struct cc_field *bf = member_field(n->a);
+            if (bf && bf->bits > 0) {
+                int a = lower_addr(n->a);
+                int old = lower_bitfield_read(a, bf);
+                int one = lower_const(n->kind == ND_POST_INC ? 1 : -1);
+                struct ir_insn *ai = emit(IR_ADD);
+                ai->dst = new_temp();
+                ai->a = old;
+                ai->b = one;
+                lower_bitfield_write(a, bf, ai->dst);
+                return old;                                   /* post: old */
+            }
+        }
         int addr = lower_addr(n->a);
         struct cc_type *t = lvalue_type(n->a);
         int old_val = emit_load(addr, t);
@@ -1292,9 +2267,11 @@ lower_expr(struct cc_node *n)
         return lower_expr(n->b);
 
     case ND_CAST: {
-        int val = lower_expr(n->a);
         struct cc_type *from = lvalue_type(n->a);
         struct cc_type *to = n->decl_type;
+        reject_ldouble(to, n->line);        /* a cast producing a long double */
+        reject_ldouble(from, n->line);      /* or consuming one */
+        int val = lower_expr(n->a);
         if (to && is_float_type(to) && !is_float_type(from)) {
             if (is_i64_type(from)) {
                 ins = emit(IR_TRUNC64);
@@ -1305,15 +2282,28 @@ lower_expr(struct cc_node *n)
             ins = emit(IR_ITOF);
             ins->dst = new_temp();
             ins->a = val;
+            ins->imm = fwidth(to);
             return ins->dst;
         }
         if (to && !is_float_type(to) && is_float_type(from)) {
             ins = emit(IR_FTOI);
             ins->dst = new_temp();
             ins->a = val;
+            ins->imm = fwidth(from);
             val = ins->dst;
             if (is_i64_type(to)) {
                 ins = emit(IR_SEXT64);
+                ins->dst = new_temp();
+                ins->a = val;
+                return ins->dst;
+            }
+            return val;
+        }
+        /* float <-> double (both float types, differing width) */
+        if (to && from && is_float_type(to) && is_float_type(from)) {
+            if (fwidth(from) != fwidth(to)) {
+                ins = emit(fwidth(to) == FWIDTH_F32
+                           ? IR_F64TOF32 : IR_F32TOF64);
                 ins->dst = new_temp();
                 ins->a = val;
                 return ins->dst;
@@ -1336,20 +2326,62 @@ lower_expr(struct cc_node *n)
     }
 
     case ND_SIZEOF: {
-        int sz;
-        if (n->decl_type)
-            sz = cc_type_size(n->decl_type);
-        else if (n->a)
-            sz = cc_type_size(lvalue_type(n->a));
-        else
-            sz = 4;
-        return lower_const(sz);
+        struct cc_type *t = n->decl_type ? n->decl_type
+                          : n->a ? lvalue_type(n->a) : NULL;
+        int v = n->op == TOK_ALIGNOF ? cc_type_align(t ? t : cc_type_int())
+              : t ? cc_type_size(t) : 4;
+        return lower_const(v);
     }
 
     case ND_CALL: {
         int is_indirect = 0;
         int fptr = -1;
         struct cc_type *callee_type = NULL;
+
+        /* varargs builtins (a va_list decays to the address of its struct) */
+        if (n->a->kind == ND_VAR && n->b) {
+            const char *bn = n->a->name;
+            if (strcmp(bn, "__builtin_va_start") == 0) {
+                int ap = lower_expr(n->b);   /* the va_list address */
+                ins = emit(IR_VA_START);
+                ins->a = ap;
+                return lower_const(0);
+            }
+            if (strcmp(bn, "__builtin_va_end") == 0)
+                return lower_const(0);        /* no-op on SysV */
+            int va_fp = strcmp(bn, "__builtin_va_arg_dbl") == 0;
+            int va_gp = strcmp(bn, "__builtin_va_arg_int") == 0 ||
+                        strcmp(bn, "__builtin_va_arg_long") == 0;
+            if (va_fp || va_gp) {
+                int ap = lower_expr(n->b);
+                int fpc = lower_const(va_fp ? 1 : 0);
+                ins = emit(IR_ARG64); ins->a = ap; ins->imm = 0;
+                ins = emit(IR_ARG); ins->a = fpc; ins->imm = 1;
+                ins = emit(IR_CALL64);      /* returns a pointer to the slot */
+                ins->dst = new_temp();
+                ins->sym = arena_strdup(lower_arena, "__va_arg");
+                ins->nargs = 2;
+                int ptr = ins->dst;
+                if (va_fp) {
+                    ins = emit(IR_FLD);
+                    ins->dst = new_temp();
+                    ins->a = ptr;
+                    ins->imm = 0;            /* double */
+                    return ins->dst;
+                }
+                /* int loads the low 4 bytes; long loads all 8 */
+                if (strcmp(bn, "__builtin_va_arg_long") == 0) {
+                    ins = emit(IR_LD64);
+                    ins->dst = new_temp();
+                    ins->a = ptr;
+                    return ins->dst;
+                }
+                ins = emit(IR_LW);
+                ins->dst = new_temp();
+                ins->a = ptr;
+                return ins->dst;
+            }
+        }
         if (n->a->kind == ND_VAR) {
             struct local *lc = find_local(n->a->name);
             if (lc && lc->type && (lc->type->kind == TY_PTR ||
@@ -1369,22 +2401,151 @@ lower_expr(struct cc_node *n)
             fptr = lower_expr(n->a);
         }
         int args[32];
-        int arg_kind[32];
+        int arg_kind[32];       /* 0 int, 1 float, 2 i64, 3 MEMORY struct,
+                                   4 x8 result pointer (AAPCS64) */
+        int arg_fw[32];
+        int arg_msize[32] = {0}; /* byte size for a kind-3 MEMORY struct arg */
         int nargs = 0;
+        /* a memory-class struct return: hand the callee a pointer to a result
+           slot.  SysV passes it as the first integer argument; AAPCS64 passes
+           it in the x8 indirect-result register (arg_kind 4). */
+        /* mirror the ABI's register accounting so the caller applies the
+           same all-or-nothing rule the callee does: a register struct whose
+           slots do not all fit in the remaining registers is passed wholly in
+           memory rather than split across a register and the stack.  ABI_NINT
+           integer arg registers (SysV rdi..r9 = 6; AAPCS64 x0..x7 = 8), 8 fp. */
+#ifdef CC_ARM64
+        int abi_nint = 8;
+#else
+        int abi_nint = 6;
+#endif
+        int iu = 0, fu = 0;             /* integer / fp arg registers used */
+        int mem_ret_slot = -1;
+        if (callee_type && callee_type->kind == TY_FUNC &&
+            abi_struct_mem(callee_type->base)) {
+            mem_ret_slot = alloc_slot(cc_type_size(callee_type->base));
+            args[0] = emit_addr_slot(mem_ret_slot);
+#ifdef CC_ARM64
+            arg_kind[0] = 4;           /* AAPCS64: the x8 indirect-result reg */
+#else
+            arg_kind[0] = 2;           /* SysV: the hidden first int argument */
+            iu = 1;                    /* it consumes rdi */
+#endif
+            arg_fw[0] = 0;
+            nargs = 1;
+        }
         struct cc_param *pp = (callee_type && callee_type->kind == TY_FUNC)
                               ? callee_type->params : NULL;
         for (struct cc_node *a = n->b; a; a = a->next) {
             if (nargs >= 32)
                 die("lower:%d: too many arguments", n->line);
-            args[nargs] = lower_expr(a);
+            int cls[4], neb;
             struct cc_type *at = pp ? pp->type : lvalue_type(a);
-            if (is_float_type(at))
+            reject_ldouble(at, n->line);
+            if ((neb = abi_agg(at, cls)) > 0) {
+                int need_i = 0, need_f = 0;
+                for (int j = 0; j < neb; j++)
+                    if (cls[j] == 0) need_i++; else need_f++;
+                if (iu + need_i > abi_nint || fu + need_f > 8) {
+                    /* the slots do not all fit: pass the whole struct in memory
+                       (a by-value stack copy), matching the callee's all-or-
+                       nothing rule.  The remaining registers stay available for
+                       later arguments (iu/fu unchanged). */
+                    args[nargs] = lower_expr(a);
+                    arg_kind[nargs] = 3;
+                    arg_fw[nargs] = 0;
+                    arg_msize[nargs] = cc_type_size(at);
+                    if (pp)
+                        pp = pp->next;
+                    nargs++;
+                    continue;
+                }
+                iu += need_i;
+                fu += need_f;
+                /* register struct: decompose into its slots, one arg each,
+                   loaded from the struct's address.  An integer/double slot is
+                   8 bytes; a float-HFA slot is a 4-byte single, so the stride
+                   and width follow the slot class. */
+                int base = lower_expr(a);
+                int stride = (cls[0] == 2) ? 4 : 8;
+                for (int j = 0; j < neb; j++) {
+                    int addr = j ? emit_addr_add(base,
+                                       emit_addr_const(stride * j))
+                                 : base;
+                    struct ir_insn *ld;
+                    if (cls[j] != 0) {          /* FP slot -> fp reg */
+                        int w = (cls[j] == 2) ? FWIDTH_F32 : 8;
+                        ld = emit(IR_FLD);
+                        ld->imm = w;
+                        ld->dst = new_temp();
+                        ld->a = addr;
+                        args[nargs] = ld->dst;
+                        arg_kind[nargs] = 1;
+                        arg_fw[nargs] = w;
+                    } else {                    /* INTEGER slot -> gp */
+                        ld = emit(IR_LD64);
+                        ld->dst = new_temp();
+                        ld->a = addr;
+                        args[nargs] = ld->dst;
+                        arg_kind[nargs] = 2;
+                        arg_fw[nargs] = 0;
+                    }
+                    nargs++;
+                }
+                if (pp)
+                    pp = pp->next;
+                continue;
+            }
+            if (abi_struct_mem(at)) {
+#ifdef CC_ARM64
+                /* AAPCS64: pass a pointer to a caller-made copy (value
+                   semantics: the callee must not see later mutations) */
+                int src = lower_expr(a);
+                int cslot = alloc_slot(cc_type_size(at));
+                emit_aggregate_copy(emit_addr_slot(cslot), src,
+                                    cc_type_size(at));
+                args[nargs] = emit_addr_slot(cslot);
+                arg_kind[nargs] = 2;    /* the pointer rides a gp reg */
+                arg_fw[nargs] = 0;
+                if (iu < abi_nint)
+                    iu++;               /* the pointer consumes an x-register */
+                if (pp)
+                    pp = pp->next;
+                nargs++;
+                continue;
+#else
+                /* SysV: pass a by-value stack copy (the backend copies its
+                   bytes onto the outgoing stack) */
+                args[nargs] = lower_expr(a);
+                arg_kind[nargs] = 3;
+                arg_fw[nargs] = 0;
+                arg_msize[nargs] = cc_type_size(at);
+                if (pp)
+                    pp = pp->next;
+                nargs++;
+                continue;
+#endif
+            }
+            args[nargs] = lower_expr(a);
+            arg_fw[nargs] = 0;
+            if (is_float_type(at)) {
                 arg_kind[nargs] = 1;
-            else if (is_i64_type(at)) {
+                arg_fw[nargs] = fwidth(at);
+                if (fu < 8)
+                    fu++;
+                /* convert the argument to the parameter's float type */
+                if (pp)
+                    args[nargs] = to_float(args[nargs], lvalue_type(a), at);
+            } else if (is_i64_type(at)) {
                 arg_kind[nargs] = 2;
+                if (iu < abi_nint)
+                    iu++;
                 args[nargs] = widen_to_i64(args[nargs], lvalue_type(a));
-            } else
+            } else {
                 arg_kind[nargs] = 0;
+                if (iu < abi_nint)
+                    iu++;
+            }
             if (pp)
                 pp = pp->next;
             nargs++;
@@ -1392,15 +2553,51 @@ lower_expr(struct cc_node *n)
         for (int i = 0; i < nargs; i++) {
             int op = arg_kind[i] == 1 ? IR_FARG
                    : arg_kind[i] == 2 ? IR_ARG64
+                   : arg_kind[i] == 3 ? IR_ARG_MEM
+                   : arg_kind[i] == 4 ? IR_ARG_X8
                    : IR_ARG;
             ins = emit(op);
             ins->a = args[i];
-            ins->imm = i;
+            /* FARG carries the float width in imm; ARG_MEM carries the struct
+             * byte size; other ARGs carry the arg index */
+            ins->imm = op == IR_FARG ? arg_fw[i]
+                     : op == IR_ARG_MEM ? arg_msize[i]
+                     : i;
         }
+        if (callee_type && callee_type->kind == TY_FUNC)
+            reject_ldouble(callee_type->base, n->line);
         int fret = callee_type && callee_type->kind == TY_FUNC &&
                    is_float_type(callee_type->base);
+        int rcls[4], rneb = 0;
+        if (callee_type && callee_type->kind == TY_FUNC)
+            rneb = abi_agg(callee_type->base, rcls);
+        int sret = rneb > 0;    /* struct returned in registers */
         int i64ret = callee_type && callee_type->kind == TY_FUNC &&
                      is_i64_type(callee_type->base);
+        if (sret) {
+            /* a struct-returning call: the backend makes the call and stores
+               the returned register slots into a hidden slot; imm encodes the
+               slot count (bits 0-2) and each slot's class in a 2-bit field
+               (0 = integer, 1 = double, 2 = float single) at bits 3+2*j.  The
+               call expression yields the slot address, uniform with every
+               other struct value. */
+            int slot = alloc_slot(rneb * 8 < 8 ? 8 : rneb * 8);
+            long enc = rneb;
+            for (int j = 0; j < rneb; j++)
+                enc |= (long)rcls[j] << (3 + 2 * j);
+            ins = emit(is_indirect ? IR_CALLI_AGG : IR_CALL_AGG);
+            ins->dst = -1;
+            ins->slot = slot;
+            ins->imm = enc;
+            ins->nargs = nargs;
+            if (is_indirect)
+                ins->a = fptr;
+            else
+                ins->sym = arena_strdup(lower_arena, n->a->name);
+            return emit_addr_slot(slot);
+        }
+        if (mem_ret_slot >= 0)
+            i64ret = 1;         /* MEMORY return: rax holds the result pointer */
         if (is_indirect) {
             int op = fret ? IR_FCALLI : i64ret ? IR_CALLI64 : IR_CALLI;
             ins = emit(op);
@@ -1414,6 +2611,10 @@ lower_expr(struct cc_node *n)
             ins->sym = arena_strdup(lower_arena, n->a->name);
             ins->nargs = nargs;
         }
+        if (mem_ret_slot >= 0)
+            /* the call wrote the struct into our result slot; yield its
+               address, uniform with every other struct value */
+            return emit_addr_slot(mem_ret_slot);
         return ins->dst;
     }
 
@@ -1472,6 +2673,7 @@ lower_local_decl(struct cc_node *n)
         add_global(n->name, t, t->kind == TY_FUNC);
         return;
     }
+    reject_ldouble(t, n->line);
 
     if (n->is_static) {
         char mangled[128];
@@ -1481,7 +2683,20 @@ lower_local_decl(struct cc_node *n)
         g->name = arena_strdup(lower_arena, mangled);
         g->is_local = 1;
         g->base_type = type_to_ir(t);
-        if (t->kind == TY_ARRAY) {
+        if (wants_image(t, n->a)) {
+            /* aggregate (struct/union, or an array of one): a byte blob of the
+               full size, aligned to the aggregate's alignment; an initializer
+               becomes an ir_init byte image */
+            if (t->kind == TY_ARRAY && t->array_len < 0 && n->a &&
+                n->a->kind == ND_INIT_LIST) {
+                t->array_len = infer_array_len(n->a);
+            }
+            g->base_type = IR_I8;
+            g->arr_size = cc_type_size(t);
+            g->align = cc_type_align(t);
+            if (n->a && n->a->kind == ND_INIT_LIST)
+                g->inits = lower_aggregate_init(t, n->a);
+        } else if (t->kind == TY_ARRAY) {
             g->base_type = type_to_ir(t->base);
             if (t->array_len < 0 && n->a &&
                 n->a->kind == ND_INIT_LIST) {
@@ -1492,7 +2707,7 @@ lower_local_decl(struct cc_node *n)
             }
             g->arr_size = t->array_len > 0 ? t->array_len : 0;
         }
-        if (n->a) {
+        if (n->a && !g->inits) {
             if (n->a->kind == ND_INIT_LIST) {
                 int cnt = count_init_flat(n->a);
                 g->init_ivals = arena_alloc(lower_arena, cnt * sizeof(int64_t));
@@ -1502,13 +2717,27 @@ lower_local_decl(struct cc_node *n)
                 g->init_count = pos;
                 if (g->arr_size == 0)
                     g->arr_size = pos;
-            } else if (n->a->kind == ND_STRLIT) {
+            } else if (n->a->kind == ND_STRLIT && t->kind != TY_PTR) {
                 g->init_string = arena_alloc(lower_arena, n->a->slen + 1);
                 memcpy(g->init_string, n->a->sval, n->a->slen);
                 g->init_string[n->a->slen] = '\0';
                 g->init_strlen = n->a->slen + 1;
                 if (g->arr_size == 0)
                     g->arr_size = n->a->slen + 1;
+            } else if (t->kind == TY_PTR &&
+                       (n->a->kind == ND_ADDR || n->a->kind == ND_VAR ||
+                        n->a->kind == ND_STRLIT)) {
+                /* a pointer initialized to an address constant -> relocation */
+                int64_t val = 0;
+                char *sym = NULL;
+                encode_scalar(t, n->a, &val, &sym);
+                g->init_ivals = arena_alloc(lower_arena, sizeof(int64_t));
+                g->init_ivals[0] = val;
+                if (sym) {
+                    g->init_syms = arena_zalloc(lower_arena, sizeof(char *));
+                    g->init_syms[0] = sym;
+                }
+                g->init_count = 1;
             } else if (n->a->kind == ND_INTLIT) {
                 g->init_ivals = arena_alloc(lower_arena, sizeof(int64_t));
                 g->init_ivals[0] = n->a->ival;
@@ -1553,51 +2782,44 @@ lower_local_decl(struct cc_node *n)
 
     if (n->a->kind == ND_INIT_LIST && t &&
         (t->kind == TY_ARRAY || t->kind == TY_STRUCT)) {
-        /* array/struct initializer list */
-        struct ir_insn *ins = emit(IR_ADL);
-        ins->dst = new_temp();
-        ins->slot = slot;
-        int base_addr = ins->dst;
+        /* array/struct initializer list.  Addresses are address-width (64-bit
+           under LP64), so use the ADDR64-aware helpers rather than a raw
+           32-bit IR_ADL/IR_ADD, which would truncate a high stack address. */
+        int base_addr = emit_addr_slot(slot);
 
         if (t->kind == TY_ARRAY) {
             int elem_sz = cc_type_size(t->base);
             int offset = 0;
             for (struct cc_node *e = n->a->body; e; e = e->next) {
                 int val = lower_expr(e);
-                if (offset == 0) {
-                    emit_store(base_addr, val, t->base);
-                } else {
-                    int off = lower_const(offset);
-                    ins = emit(IR_ADD);
-                    ins->dst = new_temp();
-                    ins->a = base_addr;
-                    ins->b = off;
-                    emit_store(ins->dst, val, t->base);
-                }
+                int addr = offset ? emit_addr_add(base_addr,
+                                        emit_addr_const(offset))
+                                  : base_addr;
+                emit_store(addr, val, t->base);
                 offset += elem_sz;
             }
         } else {
             struct cc_field *f = t->fields;
             for (struct cc_node *e = n->a->body; e && f; e = e->next, f = f->next) {
                 int val = lower_expr(e);
-                if (f->offset == 0) {
-                    emit_store(base_addr, val, f->type);
-                } else {
-                    int off = lower_const(f->offset);
-                    ins = emit(IR_ADD);
-                    ins->dst = new_temp();
-                    ins->a = base_addr;
-                    ins->b = off;
-                    emit_store(ins->dst, val, f->type);
-                }
+                int addr = f->offset ? emit_addr_add(base_addr,
+                                           emit_addr_const(f->offset))
+                                     : base_addr;
+                emit_store(addr, val, f->type);
             }
         }
     } else {
         int val = lower_expr(n->a);
+        if (is_aggregate(t)) {
+            /* init from another aggregate: value-semantic byte copy */
+            emit_aggregate_copy(emit_addr_slot(slot), val, cc_type_size(t));
+            return;
+        }
         int op;
-        if (is_float_type(t))
+        if (is_float_type(t)) {
             op = IR_FSTL;
-        else if (is_i64_type(t)) {
+            val = to_float(val, lvalue_type(n->a), t);
+        } else if (is_i64_type(t)) {
             op = IR_STL64;
             val = widen_to_i64(val, lvalue_type(n->a));
         } else
@@ -1605,6 +2827,8 @@ lower_local_decl(struct cc_node *n)
         struct ir_insn *ins = emit(op);
         ins->a = val;
         ins->slot = slot;
+        if (op == IR_FSTL)
+            ins->imm = fwidth(t);
     }
 }
 
@@ -1809,8 +3033,29 @@ lower_stmt(struct cc_node *n)
     case ND_RETURN:
         if (n->a) {
             int val = lower_expr(n->a);
+            if (cur_fn_ret_mem) {
+                /* MEMORY return: copy the struct through the hidden result
+                   pointer and return that pointer in rax (SysV) */
+                struct ir_insn *ld = emit(IR_LDL64);
+                ld->dst = new_temp();
+                ld->slot = cur_fn_sret_slot;
+                emit_aggregate_copy(ld->dst, val, cc_type_size(cur_fn_ret_type));
+                ins = emit(IR_RETV64);
+                ins->a = ld->dst;
+                return;
+            }
+            if (cur_fn_ret_neb > 0) {
+                /* pack the returned struct into the return registers: the
+                   backend loads each eightbyte from the struct's address
+                   (val) into rax/rdx or xmm0/xmm1 per fn->ret_cls */
+                ins = emit(IR_RETV_AGG);
+                ins->a = val;
+                return;
+            }
             if (cur_fn_returns_i64)
                 val = widen_to_i64(val, lvalue_type(n->a));
+            else if (cur_fn_returns_float)
+                val = to_float(val, lvalue_type(n->a), cur_fn_ret_type);
             int op = cur_fn_returns_float ? IR_FRETV
                    : cur_fn_returns_i64   ? IR_RETV64
                    : IR_RETV;
@@ -1853,36 +3098,152 @@ lower_function(struct cc_node *fndef)
     cur_switch = NULL;
 
     struct cc_type *ftype = fndef->decl_type;
+    int rcls[4];
+    /* Arm the inline-drop recovery: an inline function that hits any long
+       double reject (its signature, body, or a dead call into a long double
+       helper) longjmps back here and is dropped, since an inline definition
+       may be omitted -- which is how musl's header helpers such as __islessf
+       are meant to work.  A non-inline function errors via die() instead. */
+    if (fndef->is_inline) {
+        ldouble_recover_active = 1;
+        if (setjmp(ldouble_recover)) {
+            ldouble_recover_active = 0;
+            return NULL;
+        }
+    }
+    reject_ldouble(ftype->base, fndef->line);       /* return type */
+    for (struct cc_param *p = ftype->params; p; p = p->next)
+        reject_ldouble(p->type, fndef->line);
     cur_fn_returns_float = is_float_type(ftype->base);
     cur_fn_returns_i64 = is_i64_type(ftype->base);
+    cur_fn_ret_neb = abi_agg(ftype->base, rcls);
+    cur_fn_ret_mem = cur_fn_ret_neb < 0;
+    if (cur_fn_ret_neb < 0)
+        cur_fn_ret_neb = 0;             /* MEMORY: returned via a hidden ptr */
+    fn->ret_neb = cur_fn_ret_mem ? -1 : cur_fn_ret_neb;
+    for (int j = 0; j < 4; j++)
+        fn->ret_cls[j] = rcls[j];
+    cur_fn_ret_type = ftype->base;
+    fn->is_variadic = ftype->is_variadic;
     int nparams = 0;
 
-    /* allocate slots for params */
+    /* allocate slots for params.  A MEMORY return adds a hidden leading
+       integer parameter, the caller-provided result pointer (SysV): it takes
+       the first gp register like any other pointer, and the return copies the
+       struct through it. */
+    int np = 0;
+    for (struct cc_param *p = ftype->params; p; p = p->next)
+        np++;
+    if (cur_fn_ret_mem)
+        np++;
+    np = np > 0 ? np : 1;
+    fn->param_class = arena_alloc(lower_arena, np * sizeof(int));
+    fn->param_neb = arena_alloc(lower_arena, np * sizeof(signed char));
+    fn->param_cls = arena_alloc(lower_arena, 4 * np * sizeof(signed char));
+    if (cur_fn_ret_mem) {
+        cur_fn_sret_slot = alloc_slot(8);
+        fn->param_neb[0] = 1;
+        fn->param_cls[0] = 0;
+        fn->param_cls[1] = fn->param_cls[2] = fn->param_cls[3] = -1;
+        fn->param_class[0] = 0;
+        nparams = 1;
+    }
+    /* AAPCS64 memory params: a >16-byte struct arrives as a pointer to a
+       caller copy.  The pointer occupies the param slot; the copied struct
+       needs a local slot, which must be allocated after all param slots so the
+       param indices stay 0..nparams-1.  Deferred here, resolved below. */
+    int mem_pslot[16], nmemparam = 0;
+    struct cc_param *mem_pparam[16];
     for (struct cc_param *p = ftype->params; p; p = p->next) {
         int sz = cc_type_size(p->type);
+        int pcls[4], neb = abi_agg(p->type, pcls);
+        int mem_ptr = 0;
+#ifdef CC_ARM64
+        mem_ptr = (neb < 0);            /* a pointer to a caller copy */
+#endif
         if (is_float_type(p->type) && sz < 8)
             sz = 8;
         else if (is_i64_type(p->type) && sz < 8)
             sz = 8;
+        else if (neb > 0 && sz < neb * 8)
+            sz = neb * 8;               /* room to reconstruct the slots */
         else if (sz < 4)
             sz = 4;
+        for (int j = 0; j < 4; j++)
+            fn->param_cls[4 * nparams + j] = -1;
+        if (mem_ptr) {                  /* AAPCS64: one gp reg holds the ptr */
+            int slot = alloc_slot(8);
+            if (nmemparam < 16) {
+                mem_pslot[nmemparam] = slot;
+                mem_pparam[nmemparam] = p;
+                nmemparam++;
+            }
+            fn->param_neb[nparams] = 1;
+            fn->param_cls[4 * nparams] = 0;
+            fn->param_class[nparams] = 0;
+            nparams++;
+            continue;
+        }
         int slot = alloc_slot(sz);
         if (p->name)
             add_local(p->name, slot, p->type);
+        if (neb > 0) {                  /* struct in 1-4 registers */
+            fn->param_neb[nparams] = neb;
+            for (int j = 0; j < neb; j++)
+                fn->param_cls[4 * nparams + j] = pcls[j];
+            fn->param_class[nparams] = pcls[0];
+        } else if (neb < 0) {           /* SysV MEMORY struct: read from stack */
+            fn->param_neb[nparams] = (sz + 7) / 8;   /* 8-byte stack slots */
+            fn->param_cls[4 * nparams] = -2;         /* MEMORY marker */
+            fn->param_cls[4 * nparams + 1] = -2;
+            fn->param_class[nparams] = 0;
+        } else {                        /* scalar */
+            fn->param_neb[nparams] = 1;
+            fn->param_cls[4 * nparams] = is_float_type(p->type) ? 1 : 0;
+            fn->param_class[nparams] = is_float_type(p->type) ? 1 : 0;
+        }
         nparams++;
     }
     fn->nparams = nparams;
+
+    /* allocate the copied-struct locals for the memory params (after the param
+       slots), bind each name to its copy, and record the copy-in */
+    int mem_dslot[16];
+    for (int m = 0; m < nmemparam; m++) {
+        mem_dslot[m] = alloc_slot(cc_type_size(mem_pparam[m]->type));
+        if (mem_pparam[m]->name)
+            add_local(mem_pparam[m]->name, mem_dslot[m], mem_pparam[m]->type);
+    }
 
     struct ir_insn *ins = emit(IR_FUNC);
     ins->sym = arena_strdup(lower_arena, fndef->name);
     ins->nargs = nparams;
 
+    /* AAPCS64: copy each memory-class struct parameter from its pointer into
+       the local copy, before the body runs */
+    for (int m = 0; m < nmemparam; m++) {
+        struct ir_insn *ld = emit(IR_LDL64);
+        ld->dst = new_temp();
+        ld->slot = mem_pslot[m];
+        emit_aggregate_copy(emit_addr_slot(mem_dslot[m]), ld->dst,
+                            cc_type_size(mem_pparam[m]->type));
+    }
+
     lower_stmt(fndef->body);
 
     /* ensure function ends with a return */
     if (!fn->tail || (fn->tail->op != IR_RET && fn->tail->op != IR_RETV &&
-                      fn->tail->op != IR_RETV64 && fn->tail->op != IR_FRETV)) {
-        if (cur_fn_returns_i64) {
+                      fn->tail->op != IR_RETV64 && fn->tail->op != IR_FRETV &&
+                      fn->tail->op != IR_RETV_AGG)) {
+        if (cur_fn_ret_mem) {
+            /* no explicit return (UB): still hand back the hidden pointer */
+            ins = emit(IR_LDL64);
+            ins->dst = new_temp();
+            ins->slot = cur_fn_sret_slot;
+            int p = ins->dst;
+            ins = emit(IR_RETV64);
+            ins->a = p;
+        } else if (cur_fn_returns_i64) {
             int z = lower_const64(0);
             ins = emit(IR_RETV64);
             ins->a = z;
@@ -1898,6 +3259,7 @@ lower_function(struct cc_node *fndef)
     fn->nslots = nslots;
     fn->slot_size = arena_alloc(lower_arena, nslots * sizeof(int));
     memcpy(fn->slot_size, slot_sizes, nslots * sizeof(int));
+    ldouble_recover_active = 0;
     return fn;
 }
 
@@ -1921,7 +3283,20 @@ lower_global_decl(struct cc_node *gn)
     struct ir_global *g = arena_zalloc(lower_arena, sizeof *g);
     g->name = arena_strdup(lower_arena, gn->name);
 
-    if (t->kind == TY_ARRAY) {
+    if (wants_image(t, gn->a)) {
+        /* an aggregate global (struct/union, or an array of one) is a byte
+           blob of its full size, aligned to the aggregate's alignment; an
+           initializer becomes an ir_init byte image (see build_image) */
+        if (t->kind == TY_ARRAY && t->array_len < 0 && gn->a &&
+            gn->a->kind == ND_INIT_LIST) {
+            t->array_len = infer_array_len(gn->a);
+        }
+        g->base_type = IR_I8;
+        g->arr_size = cc_type_size(t);
+        g->align = cc_type_align(t);
+        if (gn->a && gn->a->kind == ND_INIT_LIST)
+            g->inits = lower_aggregate_init(t, gn->a);
+    } else if (t->kind == TY_ARRAY) {
         g->base_type = type_to_ir(t->base);
         if (t->array_len < 0 && gn->a &&
             gn->a->kind == ND_INIT_LIST) {
@@ -1932,20 +3307,36 @@ lower_global_decl(struct cc_node *gn)
         }
         g->arr_size = t->array_len > 0 ? t->array_len : 0;
     } else if (t->kind == TY_PTR) {
-        g->base_type = IR_I32;
+        g->base_type = ADDR64 ? IR_I64 : IR_I32;
         g->is_ptr = 1;
     } else {
         g->base_type = type_to_ir(t);
     }
 
-    if (gn->a) {
-        if (gn->a->kind == ND_STRLIT) {
+    if (gn->a && !g->inits) {
+        if (gn->a->kind == ND_STRLIT && t->kind != TY_PTR) {
             g->init_string = arena_alloc(lower_arena, gn->a->slen + 1);
             memcpy(g->init_string, gn->a->sval, gn->a->slen);
             g->init_string[gn->a->slen] = '\0';
             g->init_strlen = gn->a->slen + 1;
             if (g->arr_size == 0)
                 g->arr_size = gn->a->slen + 1;
+        } else if (t->kind == TY_PTR &&
+                   (gn->a->kind == ND_ADDR || gn->a->kind == ND_VAR ||
+                    gn->a->kind == ND_STRLIT)) {
+            /* a pointer global initialized to an address constant: &var, an
+               array/function name (decays), or a string literal.  encode_scalar
+               yields a symbol; init_syms emits it as a relocation. */
+            int64_t val = 0;
+            char *sym = NULL;
+            encode_scalar(t, gn->a, &val, &sym);
+            g->init_ivals = arena_alloc(lower_arena, sizeof(int64_t));
+            g->init_ivals[0] = val;
+            if (sym) {
+                g->init_syms = arena_zalloc(lower_arena, sizeof(char *));
+                g->init_syms[0] = sym;
+            }
+            g->init_count = 1;
         } else if (gn->a->kind == ND_INIT_LIST) {
             int cnt = count_init_flat(gn->a);
             g->init_ivals = arena_alloc(lower_arena, cnt * sizeof(int64_t));
@@ -1967,6 +3358,9 @@ lower_global_decl(struct cc_node *gn)
         }
     }
 
+    if (gn->align > g->align)   /* _Alignas raises the global's alignment */
+        g->align = gn->align;
+
     g->next = cur_prog->globals;
     cur_prog->globals = g;
     add_global(gn->name, t, 0);
@@ -1985,6 +3379,22 @@ cc_lower_program(struct arena *a, struct cc_node *ast)
     nglobals = 0;
     str_counter = 0;
 
+    /* register the varargs builtins so a call to one types by its return
+       type (the lowering intercepts them by name; this is just for typing) */
+    {
+        struct cc_type *dbl = arena_zalloc(lower_arena, sizeof *dbl);
+        dbl->kind = TY_DOUBLE;
+        struct cc_type *rets[3] = { cc_type_int(), cc_type_long(), dbl };
+        const char *nms[3] = { "__builtin_va_arg_int",
+                               "__builtin_va_arg_long", "__builtin_va_arg_dbl" };
+        for (int k = 0; k < 3; k++) {
+            struct cc_type *ft = arena_zalloc(lower_arena, sizeof *ft);
+            ft->kind = TY_FUNC;
+            ft->base = rets[k];
+            add_global(nms[k], ft, 1);
+        }
+    }
+
     /* first pass: register globals and functions */
     for (struct cc_node *d = ast->body; d; d = d->next) {
         if (d->kind == ND_GLOBAL_DECL)
@@ -1999,6 +3409,8 @@ cc_lower_program(struct arena *a, struct cc_node *ast)
         if (d->kind != ND_FUNC_DEF)
             continue;
         struct ir_func *fn = lower_function(d);
+        if (!fn)                        /* skipped (e.g. a long double inline) */
+            continue;
         *ftail = fn;
         ftail = &fn->next;
     }

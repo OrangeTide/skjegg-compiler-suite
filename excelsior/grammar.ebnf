@@ -1,0 +1,621 @@
+(* Excelsior Grammar : EBNF *)
+(* A statically-typed, class-based in-world scripting language.        *)
+(* Forked from MooScript; carries LambdaMOO's lessons, not its syntax. *)
+(*                                                                     *)
+(* core.md is authoritative for the design and rationale (the uniform  *)
+(* form core, the meta-stack, quoting, execution and liveness). This   *)
+(* file is the concrete surface grammar that sits on that core.        *)
+(*                                                                     *)
+(* Conventions:                                                        *)
+(*   NL     the statement terminator: one or more line breaks. There   *)
+(*          is no ";". The continuation rules are formal: see the      *)
+(*          Line endings section under Lexical elements.               *)
+(*   Separators follow the quotation-boundary rule (sequences.md):     *)
+(*   commas belong to code, spaces belong to data, newlines belong to  *)
+(*   statements. A comma list always runs to a bracket or a keyword,   *)
+(*   never to a newline; computation enters quoted contexts (strings,  *)
+(*   data literals) only through ${} holes.                            *)
+(*   Identifiers and keywords are CASE-INSENSITIVE (ASCII fold), with   *)
+(*   the display form canonicalized to the first-seen spelling.        *)
+(*   A leading "_" always names a user identifier and never a keyword, *)
+(*   so it is the escape for a name that collides with the language.   *)
+
+(* =================================================================== *)
+(* Files (Ada-style roles)                                             *)
+(*   .exs  body       : what a builder writes                          *)
+(*   .exi  interface  : GENERATED from the .exs; the public shape plus  *)
+(*                      a `discloses` block. Same grammar, but verbs    *)
+(*                      have empty bodies (signatures), the `private`   *)
+(*                      section is omitted, and `discloses` is present. *)
+(* =================================================================== *)
+
+file            = { section } ;
+
+section         = use_section
+                | const_section
+                | type_section
+                ;
+
+(* --- use: imports with optional aliasing --- *)
+
+use_section     = "use" NL { use_item } ;
+use_item        = module_path ( [ "as" IDENT ]
+                              | "(" IDENT { "," IDENT } ")" ) NL ;
+module_path     = IDENT { "." IDENT } ;
+
+(* --- const: module constants --- *)
+
+const_section   = "const" NL { const_item } ;
+const_item      = IDENT [ "is" type ] "=" expr NL ;
+
+(* --- type: type definitions --- *)
+
+type_section    = "type" NL { type_def } ;
+type_def        = class_def
+                | enum_def
+                | record_def
+                | shape_def
+                | interface_decl          (* a named interface; see Types  *)
+                ;
+
+(* =================================================================== *)
+(* Classes                                                             *)
+(* Single inheritance. Members and fields live under visibility        *)
+(* sections, which decide `.exi` exposure. Bodies close with a         *)
+(* per-kind terminator; a stray keyword inside a body is content, not  *)
+(* a terminator.                                                       *)
+(* Verbs are the boundary (verbs.md): a verb is a public, dispatched    *)
+(* entry in the class descriptor and the .exi contract; a func is a     *)
+(* private static helper. The pairing is enforced: `verb` may appear    *)
+(* only under `public`, `func` only under `private` (fields may be      *)
+(* either). "Public verbs are what others can ask you to do; private    *)
+(* funcs are how you do it; the dot asks."                              *)
+(* =================================================================== *)
+
+class_def       = "class" IDENT [ "is" IDENT ]
+                  { visibility_section | disclose_clause }
+                  "endclass" [ IDENT ]
+                ;
+
+visibility_section = ( "public" | "private" ) NL { class_member } ;
+
+class_member    = field_decl
+                | verb_def
+                | func_def
+                | supports_decl       (* interface-support.md *)
+                | verb_sig            (* .exi only: empty body *)
+                ;
+
+(* `supports Openable, Lockable`: the interfaces this class claims to        *)
+(* satisfy (interface-support.md). A BODY DIRECTIVE, like capabilities.md's  *)
+(* `include`, not a header clause, so the header keeps `is Parent` alone.    *)
+(* It is OPTIONAL and creates no conformance: conformance stays structural   *)
+(* (object-slices.md D3), so an unlisted class still satisfies every         *)
+(* interface it matches. It brings SIGNATURES AND NO MEMBERS, which is what  *)
+(* keeps it from being a third inheritance axis: `is` brings both, `include` *)
+(* brings bodies, `supports` brings signatures. Naming an interface the      *)
+(* class does not satisfy is an error at the class.                          *)
+supports_decl   = "supports" IDENT { "," IDENT } NL ;
+
+(* GENERATED into the .exi: reach and powers, not hand-written *)
+disclose_clause = "discloses" disclosure { "," disclosure } NL ;
+disclosure      = IDENT [ ":" IDENT ] [ "(" [ arg_list ] ")" ] ;
+
+(* --- fields --- *)
+
+field_decl      = [ "tunable" ] IDENT "is" type [ "=" expr ] NL ;
+
+(* --- verbs (entry-point messages) and funcs (plain functions) --- *)
+
+(* A verb states its whole signature or none of it. With none, it comes  *)
+(* from the one source that declares the verb, a supported interface or  *)
+(* the parent, PARAMETER NAMES INCLUDED (interface-support.md D4/D5), so *)
+(* `verb hurt` can use `amount` without declaring it. All or nothing:    *)
+(* `verb open()` still means "takes nothing".                            *)
+verb_def        = "verb" IDENT ( "(" [ param_list ] ")" [ "returns" type ]
+                               | (* nothing: from the interface *) ) NL
+                  stmts "endverb"
+                ;
+func_def        = "func" IDENT "(" [ param_list ] ")"
+                  [ "returns" type | "can" "fail" ] NL
+                  stmts "endfunc"
+                ;
+                (* `returns maybe T` declares a fallible value func;    *)
+                (* `can fail` a valueless one (its call types as bool:  *)
+                (* success). Verbs are never fallible: send failure     *)
+                (* belongs to the send ABI. See fallible.md.            *)
+verb_sig        = "verb" IDENT "(" [ param_list ] ")" [ "returns" type ] NL ;
+
+param_list      = param { "," param } ;
+param           = IDENT "is" type ;
+
+(* Note: library-authored member kinds (effect, dialog, ...) are        *)
+(* reader-registered macros with their own end<kind> terminators; they  *)
+(* are not part of this fixed grammar. They expand to the core forms.   *)
+
+(* =================================================================== *)
+(* Enums and records                                                   *)
+(* =================================================================== *)
+
+(* An enum's members are atoms, so they are written as a word list in  *)
+(* the data-literal style (sequences.md: "commas belong to code,       *)
+(* spaces belong to data"). The open bracket continues lines, so a     *)
+(* large enum wraps with no block terminator and no trailing commas:   *)
+(*     enum Color [red green blue]                                     *)
+(*     enum Direction [                                                *)
+(*         north south east west                                       *)
+(*         up down ]                                                   *)
+enum_def        = "enum" IDENT "[" IDENT { IDENT } "]" NL ;
+
+record_def      = "record" IDENT NL { field_decl } "endrecord" [ IDENT ] ;
+
+(* A shape is a schema for symbolic data literals (typed-data.md, the    *)
+(* R5 pass): a named type that is a sum of node kinds, checked by the    *)
+(* type checker against a literal that reaches it through a context type *)
+(* (a param, field, ascription, `as`, or return); with no shape in       *)
+(* context a symbolic literal stays `any`. Each line is `Kind [ rhs ]`,  *)
+(* bracketed like the `[Kind ...]` data it constrains (and like an       *)
+(* enum), which also keeps the `+`/`*` slot suffixes off the line end    *)
+(* where they would read as a continuation operator. A slot is a scalar  *)
+(* type keyword (a leaf atom of that type), `label` (a node's declared   *)
+(* name, unique per tree) or `ref` (a use of one, resolved against the   *)
+(* labels), a name matching a declared kind or group (a nested node), or *)
+(* any other bare word (a literal keyword atom, matched verbatim). A     *)
+(* group line alternates kind names with `or`. The first node kind is    *)
+(* the root the top literal's head must match. Stage 4 (`${T}` holes and *)
+(* guard/action fragments) is deferred; a hole matches one slot untyped. *)
+shape_def       = "shape" IDENT NL { shape_line } "endshape" [ IDENT ] ;
+shape_line      = IDENT "[" ( shape_slot { shape_slot }
+                            | IDENT { "or" IDENT } ) "]" NL ;
+shape_slot      = ( "str" | "int" | "decimal" | "bool" | IDENT | "to" )
+                  [ "+" | "*" ] ;
+
+(* =================================================================== *)
+(* Types                                                               *)
+(* =================================================================== *)
+
+type            = "int"                        (* untagged machine int   *)
+                | "float"                      (* hardware IEEE double    *)
+                | "decimal"                    (* base-10 fixed point:    *)
+                                               (* value x 10^-4 in int32, *)
+                                               (* four fraction digits;   *)
+                                               (* numbers.md              *)
+                | "vec"                        (* small vector value      *)
+                | "mat"                        (* small matrix value      *)
+                | "str"
+                | "bool"
+                | "obj"
+                | "err"
+                | "prop"                       (* runtime-tagged escape   *)
+                | "list" "<" type ">"
+                | "maybe" type                 (* a T or nothing; see     *)
+                                               (* fallible.md. maybe obj  *)
+                                               (* is forbidden (nil is    *)
+                                               (* that); no nested maybe; *)
+                                               (* maybe float/prop wait   *)
+                | obj_slice                     (* a verb subset; below   *)
+                | IDENT                         (* class, enum, or the    *)
+                                                (* name of a slice        *)
+                ;
+
+(* An object slice, `obj with (open, close)` (object-slices.md): an       *)
+(* object restricted to a subset of its VERBS, which is the interface     *)
+(* type. It is structural and cross-type, unlike the record field slice   *)
+(* (`p with (x, y)`, same-type and nominal), because a verb slice exposes *)
+(* dispatch rather than layout: dispatch is already dynamic and keyed by  *)
+(* a program-global selector, so a slice needs no runtime form at all and *)
+(* its value at rest is the plain object handle. A class conforms by      *)
+(* having verbs of those names and never declares that it does, so a      *)
+(* slice may be introduced after the classes that satisfy it. A slice     *)
+(* narrows to a smaller slice. Its holder may send ONLY the named verbs,  *)
+(* which makes it an attenuated capability. `with` is the same word the   *)
+(* record slice uses; the base type says which reading applies.           *)
+obj_slice       = "obj" "with" "(" IDENT { "," IDENT } ")" ;
+
+(* An INTERFACE declaration (interface-decl.md): a named object slice,    *)
+(* declared with a keyword and a terminator like every other type         *)
+(* declaration, and with a body of VERB SIGNATURES. The body is           *)
+(* `verb_sig`, the bodyless verb form an `.exi` already carries, so an    *)
+(* interface body and an `.exi` verb list are the same production and     *)
+(* interfaces flow into the `.exi` unchanged.                             *)
+(* The slice is the form (`obj with (...)`, anonymous, inline, NAMES      *)
+(* ONLY); an interface is a named one that also states signatures, and    *)
+(* those declared signatures are what conformance compares. A block body  *)
+(* does NOT accept bare verb names: names-only already has a spelling.    *)
+(* The vocabulary is the one interface-and-module languages use (Java's   *)
+(* interface, Modula-2 and Oberon's definition modules, Object Pascal's   *)
+(* interface section), not C's typedef: this declares a contract other    *)
+(* types satisfy, which is not what a type alias does.                    *)
+interface_decl  = "interface" IDENT NL { verb_sig } "endinterface" NL ;
+
+(* Numbers for builders (numbers.md): whole numbers are int, decimals  *)
+(* are decimal, float is asked for by name. The former binary `fixed`  *)
+(* type, its `0f` exact literal, and the `fixed(num, den)` dyadic      *)
+(* constructor were all retired when the representation moved to base  *)
+(* 10 (each answers with a lexer migration hint): any DEC_LIT of up to *)
+(* four fraction digits is exact by construction, so no exact spelling *)
+(* is needed.                                                          *)
+
+(* vec and mat are reserved value types with no operations yet.        *)
+(* Proposed syntax, to be refined: construction is a call on the type  *)
+(* name, `vec(x, y, z)` and `mat(r0, r1, r2)` where the rows are vecs; *)
+(* component read is a field access, `v.x`, `v.y`, `v.z`; arithmetic   *)
+(* uses the ordinary operators (scalar * vec, mat * vec, mat * mat).   *)
+(* No new literal forms and no new tokens are needed.                  *)
+
+(* =================================================================== *)
+(* Statements (newline-terminated)                                     *)
+(* =================================================================== *)
+
+stmts           = { statement } ;
+
+statement       = var_decl
+                | assign_or_expr_stmt
+                | if_stmt
+                | for_stmt
+                | while_stmt
+                | match_stmt
+                | return_stmt
+                | fail_stmt
+                | break_stmt
+                | continue_stmt
+                | trace_stmt
+                | TRACE_COMMENT
+                ;
+
+(* local inference: the `is` type is optional when an initializer makes *)
+(* the type unambiguous. At least one of the type or the init appears.  *)
+var_decl        = "var" IDENT ( "is" type [ "=" expr ] | "=" expr ) NL ;
+
+(* One production covers assignment and expression statements: parse an *)
+(* expression, then a following `=` makes it an assignment. The left    *)
+(* side must be assignable (a name, a field access, or an index); that  *)
+(* is checked semantically, not by the parser. There are no compound    *)
+(* assignments (`+=`, `-=`): write `x = x + 1`.                         *)
+assign_or_expr_stmt = expr [ "=" expr ] NL ;
+
+(* A condition is closed by "then" and a loop header by "do"          *)
+(* (then-in-if.md): "then" reads as one-shot, "do" as repeat, the     *)
+(* Pascal/Lua split. "else" has no condition, so it takes no "then".  *)
+(* Between the head keyword and its closer the header is a            *)
+(* NEWLINE-TRANSPARENT REGION, exactly like the inside of "( )", so a *)
+(* compound condition wraps across lines with no trailing-operator    *)
+(* trick; the visible word closes it. After the closer the body is    *)
+(* either a next-line block or ONE inline statement, which the block  *)
+(* terminator closes in place of a newline (the one-line guard        *)
+(* `if bad then return endif`); one statement, because there is no    *)
+(* ";" separator.                                                     *)
+(* A condition may itself be an if-expression, and the two "then"s    *)
+(* must not collide. This needs no rule of its own: the if-expression *)
+(* binds loosest and is parenthesized whenever it is not the whole    *)
+(* expression (see expr), which settles the condition case with it.   *)
+(* An unparenthesized one is a teaching error naming that fix.        *)
+(* The binding forms consume a fallible expression (fallible.md):     *)
+(* `if var i = E` runs the then-arm with i bound when E produced a     *)
+(* value, the else-arm otherwise; `while var` loops until failure.     *)
+if_stmt         = "if" [ "var" IDENT "=" ] expr "then" stmts
+                  { "elseif" [ "var" IDENT "=" ] expr "then" stmts }
+                  [ "else" stmts ]
+                  "endif"
+                ;
+
+for_stmt        = "for" IDENT "in" expr [ "to" expr ] "do" stmts "endfor" ;
+
+while_stmt      = "while" [ "var" IDENT "=" ] expr "do" stmts "endwhile" ;
+
+(* `match E` ... arms ... `endmatch`: match a subject against constant  *)
+(* labels, Erlang-flavored but word-spelled (no `->`; symbols do math,  *)
+(* words do structure). The head names the operation and the arms are   *)
+(* the cases. Every arm opens with `when` (match-when.md D1), so an arm *)
+(* is `when LABELS then BODY` and the body runs until the next `when`,  *)
+(* `otherwise`, or `endmatch`. The arm boundary is one keyword of       *)
+(* lookahead (LL(1)); the old LL(2) rule, where a line shaped like a    *)
+(* label began an arm, is gone, and with it the R4 trap where a         *)
+(* statement beginning `IDENT then` was stolen as an arm               *)
+(* (parse-traps.md, now discharged). The subject runs from `match` to   *)
+(* the first `when`, a keyword boundary, so the newline after it is     *)
+(* optional. Labels stay constants (Ada-style), which is what a         *)
+(* jump-table lowering wants.                                           *)
+(* A match statement with no `otherwise` and no matching arm is a       *)
+(* no-op, like `if` without `else`; the expression form (match_expr,    *)
+(* below) traps instead, like `select`. The subject is int, bool,       *)
+(* decimal, or an enum; str and float subjects are not supported.       *)
+match_stmt      = "match" expr [ NL ]
+                  { match_arm }
+                  [ "otherwise" NL stmts ]
+                  "endmatch"
+                ;
+match_arm       = "when" match_vals "then" stmts ;
+match_vals      = match_val { "," match_val } ;
+match_val       = match_label [ "to" match_label ] ;
+match_label     = [ "-" ] INT_LIT | DEC_LIT | "true" | "false" | IDENT ;
+                (* the IDENT must name a module const (checked           *)
+                (* semantically); enum-member labels arrive when enum    *)
+                (* values do                                             *)
+
+return_stmt     = "return" [ expr ] NL ;
+fail_stmt       = "fail" NL ;
+                (* only inside `returns maybe` / `can fail` funcs; for a *)
+                (* maybe func it is `return nothing`                     *)
+break_stmt      = "break" NL ;
+continue_stmt   = "continue" NL ;
+trace_stmt      = "trace" expr NL ;
+
+(* =================================================================== *)
+(* Expressions                                                         *)
+(* Precedence low to high: then/else/otherwise < or < and < not < cmp  *)
+(* < add < mul < unary < postfix. Word boolean operators; `and`/`or`   *)
+(* short-circuit and sit below comparisons (fixing Pascal's precedence  *)
+(* footgun). Bitwise is not overloaded onto the words.                 *)
+(* =================================================================== *)
+
+(* The lowest tier, right associative, two forms sharing it:           *)
+(*                                                                     *)
+(* `cond then A else B` is the if-expression: cond is bool, exactly    *)
+(* one branch evaluates, and the `else` is REQUIRED (a missing         *)
+(* "otherwise" is a compile error, not a runtime trap; game text       *)
+(* always says otherwise). The else branch is a full expr, so          *)
+(* `a then x else b then y else z` chains like elseif. This is the     *)
+(* home of bool word pairs: `${locked then "locked" else "unlocked"}`; *)
+(* a reusable pair is a one-line func returning one.                   *)
+(*                                                                     *)
+(* ONE RULE FOR READERS: the if-expression binds loosest, so           *)
+(* EVERYTHING TO THE LEFT of `then` is its condition. It is therefore  *)
+(* parenthesized whenever it is not the whole expression: `1 + (a then *)
+(* b else c)`, `f((a then b else c))`, `if (a then b else c) then`.    *)
+(* That single rule covers the condition of an `if` statement too;     *)
+(* the second `then` there is not a separate case, only the place the  *)
+(* precedence is most visible (then-in-if.md D5). Both ways of         *)
+(* breaking it teach the rule: a bare if-expression in a condition is  *)
+(* a parse error naming the parentheses, and a condition that is not   *)
+(* bool (`1 + a`, the swallowed left side) reports the rule as a note. *)
+(*                                                                     *)
+(* `A otherwise B` is the general fallback operator: `A` is a fallible *)
+(* expression; when it produces no value, `B` evaluates. `a otherwise  *)
+(* b otherwise c` is `a otherwise (b otherwise c)`, first value wins.   *)
+(* `otherwise` (not `else`) also supplies the `match` and `select`     *)
+(* defaults, so `else` means only a boolean branch and `otherwise`     *)
+(* means "the value when there was none". See fallback-words.md and    *)
+(* case-select.md.                                                     *)
+expr            = or_expr [ "then" or_expr "else" expr
+                          | "otherwise" expr ] ;
+
+or_expr         = and_expr { ( "or" | "xor" ) and_expr } ;
+and_expr        = not_expr { "and" not_expr } ;
+not_expr        = "not" not_expr | comparison_expr ;
+
+(* Chained comparisons are supported for new users: `a < b < c` means   *)
+(* `a < b and b < c`, with each operand evaluated once and the chain    *)
+(* short-circuiting on the first false. Only same-direction chains are  *)
+(* legal (`<` with `<=`, `>` with `>=`, or a chain of `==`); mixing     *)
+(* directions and chaining `!=` are compile errors, with messages that  *)
+(* suggest splitting with `and`. Chain operands are int, bool, or       *)
+(* decimal; str and float comparisons do not chain (split with `and`).  *)
+(* The chain parses as a plain loop with no extra lookahead.            *)
+comparison_expr = membership_expr { ( "==" | "!=" | "<" | "<=" | ">" | ">=" )
+                                    membership_expr } ;
+membership_expr = add_expr [ ( "in" add_expr | "is" module_path ) ] ;
+add_expr        = mul_expr { ( "+" | "-" ) mul_expr } ;
+mul_expr        = unary_expr { ( "*" | "/" | "%" ) unary_expr } ;
+unary_expr      = "-" unary_expr | postfix_expr ;
+
+postfix_expr    = primary { postfix_op } ;
+(* One dot (verbs.md): `recv.verb(args)` is a verb send (dynamic         *)
+(* dispatch through __exc_send); `recv.field` reads a field, whose value *)
+(* may itself be callable, so `recv.field(args)` is a call-through-field.*)
+(* Which one a dot-call means is decided at the declaration, not the     *)
+(* call site: verbs and fields share one class namespace and cannot      *)
+(* collide, so the checker resolves `x.name(args)` to a send when name   *)
+(* is a verb of x's class, and always to a send when x is an untyped     *)
+(* obj (cross-object field access is not part of the actor model). A     *)
+(* bare `name(args)` calls a sibling: a func directly, a verb as a       *)
+(* dispatched self-send (so overrides take effect). The old `recv:verb()`*)
+(* colon send was retired with the de-arrow; `:` no longer appears in    *)
+(* the expression language at all.                                       *)
+postfix_op      = "." IDENT                     (* field read / send head *)
+                | "(" [ arg_list ] ")"           (* call / send / call-through-field *)
+                | "[" expr [ "to" expr ] "]"     (* index, or slice `[lo to hi]` *)
+                | "as" type                      (* narrowing cast        *)
+                ;
+
+primary         = INT_LIT
+                | DEC_LIT
+                | STR_LIT                         (* may carry ${..} holes *)
+                | "true" | "false"
+                | "nil"
+                | "nothing"                       (* the maybe absence     *)
+                | "self"
+                | IDENT
+                | select_expr
+                | match_expr
+                | data_literal
+                | quote_form
+                | "(" expr ")"
+                ;
+
+(* The same match construct in expression position: identical shape and *)
+(* keywords, but an arm body is one expression, and a subject matching  *)
+(* no arm with no `otherwise` traps at runtime (like `select` and like  *)
+(* out-of-range indexing). Newlines inside the construct separate the   *)
+(* arms exactly as in the statement form; the parser skips them, since  *)
+(* the construct is keyword-delimited through `endmatch`. All arm       *)
+(* expressions and the `otherwise` share one type.                      *)
+match_expr      = "match" expr [ NL ]
+                  { "when" match_vals "then" expr NL }
+                  [ "otherwise" expr NL ]
+                  "endmatch" ;
+(* The `otherwise` default arm BEGINS a line; the `A otherwise B`       *)
+(* fallback operator is infix and never begins a line, so the two      *)
+(* never meet. Within one line the operator applies as usual:          *)
+(* `1 then xs[i] otherwise 0` is an arm whose body is `xs[i]           *)
+(* otherwise 0`.                                                        *)
+
+arg_list        = expr { "," expr } ;
+
+(* Positional select: IDX (an int) picks the Ith branch; an index       *)
+(* outside the branch list yields DEFAULT, or traps at runtime when no  *)
+(* `otherwise` is given. Branch and default expressions share a type.   *)
+(* Only the chosen branch evaluates. The index and the branches parse   *)
+(* above the `otherwise` operator, so the trailing `otherwise` belongs  *)
+(* to the select; parenthesize the whole select to put a fallback on    *)
+(* it instead. The branch commas are greedy, so a select in a comma     *)
+(* list (a call argument or another select's branch) must be            *)
+(* parenthesized; a bare one there is a parse-time teaching error (R4,   *)
+(* parse-traps.md).                                                      *)
+select_expr     = "select" or_expr "from" or_expr { "," or_expr }
+                  [ "otherwise" expr ] ;
+
+(* The former `fixed(num, den)` dyadic constructor (which itself       *)
+(* replaced the bare `123:1024` ratio literal) retired with the base-10 *)
+(* decimal type: plain literals are exact up to four fraction digits,   *)
+(* so nothing is unwritable (numbers.md).                               *)
+
+(* =================================================================== *)
+(* Code as data                                                        *)
+(* =================================================================== *)
+
+(* Logo-flavored nested data: named-head, space-separated, no commas.  *)
+(* `[` starting a primary is a data literal; `[` after an expression   *)
+(* is index/slice. Items are pure atoms; a link from a head to a       *)
+(* target (dialog etc.) is spelled with an ordinary word by convention *)
+(* (`[choice "Goodbye" to end]`), not with grammar.                    *)
+(* Typing (enforced by the checker): a homogeneous constant literal    *)
+(* is a list<T> value, T one of int, bool, decimal, or str, so an      *)
+(* ascription mismatch is a normal type error. Mixed constants and     *)
+(* float elements are errors. A literal containing words or nesting    *)
+(* is quoted data, not a plain value: with no shape in context it types *)
+(* `any` so it can flow to host sends (dialog trees, stat tables). When *)
+(* a context type names a shape (typed-data.md), the checker validates  *)
+(* the tree against that schema (head words, slot arity and types, and  *)
+(* `to`/label references) instead; it still does not lower. An empty    *)
+(* `[]` takes its type from context.                                    *)
+(* A `${expr}` hole splices a computed value, the same mechanism as in *)
+(* strings (the quotation-boundary rule, sequences.md): `[10 20        *)
+(* ${limit}]` is a list<int> with a computed element (hole types join  *)
+(* the element type). A hole whose expression is a compile-time        *)
+(* constant (`${2+3}`) folds and keeps the list a pure constant        *)
+(* global; only runtime-valued holes patch their slot at construction  *)
+(* (one copy-on-write set each). Holes inside symbolic/quoted data are *)
+(* parsed and their expressions are resolved and checked, but symbolic *)
+(* literals still do not lower.                                        *)
+data_literal    = "[" { data_item } "]" ;
+data_item       = IDENT | "to" | INT_LIT | DEC_LIT | STR_LIT
+                | data_literal | HOLE ;
+(* `to` is a keyword elsewhere but reads as a plain word inside data,   *)
+(* the `[choice "..." to end]` linking convention.                      *)
+
+(* Explicit reify; rare, mostly library-author code. `${expr}` inside  *)
+(* a string or quoted template is an immediate hole spliced at build.  *)
+quote_form      = "quote" primary ;
+
+(* =================================================================== *)
+(* String holes                                                        *)
+(* A `${expr}` hole holds an ordinary expression, stringified by       *)
+(* static type (str splices as-is; int, bool, float, decimal format;   *)
+(* a list or obj has no text form and is a type error). The old        *)
+(* `${cond ? a : b}` pick became the general `cond then A else B`      *)
+(* if-expression, so a hole needs no private grammar, and neither `?`  *)
+(* nor an expression `:` exists in the language. (In the               *)
+(* implementation the lexer splits the string into T_ISTR_PIECE        *)
+(* tokens around each hole; `\$` writes a literal dollar.)             *)
+(* =================================================================== *)
+
+STR_LIT         = '"' { CHAR | ESCAPE | HOLE } '"' ;
+HOLE            = "${" expr "}" ;
+
+(* =================================================================== *)
+(* Lexical elements                                                    *)
+(* =================================================================== *)
+
+(* --- Line endings --- *)
+(* NL is the statement terminator: a run of one or more line breaks,   *)
+(* emitted as one token. A line break is suppressed (the statement     *)
+(* continues) when any of these hold:                                  *)
+(*   1. a "(" or "[" is open (bracket depth > 0),                      *)
+(*   2. a condition region is open: the break falls between an "if" /  *)
+(*      "elseif" / "while" / "for" head and its "then" / "do"          *)
+(*      (then-in-if.md D3, the same rule as an open bracket),          *)
+(*   3. the last token before the break is a CONT_TOKEN,               *)
+(*   4. the line ends with the explicit "\" escape.                    *)
+(* The principle is completeness: a line that cannot be a complete     *)
+(* statement does not end one (Go-style, decided at the lexer with one *)
+(* token of context; see sequences.md for the policy discussion).      *)
+(* Two keyword exceptions cut the other way: `else` and `then` are     *)
+(* infix-position words whose clauses normally follow the line break   *)
+(* (`otherwise NL` for the match default, `then NL` heading a match    *)
+(* arm's or an if-statement's body), so they never continue a line     *)
+(* even though a line ending there looks incomplete. A body may still  *)
+(* start on the same line as its `then` / `do`: that is the one-line   *)
+(* guard, closed by the block terminator.                              *)
+
+NL              = LINE_BREAK { LINE_BREAK } ;
+LINE_BREAK      = ? end of line, subject to the suppression rules ? ;
+
+CONT_TOKEN      = "+" | "-" | "*" | "/" | "%"
+                | "==" | "!=" | "<" | "<=" | ">" | ">="
+                | "=" | "." | ","
+                | "(" | "["
+                | "and" | "or" | "xor" | "not"
+                | "in" | "is" | "as" | "from" | "to" | "returns"
+                | "maybe" | "can" ;
+
+IDENT           = LETTER { LETTER | DIGIT | "_" } ;
+
+INT_LIT         = DIGIT { DIGIT }
+                | ( "0x" | "0X" ) HEX_DIGIT { HEX_DIGIT }
+                | ( "0b" | "0B" ) BIN_DIGIT { BIN_DIGIT }
+                | ( "0o" | "0O" ) OCT_DIGIT { OCT_DIGIT } ;
+
+DEC_LIT       = DIGIT { DIGIT } "." DIGIT { DIGIT }
+                  [ ( "e" | "E" ) [ "+" | "-" ] DIGIT { DIGIT } ]
+                | DIGIT { DIGIT } ( "e" | "E" ) [ "+" | "-" ] DIGIT { DIGIT } ;
+
+(* DEC_LIT (the production above) is an untyped decimal constant       *)
+(* (numbers.md): it adapts to decimal or float context and defaults to *)
+(* decimal at unresolved boundaries (inference, holes, list elements,  *)
+(* match subjects and labels). In decimal context a value with nonzero *)
+(* digits past the fourth fraction digit is a compile error (exact or  *)
+(* an error; float is the escape). The former `0f` FIXED_LIT retired   *)
+(* with the base-10 type; the lexer answers it with a migration hint.  *)
+
+(* A trace comment is a token, not trivia: it reaches the parser as a  *)
+(* statement (see `statement`) and becomes debug output when tracing   *)
+(* is on. When tracing is off the lexer discards it like a comment.    *)
+(* Leading blanks after the "///" are stripped; the rest of the line   *)
+(* is the token's text.                                                *)
+TRACE_COMMENT   = "///" { " " | "\t" } { LINE_CHAR } ;
+
+LETTER          = "a".."z" | "A".."Z" | "_" ;
+DIGIT           = "0".."9" ;
+BIN_DIGIT       = "0" | "1" ;
+OCT_DIGIT       = "0".."7" ;
+HEX_DIGIT       = DIGIT | "a".."f" | "A".."F" ;
+CHAR            = (* any character except '"' and '\' *) ;
+LINE_CHAR       = (* any character except a line break *) ;
+ESCAPE          = "\" ( "n" | "t" | "r" | "\" | '"' | "$"
+                      | "x" HEX_DIGIT HEX_DIGIT ) ;
+                (* `\$` writes a literal dollar, so `"\${x}"` is the    *)
+                (* text ${x} rather than a hole; a `$` not followed by  *)
+                (* `{` needs no escape                                  *)
+
+(* --- Comments (trivia, discarded by the lexer) --- *)
+(* //  to end of line                                                  *)
+(* /* ... */ block comment                                             *)
+(* /// is NOT trivia when tracing is on: see TRACE_COMMENT above        *)
+
+(* =================================================================== *)
+(* Keywords                                                            *)
+(* =================================================================== *)
+(* use as const type  class endclass enum record endrecord  public     *)
+(* private tunable  verb endverb func endfunc returns  discloses       *)
+(* if elseif else endif  for in to do endfor  while endwhile            *)
+(* match when then otherwise endmatch  select from  var return break   *)
+(* continue                                                             *)
+(* trace  quote self  and or xor not in is as  true false nil          *)
+(* maybe nothing can fail                                              *)
+(* int float decimal vec mat str obj bool err list prop                *)
+(*                                                                     *)
+(* Bitwise (mechanics-tier, not overloaded onto and/or): band bor bxor *)
+(* shl shr, or intrinsics. Library-authored member kinds (effect,      *)
+(* dialog, after, when, apply) are reader-registered macros with their *)
+(* own end<kind> terminators, not fixed grammar.                       *)

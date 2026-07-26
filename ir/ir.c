@@ -32,7 +32,9 @@ ir_op_is_float_def(int op)
     case IR_FADD: case IR_FSUB: case IR_FMUL: case IR_FDIV:
     case IR_FNEG: case IR_FABS:
     case IR_ITOF:
+    case IR_F32TOF64: case IR_F64TOF32:
     case IR_FLS: case IR_FLD:
+    case IR_FLH:
     case IR_FLDL:
     case IR_FCALL: case IR_FCALLI:
         return 1;
@@ -52,6 +54,7 @@ ir_op_is_i64_def(int op)
     case IR_NEG64:
     case IR_LD64:
     case IR_LDL64:
+    case IR_LEA64: case IR_ADL64:
     case IR_SEXT64: case IR_ZEXT64:
     case IR_CALL64: case IR_CALLI64:
         return 1;

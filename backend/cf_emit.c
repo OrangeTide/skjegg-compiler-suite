@@ -329,6 +329,7 @@ emit_funop(FILE *out, struct ir_func *fn, struct ir_insn *i,
 
 static int arg_temps[16];
 static int arg_is_float[16];
+static int arg_is_f32[16];
 static int arg_is_i64[16];
 static int narg;
 static int label_prefix;
@@ -430,7 +431,14 @@ emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
     for (k = narg - 1; k >= 0; k--) {
         if (arg_is_float[k]) {
             const char *sa = frs(out, fn, arg_temps[k], 0);
-            fprintf(out, "\tfmove.d %s, -(%%sp)\n", sa);
+            if (arg_is_f32[k]) {
+                /* single format at the slot base (the callee reads fmove.s);
+                 * reserve the full 8-byte arg slot */
+                fprintf(out, "\tlea -8(%%sp), %%sp\n");
+                fprintf(out, "\tfmove.s %s, (%%sp)\n", sa);
+            } else {
+                fprintf(out, "\tfmove.d %s, -(%%sp)\n", sa);
+            }
             arg_bytes += 8;
         } else if (arg_is_i64[k]) {
             int hi, lo;
@@ -489,7 +497,8 @@ emit_tailcall_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
         for (k = 0; k < narg; k++) {
             if (arg_is_float[k]) {
                 const char *sa = frs(out, fn, arg_temps[k], 0);
-                fprintf(out, "\tfmove.d %s, %d(%%fp)\n", sa, off);
+                fprintf(out, "\tfmove.%c %s, %d(%%fp)\n",
+                    arg_is_f32[k] ? 's' : 'd', sa, off);
                 off += 8;
             } else {
                 const char *sa = rs(out, fn, arg_temps[k], 0);
@@ -662,6 +671,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         if (narg >= 16)
             die("cf_emit: too many args");
         arg_is_float[narg] = 0;
+        arg_is_f32[narg] = 0;
         arg_is_i64[narg] = 0;
         arg_temps[narg++] = i->a;
         break;
@@ -669,6 +679,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         if (narg >= 16)
             die("cf_emit: too many args");
         arg_is_float[narg] = 1;
+        arg_is_f32[narg] = (i->imm == FWIDTH_F32);
         arg_is_i64[narg] = 0;
         arg_temps[narg++] = i->a;
         break;
@@ -798,6 +809,28 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
     }
 
+    /* IR_F32 on ColdFire: the FPU computes in wide registers (no single-
+     * rounded fsadd/fsmul), so single precision is storage-only, rounded at
+     * fmove.s.  single -> double is an exact widening copy; double -> single
+     * rounds through a single-precision stack round-trip. */
+    case IR_F32TOF64: {
+        const char *sa = frs(out, fn, i->a, 0);
+        const char *sd = frd(fn, i->dst, 0);
+        if (strcmp(sa, sd) != 0)
+            fprintf(out, "\tfmove.x %s, %s\n", sa, sd);
+        fwd(out, fn, i->dst, sd);
+        break;
+    }
+
+    case IR_F64TOF32: {
+        const char *sa = frs(out, fn, i->a, 0);
+        const char *sd = frd(fn, i->dst, 0);
+        fprintf(out, "\tfmove.s %s, -(%%sp)\n", sa);   /* round to single */
+        fprintf(out, "\tfmove.s (%%sp)+, %s\n", sd);
+        fwd(out, fn, i->dst, sd);
+        break;
+    }
+
     case IR_FLS: {
         const char *sa = rs(out, fn, i->a, 0);
         const char *sd = frd(fn, i->dst, 0);
@@ -811,7 +844,8 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         const char *sa = rs(out, fn, i->a, 0);
         const char *sd = frd(fn, i->dst, 0);
         fprintf(out, "\tmovea.l %s, %%a0\n", sa);
-        fprintf(out, "\tfmove.d (%%a0), %s\n", sd);
+        fprintf(out, "\tfmove.%c (%%a0), %s\n",
+            i->imm == FWIDTH_F32 ? 's' : 'd', sd);
         fwd(out, fn, i->dst, sd);
         break;
     }
@@ -828,14 +862,48 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         const char *sa = rs(out, fn, i->a, 0);
         const char *sb = frs(out, fn, i->b, 0);
         fprintf(out, "\tmovea.l %s, %%a0\n", sa);
-        fprintf(out, "\tfmove.d %s, (%%a0)\n", sb);
+        fprintf(out, "\tfmove.%c %s, (%%a0)\n",
+            i->imm == FWIDTH_F32 ? 's' : 'd', sb);
+        break;
+    }
+
+    case IR_FLH: {
+        /* half in memory -> F64 reg, via __skj_extendhfsf then fmove.s.
+         * The helper is integer-only (no fp regs), so fp2-fp7 survive. */
+        const char *sa = rs(out, fn, i->a, 0);
+        const char *sd = frd(fn, i->dst, 0);
+        fprintf(out, "\tmovea.l %s, %%a0\n", sa);
+        fprintf(out, "\tmoveq #0, %%d0\n");
+        fprintf(out, "\tmove.w (%%a0), %%d0\n");     /* zero-extend the 16 bits */
+        fprintf(out, "\tmove.l %%d0, -(%%sp)\n");
+        fprintf(out, "\tjsr __skj_extendhfsf\n");     /* d0 = single bits */
+        fprintf(out, "\taddq.l #4, %%sp\n");
+        fprintf(out, "\tmove.l %%d0, -(%%sp)\n");
+        fprintf(out, "\tfmove.s (%%sp), %s\n", sd);   /* widen single -> double */
+        fprintf(out, "\taddq.l #4, %%sp\n");
+        fwd(out, fn, i->dst, sd);
+        break;
+    }
+
+    case IR_FSH: {
+        /* F64 reg -> half in memory, via fmove.s then __skj_truncsfhf. */
+        const char *sa = rs(out, fn, i->a, 0);
+        const char *sb = frs(out, fn, i->b, 0);
+        fprintf(out, "\tfmove.s %s, -(%%sp)\n", sb);  /* round double -> single */
+        fprintf(out, "\tmove.l (%%sp)+, %%d0\n");
+        fprintf(out, "\tmove.l %%d0, -(%%sp)\n");
+        fprintf(out, "\tjsr __skj_truncsfhf\n");       /* d0 = half bits */
+        fprintf(out, "\taddq.l #4, %%sp\n");
+        fprintf(out, "\tmovea.l %s, %%a0\n", sa);
+        fprintf(out, "\tmove.w %%d0, (%%a0)\n");
         break;
     }
 
     case IR_FLDL: {
         const char *sd = frd(fn, i->dst, 0);
         int off = slot_offset(fn, i->slot);
-        fprintf(out, "\tfmove.d %d(%%fp), %s\n", off, sd);
+        fprintf(out, "\tfmove.%c %d(%%fp), %s\n",
+            i->imm == FWIDTH_F32 ? 's' : 'd', off, sd);
         fwd(out, fn, i->dst, sd);
         break;
     }
@@ -843,7 +911,8 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_FSTL: {
         const char *sa = frs(out, fn, i->a, 0);
         int off = slot_offset(fn, i->slot);
-        fprintf(out, "\tfmove.d %s, %d(%%fp)\n", sa, off);
+        fprintf(out, "\tfmove.%c %s, %d(%%fp)\n",
+            i->imm == FWIDTH_F32 ? 's' : 'd', sa, off);
         break;
     }
 
@@ -1394,6 +1463,37 @@ emit_string_bytes(FILE *out, const char *s, int n)
     fputs("\"\n", out);
 }
 
+/* emit an aggregate global's byte image: pad to each item's offset, emit the
+   sized value (8-byte high word first, big-endian m68k), pad to the full size */
+static void
+emit_init_image(FILE *out, struct ir_global *g)
+{
+    struct ir_init *it;
+    int cur = 0;
+
+    for (it = g->inits; it; it = it->next) {
+        if (it->offset > cur) {
+            fprintf(out, "\t.space %d\n", it->offset - cur);
+            cur = it->offset;
+        }
+        if (it->sym)
+            fprintf(out, "\t.long %s\n", it->sym);
+        else if (it->size == 8) {
+            uint64_t b = (uint64_t)it->ival;
+            fprintf(out, "\t.long 0x%08x\n", (unsigned)(b >> 32));
+            fprintf(out, "\t.long 0x%08x\n", (unsigned)(b & 0xFFFFFFFF));
+        } else if (it->size == 2)
+            fprintf(out, "\t.short 0x%04x\n", (unsigned)(it->ival & 0xFFFF));
+        else if (it->size == 1)
+            fprintf(out, "\t.byte 0x%02x\n", (unsigned)(it->ival & 0xFF));
+        else
+            fprintf(out, "\t.long 0x%08x\n", (unsigned)it->ival);
+        cur += it->size;
+    }
+    if (g->arr_size > cur)
+        fprintf(out, "\t.space %d\n", g->arr_size - cur);
+}
+
 static void
 emit_globals(FILE *out, struct ir_program *prog)
 {
@@ -1411,11 +1511,22 @@ emit_globals(FILE *out, struct ir_program *prog)
         default:     elsz = 4; break;
         }
 
-        fprintf(out, "\t.align 2\n");
+        {
+            /* m68k aligns to 4; an _Alignas request (g->align) may raise it.
+               GAS .align is a power-of-two exponent. */
+            int alb = 4, e = 0;
+            if (g->align > alb)
+                alb = g->align;
+            while ((1 << e) < alb)
+                e++;
+            fprintf(out, "\t.align %d\n", e);
+        }
         if (!g->is_local)
             fprintf(out, "\t.globl %s\n", g->name);
         fprintf(out, "%s:\n", g->name);
-        if (g->init_string) {
+        if (g->inits) {
+            emit_init_image(out, g);
+        } else if (g->init_string) {
             emit_string_bytes(out, g->init_string,
                       g->init_strlen);
         } else if (g->init_count > 0) {

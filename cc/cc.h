@@ -8,6 +8,22 @@
 #include <stdio.h>
 
 /****************************************************************
+ * Target data model
+ *
+ * LP64 (8-byte long and pointers) is selected at compile time for the 64-bit
+ * targets by defining CC_LP64; the 32-bit targets stay ILP32 (4-byte long and
+ * pointers).  See doc/lp64.md.
+ ****************************************************************/
+
+#ifdef CC_LP64
+#define CC_PTR_SIZE  8
+#define CC_LONG_SIZE 8
+#else
+#define CC_PTR_SIZE  4
+#define CC_LONG_SIZE 4
+#endif
+
+/****************************************************************
  * Tokens
  ****************************************************************/
 
@@ -22,9 +38,9 @@ enum cc_tok {
 
     /* keywords — types */
     TOK_VOID, TOK_CHAR, TOK_SHORT, TOK_INT, TOK_LONG,
-    TOK_FLOAT, TOK_DOUBLE, TOK_SIGNED, TOK_UNSIGNED,
+    TOK_FLOAT16, TOK_FLOAT, TOK_DOUBLE, TOK_SIGNED, TOK_UNSIGNED,
     TOK_STRUCT, TOK_UNION, TOK_ENUM, TOK_TYPEDEF,
-    TOK_CONST, TOK_VOLATILE,
+    TOK_CONST, TOK_VOLATILE, TOK_RESTRICT, TOK_INLINE,
 
     /* keywords — storage */
     TOK_EXTERN, TOK_STATIC, TOK_AUTO, TOK_REGISTER,
@@ -36,6 +52,8 @@ enum cc_tok {
 
     /* keywords — misc */
     TOK_SIZEOF,
+    TOK_ALIGNOF,
+    TOK_ALIGNAS,
 
     /* punctuation */
     TOK_LPAREN, TOK_RPAREN,
@@ -66,6 +84,9 @@ struct cc_token {
     int slen;
     int line;
     int is_float;
+    int is_half;
+    int is_long;    /* integer literal with an l/L suffix or too big for int */
+    int is_llong;   /* integer literal with an ll/LL suffix */
 };
 
 /****************************************************************
@@ -79,8 +100,11 @@ enum cc_type_kind {
     TY_INT,
     TY_LONG,
     TY_LONG_LONG,
+    TY_FLOAT16,
     TY_FLOAT,
     TY_DOUBLE,
+    TY_LDOUBLE,         /* long double: a distinct type, but unsupported for
+                           codegen (rejected at any ABI crossing / use) */
     TY_PTR,
     TY_ARRAY,
     TY_FUNC,
@@ -121,6 +145,8 @@ struct cc_field {
     char *name;
     struct cc_type *type;
     int offset;
+    int bits;        /* bit-field width, 0 = ordinary field */
+    int bit_off;     /* bit position within the storage unit at `offset` */
     struct cc_field *next;
 };
 
@@ -176,6 +202,7 @@ enum cc_node_kind {
     ND_FLOATLIT,
     ND_STRLIT,
     ND_INIT_LIST,
+    ND_DESIG,       /* designated init element: name (.field) or ival ([index]), a = value */
 };
 
 struct cc_node {
@@ -198,6 +225,8 @@ struct cc_node {
     struct cc_type *decl_type;
     int is_static;
     int is_extern;
+    int is_inline;
+    int align;          /* _Alignas requested alignment (0 = default) */
 };
 
 /****************************************************************
@@ -226,6 +255,7 @@ struct ir_program *cc_lower_program(struct arena *a, struct cc_node *ast);
  ****************************************************************/
 
 struct cc_type *cc_type_int(void);
+struct cc_type *cc_type_long(void);
 struct cc_type *cc_type_long_long(void);
 struct cc_type *cc_type_char(void);
 struct cc_type *cc_type_void(void);

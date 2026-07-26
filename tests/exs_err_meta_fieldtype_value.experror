@@ -1,0 +1,1 @@
+fieldtype(type, "name") takes a type and a name; a value's type is `typeof(v)`

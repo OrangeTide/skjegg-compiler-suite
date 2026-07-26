@@ -1,0 +1,2 @@
+# forgetting `typeof` is the mistake, so the fix is named
+fieldsof(...) needs a type, not a value; a value's type is `typeof(v)`

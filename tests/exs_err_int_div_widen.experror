@@ -1,0 +1,4 @@
+# the trap, then both spellings that resolve it
+integer division truncates: this quotient is an int (1 / 2 is 0, not 0.5)
+write a decimal operand (`1.0 / 2`) for decimal division
+keep the truncated quotient explicitly with `as decimal`

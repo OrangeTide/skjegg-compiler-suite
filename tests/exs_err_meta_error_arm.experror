@@ -1,0 +1,3 @@
+# the macro author's own words, reported at line 17, the call site, not in
+# the macro body where error(...) is written
+exs_err_meta_error_arm.exs:17: double needs an int

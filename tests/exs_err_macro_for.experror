@@ -1,0 +1,3 @@
+# this check must run before the sequence is evaluated: `1 to 3` would
+# otherwise die evaluating `1` and report the generic meta-layer message
+a meta `for` iterates a field sequence, not a range

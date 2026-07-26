@@ -1,0 +1,2 @@
+the type is called `decimal` now
+`fixed` and `fixed(num, den)` were retired

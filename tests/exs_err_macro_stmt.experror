@@ -1,0 +1,2 @@
+# the meta-language is deliberately small, so the boundary is named
+this statement is not valid in a macro body

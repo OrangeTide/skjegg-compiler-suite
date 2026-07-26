@@ -1,0 +1,3 @@
+# both replacements are named, since `->` served two roles
+there is no `->`
+a match arm uses `then` and a return type uses `returns`

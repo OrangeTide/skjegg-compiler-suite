@@ -1,0 +1,12 @@
+len 2 p1 1,2
+  0,0
+  9,9
+  1,2
+  3,4
+  5,6
+ends 5 0
+rest 9
+cat 6 7
+setdel 100 9
+iso 1 2
+mem true false

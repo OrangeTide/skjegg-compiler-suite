@@ -1,0 +1,5 @@
+clamp 0 50 100
+cast
+short on mana
+total 10 n 0
+big

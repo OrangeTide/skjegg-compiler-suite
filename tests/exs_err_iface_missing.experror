@@ -1,0 +1,2 @@
+# reported at the class, not wherever a Chest later meets an Openable
+`Chest` supports `Openable`, which declares a verb `close`, and this class has none

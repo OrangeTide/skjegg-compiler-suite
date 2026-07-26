@@ -21,6 +21,7 @@ struct kw {
 };
 
 static const struct kw keywords[] = {
+    { "_Float16", TOK_FLOAT16 },
     { "auto",     TOK_AUTO },
     { "break",    TOK_BREAK },
     { "case",     TOK_CASE },
@@ -37,13 +38,23 @@ static const struct kw keywords[] = {
     { "for",      TOK_FOR },
     { "goto",     TOK_GOTO },
     { "if",       TOK_IF },
+    { "inline",   TOK_INLINE },
+    { "__inline", TOK_INLINE },
+    { "__inline__", TOK_INLINE },
     { "int",      TOK_INT },
     { "long",     TOK_LONG },
+    { "restrict", TOK_RESTRICT },
+    { "__restrict", TOK_RESTRICT },
+    { "__restrict__", TOK_RESTRICT },
     { "register", TOK_REGISTER },
     { "return",   TOK_RETURN },
     { "short",    TOK_SHORT },
     { "signed",   TOK_SIGNED },
     { "sizeof",   TOK_SIZEOF },
+    { "_Alignof", TOK_ALIGNOF },
+    { "alignof",  TOK_ALIGNOF },
+    { "_Alignas", TOK_ALIGNAS },
+    { "alignas",  TOK_ALIGNAS },
     { "static",   TOK_STATIC },
     { "struct",   TOK_STRUCT },
     { "switch",   TOK_SWITCH },
@@ -117,7 +128,7 @@ is_ident_char(char c)
 }
 
 static long
-parse_int_literal(void)
+parse_int_literal(int *is_long, int *is_llong)
 {
     long val = 0;
     if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
@@ -139,9 +150,20 @@ parse_int_literal(void)
             p++;
         }
     }
-    /* skip suffixes: u, l, ul, ll, ull */
-    while (*p == 'u' || *p == 'U' || *p == 'l' || *p == 'L')
+    /* suffixes: u, l, ul, ll, ull.  Count the l's to size the literal. */
+    int nl = 0;
+    while (*p == 'u' || *p == 'U' || *p == 'l' || *p == 'L') {
+        if (*p == 'l' || *p == 'L')
+            nl++;
         p++;
+    }
+    int too_big_for_int = val > 2147483647L;
+    if (is_long)
+        /* an l suffix, or a value too big for a signed 32-bit int */
+        *is_long = (nl >= 1) || too_big_for_int;
+    if (is_llong)
+        /* an ll suffix, or a value too big for the target's long as well */
+        *is_llong = (nl >= 2) || (too_big_for_int && CC_LONG_SIZE < 8);
     return val;
 }
 
@@ -236,7 +258,10 @@ lex_token(void)
         if (is_float) {
             t.kind = TOK_FLOATLIT;
             t.fval = strtod(p, (char **)&p);
-            if (*p == 'f' || *p == 'F') {
+            if ((p[0] == 'f' || p[0] == 'F') && p[1] == '1' && p[2] == '6') {
+                t.is_half = 1;          /* _Float16 literal: 1.5f16 */
+                p += 3;
+            } else if (*p == 'f' || *p == 'F') {
                 t.is_float = 1;
                 p++;
             } else if (*p == 'l' || *p == 'L') {
@@ -244,7 +269,7 @@ lex_token(void)
             }
         } else {
             t.kind = TOK_INTLIT;
-            t.ival = parse_int_literal();
+            t.ival = parse_int_literal(&t.is_long, &t.is_llong);
         }
         return t;
     }

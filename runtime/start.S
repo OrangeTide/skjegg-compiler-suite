@@ -310,43 +310,49 @@ __udivmoddi3:
     rts
 
 | __udivdi3(a_hi, a_lo, b_hi, b_lo) -> d0:d1 = quotient
-|   Unsigned 64-bit division.
+|   Unsigned 64-bit division. d2/d3 are callee-saved in the C ABI and
+|   __udivmoddi3 returns the remainder in them, so save them here.
     .globl __udivdi3
 __udivdi3:
-    move.l  16(%sp), -(%sp)     | push b_lo
-    move.l  16(%sp), -(%sp)     | push b_hi
-    move.l  16(%sp), -(%sp)     | push a_lo
-    move.l  16(%sp), -(%sp)     | push a_hi
+    movem.l %d2-%d3, -(%sp)
+    move.l  24(%sp), -(%sp)     | push b_lo
+    move.l  24(%sp), -(%sp)     | push b_hi
+    move.l  24(%sp), -(%sp)     | push a_lo
+    move.l  24(%sp), -(%sp)     | push a_hi
     bsr     __udivmoddi3
     lea     16(%sp), %sp        | pop args
     | d0:d1 = quotient (already there)
+    movem.l (%sp)+, %d2-%d3
     rts
 
 | __umoddi3(a_hi, a_lo, b_hi, b_lo) -> d0:d1 = remainder
-|   Unsigned 64-bit modulo.
+|   Unsigned 64-bit modulo. Saves d2/d3 (C ABI callee-saved).
     .globl __umoddi3
 __umoddi3:
-    move.l  16(%sp), -(%sp)     | push b_lo
-    move.l  16(%sp), -(%sp)     | push b_hi
-    move.l  16(%sp), -(%sp)     | push a_lo
-    move.l  16(%sp), -(%sp)     | push a_hi
+    movem.l %d2-%d3, -(%sp)
+    move.l  24(%sp), -(%sp)     | push b_lo
+    move.l  24(%sp), -(%sp)     | push b_hi
+    move.l  24(%sp), -(%sp)     | push a_lo
+    move.l  24(%sp), -(%sp)     | push a_hi
     bsr     __udivmoddi3
     lea     16(%sp), %sp        | pop args
     move.l  %d2, %d0            | remainder hi
     move.l  %d3, %d1            | remainder lo
+    movem.l (%sp)+, %d2-%d3
     rts
 
 | __divdi3(a_hi, a_lo, b_hi, b_lo) -> d0:d1 = quotient
 |   Signed 64-bit division. Negates operands as needed, calls __udivmoddi3,
-|   negates result if signs differ.
+|   negates result if signs differ. Saves d2-d5 (d2/d3 are C ABI
+|   callee-saved; this wrapper and __udivmoddi3 use them as scratch).
     .globl __divdi3
 __divdi3:
-    movem.l %d4-%d5, -(%sp)
-    | load args (offset by 8 for 2 saved regs)
-    move.l  12(%sp), %d0        | a_hi
-    move.l  16(%sp), %d1        | a_lo
-    move.l  20(%sp), %d2        | b_hi
-    move.l  24(%sp), %d3        | b_lo
+    movem.l %d2-%d5, -(%sp)
+    | load args (offset by 16 for 4 saved regs)
+    move.l  20(%sp), %d0        | a_hi
+    move.l  24(%sp), %d1        | a_lo
+    move.l  28(%sp), %d2        | b_hi
+    move.l  32(%sp), %d3        | b_lo
     | d4 = sign flag (1 if result should be negated)
     clr.l   %d4
     tst.l   %d0
@@ -387,18 +393,19 @@ __divdi3:
     bcc     .Ldiv_done
     addq.l  #1, %d0
 .Ldiv_done:
-    movem.l (%sp)+, %d4-%d5
+    movem.l (%sp)+, %d2-%d5
     rts
 
 | __moddi3(a_hi, a_lo, b_hi, b_lo) -> d0:d1 = remainder
 |   Signed 64-bit modulo. Remainder has same sign as dividend.
+|   Saves d2-d5 like __divdi3.
     .globl __moddi3
 __moddi3:
-    movem.l %d4-%d5, -(%sp)
-    move.l  12(%sp), %d0        | a_hi
-    move.l  16(%sp), %d1        | a_lo
-    move.l  20(%sp), %d2        | b_hi
-    move.l  24(%sp), %d3        | b_lo
+    movem.l %d2-%d5, -(%sp)
+    move.l  20(%sp), %d0        | a_hi
+    move.l  24(%sp), %d1        | a_lo
+    move.l  28(%sp), %d2        | b_hi
+    move.l  32(%sp), %d3        | b_lo
     | d4 = sign of dividend (remainder gets this sign)
     clr.l   %d4
     tst.l   %d0
@@ -437,7 +444,7 @@ __moddi3:
     bcc     .Lmod_done
     addq.l  #1, %d0
 .Lmod_done:
-    movem.l (%sp)+, %d4-%d5
+    movem.l (%sp)+, %d2-%d5
     rts
 
 | __moo_arena_alloc(size)

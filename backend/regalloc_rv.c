@@ -7,6 +7,8 @@
  * Integer allocatable (callee-save): s1..s11  ->  11 regs, first = 2
  * I64 pair allocatable (callee-save): (s10,s11), (s8,s9), (s6,s7), (s4,s5)
  *                                     ->  4 pairs
+ * Float allocatable (callee-save): fs0..fs11  ->  12 regs, first = 2
+ *                                  (disjoint register file, no int overlap)
  *
  * Reserved:
  *   t0  spill-fix-up scratch (first operand reload)
@@ -40,6 +42,11 @@
 
 #define I64_NUM_PAIRS  4
 #define I64_FIRST_PAIR 0
+
+/* Float allocatable (callee-save): fs0..fs11 -> 12 regs, first = 2
+ * (indices 0-1 are the emitter's float scratch ft0/ft1). */
+#define FP_NUM_REGS   12
+#define FP_FIRST_REG  2
 
 struct interval {
     int temp;
@@ -259,7 +266,12 @@ regalloc(struct ir_func *fn)
 
     fn->nspills = linscan(fn, first_def, last_use,
                   is_int, int_num_regs, INT_FIRST_REG, 4);
-    fn->nfspills = 0;
+
+    /* Float temps get their own callee-saved class (fs0..fs11), disjoint
+       from the integer register file, so a float and an int temp may share
+       an index without conflict. */
+    fn->nfspills = linscan(fn, first_def, last_use,
+                   is_float, FP_NUM_REGS, FP_FIRST_REG, 8);
 
     arena_release(fn->arena, m);
 }

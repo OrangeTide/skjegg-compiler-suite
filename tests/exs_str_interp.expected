@@ -1,0 +1,5 @@
+hi gandalf!
+n=42 f=3.500000 x=3.5
+sum 50
+greet dear gandalf
+write ${n} to splice; $5 needs no escape

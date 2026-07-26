@@ -1,0 +1,6 @@
+# the consumers named here must be ones that actually take a signal: `if` and
+# `while` are bool-only and reject it, so naming them would send the author in
+# a circle between this error and want_bool's
+a `can fail` call is a signal, not a value
+consume it with `action() on fail ...` or a bare call
+call a `returns bool` predicate instead

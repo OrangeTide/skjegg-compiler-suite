@@ -1,0 +1,6 @@
+read 1 2 3 4
+write 99 3
+copyout 4 77
+whole 5 6
+deepcopy 5 88
+threedeep 10 40 4

@@ -1,0 +1,1 @@
+decimal literals need no `0f` prefix now; write the value plainly

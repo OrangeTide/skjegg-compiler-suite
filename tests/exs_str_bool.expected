@@ -1,0 +1,5 @@
+true
+door is true
+locked is false
+5 > 3 is true
+5 = 3 is false

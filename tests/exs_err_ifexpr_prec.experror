@@ -1,0 +1,5 @@
+# the error itself is about the swallowed left side...
+arithmetic needs numeric operands
+# ...and the note explains why that left side became the condition
+note: the if-expression binds loosest, so everything to the left of `then` is its condition
+1 + (a then b else c)

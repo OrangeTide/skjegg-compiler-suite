@@ -155,6 +155,13 @@ add_tag(const char *name, struct cc_type *type)
 
 /* forward declarations */
 static struct cc_type *parse_declspec(int *is_static, int *is_extern, int *is_typedef);
+static long const_eval(struct cc_node *n);
+
+/* _Alignas requested by the declspec just parsed (0 = none); read by the
+   declaration immediately after parse_declspec returns. */
+static int declspec_alignas;
+/* `inline` seen in the declspec just parsed; read by the declaration after */
+static int declspec_inline;
 static struct cc_type *parse_declarator(struct cc_type *base, char **name_out);
 static struct cc_node *parse_stmt(void);
 static struct cc_node *parse_expr(void);
@@ -167,7 +174,7 @@ is_type_start(struct cc_token t)
 {
     switch (t.kind) {
     case TOK_VOID: case TOK_CHAR: case TOK_SHORT: case TOK_INT:
-    case TOK_LONG: case TOK_FLOAT: case TOK_DOUBLE:
+    case TOK_LONG: case TOK_FLOAT16: case TOK_FLOAT: case TOK_DOUBLE:
     case TOK_SIGNED: case TOK_UNSIGNED:
     case TOK_STRUCT: case TOK_UNION: case TOK_ENUM:
     case TOK_CONST: case TOK_VOLATILE:
@@ -198,6 +205,16 @@ parse_fields(void)
             memset(f, 0, sizeof *f);
             f->name = name;
             f->type = ft;
+            /* bit-field: `type name : width` (name may be absent) */
+            if (consume(TOK_COLON)) {
+                struct cc_node *w = parse_assign_expr();
+                if (w->kind != ND_INTLIT)
+                    die("parse error at line %d: bit-field width must be "
+                        "a constant", w->line);
+                f->bits = (int)w->ival;
+                if (f->bits == 0)
+                    f->bits = -1;   /* zero-width: alignment only, sentinel */
+            }
             if (!head) head = f; else tail->next = f;
             tail = f;
             if (!consume(TOK_COMMA))
@@ -208,18 +225,48 @@ parse_fields(void)
     return head;
 }
 
-/* compute struct layout */
+/* compute struct layout.  Bit-fields pack LSB-first into a storage unit of
+   their declared type; a field that would overflow the unit, or a zero-width
+   field, starts a fresh unit. */
 static void
 layout_struct(struct cc_type *t)
 {
     int offset = 0;
     int max_align = 1;
+    int bf_off = -1;     /* byte offset of the open bit-field unit, -1 = none */
+    int bf_bits = 0;     /* bits already used in the open unit */
+    int bf_unit = 0;     /* the open unit's size in bits */
+
     for (struct cc_field *f = t->fields; f; f = f->next) {
-        int a = cc_type_align(f->type);
-        if (a > max_align) max_align = a;
-        offset = (offset + a - 1) & ~(a - 1);
-        f->offset = offset;
-        offset += cc_type_size(f->type);
+        if (f->bits != 0) {
+            int tsz = cc_type_size(f->type);
+            int a = cc_type_align(f->type);
+            if (a > max_align) max_align = a;
+            if (f->bits < 0) {          /* zero-width: close the unit, realign */
+                bf_off = -1;
+                bf_bits = 0;
+                offset = (offset + a - 1) & ~(a - 1);
+                continue;
+            }
+            if (bf_off < 0 || bf_bits + f->bits > bf_unit) {
+                offset = (offset + a - 1) & ~(a - 1);
+                bf_off = offset;
+                bf_bits = 0;
+                bf_unit = tsz * 8;
+                offset += tsz;
+            }
+            f->offset = bf_off;
+            f->bit_off = bf_bits;
+            bf_bits += f->bits;
+        } else {
+            int a = cc_type_align(f->type);
+            if (a > max_align) max_align = a;
+            bf_off = -1;                /* an ordinary field closes the unit */
+            bf_bits = 0;
+            offset = (offset + a - 1) & ~(a - 1);
+            f->offset = offset;
+            offset += cc_type_size(f->type);
+        }
     }
     t->size = (offset + max_align - 1) & ~(max_align - 1);
     t->align = max_align;
@@ -253,6 +300,8 @@ parse_declspec(int *is_static, int *is_extern, int *is_typedef)
     int long_count = 0;
     struct cc_type *result = NULL;
 
+    declspec_alignas = 0;
+    declspec_inline = 0;
     if (is_static) *is_static = 0;
     if (is_extern) *is_extern = 0;
     if (is_typedef) *is_typedef = 0;
@@ -275,9 +324,34 @@ parse_declspec(int *is_static, int *is_extern, int *is_typedef)
         case TOK_AUTO: case TOK_REGISTER:
             next();
             continue;
+        case TOK_INLINE:
+            next();
+            declspec_inline = 1;        /* an inline definition may be omitted */
+            continue;
         case TOK_CONST: case TOK_VOLATILE:
+        case TOK_RESTRICT:
             next();
             continue;
+        case TOK_ALIGNAS: {
+            /* _Alignas(constant) or _Alignas(type): raise the alignment */
+            next();
+            expect(TOK_LPAREN);
+            int al;
+            if (is_type_start(peek())) {
+                int saved = declspec_alignas;   /* recursion resets it */
+                int d1 = 0, d2 = 0;
+                struct cc_type *ty = parse_declspec(&d1, &d2, NULL);
+                ty = parse_declarator(ty, NULL);
+                al = cc_type_align(ty);
+                declspec_alignas = saved;
+            } else {
+                al = (int)const_eval(parse_assign_expr());
+            }
+            expect(TOK_RPAREN);
+            if (al > declspec_alignas)
+                declspec_alignas = al;
+            continue;
+        }
         case TOK_UNSIGNED:
             next();
             is_unsigned = 1;
@@ -312,6 +386,11 @@ parse_declspec(int *is_static, int *is_extern, int *is_typedef)
         case TOK_LONG:
             next();
             long_count++;
+            saw_type = 1;
+            continue;
+        case TOK_FLOAT16:
+            next();
+            base = TY_FLOAT16;
             saw_type = 1;
             continue;
         case TOK_FLOAT:
@@ -421,6 +500,8 @@ done:
                 base = TY_LONG;
             else
                 base = TY_INT;
+        } else if (base == TY_DOUBLE && long_count >= 1) {
+            base = TY_LDOUBLE;          /* `long double` (either word order) */
         }
         result = arena_alloc(parse_arena, sizeof *result);
         memset(result, 0, sizeof *result);
@@ -478,8 +559,13 @@ const_eval(struct cc_node *n)
     }
     case ND_TERNARY:
         return const_eval(n->a) ? const_eval(n->b) : const_eval(n->c);
-    case ND_SIZEOF:
-        return cc_type_size(n->decl_type);
+    case ND_SIZEOF: {
+        struct cc_type *t = n->decl_type ? n->decl_type
+                          : (n->a ? n->a->type : NULL);
+        if (!t)
+            t = cc_type_int();
+        return n->op == TOK_ALIGNOF ? cc_type_align(t) : cc_type_size(t);
+    }
     case ND_CAST:
         return const_eval(n->a);
     default:
@@ -496,7 +582,8 @@ parse_declarator(struct cc_type *base, char **name_out)
     while (consume(TOK_STAR)) {
         base = cc_type_ptr(parse_arena,base);
         /* skip qualifiers after * */
-        while (peek().kind == TOK_CONST || peek().kind == TOK_VOLATILE)
+        while (peek().kind == TOK_CONST || peek().kind == TOK_VOLATILE ||
+               peek().kind == TOK_RESTRICT)
             next();
     }
 
@@ -599,7 +686,28 @@ parse_initializer(void)
         struct cc_node *n = node(ND_INIT_LIST, cc_lex_line());
         struct cc_node *head = NULL, *tail = NULL;
         while (!consume(TOK_RBRACE)) {
-            struct cc_node *elem = parse_initializer();
+            struct cc_node *elem;
+            /* designator: .field = ... or [const] = ... (one level) */
+            if (peek().kind == TOK_DOT || peek().kind == TOK_LBRACK) {
+                struct cc_node *d = node(ND_DESIG, cc_lex_line());
+                if (consume(TOK_DOT)) {
+                    struct cc_token id = expect(TOK_IDENT);
+                    d->name = arena_strdup(parse_arena, id.sval);
+                } else {
+                    expect(TOK_LBRACK);
+                    struct cc_node *idx = parse_assign_expr();
+                    if (idx->kind != ND_INTLIT)
+                        die("parse error at line %d: array designator "
+                            "must be a constant", idx->line);
+                    d->ival = idx->ival;   /* name stays null -> index */
+                    expect(TOK_RBRACK);
+                }
+                expect(TOK_ASSIGN);
+                d->a = parse_initializer();
+                elem = d;
+            } else {
+                elem = parse_initializer();
+            }
             if (!head) head = elem; else tail->next = elem;
             tail = elem;
             if (!consume(TOK_COMMA))
@@ -623,7 +731,9 @@ parse_primary(void)
     case TOK_INTLIT: {
         struct cc_node *n = node(ND_INTLIT, t.line);
         n->ival = t.ival;
-        n->type = cc_type_int();
+        n->type = t.is_llong ? cc_type_long_long()
+                : t.is_long  ? cc_type_long()
+                :              cc_type_int();
         return n;
     }
     case TOK_FLOATLIT: {
@@ -631,7 +741,7 @@ parse_primary(void)
         n->fval = t.fval;
         struct cc_type *ft = arena_alloc(parse_arena, sizeof *ft);
         memset(ft, 0, sizeof *ft);
-        ft->kind = t.is_float ? TY_FLOAT : TY_DOUBLE;
+        ft->kind = t.is_half ? TY_FLOAT16 : t.is_float ? TY_FLOAT : TY_DOUBLE;
         n->type = ft;
         return n;
     }
@@ -796,9 +906,13 @@ parse_unary(void)
         n->a = parse_cast();
         return n;
     }
-    case TOK_SIZEOF: {
+    case TOK_SIZEOF:
+    case TOK_ALIGNOF: {
+        int is_alignof = t.kind == TOK_ALIGNOF;
         next();
         struct cc_node *n = node(ND_SIZEOF, ln);
+        n->op = is_alignof ? TOK_ALIGNOF : TOK_SIZEOF;
+        /* _Alignof requires a parenthesized type; sizeof also takes an expr */
         if (consume(TOK_LPAREN)) {
             struct cc_token ahead = peek();
             if (is_type_start(ahead)) {
@@ -1123,6 +1237,8 @@ parse_top_decl(void)
 {
     int is_static = 0, is_extern = 0, is_typedef = 0;
     struct cc_type *base = parse_declspec(&is_static, &is_extern, &is_typedef);
+    int dspec_align = declspec_alignas;
+    int dspec_inline = declspec_inline;
 
     /* bare struct/enum declaration */
     if (consume(TOK_SEMI))
@@ -1149,6 +1265,7 @@ parse_top_decl(void)
         n->name = name;
         n->decl_type = dt;
         n->is_static = is_static;
+        n->is_inline = dspec_inline;
         /* add params to scope */
         push_scope();
         for (struct cc_param *pp = dt->params; pp; pp = pp->next) {
@@ -1168,6 +1285,7 @@ parse_top_decl(void)
         n->decl_type = dt;
         n->is_static = is_static;
         n->is_extern = is_extern;
+        n->align = dspec_align;
         if (consume(TOK_ASSIGN))
             n->a = parse_initializer();
         head = n;
@@ -1181,6 +1299,7 @@ parse_top_decl(void)
         n->decl_type = dt2;
         n->is_static = is_static;
         n->is_extern = is_extern;
+        n->align = dspec_align;
         if (consume(TOK_ASSIGN))
             n->a = parse_initializer();
         tail->next = n;
@@ -1199,6 +1318,50 @@ cc_parse_program(struct arena *a)
     parse_arena = a;
     prog = node(ND_PROGRAM, 1);
     push_scope();
+
+    /* Builtin va_list, laid out per the target ABI.  cc never reads the fields
+       by name; the backend's IR_VA_START and the runtime __va_arg agree on the
+       layout, so only the size and field types must be right.  SysV (x86-64):
+       { unsigned gp_offset, fp_offset; void *overflow_arg_area, *reg_save_area; }.
+       AAPCS64 (arm64): { void *__stack, *__gr_top, *__vr_top; int __gr_offs,
+       __vr_offs; }. */
+    {
+        struct cc_type *u = arena_zalloc(parse_arena, sizeof *u);
+        u->kind = TY_INT;
+        u->is_unsigned = 1;
+        struct cc_type *si = cc_type_int();
+        struct cc_type *vp = cc_type_ptr(parse_arena, cc_type_void());
+#ifdef CC_ARM64
+        const char *nm[5] = { "__stack", "__gr_top", "__vr_top",
+                              "__gr_offs", "__vr_offs" };
+        struct cc_type *ty[5] = { vp, vp, vp, si, si };
+        int nf = 5;
+#else
+        (void)si;
+        const char *nm[5] = { "gp_offset", "fp_offset",
+                              "overflow_arg_area", "reg_save_area", NULL };
+        struct cc_type *ty[5] = { u, u, vp, vp, NULL };
+        int nf = 4;
+#endif
+        struct cc_field *f[5];
+        for (int k = 0; k < nf; k++) {
+            f[k] = arena_alloc(parse_arena, sizeof *f[k]);
+            memset(f[k], 0, sizeof *f[k]);
+            f[k]->name = arena_strdup(parse_arena, nm[k]);
+            f[k]->type = ty[k];
+            f[k]->next = NULL;
+            if (k > 0)
+                f[k - 1]->next = f[k];
+        }
+        struct cc_type *st = arena_zalloc(parse_arena, sizeof *st);
+        st->kind = TY_STRUCT;
+        st->tag = arena_strdup(parse_arena, "__va_list_tag");
+        st->fields = f[0];
+        layout_struct(st);
+        add_tag("__va_list_tag", st);
+        add_sym("__builtin_va_list", SYM_TYPEDEF,
+                cc_type_array(parse_arena, st, 1), 0);
+    }
     while (peek().kind != TOK_EOF) {
         struct cc_node *decl = parse_top_decl();
         while (decl) {

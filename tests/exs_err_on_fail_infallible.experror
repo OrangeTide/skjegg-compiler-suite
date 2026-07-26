@@ -1,0 +1,2 @@
+`on fail` needs an action that can fail; this one cannot
+Drop `on fail`, or use a `can fail` or fallible action

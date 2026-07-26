@@ -1,0 +1,3 @@
+# the reason, then the two ways out
+`shared` is not allowed on a verb parameter (a send crosses the actor boundary)
+use a func, or return the value

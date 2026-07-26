@@ -1,0 +1,8 @@
+prepend 4 1
+insert 4 9
+reverse 4 2
+concat 5 6
+first 2
+last 4
+rest 2 3
+empty -1 0

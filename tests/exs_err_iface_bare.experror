@@ -1,0 +1,2 @@
+a type declaration opens with `class`, `record`, `enum`, `shape`, or `interface`
+an interface is `interface Openable ... endinterface`, a `verb` signature per line

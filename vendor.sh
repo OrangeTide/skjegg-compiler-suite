@@ -115,6 +115,11 @@ S="$tmpdir/src"
 
 rm -rf "$DEST"
 
+# version (always present; the tools' --version reads it, and it must come
+# from skjegg rather than from the consuming project's git tags)
+mkdir -p "$DEST"
+cp "$S/version.mk" "$DEST/"
+
 # IR core (always present)
 mkdir -p "$DEST/ir"
 cp "$S/ir/ir.c" "$S/ir/ir.h" "$S/ir/util.c" "$S/ir/util.h" \
@@ -260,6 +265,11 @@ BUILD  ?= build
 
 CC     ?= cc
 CFLAGS ?= -std=c99 -O2 -Wall -Wextra -Wpedantic -Wno-unused-parameter
+CFLAGS += -I\$(BUILD)
+
+# The vendored skjegg version.  Fixed at vendoring time; deliberately not
+# derived from git, since git here is your project, not skjegg.
+include \$(SKJEGG)version.mk
 EOF
 
 # cross-toolchain variables
@@ -466,8 +476,14 @@ if [ "$has_moo" -eq 1 ] && [ "$has_cf" -eq 1 ]; then
     } >> "$MK"
 fi
 
-# phony and directory targets
+# version header, phony and directory targets
 cat >> "$MK" <<'MK'
+
+# Every tool's main.c includes "version.h", so generate it from SKJ_VERSION.
+$(BUILD)/version.h: $(SKJEGG)version.mk | $(BUILD)
+	@printf '#ifndef SKJ_VERSION_H\n#define SKJ_VERSION_H\n#define SKJ_VERSION "%s"\n#endif\n' '$(SKJ_VERSION)' > $@
+
+$(SKJ_ALL): $(BUILD)/version.h
 
 skjegg: $(SKJ_ALL)
 .PHONY: skjegg

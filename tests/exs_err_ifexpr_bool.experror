@@ -1,0 +1,2 @@
+the condition of `then ... else` must be bool, got int
+the if-expression binds loosest, so everything to its left is the condition

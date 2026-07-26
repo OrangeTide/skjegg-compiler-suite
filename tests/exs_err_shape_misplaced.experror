@@ -1,0 +1,2 @@
+# a real kind in the wrong place reads differently from a misspelled one
+a `node` node is not allowed in a `node` here

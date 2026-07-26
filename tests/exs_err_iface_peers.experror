@@ -1,0 +1,3 @@
+# two supported interfaces disagreeing is capabilities.md D4's peers case:
+# the class resolves it by writing the signature it means
+`A` and `B` declare `ping` differently; write the signature this class means

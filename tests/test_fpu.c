@@ -121,9 +121,10 @@ build_test(struct arena *a)
 
     fn = ir_new_func(a, "main");
     fn->nparams = 0;
-    fn->nslots = 1;
-    fn->slot_size = xmalloc(sizeof(int));
-    fn->slot_size[0] = 8;
+    fn->nslots = 2;
+    fn->slot_size = xmalloc(2 * sizeof(int));
+    fn->slot_size[0] = 8;       /* double slot for fstl/fldl */
+    fn->slot_size[1] = 8;       /* backing store for the _Float16 round-trip */
 
     lfail = ir_new_label(fn);
 
@@ -217,6 +218,36 @@ build_test(struct arena *a)
         }
         ti = new_ftoi(fn, fslot);
         cmp = new_cmpeq(fn, ti, i10);
+        emit_bz(fn, cmp, lfail);
+    }
+
+    /* fsh/flh: _Float16 round-trip through half-width memory (slot 1).
+     * Store 2.5 as a binary16, load it back to a double, double it to 5.0,
+     * and check == 5. 2.5 is exact in binary16, so the fraction must survive
+     * the narrow/widen pair, not just the integer part. */
+    {
+        int f25, haddr, hval, dbl;
+        struct ir_insn *adl, *sh, *lh;
+
+        f25 = new_fbinop(fn, IR_FDIV, f10, f4);     /* 10.0 / 4.0 = 2.5 */
+
+        haddr = ir_new_temp(fn);
+        adl = ir_emit(fn, IR_ADL);
+        adl->dst = haddr;
+        adl->slot = 1;
+
+        sh = ir_emit(fn, IR_FSH);                    /* store 2.5 as binary16 */
+        sh->a = haddr;
+        sh->b = f25;
+
+        hval = ir_new_temp(fn);
+        lh = ir_emit(fn, IR_FLH);                    /* load binary16 -> double */
+        lh->dst = hval;
+        lh->a = haddr;
+
+        dbl = new_fbinop(fn, IR_FADD, hval, hval);   /* 2.5 + 2.5 = 5.0 */
+        ti = new_ftoi(fn, dbl);
+        cmp = new_cmpeq(fn, ti, new_lic(fn, 5));
         emit_bz(fn, cmp, lfail);
     }
 

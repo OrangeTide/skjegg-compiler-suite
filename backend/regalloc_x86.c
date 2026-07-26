@@ -41,14 +41,25 @@
 
 #include <stdlib.h>  /* qsort */
 
+#ifndef X86_BITS
+#define X86_BITS 32
+#endif
+
+#if X86_BITS == 64
+/* x86-64: rbx, r12-r15 (5 regs); i64 shares the int class (native, one reg) */
+#define INT_NUM_REGS  5
+#define INT_SPILL     8
+#else
+/* x86-32: ebx, esi, edi (3 regs); i64 uses register pairs */
 #define INT_NUM_REGS  3
-#define INT_FIRST_REG 0
-
-#define FP_NUM_REGS   7
-#define FP_FIRST_REG  0
-
+#define INT_SPILL     4
 #define I64_NUM_PAIRS  1
 #define I64_FIRST_PAIR 0
+#endif
+
+#define INT_FIRST_REG 0
+#define FP_NUM_REGS   7
+#define FP_FIRST_REG  0
 
 struct interval {
     int temp;
@@ -69,9 +80,12 @@ sort_by_start(const void *pa, const void *pb)
     return a->end - b->end;
 }
 
+/* force_spill (may be NULL): temps that must not get a register (e.g. a float
+   temp live across a call, since the SSE registers are all caller-saved). */
 static int
 linscan(struct ir_func *fn, int *first_def, int *last_use,
-        int *is_class, int num_regs, int first_reg, int spill_size)
+        int *is_class, int num_regs, int first_reg, int spill_size,
+        int *force_spill)
 {
     struct interval *ivs;
     struct interval **active;
@@ -135,6 +149,13 @@ linscan(struct ir_func *fn, int *first_def, int *last_use,
         }
         nactive = w;
 
+        /* a temp that must spill never takes a register (no callee-saved SSE
+           register exists to hold a float across a call) */
+        if (force_spill && force_spill[iv->temp]) {
+            iv->spill = nspills++ * spill_size;
+            continue;
+        }
+
         got = -1;
         for (k = 0; k < num_regs; k++) {
             if (pool[k]) {
@@ -190,6 +211,25 @@ linscan(struct ir_func *fn, int *first_def, int *last_use,
     return nspills;
 }
 
+/* mark each float temp whose live range strictly contains a call position: it
+   must be spilled, since every SSE register is caller-saved */
+static void
+mark_float_cross(struct ir_func *fn, int *first_def, int *last_use,
+                 int *is_float, int *call_pos, int ncall, int *out)
+{
+    int t, c;
+    for (t = 0; t < fn->ntemps; t++) {
+        out[t] = 0;
+        if (!is_float[t] || first_def[t] < 0)
+            continue;
+        for (c = 0; c < ncall; c++)
+            if (call_pos[c] > first_def[t] && call_pos[c] < last_use[t]) {
+                out[t] = 1;
+                break;
+            }
+    }
+}
+
 void
 regalloc(struct ir_func *fn)
 {
@@ -233,6 +273,72 @@ regalloc(struct ir_func *fn)
         last_use[t] = -1;
     }
 
+    /* call positions (for the float-across-call spill), and the resulting
+       force-spill mask */
+    int ninsn = 0;
+    for (i = fn->head; i; i = i->next)
+        ninsn++;
+    int *call_pos = arena_alloc(fn->arena, (ninsn > 0 ? ninsn : 1) * sizeof(int));
+    int *float_cross = arena_zalloc(fn->arena, ntemps * sizeof(int));
+    int ncall = 0;
+
+#if X86_BITS == 64
+    /* One integer class covers both i32 and i64 (one native register each);
+     * an IR_ARG operand is consumed at the following call, not the ARG, so
+     * pending arg operands have their live range extended to the call (the
+     * merged pool otherwise lets a temp defined between the ARG and the call
+     * reuse the argument's register). Same latent gap as the arm64 backend. */
+    int pending[16];
+    int npending = 0;
+
+    pos = 0;
+    for (i = fn->head; i; i = i->next, pos++) {
+        if (i->dst >= 0 && i->dst < ntemps) {
+            if (first_def[i->dst] < 0)
+                first_def[i->dst] = pos;
+            if (last_use[i->dst] < pos)
+                last_use[i->dst] = pos;
+            if (ir_op_is_float_def(i->op))
+                is_float[i->dst] = 1;
+        }
+        if (i->a >= 0 && i->a < ntemps && last_use[i->a] < pos)
+            last_use[i->a] = pos;
+        if (i->b >= 0 && i->b < ntemps && last_use[i->b] < pos)
+            last_use[i->b] = pos;
+
+        if (i->op == IR_ARG || i->op == IR_ARG64 || i->op == IR_FARG ||
+            i->op == IR_ARG_MEM) {
+            if (npending < 16)
+                pending[npending++] = i->a;
+        } else if (i->op == IR_CALL || i->op == IR_CALLI ||
+                   i->op == IR_CALL64 || i->op == IR_CALLI64 ||
+                   i->op == IR_FCALL || i->op == IR_FCALLI ||
+                   i->op == IR_CALL_AGG || i->op == IR_CALLI_AGG ||
+                   i->op == IR_TAILCALL || i->op == IR_TAILCALLI) {
+            int k;
+            for (k = 0; k < npending; k++)
+                if (pending[k] >= 0 && pending[k] < ntemps &&
+                    last_use[pending[k]] < pos)
+                    last_use[pending[k]] = pos;
+            npending = 0;
+            call_pos[ncall++] = pos;
+        }
+    }
+
+    (void)is_i64;
+    (void)max_pair;
+    (void)int_num_regs;
+    for (t = 0; t < ntemps; t++)
+        is_int[t] = !is_float[t];
+
+    mark_float_cross(fn, first_def, last_use, is_float, call_pos, ncall,
+                     float_cross);
+    fn->ni64spills = 0;
+    fn->nspills = linscan(fn, first_def, last_use,
+                  is_int, INT_NUM_REGS, INT_FIRST_REG, INT_SPILL, NULL);
+    fn->nfspills = linscan(fn, first_def, last_use,
+                   is_float, FP_NUM_REGS, FP_FIRST_REG, 8, float_cross);
+#else
     pos = 0;
     for (i = fn->head; i; i = i->next, pos++) {
         if (i->dst >= 0 && i->dst < ntemps) {
@@ -249,10 +355,16 @@ regalloc(struct ir_func *fn)
             last_use[i->a] = pos;
         if (i->b >= 0 && i->b < ntemps && last_use[i->b] < pos)
             last_use[i->b] = pos;
+        if (i->op == IR_CALL || i->op == IR_CALLI ||
+            i->op == IR_CALL64 || i->op == IR_CALLI64 ||
+            i->op == IR_FCALL || i->op == IR_FCALLI ||
+            i->op == IR_CALL_AGG || i->op == IR_CALLI_AGG ||
+            i->op == IR_TAILCALL || i->op == IR_TAILCALLI)
+            call_pos[ncall++] = pos;
     }
 
     fn->ni64spills = linscan(fn, first_def, last_use,
-                 is_i64, I64_NUM_PAIRS, I64_FIRST_PAIR, 8);
+                 is_i64, I64_NUM_PAIRS, I64_FIRST_PAIR, 8, NULL);
 
     max_pair = -1;
     for (t = 0; t < ntemps; t++) {
@@ -266,10 +378,13 @@ regalloc(struct ir_func *fn)
     for (t = 0; t < ntemps; t++)
         is_int[t] = !is_float[t] && !is_i64[t];
 
+    mark_float_cross(fn, first_def, last_use, is_float, call_pos, ncall,
+                     float_cross);
     fn->nspills = linscan(fn, first_def, last_use,
-                  is_int, int_num_regs, INT_FIRST_REG, 4);
+                  is_int, int_num_regs, INT_FIRST_REG, INT_SPILL, NULL);
     fn->nfspills = linscan(fn, first_def, last_use,
-                   is_float, FP_NUM_REGS, FP_FIRST_REG, 8);
+                   is_float, FP_NUM_REGS, FP_FIRST_REG, 8, float_cross);
+#endif
 
     arena_release(fn->arena, m);
 }

@@ -1,0 +1,2 @@
+a func is a private helper; it belongs under `private`
+write `verb` for a public entry point
