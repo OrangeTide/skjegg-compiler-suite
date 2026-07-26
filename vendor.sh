@@ -269,7 +269,14 @@ CFLAGS += -I\$(BUILD)
 
 # The vendored skjegg version.  Fixed at vendoring time; deliberately not
 # derived from git, since git here is your project, not skjegg.
+#
+# SKJ_VERSION names the release.  The commit is baked in beside it because
+# a vendored tree may come from a ref that has moved past that release, and
+# a bare release number would then overstate what you actually have.
 include \$(SKJEGG)version.mk
+SKJ_VENDOR_REF    := $REF
+SKJ_VENDOR_COMMIT := $commit
+SKJ_FULL_VERSION  := \$(SKJ_VERSION)\$(if \$(SKJ_VENDOR_COMMIT),+g\$(SKJ_VENDOR_COMMIT))
 EOF
 
 # cross-toolchain variables
@@ -479,9 +486,10 @@ fi
 # version header, phony and directory targets
 cat >> "$MK" <<'MK'
 
-# Every tool's main.c includes "version.h", so generate it from SKJ_VERSION.
-$(BUILD)/version.h: $(SKJEGG)version.mk | $(BUILD)
-	@printf '#ifndef SKJ_VERSION_H\n#define SKJ_VERSION_H\n#define SKJ_VERSION "%s"\n#endif\n' '$(SKJ_VERSION)' > $@
+# Every tool's main.c includes "version.h", so generate it from the release
+# number plus the commit this tree was vendored from.
+$(BUILD)/version.h: $(SKJEGG)version.mk $(SKJEGG)skjegg.mk | $(BUILD)
+	@printf '#ifndef SKJ_VERSION_H\n#define SKJ_VERSION_H\n#define SKJ_VERSION "%s"\n#endif\n' '$(SKJ_FULL_VERSION)' > $@
 
 $(SKJ_ALL): $(BUILD)/version.h
 
