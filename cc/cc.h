@@ -54,6 +54,7 @@ enum cc_tok {
     TOK_SIZEOF,
     TOK_ALIGNOF,
     TOK_ALIGNAS,
+    TOK_ASM,
 
     /* punctuation */
     TOK_LPAREN, TOK_RPAREN,
@@ -176,6 +177,7 @@ enum cc_node_kind {
     ND_LABEL,
     ND_EXPR_STMT,
     ND_LOCAL_DECL,
+    ND_ASM,         /* basic inline asm: verbatim text in sval/slen */
 
     /* expressions */
     ND_BINOP,

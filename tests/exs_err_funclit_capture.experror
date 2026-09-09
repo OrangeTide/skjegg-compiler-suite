@@ -1,0 +1,1 @@
+a func value cannot capture `k` from its enclosing scope

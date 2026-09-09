@@ -4,9 +4,10 @@
 # Exercises: skj-exc -> skj-as -> skj-ld -> qemu-m68k
 #
 # Each tests/exs_*.exs with a matching .exitcode and/or .expected file is
-# compiled, linked against runtime/start.S and the test host
-# (runtime/exc_host.c, which bootstraps the entry actor, provides __exc_send,
-# and the log/string helpers), and run under qemu. Its exit code is compared
+# compiled, linked against runtime/start.S and the test host: libexc
+# (runtime/libexc.c, the portable guest runtime: __exc_send, spawn, the
+# value helpers) plus the native binding (runtime/exc_native.c, which
+# bootstraps the entry actor and routes output), and run under qemu. Its exit code is compared
 # to the .exitcode file (default 0), and, when a .expected file is present,
 # its stdout is diffed against it. Files with neither are skipped (reader /
 # feature samples).
@@ -21,7 +22,7 @@
 #
 # Usage: tests/run-exc-tests.sh [qemu-binary]
 # Requires: build/skj-exc build/skj-as build/skj-ld build/start.o
-#           build/exc_host.o
+#           build/libexc.o build/exc_native.o
 #
 # Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
@@ -30,13 +31,20 @@ set -eu
 QEMU=${1:-qemu-m68k}
 HERE=$(dirname "$0")
 ROOT=$(cd "$HERE/.." && pwd)
-EXC="$ROOT/build/skj-exc"
-AS="$ROOT/build/skj-as"
-LD="$ROOT/build/skj-ld"
-BDIR="$ROOT/build/exc"
-START="$ROOT/build/start.o"
-HOST="$ROOT/build/exc_host.o"
-UTF8="$ROOT/build/utf8.o"
+# EXC/AS/LD are overridable so a second target can reuse this script.
+# AS and LD carry their own "-o" (the run-cc-tests.sh convention), since a
+# cross assembler needs arch flags before it.
+EXC=${EXC:-"$ROOT/build/skj-exc"}
+AS=${AS:-"$ROOT/build/skj-as -o"}
+LD=${LD:-"$ROOT/build/skj-ld -o"}
+# The runtime objects and the output directory are overridable so the same
+# script serves a second tier: the emulator run links the strict-ColdFire
+# build of libexc and its binding out of build/cf.
+BDIR=${BDIR:-"$ROOT/build/exc"}
+START=${START:-"$ROOT/build/start.o"}
+LIBEXC=${LIBEXC:-"$ROOT/build/libexc.o"}
+BINDING=${BINDING:-"$ROOT/build/exc_native.o"}
+UTF8=${UTF8:-"$ROOT/build/utf8.o"}
 
 pass=0
 fail=0
@@ -91,8 +99,8 @@ for name in $names; do
     [ -f "$ecfile" ] && expect=$(cat "$ecfile")
 
     if "$EXC" -o "$BDIR/$name.s" "$src" 2>"$BDIR/$name.err" &&
-       "$AS" -o "$BDIR/$name.o" "$BDIR/$name.s" 2>>"$BDIR/$name.err" &&
-       "$LD" -o "$BDIR/$name" "$START" "$HOST" "$UTF8" "$BDIR/$name.o" \
+       $AS "$BDIR/$name.o" "$BDIR/$name.s" 2>>"$BDIR/$name.err" &&
+       $LD "$BDIR/$name" "$START" "$LIBEXC" "$BINDING" $UTF8 "$BDIR/$name.o" \
              2>>"$BDIR/$name.err"
     then
         set +e

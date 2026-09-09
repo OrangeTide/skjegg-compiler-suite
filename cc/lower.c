@@ -2604,12 +2604,16 @@ lower_expr(struct cc_node *n)
             ins->dst = new_temp();
             ins->a = fptr;
             ins->nargs = nargs;
+            if (fret)
+                ins->imm = fwidth(callee_type->base);   /* single vs double */
         } else {
             int op = fret ? IR_FCALL : i64ret ? IR_CALL64 : IR_CALL;
             ins = emit(op);
             ins->dst = new_temp();
             ins->sym = arena_strdup(lower_arena, n->a->name);
             ins->nargs = nargs;
+            if (fret)
+                ins->imm = fwidth(callee_type->base);   /* single vs double */
         }
         if (mem_ret_slot >= 0)
             /* the call wrote the struct into our result slot; yield its
@@ -3061,6 +3065,8 @@ lower_stmt(struct cc_node *n)
                    : IR_RETV;
             ins = emit(op);
             ins->a = val;
+            if (op == IR_FRETV)
+                ins->imm = fwidth(cur_fn_ret_type);   /* single vs double */
         } else {
             emit(IR_RET);
         }
@@ -3074,6 +3080,12 @@ lower_stmt(struct cc_node *n)
         emit_label(get_named_label(n->name));
         lower_stmt(n->a);
         return;
+
+    case ND_ASM: {
+        struct ir_insn *ins = emit(IR_ASM);
+        ins->sym = arena_strndup(lower_arena, n->sval, n->slen);
+        return;
+    }
 
     default:
         die("lower:%d: unhandled statement kind %d", n->line, n->kind);
@@ -3140,6 +3152,8 @@ lower_function(struct cc_node *fndef)
     fn->param_class = arena_alloc(lower_arena, np * sizeof(int));
     fn->param_neb = arena_alloc(lower_arena, np * sizeof(signed char));
     fn->param_cls = arena_alloc(lower_arena, 4 * np * sizeof(signed char));
+    fn->param_fw = arena_alloc(lower_arena, np * sizeof(signed char));
+    memset(fn->param_fw, 0, np * sizeof(signed char));
     if (cur_fn_ret_mem) {
         cur_fn_sret_slot = alloc_slot(8);
         fn->param_neb[0] = 1;
@@ -3201,6 +3215,8 @@ lower_function(struct cc_node *fndef)
             fn->param_neb[nparams] = 1;
             fn->param_cls[4 * nparams] = is_float_type(p->type) ? 1 : 0;
             fn->param_class[nparams] = is_float_type(p->type) ? 1 : 0;
+            if (is_float_type(p->type) && cc_type_size(p->type) == 4)
+                fn->param_fw[nparams] = 1;    /* single: one ABI word on RV */
         }
         nparams++;
     }

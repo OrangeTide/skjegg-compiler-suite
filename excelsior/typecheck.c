@@ -35,6 +35,12 @@
 static struct arena *ta;
 static const char *tfile;
 static struct node *cur_mem;      /* the verb/func being checked */
+static struct ex_type *cur_src;   /* the `source of T` a source body
+                                   * produces, or NULL (sources.md D4) */
+static int in_defer;              /* checking a deferred statement (defer.md) */
+static int chk_loop_depth;        /* enclosing loop bodies, for the
+                                   * break-out-of-the-unwind rule (D6) */
+static int chk_loop_base;         /* loop depth at the defer's entry */
 static struct sym *cur_class_sym; /* the class owning it (for record UFCS) */
 static int meta_depth;            /* macro expansion depth (record-introspection.md) */
 static struct node *cur_file;     /* the program, for program-wide selector lookup */
@@ -176,6 +182,9 @@ type_name(struct ex_type *t)
     case ET_ANY:   return "any";
     case ET_NIL:   return "nil";
     case ET_SIGNAL: return "a can-fail signal";
+    case ET_SOURCE:
+        snprintf(buf, 128, "source of %s", type_name(t->inner));
+        return buf;
     case ET_DEC:   return "decimal";    /* an unresolved decimal literal */
     case T_TINT:   return "int";
     case T_TFLOAT: return "float";
@@ -193,6 +202,17 @@ type_name(struct ex_type *t)
     case ET_MAYBE:
         snprintf(buf, sizeof bufs[0], "maybe %s", type_name(t->inner));
         return buf;
+    case ET_FUNC: {
+        int k = snprintf(buf, sizeof bufs[0], "func(");
+        for (struct node *p = t->verbs; p; p = p->next)
+            k += snprintf(buf + k, sizeof bufs[0] - (size_t)k, "%s%s",
+                          p == t->verbs ? "" : ", ",
+                          p->type ? type_name(p->type) : "?");
+        snprintf(buf + k, sizeof bufs[0] - (size_t)k, ")%s%s",
+                 t->inner ? " returns " : "",
+                 t->inner ? type_name(t->inner) : "");
+        return buf;
+    }
     case ET_SLICE: {
         int n = snprintf(buf, sizeof bufs[0], "obj with (");
         for (struct node *v = t->verbs; v; v = v->next)
@@ -222,7 +242,21 @@ type_equal(struct ex_type *a, struct ex_type *b)
             return 1;               /* list of unknown element */
         return type_equal(a->inner, b->inner);
     case ET_MAYBE:
+    case ET_SOURCE:
         return type_equal(a->inner, b->inner);
+    case ET_FUNC: {
+        /* two func types match when their parameter types match pairwise
+         * and their result types match (function-values.md D3) */
+        struct node *pa = a->verbs, *pb = b->verbs;
+        for (; pa && pb; pa = pa->next, pb = pb->next)
+            if (!pa->type || !pb->type || !type_equal(pa->type, pb->type))
+                return 0;
+        if (pa || pb)
+            return 0;
+        if (!a->inner || !b->inner)
+            return !a->inner && !b->inner;
+        return type_equal(a->inner, b->inner);
+    }
     case T_IDENT:
         if (a->sym && b->sym)
             return a->sym == b->sym;
@@ -860,6 +894,8 @@ arith_result(struct node *n, struct ex_type *l, struct ex_type *r)
  ****************************************************************/
 
 static struct ex_type *check_expr(struct node *n);
+static void want_bool(struct node *cond, const char *ctx);
+static void check_stmts(struct node *list, struct sym *ret);
 static void expand_macro(struct node *call, struct sym *mac);
 
 /* a `shared` argument must be an lvalue of a qualifying place: a local, a
@@ -1005,8 +1041,15 @@ check_send(struct node *n)
     }
 
     if (!cls) {                     /* dynamic receiver: check args loosely */
-        for (struct node *a = n->b; a; a = a->next)
-            dec_default(a, check_expr(a));
+        for (struct node *a = n->b; a; a = a->next) {
+            struct ex_type *at = check_expr(a);
+            /* second-class (sources.md D5): a source never crosses the
+             * actor boundary, even to an untyped receiver */
+            if (at && at->kind == ET_SOURCE)
+                terr(a, "a source cannot cross the actor boundary in a "
+                        "send; send the results as a list");
+            dec_default(a, at);
+        }
         return ty_any;
     }
     v = sym_member(cls, n->name);
@@ -1098,6 +1141,13 @@ check_field(struct node *n)
     /* typed obj.field: look the field up in the object's class members */
     if (base && base->kind == T_IDENT && base->sym) {
         struct sym *m = sym_member(base->sym, n->name);
+        /* A field of another actor is not reachable: foreign state is reached
+         * through a verb (data-model.md, the actor boundary). `self.field` is
+         * the one exception, and it is already handled above (n->sym set). A
+         * record is a value, not an actor, so `p.x` on a record stays fine. */
+        if (m && m->kind == SYM_FIELD && base->sym->kind == SYM_CLASS)
+            terr(n, "`%s` is a field of another object; reach it with a verb, "
+                    "not a direct read (the actor boundary)", n->name);
         if (m) {
             struct node *mask = param_field_mask(n->a);
             if (mask) {             /* a field-restricted view (D4) */
@@ -1688,6 +1738,32 @@ check_expr(struct node *n)
                       y->kind == SYM_VERB))
                 n->a->sym = y;
         }
+        /* calling a func value (function-values.md D1): the callee is a value
+         * binding whose type is a func, so this is an indirect call. Its
+         * signature comes from the func type; args are checked against the
+         * parameter types and the result is the func's return type. */
+        if (n->a->sym && n->a->sym->type &&
+            n->a->sym->type->kind == ET_FUNC &&
+            (n->a->sym->kind == SYM_LOCAL || n->a->sym->kind == SYM_PARAM ||
+             n->a->sym->kind == SYM_CONST || n->a->sym->kind == SYM_FIELD)) {
+            struct ex_type *ft = check_expr(n->a);      /* stamps ET_FUNC */
+            struct node *param = ft->verbs;
+
+            for (struct node *a = n->b; a; a = a->next) {
+                struct ex_type *at = dec_default(a, check_expr(a));
+                if (!param)
+                    terr(a, "too many arguments for this func value");
+                if (!is_any(at) && param->type && !assignable(param->type, at))
+                    terr(a, "argument is %s, this func value expects %s",
+                         type_name(at), type_name(param->type));
+                widen_to(a, param->type);
+                param = param->next;
+            }
+            if (param)
+                terr(n, "too few arguments for this func value");
+            t = ft->inner ? ft->inner : ty_any;
+            break;
+        }
         bn = (n->a->kind == N_NAME && !n->a->sym)
            ? n->a->name : NULL;                /* bare unresolved builtin */
         /* a macro call expands at compile time into core forms, then those
@@ -1705,6 +1781,19 @@ check_expr(struct node *n)
             t = check_expr(n);
             meta_depth--;
             break;
+        }
+        /* next(s) on a source value: the built-in pump (sources.md D4), a
+         * fallible producer of the element. Chosen by the argument's type,
+         * so it coexists with a class's cursor-record `next` func (D2);
+         * clearing the stamped sym routes the lowering to the builtin. */
+        if (n->a->kind == N_NAME && ex_ci_eq(n->a->name, "next") &&
+            arg && !arg->next && !arg->alias) {
+            struct ex_type *st = check_expr(arg);
+            if (st && st->kind == ET_SOURCE) {
+                n->a->sym = NULL;
+                t = maybe_of(st->inner);
+                break;
+            }
         }
         /* get(rec, "field"): a compile-time field accessor (the target a
          * field-walking macro emits); the field name is a string literal,
@@ -1792,6 +1881,119 @@ check_expr(struct node *n)
                 terr(arg->next, "append value is %s, list holds %s",
                      type_name(vt), type_name(lt->inner));
             t = lt;                                       /* a new list<T> */
+        } else if (bn && (ex_ci_eq(bn, "map") || ex_ci_eq(bn, "filter") ||
+                          ex_ci_eq(bn, "sort")) && n_args != 2) {
+            terr(n, "`%s` takes two arguments: a list and a func value", bn);
+        } else if (bn && ex_ci_eq(bn, "reduce") && n_args != 3) {
+            terr(n, "reduce takes three arguments: a list, an initial value, "
+                    "and a func value");
+        } else if (bn && ex_ci_eq(bn, "map") && n_args == 2) {
+            /* map(list<T>, func(T) returns U) -> list<U> (function-values.md
+             * D7): the prelude combinator, an ordinary call over a func value */
+            struct ex_type *lt = check_expr(arg);
+            struct ex_type *ft = check_expr(arg->next);
+            struct ex_type *elem = lt && lt->kind == T_TLIST ? lt->inner : NULL;
+
+            if (!is_any(lt) && lt->kind != T_TLIST)
+                terr(arg, "map expects a list, got %s", type_name(lt));
+            if (!is_any(ft) && ft->kind != ET_FUNC)
+                terr(arg->next, "map's second argument is a func value, "
+                     "got %s", type_name(ft));
+            if (ft->kind == ET_FUNC) {
+                struct node *p = ft->verbs;
+                if (!p || p->next)
+                    terr(arg->next, "map's func takes one argument");
+                if (elem && p->type && !assignable(p->type, elem))
+                    terr(arg->next, "map's func takes %s, but the list holds "
+                         "%s", type_name(p->type), type_name(elem));
+                t = list_of(ft->inner ? ft->inner : ty_any);
+            } else {
+                t = ty_any;
+            }
+        } else if (bn && ex_ci_eq(bn, "filter") && n_args == 2) {
+            /* filter(list<T>, func(T) returns bool) -> list<T> */
+            struct ex_type *lt = check_expr(arg);
+            struct ex_type *ft = check_expr(arg->next);
+            struct ex_type *elem = lt && lt->kind == T_TLIST ? lt->inner : NULL;
+
+            if (!is_any(lt) && lt->kind != T_TLIST)
+                terr(arg, "filter expects a list, got %s", type_name(lt));
+            if (!is_any(ft) && ft->kind != ET_FUNC)
+                terr(arg->next, "filter's second argument is a func value, "
+                     "got %s", type_name(ft));
+            if (ft->kind == ET_FUNC) {
+                struct node *p = ft->verbs;
+                if (!p || p->next)
+                    terr(arg->next, "filter's func takes one argument");
+                if (elem && p->type && !assignable(p->type, elem))
+                    terr(arg->next, "filter's func takes %s, but the list "
+                         "holds %s", type_name(p->type), type_name(elem));
+                if (ft->inner && !is_any(ft->inner) &&
+                    ft->inner->kind != T_TBOOL)
+                    terr(arg->next, "filter's func must return bool, got %s",
+                         type_name(ft->inner));
+            }
+            t = lt;
+        } else if (bn && ex_ci_eq(bn, "sort") && n_args == 2) {
+            /* sort(list<T>, func(T, T) returns bool) -> list<T>: the
+             * comparator says whether its first argument sorts ahead of its
+             * second (function-values.md D6, a func not a baked `by` clause) */
+            struct ex_type *lt = check_expr(arg);
+            struct ex_type *ft = check_expr(arg->next);
+            struct ex_type *elem = lt && lt->kind == T_TLIST ? lt->inner : NULL;
+
+            if (!is_any(lt) && lt->kind != T_TLIST)
+                terr(arg, "sort expects a list, got %s", type_name(lt));
+            if (!is_any(ft) && ft->kind != ET_FUNC)
+                terr(arg->next, "sort's second argument is a comparator func "
+                     "value, got %s", type_name(ft));
+            if (ft->kind == ET_FUNC) {
+                struct node *p = ft->verbs;
+                if (!p || !p->next || p->next->next)
+                    terr(arg->next, "sort's comparator takes two arguments");
+                if (elem && p->type && !assignable(p->type, elem))
+                    terr(arg->next, "sort's comparator takes %s, but the list "
+                         "holds %s", type_name(p->type), type_name(elem));
+                if (ft->inner && !is_any(ft->inner) &&
+                    ft->inner->kind != T_TBOOL)
+                    terr(arg->next, "sort's comparator must return bool, got "
+                         "%s", type_name(ft->inner));
+            }
+            t = lt;
+        } else if (bn && ex_ci_eq(bn, "reduce") && n_args == 3) {
+            /* reduce(list<T>, U, func(U, T) returns U) -> U: fold the list
+             * with the step, seeded by the initial value (function-values.md
+             * D7). U is the initial value's type. */
+            struct ex_type *lt = check_expr(arg);
+            struct ex_type *ut = dec_default(arg->next, check_expr(arg->next));
+            struct ex_type *ft = check_expr(arg->next->next);
+            struct ex_type *elem = lt && lt->kind == T_TLIST ? lt->inner : NULL;
+
+            if (!is_any(lt) && lt->kind != T_TLIST)
+                terr(arg, "reduce expects a list, got %s", type_name(lt));
+            if (!is_any(ft) && ft->kind != ET_FUNC)
+                terr(arg->next->next, "reduce's third argument is a func "
+                     "value, got %s", type_name(ft));
+            if (ft->kind == ET_FUNC) {
+                struct node *p = ft->verbs;
+                if (!p || !p->next || p->next->next)
+                    terr(arg->next->next, "reduce's func takes two arguments "
+                         "(the accumulator and an element)");
+                if (p && p->type && !is_any(ut) && !assignable(p->type, ut))
+                    terr(arg->next->next, "reduce's func accumulator is %s, "
+                         "but the initial value is %s",
+                         type_name(p->type), type_name(ut));
+                if (p && p->next && p->next->type && elem &&
+                    !assignable(p->next->type, elem))
+                    terr(arg->next->next, "reduce's func element is %s, but "
+                         "the list holds %s",
+                         type_name(p->next->type), type_name(elem));
+                if (ft->inner && !is_any(ut) && !assignable(ut, ft->inner))
+                    terr(arg->next->next, "reduce's func returns %s, but the "
+                         "accumulator is %s",
+                         type_name(ft->inner), type_name(ut));
+            }
+            t = ut;                                 /* the result is U */
         } else if (bn && ex_ci_eq(bn, "set") && n_args == 3) {
             struct ex_type *lt = check_expr(arg);        /* list<T> */
             struct ex_type *it = check_expr(arg->next);  /* index */
@@ -2016,6 +2218,67 @@ check_expr(struct node *n)
                 terr(n, "`with (...)` slices a record, got %s", type_name(bt));
             t = ty_any;
         }
+        break;
+    }
+    case N_FUNCLIT: {
+        /* func(p) returns T ... endfunc: an anonymous function value
+         * (function-values.md D1). Its type is ET_FUNC (return in inner,
+         * the param list in verbs). The body is checked with its own return
+         * context, saving the enclosing member's so a `return` in the lambda
+         * is checked against the lambda's result, not the caller's. */
+        struct ex_type *ft = mk_ty(ET_FUNC);
+        struct sym *rsym;
+        struct node *save_mem = cur_mem;
+        struct ex_type *save_src = cur_src;
+
+        ft->inner = n->type;                /* the result type, or NULL */
+        ft->verbs = n->a;                   /* the parameter list */
+        rsym = arena_zalloc(ta, sizeof *rsym);
+        rsym->kind = SYM_FUNC;
+        rsym->type = n->type;
+        cur_mem = n;
+        cur_src = NULL;
+        check_stmts(n->b, n->type ? rsym : NULL);
+        cur_mem = save_mem;
+        cur_src = save_src;
+        t = ft;
+        break;
+    }
+    case N_COMP: {
+        /* [head for x in source if cond] (function-values.md D5): the source
+         * is a list or str, the binder takes its element type, the head types
+         * with the binder bound, and the result is a list of the head's type.
+         * The `if` filter is bool. Range and multi-clause sources are the
+         * deferred follow-ons. */
+        struct ex_type *elem, *head;
+
+        if (n->b->kind == N_RANGE) {            /* for i in lo to hi */
+            struct ex_type *lo = strip_maybe(check_expr(n->b->a));
+            struct ex_type *hi = strip_maybe(check_expr(n->b->b));
+            if (!is_numeric(lo) && !is_any(lo))
+                terr(n->b->a, "range bound must be numeric, got %s",
+                     type_name(lo));
+            if (!is_numeric(hi) && !is_any(hi))
+                terr(n->b->b, "range bound must be numeric, got %s",
+                     type_name(hi));
+            elem = is_any(lo) ? ty_int : lo;
+        } else {
+            struct ex_type *src = strip_maybe(check_expr(n->b));
+            if (is_any(src))
+                elem = ty_any;
+            else if (src->kind == T_TLIST)
+                elem = src->inner ? src->inner : ty_any;
+            else if (src->kind == T_TSTR)
+                elem = ty_str;
+            else
+                terr(n->b, "a comprehension iterates a list, str, or range, "
+                     "got %s", type_name(src));
+        }
+        n->sym->type = elem;                    /* the binder */
+        head = dec_default(n->a, check_expr(n->a));
+        if (n->c)
+            want_bool(n->c, "comprehension `if`");
+        t = list_of(head);
         break;
     }
     case N_DATALIT: {
@@ -2989,7 +3252,38 @@ iter_element(struct node *n)
         return t->inner ? t->inner : ty_any;
     if (t->kind == T_TSTR)
         return ty_str;
-    terr(n->a, "cannot iterate over %s", type_name(t));
+    if (t->kind == ET_SOURCE) {
+        /* a continuation source (sources.md D3): the same pump desugar as
+         * a cursor record, through the builtin `next` */
+        n->type = maybe_of(t->inner);
+        return t->inner;
+    }
+    if (t->kind == T_IDENT && t->sym && t->sym->kind == SYM_RECORD) {
+        /* a cursor record (sources.md D2/D3): iterable when this class
+         * declares `next(shared c is R) returns maybe T`; the for loop
+         * desugars to the while-var pump over a hidden cursor copy. The
+         * pump's maybe type rides the for node for the lowering. */
+        struct sym *fn = cur_class_sym
+                       ? sym_member(cur_class_sym, "next") : NULL;
+        struct node *p;
+        if (!fn || fn->kind != SYM_FUNC)
+            terr(n->a, "cannot iterate over %s: a record iterates as a "
+                 "cursor, which needs a `next(shared c is %s) returns "
+                 "maybe T` func in this class (sources.md)",
+                 type_name(t), t->sym->name);
+        p = fn->decl ? fn->decl->a : NULL;
+        if (!p || p->next || !(p->flags & NF_SHARED) ||
+            !p->type || p->type->kind != T_IDENT || p->type->sym != t->sym)
+            terr(n->a, "`next` must take the cursor by reference and "
+                 "nothing else: `next(shared c is %s)`", t->sym->name);
+        if (!fn->type || fn->type->kind != ET_MAYBE)
+            terr(n->a, "`next` must be fallible, `returns maybe T`; its "
+                 "failure is what ends the loop");
+        n->type = fn->type;
+        return fn->type->inner;
+    }
+    terr(n->a, "cannot iterate over %s (a list, a str, a range, or a "
+         "cursor record iterate)", type_name(t));
 }
 
 static void
@@ -3085,13 +3379,17 @@ check_stmt(struct node *n, struct sym *ret)
         } else {
             want_bool(n->a, "while");
         }
+        chk_loop_depth++;
         check_stmts(n->b, ret);
+        chk_loop_depth--;
         break;
     case N_FOR: {
         struct ex_type *elem = iter_element(n);
         if (n->sym)
             n->sym->type = elem;
+        chk_loop_depth++;
         check_stmts(n->c, ret);
+        chk_loop_depth--;
         break;
     }
     case N_MATCH: {
@@ -3106,6 +3404,13 @@ check_stmt(struct node *n, struct sym *ret)
         break;
     }
     case N_RETURN:
+        if (in_defer)
+            terr(n, "`return` is not allowed in a deferred statement: the "
+                    "unwind is already on its way out (defer.md)");
+        if (cur_src)
+            terr(n, "a source body produces with `yield` and stops with "
+                    "`fail` (or its end); `return` is not legal here "
+                    "(sources.md D4)");
         if (n->a) {
             struct ex_type *rt = check_expr(n->a);
             if (!ret)
@@ -3121,11 +3426,34 @@ check_stmt(struct node *n, struct sym *ret)
         }
         break;
     case N_FAIL:
+        if (in_defer)
+            terr(n, "`fail` is not allowed in a deferred statement: an "
+                    "unwind has no consumer for its failure; consume it "
+                    "with `defer act() on fail ...` (defer.md)");
+        /* in a source body `fail` exhausts the source (sources.md D4) */
         if (!cur_mem ||
-            !((cur_mem->flags & NF_CANFAIL) || is_maybe(cur_mem->type)))
-            terr(n, "`fail` is only legal inside a `returns maybe` or "
-                    "`can fail` func");
+            !((cur_mem->flags & NF_CANFAIL) || is_maybe(cur_mem->type) ||
+              cur_src))
+            terr(n, "`fail` is only legal inside a `returns maybe`, "
+                    "`can fail`, or `returns source of T` func");
         break;
+    case N_YIELD: {
+        struct ex_type *vt;
+        if (in_defer)
+            terr(n, "`yield` is not allowed in a deferred statement: a "
+                    "block exit cannot suspend (defer.md)");
+        if (!cur_src)
+            terr(n, "`yield` is only legal inside a func `returns source "
+                    "of T` (sources.md); a plain func returns");
+        vt = check_expr(n->a);
+        no_signal(n->a, vt);
+        absence_mixup(n->a, cur_src->inner);
+        if (!assignable(cur_src->inner, vt))
+            terr(n, "yields %s, expected %s", type_name(vt),
+                 type_name(cur_src->inner));
+        widen_to(n->a, cur_src->inner);
+        break;
+    }
     case N_TRACE: {
         /* trace routes by static type to the author channel (output.md) */
         struct ex_type *tt = strip_maybe(check_expr(n->a));
@@ -3157,6 +3485,24 @@ check_stmt(struct node *n, struct sym *ret)
     }
     case N_BREAK:
     case N_CONTINUE:
+        /* a loop inside the deferred statement is fine; leaving the
+         * unwind itself is not (defer.md D6) */
+        if (in_defer && chk_loop_depth <= chk_loop_base)
+            terr(n, "`%s` cannot leave a deferred statement (defer.md)",
+                 n->kind == N_BREAK ? "break" : "continue");
+        break;
+    case N_DEFER:
+        if (in_defer)
+            terr(n, "a `defer` cannot nest inside a deferred statement");
+        if (n->a && n->a->kind == N_VAR)
+            terr(n->a, "a `defer` cannot declare a variable: the teardown "
+                       "runs at block exit, so there is nothing left to "
+                       "hold it; a defer restores existing state (defer.md)");
+        in_defer = 1;
+        chk_loop_base = chk_loop_depth;
+        check_stmt(n->a, ret);
+        in_defer = 0;
+        break;
     case N_TRACE_CMT:
         break;
     default:
@@ -3212,6 +3558,15 @@ check_class(struct node *cls)
     for (struct node *m = cls->a; m; m = m->next) {
         switch (m->kind) {
         case N_FIELD:
+            if (m->type && m->type->kind == ET_SOURCE)
+                terr(m, "a source cannot be stored in a field (it is "
+                        "second-class and turn-local, sources.md D5); "
+                        "store the results as a list");
+            if (m->type && m->type->kind == ET_FUNC)
+                terr(m, "a func value in a field is a stored closure, which "
+                        "is deferred (function-values.md D4); store behavior "
+                        "on an object as a verb or an included capability, "
+                        "not a func in a field");
             if (m->a) {
                 struct ex_type *dt = check_expr(m->a);
                 no_signal(m->a, dt);
@@ -3236,6 +3591,36 @@ check_class(struct node *cls)
                         terr(p, "`shared` is not allowed on a verb parameter "
                                 "(a send crosses the actor boundary); use a "
                                 "func, or return the value");
+            /* a source is second-class (sources.md D5): it never crosses
+             * the actor boundary, so a verb neither takes nor returns one */
+            if (m->kind == N_VERB) {
+                if (m->type && m->type->kind == ET_SOURCE)
+                    terr(m, "a verb cannot return a source (a send crosses "
+                            "the actor boundary); return the results as a "
+                            "list, or make it a func");
+                for (struct node *p = m->a; p; p = p->next)
+                    if (p->type && p->type->kind == ET_SOURCE)
+                        terr(p, "a source cannot cross the actor boundary "
+                                "as a verb parameter; pass it to a func, or "
+                                "send the results as a list");
+            }
+            /* a source body outlives the call that creates it, so a
+             * `shared` parameter (a pointer into the creator's frame)
+             * would dangle after the first yield; and the constructor
+             * stores its arguments as words in the source struct, so an
+             * 8-byte float parameter is not representable yet */
+            if (m->kind == N_FUNC && m->type && m->type->kind == ET_SOURCE)
+                for (struct node *p = m->a; p; p = p->next) {
+                    if (p->flags & NF_SHARED)
+                        terr(p, "`shared` is not allowed on a source func's "
+                                "parameter: the body outlives the creating "
+                                "call, and the reference would dangle");
+                    if (p->type && p->type->kind == T_TFLOAT)
+                        terr(p, "a float parameter on a source func is not "
+                                "supported yet (the source stores word-sized "
+                                "arguments); use a decimal, or convert "
+                                "inside the body");
+                }
             /* a field-restricted view `p is R with (x, y)` needs a record
              * type, and each masked field must exist (record-slicing.md D4) */
             for (struct node *p = m->a; p; p = p->next)
@@ -3267,7 +3652,10 @@ check_class(struct node *cls)
                 }
             /* m->sym carries the declared return type in ->type */
             cur_mem = m;
+            cur_src = (m->kind == N_FUNC && m->type &&
+                       m->type->kind == ET_SOURCE) ? m->type : NULL;
             check_stmts(m->b, m->type ? m->sym : NULL);
+            cur_src = NULL;
             cur_mem = NULL;
             break;
         default:
@@ -3319,6 +3707,15 @@ typecheck_program(struct arena *a, struct node *file)
                         it->sym->type = it->type;
                 }
             }
+            break;
+        case N_RECORD:
+            /* a record is a value; a source is second-class (sources.md
+             * D5), so a record field cannot hold one */
+            for (struct node *f = it->a; f; f = f->next)
+                if (f->type && f->type->kind == ET_SOURCE)
+                    terr(f, "a source cannot be a record field (it is "
+                            "second-class and turn-local, sources.md D5); "
+                            "store the results as a list");
             break;
         case N_CLASS:
             check_class(it);

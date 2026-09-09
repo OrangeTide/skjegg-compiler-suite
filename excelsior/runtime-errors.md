@@ -111,6 +111,8 @@ emitted with the existing `init_ivals`/`init_syms` machinery:
         int         kind;    /* EXC_TRAP_* */
         int         line;
         const char *file;    /* interned, one per module */
+        const char *name;    /* the failing callee (the UNCONSUMED     */
+                             /* report names its producer), or 0       */
     };
 
 and the trap call gains arguments:
@@ -186,10 +188,10 @@ host the descriptor; the host attaches the actor, class, verb, and turn
 id, and routes the report to the owning builder's trace channel (the
 same channel the static introspection index feeds). The player-facing
 result is only that the action did not complete. What "did not
-complete" means for actor state mid-turn (abort and roll back the turn,
-or keep the partial writes) is the turn-model transactionality
-question, owned by the brief and host-abi.md, not this note; the report
-format is the same either way.
+complete" means for actor state mid-turn was settled by memory.md D6's
+revision (2026-07): the turn aborts and partial writes stand, no
+rollback (a per-invocation host's walker discards them for free); the
+report format is the same either way.
 
 ### R8: arithmetic faults, the whole family
 

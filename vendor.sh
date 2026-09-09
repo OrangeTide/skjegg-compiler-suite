@@ -12,6 +12,7 @@
 # Backends:  coldfire  riscv  x86
 # Frontends: tinc  scheme  moo  pascal  cc
 # Tools:     as  ld  cpp
+# Emulators: emu-cf  emu-rv
 
 set -eu
 
@@ -30,7 +31,8 @@ Usage: vendor-skjegg.sh [-d DIR] [-r REF] [-u DIR] component ...
 
 Backends:  coldfire  riscv  x86
 Frontends: tinc  scheme  moo  pascal  cc
-Tools:     as  ld  cpp
+Tools:     as  ld  as-rv  ld-rv  cpp   (as-rv/ld-rv: the RISC-V RV32 toolchain)
+Emulators: emu-cf  emu-rv    (skj-run; either, both, or neither)
 
 Options:
   -d DIR   destination directory (default: skjegg)
@@ -67,6 +69,8 @@ fi
 has_cf=0 has_rv=0 has_x86=0
 has_tinc=0 has_scheme=0 has_moo=0 has_pascal=0 has_cc=0
 has_as=0 has_ld=0 has_cpp=0
+has_as_rv=0 has_ld_rv=0
+has_emu_cf=0 has_emu_rv=0
 
 for comp in $COMPONENTS; do
     case "$comp" in
@@ -80,7 +84,11 @@ for comp in $COMPONENTS; do
         cc)       has_cc=1 ;;
         as)       has_as=1 ;;
         ld)       has_ld=1 ;;
+        as-rv)    has_as_rv=1 ;;
+        ld-rv)    has_ld_rv=1 ;;
         cpp)      has_cpp=1 ;;
+        emu-cf)   has_emu_cf=1 ;;
+        emu-rv)   has_emu_rv=1 ;;
         *)        die "unknown component: $comp" ;;
     esac
 done
@@ -182,21 +190,51 @@ if [ "$has_cpp" -eq 1 ]; then
     cp "$S/cpp/main.c" "$DEST/cpp/"
 fi
 
-# assembler (library + optional tool)
-if [ "$has_as" -eq 1 ]; then
+# assembler.  The arch-neutral skeleton (asm_lex + asm_obj) is shared by the
+# ColdFire assembler (as) and the RISC-V one (as-rv); each front end plus its
+# standalone tool is taken separately, like the two emulator cores.
+if [ "$has_as" -eq 1 ] || [ "$has_as_rv" -eq 1 ]; then
     mkdir -p "$DEST/as"
-    cp "$S/as/lex.c" "$S/as/parse.c" "$S/as/encode.c" "$S/as/elf.c" \
-       "$S/as/as.h" "$DEST/as/"
-    cp "$S/as/main.c" "$DEST/as/"
+    cp "$S/as/asm_lex.c" "$S/as/asm_obj.c" \
+       "$S/as/asm_lex.h" "$S/as/asm_obj.h" "$DEST/as/"
+fi
+if [ "$has_as" -eq 1 ]; then                    # ColdFire front end + tool
+    cp "$S/as/parse.c" "$S/as/encode.c" "$S/as/elf.c" \
+       "$S/as/as.h" "$S/as/main.c" "$DEST/as/"
+fi
+if [ "$has_as_rv" -eq 1 ]; then                 # RISC-V front end + tool
+    cp "$S/as/rv_parse.c" "$S/as/rv_encode.c" "$S/as/rv_elf.c" \
+       "$S/as/rv_macro.c" "$S/as/rv.h" "$S/as/rv_main.c" "$DEST/as/"
 fi
 
-# linker (library + optional tool)
-if [ "$has_ld" -eq 1 ]; then
+# linker.  The layout core, script parser and mapfile reader (link/script/
+# mapfile) are shared by the ColdFire linker (ld) and the RISC-V one (ld-rv);
+# each target's ELF I/O plus its tool is taken separately.
+if [ "$has_ld" -eq 1 ] || [ "$has_ld_rv" -eq 1 ]; then
     mkdir -p "$DEST/ld"
-    cp "$S/ld/elf_read.c" "$S/ld/script.c" "$S/ld/link.c" \
-       "$S/ld/elf_write.c" "$S/ld/mapfile.c" \
+    cp "$S/ld/script.c" "$S/ld/link.c" "$S/ld/mapfile.c" \
        "$S/ld/ld.h" "$S/ld/mapfile.h" "$DEST/ld/"
-    cp "$S/ld/main.c" "$DEST/ld/"
+fi
+if [ "$has_ld" -eq 1 ]; then                    # ColdFire ELF I/O + tool
+    cp "$S/ld/elf_read.c" "$S/ld/elf_write.c" "$S/ld/main.c" "$DEST/ld/"
+fi
+if [ "$has_ld_rv" -eq 1 ]; then                 # RISC-V ELF I/O + reloc + tool
+    cp "$S/ld/rv_elf_read.c" "$S/ld/rv_link.c" "$S/ld/rv_elf_write.c" \
+       "$S/ld/rv_archive.c" "$S/ld/rv_ld.h" "$S/ld/rv_main.c" "$DEST/ld/"
+fi
+
+# emulator (skj-run).  The two CPU cores are independent: a project that
+# runs only ColdFire guests takes emu-cf and never carries the RV32 core.
+if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ]; then
+    mkdir -p "$DEST/emu"
+    cp "$S/emu/main.c" "$S/emu/guest.c" "$S/emu/guest.h" \
+       "$S/emu/elf32.c" "$S/emu/elf32.h" "$DEST/emu/"
+fi
+if [ "$has_emu_cf" -eq 1 ]; then
+    cp "$S/emu/coldfire.c" "$S/emu/coldfire.h" "$S/emu/cf_user.c" "$DEST/emu/"
+fi
+if [ "$has_emu_rv" -eq 1 ]; then
+    cp "$S/emu/rv32.c" "$S/emu/rv32.h" "$S/emu/rv_user.c" "$DEST/emu/"
 fi
 
 # LICENSE
@@ -358,8 +396,8 @@ MK
 fi
 if [ "$has_as" -eq 1 ]; then
     cat >> "$MK" <<'MK'
-SKJ_AS_LIB := $(SKJEGG)as/lex.c $(SKJEGG)as/parse.c \
-              $(SKJEGG)as/encode.c $(SKJEGG)as/elf.c
+SKJ_AS_LIB := $(SKJEGG)as/asm_lex.c $(SKJEGG)as/asm_obj.c \
+              $(SKJEGG)as/parse.c $(SKJEGG)as/encode.c $(SKJEGG)as/elf.c
 MK
 fi
 if [ "$has_ld" -eq 1 ]; then
@@ -367,6 +405,20 @@ if [ "$has_ld" -eq 1 ]; then
 SKJ_LD_LIB := $(SKJEGG)ld/elf_read.c $(SKJEGG)ld/script.c \
               $(SKJEGG)ld/link.c $(SKJEGG)ld/elf_write.c \
               $(SKJEGG)ld/mapfile.c
+MK
+fi
+if [ "$has_as_rv" -eq 1 ]; then
+    cat >> "$MK" <<'MK'
+SKJ_AS_RV_LIB := $(SKJEGG)as/asm_lex.c $(SKJEGG)as/asm_obj.c \
+                 $(SKJEGG)as/rv_parse.c $(SKJEGG)as/rv_encode.c \
+                 $(SKJEGG)as/rv_macro.c $(SKJEGG)as/rv_elf.c
+MK
+fi
+if [ "$has_ld_rv" -eq 1 ]; then
+    cat >> "$MK" <<'MK'
+SKJ_LD_RV_LIB := $(SKJEGG)ld/rv_elf_read.c $(SKJEGG)ld/rv_link.c \
+                 $(SKJEGG)ld/rv_elf_write.c $(SKJEGG)ld/rv_archive.c \
+                 $(SKJEGG)ld/link.c $(SKJEGG)ld/script.c $(SKJEGG)ld/mapfile.c
 MK
 fi
 
@@ -416,6 +468,11 @@ fi
 if [ "$has_cc" -eq 1 ] && [ "$has_rv" -eq 1 ]; then
     emit_compiler skj-cc-rv SKJ_CC SKJ_RV \
         '-I$(SKJEGG)cc -I$(SKJEGG)cpp -I$(SKJEGG)ir' '$(SKJ_CPP_LIB)'
+    # The psABI build: same sources with -DCC_PSABI, emitting the standard
+    # RISC-V ILP32 convention so its output interlinks with gcc.  Pairs with
+    # the standalone RV toolchain (as-rv/ld-rv) and runtime/start_rv_psabi_cc.S.
+    emit_compiler skj-cc-rv-psabi SKJ_CC SKJ_RV \
+        '-DCC_PSABI -I$(SKJEGG)cc -I$(SKJEGG)cpp -I$(SKJEGG)ir' '$(SKJ_CPP_LIB)'
 fi
 if [ "$has_cc" -eq 1 ] && [ "$has_x86" -eq 1 ]; then
     emit_compiler skj-cc-x86 SKJ_CC SKJ_X86 \
@@ -442,6 +499,41 @@ if [ "$has_ld" -eq 1 ]; then
         printf '\nSKJ_ALL += $(BUILD)/skj-ld\n'
         printf '$(BUILD)/skj-ld: $(SKJEGG)ld/main.c $(SKJ_LD_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c | $(BUILD)\n'
         printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)ld -I$(SKJEGG)ir -o $@ $(SKJEGG)ld/main.c $(SKJ_LD_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
+    } >> "$MK"
+fi
+if [ "$has_as_rv" -eq 1 ]; then
+    {
+        printf '\nSKJ_ALL += $(BUILD)/skj-as-rv\n'
+        printf '$(BUILD)/skj-as-rv: $(SKJEGG)as/rv_main.c $(SKJ_AS_RV_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c | $(BUILD)\n'
+        printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)as -I$(SKJEGG)ir -o $@ $(SKJEGG)as/rv_main.c $(SKJ_AS_RV_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
+    } >> "$MK"
+fi
+if [ "$has_ld_rv" -eq 1 ]; then
+    {
+        printf '\nSKJ_ALL += $(BUILD)/skj-ld-rv\n'
+        printf '$(BUILD)/skj-ld-rv: $(SKJEGG)ld/rv_main.c $(SKJ_LD_RV_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c | $(BUILD)\n'
+        printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)ld -I$(SKJEGG)ir -o $@ $(SKJEGG)ld/rv_main.c $(SKJ_LD_RV_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
+    } >> "$MK"
+fi
+
+# emulator driver
+if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ]; then
+    _emu_src='$(SKJEGG)emu/main.c $(SKJEGG)emu/guest.c $(SKJEGG)emu/elf32.c'
+    if [ "$has_emu_cf" -eq 1 ]; then
+        _emu_src="$_emu_src \$(SKJEGG)emu/coldfire.c \$(SKJEGG)emu/cf_user.c"
+    fi
+    if [ "$has_emu_rv" -eq 1 ]; then
+        _emu_src="$_emu_src \$(SKJEGG)emu/rv32.c \$(SKJEGG)emu/rv_user.c"
+    fi
+    {
+        printf '\n# skj-run: the guest runner.  The architectures compiled in\n'
+        printf '# are fixed at vendoring time; skj-run reads the ELF header to\n'
+        printf '# pick between them.\n'
+        printf 'SKJ_EMU := %s\n' "$_emu_src"
+        printf 'SKJ_ALL += $(BUILD)/skj-run\n'
+        printf '$(BUILD)/skj-run: $(SKJ_EMU) | $(BUILD)\n'
+        printf '\t$(CC) $(CFLAGS) -DEMU_COLDFIRE=%s -DEMU_RV32=%s -I$(SKJEGG)emu -o $@ $(SKJ_EMU) -lm\n' \
+            "$has_emu_cf" "$has_emu_rv"
     } >> "$MK"
 fi
 

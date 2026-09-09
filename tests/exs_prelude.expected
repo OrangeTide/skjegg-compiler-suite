@@ -1,0 +1,8 @@
+map 6 12
+filter 3
+sort 1 9
+labels n1 n3
+desc 9 4
+sum 31
+join 123
+src 3 8

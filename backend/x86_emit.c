@@ -964,6 +964,11 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_NOP:
         break;
 
+    case IR_ASM:
+        /* basic inline asm: the string is emitted verbatim */
+        fprintf(out, "%s\n", i->sym);
+        break;
+
     case IR_LIC: {
         const char *sd = rd(fn, i->dst, 0);
         fprintf(out, "\tmov %s, %ld\n", sd, i->imm);

@@ -8,6 +8,13 @@ confirmed; the staging is in the tree (the console object handed to
 retired with a teaching error, `trace` and `///` lowered under `-t` to
 the stderr trace helpers, and `__exc_selnames` emitted per module).
 
+Note (2026-07): debug-output.md later superseded part of this note's
+author-channel decision ("`trace` is the survivor, `///` its text-only
+sibling"): its D4 retires `trace expr` into `/// ${expr}`, and its D3
+makes `///` default-on and host-routed rather than `-t`-gated. The
+implementation in the tree is still this note's v1; read
+debug-output.md for the decided end state.
+
 Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
 

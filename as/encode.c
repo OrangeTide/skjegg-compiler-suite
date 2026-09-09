@@ -75,18 +75,18 @@ ea_emit_ext(struct assembler *a, struct operand *op)
         break;
     case OP_ABS:
         if (op->sym) {
-            int idx = sym_lookup(a, op->sym);
+            int idx = sym_lookup(&a->st, op->sym);
             if (idx < 0)
-                idx = sym_add(a, op->sym);
+                idx = sym_add(&a->st, op->sym);
             sec_add_reloc(s, s->len, idx, 0);
         }
         sec_emit32(s, (uint32_t)op->imm);
         break;
     case OP_IMM:
         if (op->sym) {
-            int idx = sym_lookup(a, op->sym);
+            int idx = sym_lookup(&a->st, op->sym);
             if (idx < 0)
-                idx = sym_add(a, op->sym);
+                idx = sym_add(&a->st, op->sym);
             sec_add_reloc(s, s->len, idx, (int32_t)op->imm);
             sec_emit32(s, 0);
         } else {
@@ -248,6 +248,32 @@ encode_movem(struct assembler *a, struct operand *op1, struct operand *op2,
             sec_emit16(s, op2->regmask);
         }
         return 4;
+    }
+    /* The control modes, (An) and d16(An), in both directions: the only
+     * movem forms real ColdFire has (the predecrement/postincrement pair
+     * above is 68k-only, kept for start.S), and what the backend emits.
+     * The mask is the normal order (bit 0 = d0), unlike predecrement. */
+    if (op1->type == OP_REGLIST &&
+        (op2->type == OP_IND || op2->type == OP_DISP)) {
+        int dm, dr;
+        if (ea_mode_reg(op2, &dm, &dr) < 0) return -1;
+        if (emit) {
+            sec_emit16(s, (uint16_t)(0x48C0 | ea_bits(dm, dr)));
+            sec_emit16(s, op1->regmask);
+            ea_emit_ext(a, op2);
+        }
+        return 4 + ea_ext_size(op2);
+    }
+    if ((op1->type == OP_IND || op1->type == OP_DISP) &&
+        op2->type == OP_REGLIST) {
+        int sm, sr;
+        if (ea_mode_reg(op1, &sm, &sr) < 0) return -1;
+        if (emit) {
+            sec_emit16(s, (uint16_t)(0x4CC0 | ea_bits(sm, sr)));
+            sec_emit16(s, op2->regmask);
+            ea_emit_ext(a, op1);
+        }
+        return 4 + ea_ext_size(op1);
     }
     return -1;
 }
@@ -438,9 +464,15 @@ encode_addq_subq(struct assembler *a, uint16_t base, int size,
     return total;
 }
 
+/* The extension word carries the destination register twice: Dq in bits
+ * 14-12 and Dr in bits 2-0.  For a divide the two must name the same
+ * register, since Dq != Dr is the encoding of REMS.L/REMU.L, which write
+ * the remainder to Dr and leave the dividend in Dq alone.  For a multiply
+ * the low field is the high half of a 64-bit product ColdFire does not
+ * have, so it stays zero. */
 static int
 encode_muldiv(struct assembler *a, uint16_t base, uint16_t ext_base,
-              struct operand *src, struct operand *dst, int emit)
+              struct operand *src, struct operand *dst, int emit, int same_dr)
 {
     int sm, sr;
     int total;
@@ -452,8 +484,11 @@ encode_muldiv(struct assembler *a, uint16_t base, uint16_t ext_base,
 
     if (emit) {
         struct section *s = &a->sections[a->cur_section];
+        uint16_t ext = (uint16_t)(ext_base | (dst->reg << 12));
+        if (same_dr)
+            ext |= (uint16_t)(dst->reg & 7);
         sec_emit16(s, (uint16_t)(base | ea_bits(sm, sr)));
-        sec_emit16(s, (uint16_t)(ext_base | (dst->reg << 12)));
+        sec_emit16(s, ext);
         ea_emit_ext(a, src);
     }
     return total;
@@ -640,10 +675,10 @@ encode_branch(struct assembler *a, uint16_t base,
         int32_t disp;
 
         if (target->sym) {
-            int idx = sym_lookup(a, target->sym);
-            if (idx >= 0 && a->syms[idx].defined
-                && a->syms[idx].section == a->cur_section) {
-                disp = (int32_t)a->syms[idx].value - (int32_t)s->len - 2;
+            int idx = sym_lookup(&a->st, target->sym);
+            if (idx >= 0 && a->st.syms[idx].defined
+                && a->st.syms[idx].section == a->cur_section) {
+                disp = (int32_t)a->st.syms[idx].value - (int32_t)s->len - 2;
             } else {
                 die("line %d: unresolved branch target '%s'",
                     a->lex.tok.line, target->sym);
@@ -817,10 +852,10 @@ encode_fbranch(struct assembler *a, uint16_t cond_word,
         int32_t disp;
 
         if (target->sym) {
-            int idx = sym_lookup(a, target->sym);
-            if (idx >= 0 && a->syms[idx].defined
-                && a->syms[idx].section == a->cur_section) {
-                disp = (int32_t)a->syms[idx].value - (int32_t)s->len - 2;
+            int idx = sym_lookup(&a->st, target->sym);
+            if (idx >= 0 && a->st.syms[idx].defined
+                && a->st.syms[idx].section == a->cur_section) {
+                disp = (int32_t)a->st.syms[idx].value - (int32_t)s->len - 2;
             } else {
                 die("line %d: unresolved fbranch target '%s'",
                     a->lex.tok.line, target->sym);
@@ -900,13 +935,13 @@ do_encode(struct assembler *a, const char *mnemonic, int size,
         return encode_addq_subq(a, 0x5100, size, op1, op2, emit);
 
     if (strcmp(mnemonic, "muls") == 0)
-        return encode_muldiv(a, 0x4C00, 0x0800, op1, op2, emit);
+        return encode_muldiv(a, 0x4C00, 0x0800, op1, op2, emit, 0);
     if (strcmp(mnemonic, "mulu") == 0)
-        return encode_muldiv(a, 0x4C00, 0x0000, op1, op2, emit);
+        return encode_muldiv(a, 0x4C00, 0x0000, op1, op2, emit, 0);
     if (strcmp(mnemonic, "divs") == 0)
-        return encode_muldiv(a, 0x4C40, 0x0800, op1, op2, emit);
+        return encode_muldiv(a, 0x4C40, 0x0800, op1, op2, emit, 1);
     if (strcmp(mnemonic, "divu") == 0)
-        return encode_muldiv(a, 0x4C40, 0x0000, op1, op2, emit);
+        return encode_muldiv(a, 0x4C40, 0x0000, op1, op2, emit, 1);
 
     if (strcmp(mnemonic, "clr") == 0) {
         uint16_t base = (size == 1) ? 0x4200 : (size == 2) ? 0x4240 : 0x4280;

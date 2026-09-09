@@ -164,7 +164,7 @@ where the cost is honest.
 The seven decisions are confirmed. The implementation (the new `prepend` /
 `insert` / `reverse` / `first` / `last` / `rest` builtins over the CoW list, `+`
 list concatenation beside the existing string concat, the fallible-versus-clamp
-split on the decomposers, and the `len` to `length` rename with its lexer
+split on the decomposers, and the `len` to `length` rename with its
 migration hint) follows; stack/queue mutation stays with buffer.md, and the
 higher-order combinators wait on the lambda/block backlog item.
 
@@ -207,7 +207,9 @@ alternative should the shared word prove confusing.
 **D7. The length builtin is `length`, not `len`.** A plain English word reads
 better for a new user than an abbreviation, and it is a better example of the
 bare-name convention than a truncated one. This is a spec-wide surface rename
-(the lexer answers a stray `len` with a migration hint, like the de-arrow); the
+(the checker answers a stray `len(...)` call with a migration hint, like the
+de-arrow hints; `len` stays an ordinary identifier to the lexer, so it is
+still usable as a name); the
 internal `{ len, data }` string descriptor field and the `__exc_str_len` host
 helper keep their C names, since the rename is of the author-facing surface, not
 the implementation.

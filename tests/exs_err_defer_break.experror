@@ -1,0 +1,2 @@
+# defer.md D6
+`break` cannot leave a deferred statement

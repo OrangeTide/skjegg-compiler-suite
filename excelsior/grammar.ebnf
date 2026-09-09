@@ -34,6 +34,7 @@ file            = { section } ;
 section         = use_section
                 | const_section
                 | type_section
+                | macro_def               (* meta layer; see Macros *)
                 ;
 
 (* --- use: imports with optional aliasing --- *)
@@ -126,8 +127,18 @@ func_def        = "func" IDENT "(" [ param_list ] ")"
                 (* belongs to the send ABI. See fallible.md.            *)
 verb_sig        = "verb" IDENT "(" [ param_list ] ")" [ "returns" type ] NL ;
 
+(* A parameter may be `shared` (a by-reference parameter, Pascal's `var`;   *)
+(* shared-params.md; func-only, rejected on a verb, checked semantically),  *)
+(* may restrict a record type to a field subset (`p is Point with (x, y)`,  *)
+(* a by-reference view whose body may touch only the listed fields;         *)
+(* record-slicing.md D4), and may carry a default (`bonus is int = 10`),    *)
+(* which must be a compile-time constant so it is visible and consistent    *)
+(* in the `.exi` (records.md). A defaulted parameter may be omitted at a    *)
+(* call; a parameter without a default must be provided.                    *)
 param_list      = param { "," param } ;
-param           = IDENT "is" type ;
+param           = [ "shared" ] IDENT "is" type
+                  [ "with" "(" IDENT { "," IDENT } ")" ]
+                  [ "=" expr ] ;
 
 (* Note: library-authored member kinds (effect, dialog, ...) are        *)
 (* reader-registered macros with their own end<kind> terminators; they  *)
@@ -147,7 +158,18 @@ param           = IDENT "is" type ;
 (*         up down ]                                                   *)
 enum_def        = "enum" IDENT "[" IDENT { IDENT } "]" NL ;
 
-record_def      = "record" IDENT NL { field_decl } "endrecord" [ IDENT ] ;
+(* A record field line is a comma list of entries (record-annotations.md   *)
+(* D1), so `x is int = 0, y is int = 0` is one line. A `tags [...]` clause  *)
+(* decorates the field before it on the line (D3): each entry is a symbol   *)
+(* followed by atoms (`tags [json "x", required]`). Tags are compile-time   *)
+(* only, kept as opaque forms and surfaced to macros as `fieldsof`'s        *)
+(* `.tags`; the record layout is unchanged.                                 *)
+record_def      = "record" IDENT NL { record_line } "endrecord" [ IDENT ] ;
+record_line     = record_entry { "," record_entry } NL ;
+record_entry    = [ "tunable" ] IDENT "is" type [ "=" expr ]
+                | tags_clause ;
+tags_clause     = "tags" "[" [ tag_entry { "," tag_entry } ] "]" ;
+tag_entry       = IDENT { IDENT | STR_LIT | INT_LIT } ;
 
 (* A shape is a schema for symbolic data literals (typed-data.md, the    *)
 (* R5 pass): a named type that is a sum of node kinds, checked by the    *)
@@ -186,13 +208,42 @@ type            = "int"                        (* untagged machine int   *)
                 | "bool"
                 | "obj"
                 | "err"
-                | "prop"                       (* runtime-tagged escape   *)
-                | "list" "<" type ">"
+                | "any"                        (* runtime-tagged escape;  *)
+                                               (* the former `prop`, re-  *)
+                                               (* named by data-model.md  *)
+                | "list" "of" type             (* type-parameters.md D1;  *)
+                                               (* the implementation still *)
+                                               (* parses `list "<" type   *)
+                                               (* ">"` until the `of`     *)
+                                               (* spelling lands          *)
+                | "set" "of" type              (* a bitmask over an enum  *)
+                                               (* universe (set-of.md);   *)
+                                               (* the element must name   *)
+                                               (* an enum. `set` and `of` *)
+                                               (* are contextual words,   *)
+                                               (* not keywords, so the    *)
+                                               (* `set` builtin and `of`  *)
+                                               (* identifiers still work. *)
+                                               (* In a set-typed context  *)
+                                               (* `empty` and `full` are  *)
+                                               (* contextual words for    *)
+                                               (* the identities (D5).    *)
+                | "source" "of" type           (* a failable-continuation *)
+                                               (* source (sources.md D4). *)
+                                               (* Contextual words like   *)
+                                               (* `set of`; the element   *)
+                                               (* is word-sized like a    *)
+                                               (* list's.                 *)
+                | "func" "(" [ type { "," type } ] ")" [ "returns" type ]
+                                               (* a func value's type      *)
+                                               (* (function-values.md D3): *)
+                                               (* positional parameter     *)
+                                               (* types, an optional result *)
                 | "maybe" type                 (* a T or nothing; see     *)
                                                (* fallible.md. maybe obj  *)
                                                (* is forbidden (nil is    *)
                                                (* that); no nested maybe; *)
-                                               (* maybe float/prop wait   *)
+                                               (* maybe float/any wait    *)
                 | obj_slice                     (* a verb subset; below   *)
                 | IDENT                         (* class, enum, or the    *)
                                                 (* name of a slice        *)
@@ -257,6 +308,8 @@ statement       = var_decl
                 | match_stmt
                 | return_stmt
                 | fail_stmt
+                | yield_stmt
+                | defer_stmt
                 | break_stmt
                 | continue_stmt
                 | trace_stmt
@@ -272,7 +325,15 @@ var_decl        = "var" IDENT ( "is" type [ "=" expr ] | "=" expr ) NL ;
 (* side must be assignable (a name, a field access, or an index); that  *)
 (* is checked semantically, not by the parser. There are no compound    *)
 (* assignments (`+=`, `-=`): write `x = x + 1`.                         *)
-assign_or_expr_stmt = expr [ "=" expr ] NL ;
+(* The statement's `=` is the assignment: the parser takes it before      *)
+(* expression parsing begins on the right side, which is what lets `=`    *)
+(* also be the equality operator inside expressions (equality.md).        *)
+(* A trailing `on fail STATEMENT` is the statement-level failure handler  *)
+(* (fallible-consumers.md), the statement twin of `otherwise`: the left   *)
+(* side is a `can fail` call (or a fallible statement), and the handler   *)
+(* is one full statement (a call, `break`, `return`, ...), which          *)
+(* consumes the newline. `on` is a contextual word, not a keyword.        *)
+assign_or_expr_stmt = expr [ "=" expr ] ( "on" "fail" statement | NL ) ;
 
 (* A condition is closed by "then" and a loop header by "do"          *)
 (* (then-in-if.md): "then" reads as one-shot, "do" as repeat, the     *)
@@ -318,7 +379,7 @@ while_stmt      = "while" [ "var" IDENT "=" ] expr "do" stmts "endwhile" ;
 (* jump-table lowering wants.                                           *)
 (* A match statement with no `otherwise` and no matching arm is a       *)
 (* no-op, like `if` without `else`; the expression form (match_expr,    *)
-(* below) traps instead, like `select`. The subject is int, bool,       *)
+(* below) traps instead. The subject is int, bool,                      *)
 (* decimal, or an enum; str and float subjects are not supported.       *)
 match_stmt      = "match" expr [ NL ]
                   { match_arm }
@@ -329,14 +390,30 @@ match_arm       = "when" match_vals "then" stmts ;
 match_vals      = match_val { "," match_val } ;
 match_val       = match_label [ "to" match_label ] ;
 match_label     = [ "-" ] INT_LIT | DEC_LIT | "true" | "false" | IDENT ;
-                (* the IDENT must name a module const (checked           *)
-                (* semantically); enum-member labels arrive when enum    *)
-                (* values do                                             *)
+                (* the IDENT names a module const or, when the subject   *)
+                (* is an enum, a bare enum member resolved against the   *)
+                (* subject enum (enums.md D3); checked semantically. A   *)
+                (* match on an enum subject must be exhaustive or carry  *)
+                (* `otherwise` (D4).                                     *)
 
 return_stmt     = "return" [ expr ] NL ;
 fail_stmt       = "fail" NL ;
                 (* only inside `returns maybe` / `can fail` funcs; for a *)
                 (* maybe func it is `return nothing`                     *)
+yield_stmt      = "yield" expr NL ;
+                (* only inside a func returning `source of T`: produce   *)
+                (* the value and suspend until the next pump; `fail` or  *)
+                (* the body's end exhausts the source, and `return` is a *)
+                (* compile error there (sources.md D4).                  *)
+defer_stmt      = "defer" statement ;
+                (* register one statement to run when the enclosing      *)
+                (* block exits (defer.md): LIFO, on every orderly exit   *)
+                (* (fall-through, return, break/continue, fallible       *)
+                (* propagation), never on a fault. The statement must be *)
+                (* infallible or consume its own failure (`defer act()   *)
+                (* on fail ...`), and may not return, fail, yield, or    *)
+                (* break/continue out of the unwind; it consumes its own *)
+                (* newline like the `on fail` handler.                   *)
 break_stmt      = "break" NL ;
 continue_stmt   = "continue" NL ;
 trace_stmt      = "trace" expr NL ;
@@ -373,28 +450,40 @@ trace_stmt      = "trace" expr NL ;
 (* `A otherwise B` is the general fallback operator: `A` is a fallible *)
 (* expression; when it produces no value, `B` evaluates. `a otherwise  *)
 (* b otherwise c` is `a otherwise (b otherwise c)`, first value wins.   *)
-(* `otherwise` (not `else`) also supplies the `match` and `select`     *)
-(* defaults, so `else` means only a boolean branch and `otherwise`     *)
+(* `otherwise` (not `else`) also supplies the `match` default, so      *)
+(* `else` means only a boolean branch and `otherwise`                  *)
 (* means "the value when there was none". See fallback-words.md and    *)
-(* case-select.md.                                                     *)
+(* choosers.md.                                                        *)
 expr            = or_expr [ "then" or_expr "else" expr
                           | "otherwise" expr ] ;
 
-or_expr         = and_expr { ( "or" | "xor" ) and_expr } ;
+(* `xor` is retired (boolean-ops.md): bool inequality is `<>`, and the   *)
+(* bitwise operations are mechanics-tier intrinsics, not word operators. *)
+(* The implementation still accepts `xor` until the retirement lands.    *)
+or_expr         = and_expr { "or" and_expr } ;
 and_expr        = not_expr { "and" not_expr } ;
 not_expr        = "not" not_expr | comparison_expr ;
 
+(* Equality is `=` and inequality `<>` (equality.md): `==` and `!=` are  *)
+(* removed, each answered by a lexer migration hint. `=` is value        *)
+(* equality (or obj identity); the assignment `=` never reaches here     *)
+(* because the statement takes it first (see assign_or_expr_stmt).       *)
 (* Chained comparisons are supported for new users: `a < b < c` means   *)
 (* `a < b and b < c`, with each operand evaluated once and the chain    *)
 (* short-circuiting on the first false. Only same-direction chains are  *)
-(* legal (`<` with `<=`, `>` with `>=`, or a chain of `==`); mixing     *)
-(* directions and chaining `!=` are compile errors, with messages that  *)
+(* legal (`<` with `<=`, `>` with `>=`, or a chain of `=`); mixing      *)
+(* directions and chaining `<>` are compile errors, with messages that  *)
 (* suggest splitting with `and`. Chain operands are int, bool, or       *)
 (* decimal; str and float comparisons do not chain (split with `and`).  *)
 (* The chain parses as a plain loop with no extra lookahead.            *)
-comparison_expr = membership_expr { ( "==" | "!=" | "<" | "<=" | ">" | ">=" )
+comparison_expr = membership_expr { ( "=" | "<>" | "<" | "<=" | ">" | ">=" )
                                     membership_expr } ;
-membership_expr = add_expr [ ( "in" add_expr | "is" module_path ) ] ;
+(* `x in xs` is membership (list, str, or set subset: `s in t` is        *)
+(* "every member of s is in t"); `s overlaps t` is the set intersection  *)
+(* test (set-of.md D6); `x is T` is the type test.                       *)
+membership_expr = add_expr [ ( "in" add_expr
+                             | "overlaps" add_expr
+                             | "is" module_path ) ] ;
 add_expr        = mul_expr { ( "+" | "-" ) mul_expr } ;
 mul_expr        = unary_expr { ( "*" | "/" | "%" ) unary_expr } ;
 unary_expr      = "-" unary_expr | postfix_expr ;
@@ -426,16 +515,18 @@ primary         = INT_LIT
                 | "nothing"                       (* the maybe absence     *)
                 | "self"
                 | IDENT
-                | select_expr
                 | match_expr
                 | data_literal
-                | quote_form
+                | comprehension                   (* a list comp; below     *)
+                | func_lit                        (* a func value; below     *)
+                | quote_form                      (* macro bodies; Macros  *)
+                | quasi_form                      (* macro bodies; Macros  *)
                 | "(" expr ")"
                 ;
 
 (* The same match construct in expression position: identical shape and *)
 (* keywords, but an arm body is one expression, and a subject matching  *)
-(* no arm with no `otherwise` traps at runtime (like `select` and like  *)
+(* no arm with no `otherwise` traps at runtime (like                    *)
 (* out-of-range indexing). Newlines inside the construct separate the   *)
 (* arms exactly as in the statement form; the parser skips them, since  *)
 (* the construct is keyword-delimited through `endmatch`. All arm       *)
@@ -450,20 +541,20 @@ match_expr      = "match" expr [ NL ]
 (* `1 then xs[i] otherwise 0` is an arm whose body is `xs[i]           *)
 (* otherwise 0`.                                                        *)
 
-arg_list        = expr { "," expr } ;
+(* An argument is positional, or named `name: value` (records.md): the   *)
+(* named form is a record literal field (`Point(x: 3, y: 4)`, order-     *)
+(* independent, omitted fields take their default) or a named            *)
+(* function/verb argument. `:` rather than `=` so a named argument       *)
+(* never reads as an assignment. A builtin, `spawn`, or a send takes     *)
+(* positional arguments only. A parameter or field without a default     *)
+(* must be provided in a named call.                                     *)
+arg_list        = arg { "," arg } ;
+arg             = [ IDENT ":" ] expr ;
 
-(* Positional select: IDX (an int) picks the Ith branch; an index       *)
-(* outside the branch list yields DEFAULT, or traps at runtime when no  *)
-(* `otherwise` is given. Branch and default expressions share a type.   *)
-(* Only the chosen branch evaluates. The index and the branches parse   *)
-(* above the `otherwise` operator, so the trailing `otherwise` belongs  *)
-(* to the select; parenthesize the whole select to put a fallback on    *)
-(* it instead. The branch commas are greedy, so a select in a comma     *)
-(* list (a call argument or another select's branch) must be            *)
-(* parenthesized; a bare one there is a parse-time teaching error (R4,   *)
-(* parse-traps.md).                                                      *)
-select_expr     = "select" or_expr "from" or_expr { "," or_expr }
-                  [ "otherwise" expr ] ;
+(* The positional `select IDX from a, b, c otherwise d` chooser is       *)
+(* retired (choosers.md D1): `match` covers its uses and reads better.   *)
+(* The implementation still accepts it until the retirement lands, at    *)
+(* which point the keywords answer with a migration hint.                *)
 
 (* The former `fixed(num, den)` dyadic constructor (which itself       *)
 (* replaced the bare `123:1024` ratio literal) retired with the base-10 *)
@@ -499,14 +590,56 @@ select_expr     = "select" or_expr "from" or_expr { "," or_expr }
 (* parsed and their expressions are resolved and checked, but symbolic *)
 (* literals still do not lower.                                        *)
 data_literal    = "[" { data_item } "]" ;
+
+(* A list comprehension (function-values.md D5): the one sugar of the      *)
+(* function-values pass, map and filter without a function value. It       *)
+(* lowers to a `for` loop building a list. A `[...]` is a comprehension    *)
+(* rather than a data literal exactly when it contains a top-level `for`   *)
+(* (a keyword that cannot be a data atom, so the two never collide). The   *)
+(* binder is a loop header (`for` pairs with `in`), the source a list,     *)
+(* str, or range, the filter a bool. A nested-head comprehension (a list   *)
+(* of lists) works, the head being any expression. One `for` clause for    *)
+(* now: multiple clauses (nested iteration in one comprehension) are        *)
+(* deferred, and a second `for` is a teaching error, not a misparse.       *)
+(* An anonymous func value (function-values.md D1): the primitive of the    *)
+(* function-values pass, a code pointer at rest. Its parameter and result    *)
+(* types are explicit (D3); a valueless func omits `returns`. The body is    *)
+(* the same statement list a named func has, closed by `endfunc`, and its    *)
+(* newlines flow even inside a call's `( )`. A lambda CAPTURES NOTHING (D4):  *)
+(* it sees only its own parameters and module-level names, so a reference to  *)
+(* an enclosing local or `self` is a teaching error, an escaping closure      *)
+(* being deferred. The named `func name(...)` declaration is the class-member *)
+(* form (Classes), the same core on the value axis.                          *)
+func_lit        = "func" "(" [ param_list ] ")" [ "returns" type ] NL
+                  stmts "endfunc" ;
+
+comprehension   = "[" expr "for" IDENT "in" ( expr | expr "to" expr )
+                  [ "if" expr ] "]" ;
 data_item       = IDENT | "to" | INT_LIT | DEC_LIT | STR_LIT
                 | data_literal | HOLE ;
 (* `to` is a keyword elsewhere but reads as a plain word inside data,   *)
 (* the `[choice "..." to end]` linking convention.                      *)
 
-(* Explicit reify; rare, mostly library-author code. `${expr}` inside  *)
-(* a string or quoted template is an immediate hole spliced at build.  *)
-quote_form      = "quote" primary ;
+(* =================================================================== *)
+(* Macros (meta layer)                                                 *)
+(* A top-level `macro` is a compile-time procedural definition         *)
+(* (meta.md): a call to it expands in the checker, where a small       *)
+(* meta-interpreter runs the body and the produced form replaces the   *)
+(* call (expand-then-typecheck). The parameters are bare names; they   *)
+(* bind the auto-quoted argument forms. The body reuses the ordinary   *)
+(* statement grammar (`var`, assignment, `for ... in`, `if`, `match`), *)
+(* interpreted at compile time over meta values (meta-values.md);      *)
+(* `quote FORM` / `quasi FORM` build output forms, with `${meta}`      *)
+(* holes splicing meta values, and a `${T}` hole in a type position    *)
+(* splices a meta type value (typed-macros.md D4). The meta spellings  *)
+(* (`quote`, `quasi`, type holes, bare builtin type names as           *)
+(* expressions) are legal in macro bodies only.                        *)
+(* `quote` left the base surface per quote.md; the implementation      *)
+(* still accepts it outside a macro body until that removal lands.     *)
+macro_def       = "macro" IDENT "(" [ IDENT { "," IDENT } ] ")" NL
+                  stmts "endmacro" ;
+quote_form      = "quote" expr ;
+quasi_form      = "quasi" expr ;
 
 (* =================================================================== *)
 (* String holes                                                        *)
@@ -552,12 +685,15 @@ NL              = LINE_BREAK { LINE_BREAK } ;
 LINE_BREAK      = ? end of line, subject to the suppression rules ? ;
 
 CONT_TOKEN      = "+" | "-" | "*" | "/" | "%"
-                | "==" | "!=" | "<" | "<=" | ">" | ">="
+                | "<>" | "<" | "<=" | ">" | ">="
                 | "=" | "." | ","
                 | "(" | "["
-                | "and" | "or" | "xor" | "not"
-                | "in" | "is" | "as" | "from" | "to" | "returns"
+                | "and" | "or" | "not"
+                | "in" | "is" | "as" | "to" | "returns"
                 | "maybe" | "can" ;
+                (* the implementation also continues a line after the     *)
+                (* retired `xor` and `from` while it still accepts them;  *)
+                (* see the Keywords note below                            *)
 
 IDENT           = LETTER { LETTER | DIGIT | "_" } ;
 
@@ -606,14 +742,27 @@ ESCAPE          = "\" ( "n" | "t" | "r" | "\" | '"' | "$"
 (* =================================================================== *)
 (* Keywords                                                            *)
 (* =================================================================== *)
-(* use as const type  class endclass enum record endrecord  public     *)
+(* use as const type  class endclass enum record endrecord             *)
+(* shape endshape  interface endinterface supports  public             *)
 (* private tunable  verb endverb func endfunc returns  discloses       *)
 (* if elseif else endif  for in to do endfor  while endwhile            *)
-(* match when then otherwise endmatch  select from  var return break   *)
-(* continue                                                             *)
-(* trace  quote self  and or xor not in is as  true false nil          *)
+(* match when then otherwise endmatch  var return break continue       *)
+(* trace  macro endmacro quote quasi  tags  shared  overlaps  with     *)
+(* yield defer                                                         *)
+(* self  and or not in is as  true false nil                           *)
 (* maybe nothing can fail                                              *)
-(* int float decimal vec mat str obj bool err list prop                *)
+(* int float decimal vec mat str obj bool err list any                 *)
+(*                                                                     *)
+(* Contextual words, never reserved: `set` and `of` (the `set of E`    *)
+(* type), `source` (the `source of T` type, sources.md), `empty` and   *)
+(* `full` (the set identities), `on` (the `on fail` handler), `next`   *)
+(* (the pump: a user func over a cursor record, a builtin over a       *)
+(* `source of T`).                                                     *)
+(*                                                                     *)
+(* Retired, decided but still accepted by the implementation until     *)
+(* each retirement lands: `xor` (boolean-ops.md), `select` / `from`    *)
+(* (choosers.md), `quote` outside a macro body (quote.md), and the     *)
+(* `list "<" type ">"` spelling (type-parameters.md).                  *)
 (*                                                                     *)
 (* Bitwise (mechanics-tier, not overloaded onto and/or): band bor bxor *)
 (* shl shr, or intrinsics. Library-authored member kinds (effect,      *)

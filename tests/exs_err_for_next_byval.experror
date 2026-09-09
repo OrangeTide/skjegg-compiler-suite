@@ -1,0 +1,3 @@
+# the by-reference rule (sources.md D2)
+`next` must take the cursor by reference
+next(shared c is Counter)

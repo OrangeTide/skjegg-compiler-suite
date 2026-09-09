@@ -22,6 +22,9 @@ struct kw {
 
 static const struct kw keywords[] = {
     { "_Float16", TOK_FLOAT16 },
+    { "asm",      TOK_ASM },
+    { "__asm",    TOK_ASM },
+    { "__asm__",  TOK_ASM },
     { "auto",     TOK_AUTO },
     { "break",    TOK_BREAK },
     { "case",     TOK_CASE },

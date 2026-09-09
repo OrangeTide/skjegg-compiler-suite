@@ -1,6 +1,9 @@
 # Memory management: regions on the escape boundary, no tracing GC
 
-Status: decided (2026-07), not yet implemented. The memory-management pass from the backlog (backlog.md, the
+Status: decided (2026-07), not yet implemented; D6 (the transactional
+turn) was reopened 2026-07 for a cost-model pass and then **retired**:
+a fault aborts the turn without rollback, see D6 for the model and the
+cost record. The memory-management pass from the backlog (backlog.md, the
 Compact Pascal lifetime item revisited for Excelsior), the model several decided
 notes wait on. Tier: **invisible at World** (an author never frees, annotates a
 lifetime, or sees a pause), the object lifecycle (`spawn`/`destroy`) at World, the
@@ -88,25 +91,27 @@ optional **coarse world-level sweep** may reclaim orphaned object cycles
 (unreachable from any root) as a host background job, never inside a turn. Objects
 are the only cyclic region, and they are kept entirely out of the hot path.
 
-## The turn is transactional (settling runtime-errors.md's open question)
+## The turn aborts on a fault; there is no rollback (D6, revised 2026-07)
 
 runtime-errors.md left open "what complete means for actor state mid-turn, abort
-and roll back or keep the partial writes." This pass settles it: **the turn is
-transactional, and a fault rolls it back.** Persistent field writes within a turn
-are **journaled**; on success the turn **commits** (the journal drops and
-refcount reclamation of overwritten values happens), on a fault the journal
-**undoes** the writes and restores the overwritten values. Transient rollback is
-the arena reset; persistent rollback is the journal undo. This is why `defer`
-runs on committing exits but not on a hard fault (defer.md), and it is the
-LambdaMOO transactional-task model. Reclamation is tied to commit precisely so a
-rollback can restore a value the turn was about to free.
+and roll back or keep the partial writes." The first version of this pass
+answered "roll back" with a journaled transactional turn; the cost-model
+pass retired that answer as too much machinery for its value (the record
+is at D6). What stands: **a fault reports and aborts the turn; transients
+drop with the arena reset; persistent field writes that already happened
+stand.** On a per-invocation host the strongest part of the old guarantee
+survives for free: the walker commits fields at turn end, so a faulted
+turn skips the freeze and its field writes are discarded by construction
+(host-abi.md D7, validated live on smolmoo). A long-lived host that wants
+stronger recovery may snapshot at its own level; that is a host choice
+outside the contract.
 
 ## Bounded by quota (the sandbox guarantee)
 
 Memory is **bounded by a per-turn and per-actor quota**. Exhausting it is an
-**`OVERFLOW`-class fault that rolls the turn back**, not a crash or an OOM kill
+**`OVERFLOW`-class fault that aborts the turn**, not a crash or an OOM kill
 (runtime-errors.md). A script cannot exhaust the shared server: an unbounded
-allocation faults, the turn rolls back, and the actor is unharmed. This makes
+allocation faults, the turn aborts, and the server is unharmed. This makes
 memory safety a sandbox guarantee, the same shape as arithmetic overflow.
 
 ## One line: persist, freeze, and refcount are the same set
@@ -149,8 +154,9 @@ passed, is reclaimed by the region it lives in, invisibly.
   tuned against the real server.
 - **Persistent-heap compaction and fragmentation** (a long-running server
   concern) and **weak references** (for caches and back-pointers), additive.
-- Whether the persistent value heap's refcount is **deferred to commit** in all
-  cases or eager with an undo-log, an implementation sub-decision under D6.
+- ~~Whether the persistent value heap's refcount is deferred to commit or
+  eager~~: settled by D6's revision. With no commit point, reclamation of
+  an overwritten value is **eager** (decrement at overwrite).
 
 ## Survey
 
@@ -159,9 +165,11 @@ passed, is reclaimed by the region it lives in, invisibly.
   value crossing a send is shared-immutable (refcounted) rather than deep-copied.
   Excelsior avoids Erlang's per-process tracing GC because most allocation is
   turn-scoped and the rest is acyclic and refcounted.
-- **LambdaMOO**: transactional tasks that roll back on error, explicit
-  `recycle()`, single-threaded execution; the turn transactionality and explicit
-  object lifecycle are taken directly.
+- **LambdaMOO**: explicit `recycle()`, single-threaded execution, tasks
+  that abort on error; the explicit object lifecycle and the
+  abort-with-effects-standing fault model are taken directly (the
+  transactional-task idea appeared in D6's first version and was
+  retired by the cost pass).
 - **Region / arena allocators (per-request in web servers)**: the turn arena is
   the per-turn arena, reset wholesale.
 - **CPython / Swift refcounting**: the persistent value heap, minus the cycle
@@ -175,16 +183,18 @@ passed, is reclaimed by the region it lives in, invisibly.
 
 Excelsior's stance: automatic and pause-free, a per-turn arena for transients, a
 reference-counted acyclic heap for escaped immutable values shared across actors,
-an explicit object lifecycle for the only cyclic region, a transactional turn, and
+an explicit object lifecycle for the only cyclic region, a fault-aborted turn
+(no rollback machinery, D6), and
 a quota that makes exhaustion a safe fault, with lifetime never exposed to the
 author.
 
 ## Decisions (confirmed)
 
-The eight decisions are confirmed. The implementation (the turn arena with a
+The eight decisions are confirmed (D6 in its revised, no-rollback
+form). The implementation (the turn arena with a
 start-mark reset, the reference-counted acyclic value heap shared across actors,
 the explicit `spawn`/`destroy` object lifecycle with safe dangling access, the
-journaled transactional turn, and the quota fault) is a runtime and host concern
+fault-aborted turn, and the quota fault) is a runtime and host concern
 that lands with the object model; the coarse object cycle sweep, quota values,
 heap compaction, and weak references are deferred follow-ons.
 
@@ -215,14 +225,40 @@ destroyed actor fails safely (nil-nothing.md), so object cycles do not leak.
 Object cycles are the only cyclic region, handled by explicit destruction and an
 optional coarse world-level sweep that never runs inside a turn.
 
-**D6. The turn is transactional (settling runtime-errors.md's open question):**
-persistent field writes are journaled, committed at turn end or undone on a fault,
-and refcount reclamation of overwritten values happens at commit so a rollback
-restores them. Arena reset is the transient rollback; journal undo is the
-persistent one. This is why `defer` runs on commit but not on a hard fault.
+**D6 (revised 2026-07): a fault aborts the turn; there is no rollback
+machinery.** The original D6 journaled persistent field writes and
+undid them on a fault. It was reopened for a cost-model pass, and the
+pass retired it: the machinery is too complicated for its value. The
+cost record, against the real hosts' budgets (60-512KB VMs,
+4096-10000-instruction tick slices, ~200 VMs):
+
+- A **per-write journal** costs ~4 instructions and 8 bytes per field
+  store, unbounded by a write-heavy loop unless a dedup check is added,
+  which itself costs per write.
+- A **whole-heap snapshot** per turn costs one to two entire tick
+  budgets of blitting, written to or not.
+- The affordable design, a **send-boundary copy-on-write** (snapshot a
+  receiver's segment at the first send to it each turn, exploiting the
+  actor rule that only send receivers' fields can mutate: ~4
+  instructions per send, zero per field write, O(1) commit by epoch),
+  still drags in an epoch word in the object header, commit and
+  rollback phases, refcount settlement by segment diffing, and a
+  release list for turn-spawned objects.
+
+None of it is bought. A fault reports (runtime-errors.md) and aborts
+the turn: the arena reset drops transients, persistent field writes
+that already happened stand, and the fault report is the author's
+signal that state may be mid-operation. Per-invocation hosts keep the
+discard-on-fault property for free through the walker (a faulted turn
+never freezes, host-abi.md D7); a long-lived host may snapshot at its
+own level if it wants more, outside the contract. With no commit
+point, refcount reclamation of overwritten values is eager. `defer`
+still does not run on a fault (defer.md D4), now because teardown
+belongs to orderly exits, not because a rollback would make it
+redundant.
 
 **D7. Memory is bounded by a per-turn/per-actor quota, and exhaustion is an
-`OVERFLOW`-class fault that rolls the turn back**, not a crash. A script cannot
+`OVERFLOW`-class fault that aborts the turn**, not a crash. A script cannot
 exhaust the shared server; memory safety is a sandbox guarantee like arithmetic
 overflow.
 

@@ -7,6 +7,11 @@ word-collision. Tier: the record-versus-object split spans World (a builder
 meets objects in the tutorial) and Mechanics (records, records.md); the
 dynamic `any` value and mixed collections are Mechanics (tiers.md).
 
+Note (2026-07): union-types.md D7 later revised this note's D2/D3 to
+the closed-union form (`any of (...)`), leaving `obj` as the one
+intentionally open dynamic type. Read those decisions with that
+revision in mind.
+
 Now that records have landed (records.md), the three things the question names
 can be placed against each other. The short answer is that there is no
 three-way unification to make: there are **two composite poles**, records and

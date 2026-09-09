@@ -285,8 +285,10 @@ emit_cmp(FILE *out, struct ir_func *fn, struct ir_insn *i,
     fprintf(out, "\tcmp.l %s, %s\n", sb, sa);
     sd = rd(fn, i->dst, 0);
     fprintf(out, "\t%s %s\n", scc, sd);
-    fprintf(out, "\tneg.b %s\n", sd);
-    fprintf(out, "\textb.l %s\n", sd);
+    /* scc writes 0x00/0xFF to the low byte; and.l #1 turns that into a
+     * clean 0/1 and clears the upper bits, replacing the 68k-only
+     * neg.b + extb.l pair (ColdFire has no byte-size neg) */
+    fprintf(out, "\tand.l #1, %s\n", sd);
     wd(out, fn, i->dst, sd);
 }
 
@@ -380,7 +382,10 @@ static void
 emit_prologue(FILE *out, struct ir_func *fn)
 {
     fprintf(out, "\tlink.w %%fp, #%d\n", -frame_size(fn));
-    fprintf(out, "\tmovem.l %%d2-%%d7, -(%%sp)\n");
+    /* real ColdFire movem has no predecrement mode: reserve then store
+     * through (%sp), the same final layout the 68k -(%sp) form produced */
+    fprintf(out, "\tlea -24(%%sp), %%sp\n");
+    fprintf(out, "\tmovem.l %%d2-%%d7, (%%sp)\n");
     if (uses_floats) {
         fprintf(out, "\tlea -48(%%sp), %%sp\n");
         fprintf(out, "\tfmove.d %%fp2, (%%sp)\n");
@@ -409,7 +414,9 @@ emit_epilogue_no_rts(FILE *out, struct ir_func *fn)
     } else {
         fprintf(out, "\tlea %d(%%fp), %%sp\n", -(frame + 24));
     }
-    fprintf(out, "\tmovem.l (%%sp)+, %%d2-%%d7\n");
+    /* ColdFire movem: load through (%sp); unlk resets %sp from %fp, so
+     * the 24-byte pop the old (%sp)+ form did is not needed */
+    fprintf(out, "\tmovem.l (%%sp), %%d2-%%d7\n");
     fprintf(out, "\tunlk %%fp\n");
 }
 
@@ -524,6 +531,11 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
 {
     switch (i->op) {
     case IR_NOP:
+        break;
+
+    case IR_ASM:
+        /* basic inline asm: the string is emitted verbatim */
+        fprintf(out, "%s\n", i->sym);
         break;
 
     case IR_LIC: {
@@ -741,9 +753,13 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
 
     case IR_CAPTURE: {
         const char *sd = rd(fn, i->dst, 0);
-        fprintf(out, "\tmovem.l %%d2-%%d7, -(%%sp)\n");
+        /* ColdFire-legal movem (control mode); the stack layout the
+         * capture/resume protocol sees is unchanged */
+        fprintf(out, "\tlea -24(%%sp), %%sp\n");
+        fprintf(out, "\tmovem.l %%d2-%%d7, (%%sp)\n");
         fprintf(out, "\tjsr __cont_capture\n");
-        fprintf(out, "\tmovem.l (%%sp)+, %%d2-%%d7\n");
+        fprintf(out, "\tmovem.l (%%sp), %%d2-%%d7\n");
+        fprintf(out, "\tlea 24(%%sp), %%sp\n");
         if (strcmp(sd, "%d0") != 0)
             fprintf(out, "\tmove.l %%d0, %s\n", sd);
         wd(out, fn, i->dst, sd);
@@ -1108,7 +1124,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         fprintf(out, ".Li64c%d:\n", id);
         fprintf(out, "\t%s %s\n",
             i->op == IR_CMP64EQ ? "seq" : "sne", sd);
-        fprintf(out, "\tneg.b %s\n", sd);
+        fprintf(out, "\tand.l #1, %s\n", sd);      /* 0x00/0xFF -> 0/1, CF-legal */
         wd(out, fn, i->dst, sd);
         break;
     }
@@ -1513,13 +1529,13 @@ emit_globals(FILE *out, struct ir_program *prog)
 
         {
             /* m68k aligns to 4; an _Alignas request (g->align) may raise it.
-               GAS .align is a power-of-two exponent. */
-            int alb = 4, e = 0;
+               On m68k (both m68k-linux-gnu-as and skj-as) the .align operand
+               is a byte count, not a power-of-two exponent (RISC-V's is the
+               exponent), so emit the alignment in bytes. */
+            int alb = 4;
             if (g->align > alb)
                 alb = g->align;
-            while ((1 << e) < alb)
-                e++;
-            fprintf(out, "\t.align %d\n", e);
+            fprintf(out, "\t.align %d\n", alb);
         }
         if (!g->is_local)
             fprintf(out, "\t.globl %s\n", g->name);

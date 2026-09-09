@@ -1,0 +1,2 @@
+# defer.md D6
+`return` is not allowed in a deferred statement

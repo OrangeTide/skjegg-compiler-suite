@@ -156,6 +156,55 @@ scope_define(struct scope *s, int kind, const char *name,
 
 static void resolve_expr(struct node *n, struct scope *sc, struct sym *cls);
 static void resolve_stmt(struct node *n, struct scope *sc, struct sym *cls);
+static void resolve_stmts(struct node *list, struct scope *sc, struct sym *cls);
+
+/* Is `s` one of the lambda's own parameters (a legitimate reference), not a
+ * capture of an enclosing binding? */
+static int
+funclit_owns(struct node *params, struct sym *s)
+{
+    for (struct node *p = params; p; p = p->next)
+        if (p->sym == s)
+            return 1;
+    return 0;
+}
+
+/* Reject every capture in a func literal's body (function-values.md D4): a
+ * reference to an enclosing local or parameter, a self field, or `self`
+ * itself. A captured closure is deferred, so the actor-safe move is to pass
+ * what the func needs as a parameter (or use a verb). A nested lambda checked
+ * itself when it was resolved, so its subtree is skipped here. */
+static void
+funclit_capture_check(struct node *n, struct node *params)
+{
+    for (; n; n = n->next) {
+        if (n->kind == N_FUNCLIT)
+            continue;                   /* self-checked at its own resolve */
+        if (n->kind == N_SELF)
+            rerr(n, "a func value cannot capture `self` (a captured closure "
+                    "is deferred, function-values.md D4); pass what it needs "
+                    "as a parameter, or use a verb");
+        if (n->kind == N_NAME && n->sym &&
+            (n->sym->kind == SYM_LOCAL || n->sym->kind == SYM_FIELD ||
+             (n->sym->kind == SYM_PARAM && !funclit_owns(params, n->sym))))
+            rerr(n, "a func value cannot capture `%s` from its enclosing "
+                    "scope (a captured closure is deferred, "
+                    "function-values.md D4); pass it as a parameter",
+                 n->name);
+        if (n->kind == N_NAME && n->sym && n->sym->kind == SYM_VERB)
+            /* a bare sibling-verb call is a self-send: it needs `self`, which
+             * a func value may not capture (function-values.md D4). An
+             * explicit `recv.verb()` to a parameter is fine. */
+            rerr(n, "a func value cannot call the sibling verb `%s`: a "
+                    "self-send needs `self`, which a func value cannot "
+                    "capture (function-values.md D4). Send to a receiver "
+                    "passed as a parameter, or use a verb",
+                 n->name);
+        funclit_capture_check(n->a, params);
+        funclit_capture_check(n->b, params);
+        funclit_capture_check(n->c, params);
+    }
+}
 
 static void
 resolve_type(struct ex_type *t, struct scope *sc)
@@ -163,6 +212,12 @@ resolve_type(struct ex_type *t, struct scope *sc)
     if (!t)
         return;
     if (t->kind == T_TLIST || t->kind == ET_MAYBE || t->kind == T_TSET) {
+        resolve_type(t->inner, sc);
+        return;
+    }
+    if (t->kind == ET_FUNC) {           /* func(T1, T2) returns U */
+        for (struct node *p = t->verbs; p; p = p->next)
+            resolve_type(p->type, sc);
         resolve_type(t->inner, sc);
         return;
     }
@@ -234,6 +289,33 @@ resolve_expr(struct node *n, struct scope *sc, struct sym *cls)
                                          * type, not resolved as values */
         resolve_expr(n->a, sc, cls);
         break;
+    case N_COMP: {                      /* [head for x in source if cond] */
+        struct scope *body_sc = scope_new(sc);
+        resolve_expr(n->b, sc, cls);        /* the source, in the outer scope */
+        n->sym = scope_define(body_sc, SYM_LOCAL, n->name, n, NULL);
+        resolve_expr(n->a, body_sc, cls);   /* the head, with the binder bound */
+        if (n->c)
+            resolve_expr(n->c, body_sc, cls);
+        break;
+    }
+    case N_FUNCLIT: {                   /* func(p) returns T ... endfunc */
+        /* Resolve the body against the ENCLOSING scope so a captured name
+         * resolves and can be named in the error, then reject every capture:
+         * a captured closure is deferred to the memory-management pass
+         * (function-values.md D4). The lambda keeps its own parameters and
+         * may still name module consts and top-level funcs. */
+        struct scope *fsc = scope_new(sc);
+        for (struct node *p = n->a; p; p = p->next) {
+            resolve_type(p->type, sc);
+            p->sym = scope_define(fsc, SYM_PARAM, p->name, p, p->type);
+        }
+        resolve_type(n->type, sc);
+        resolve_stmts(n->b, fsc, cls);
+        funclit_capture_check(n->b, n->a);
+        n->sym = cls;                   /* the defining class, for lowering a
+                                         * sibling-func call's mangled name */
+        break;
+    }
     case N_CMPCHAIN:                    /* a < b < c: first + link list */
         resolve_expr(n->a, sc, cls);
         for (struct node *l = n->b; l; l = l->next)
@@ -359,11 +441,15 @@ resolve_stmt(struct node *n, struct scope *sc, struct sym *cls)
     case N_RETURN:
     case N_TRACE:
     case N_EXPR_STMT:
+    case N_YIELD:
         resolve_expr(n->a, sc, cls);
         break;
     case N_ONFAIL:                      /* stmt on fail handler */
         resolve_stmt(n->a, sc, cls);
         resolve_stmt(n->b, sc, cls);
+        break;
+    case N_DEFER:                       /* block-scoped teardown */
+        resolve_stmt(n->a, sc, cls);
         break;
     case N_BREAK:
     case N_CONTINUE:

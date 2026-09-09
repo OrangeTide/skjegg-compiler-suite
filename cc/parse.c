@@ -1181,6 +1181,21 @@ parse_stmt(void)
         expect(TOK_SEMI);
         return n;
     }
+    case TOK_ASM: {
+        /* basic inline asm: asm [volatile] ( string-literal ) ;
+           The string is passed through verbatim.  Extended asm (operand
+           constraints and % substitution) is not supported. */
+        next();
+        struct cc_node *n = node(ND_ASM, ln);
+        consume(TOK_VOLATILE);          /* the qualifier is accepted, no effect */
+        expect(TOK_LPAREN);
+        struct cc_token s = expect(TOK_STRLIT);
+        n->sval = s.sval;
+        n->slen = s.slen;
+        expect(TOK_RPAREN);
+        expect(TOK_SEMI);
+        return n;
+    }
     case TOK_IDENT: {
         /* check for label: ident ':' */
         struct cc_token id = next();

@@ -8,4 +8,4 @@
 # Vendored and tarball builds use it verbatim, so a consumer never sees
 # their own project's tags reported as a Skjegg version.
 
-SKJ_VERSION := 0.3.0
+SKJ_VERSION := 0.4.0

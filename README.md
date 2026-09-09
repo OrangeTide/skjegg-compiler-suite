@@ -17,6 +17,7 @@ trading a small effort for a big payoff.
 | `skj-cpp`  | C preprocessor             | Working |
 | `skj-as`   | ColdFire/m68k assembler    | Working |
 | `skj-ld`   | ColdFire/m68k static linker| Working |
+| `skj-run`  | Guest runner (ColdFire, RV32)| Working |
 
 ## Architecture
 
@@ -44,6 +45,7 @@ ir/          portable IR library (types, opcodes, builder)
 backend/     target-specific code generation (ColdFire/m68k, RISC-V RV32IM)
 as/          ColdFire/m68k assembler (GAS syntax subset -> ELF32)
 ld/          ColdFire/m68k static linker (ELF32, ld script subset)
+emu/         ColdFire and RV32 emulators, and skj-run (doc/emulator.md)
 runtime/     target runtimes (start.S, pascal_rt.c, rope.c, list.c, 64-bit helpers)
 tinc/        TinC front end (C-like)
 scheme/      TinScheme front end (Scheme subset with GC)

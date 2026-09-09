@@ -158,6 +158,8 @@ list_add(struct list *l, struct node *n)
 static struct node *parse_expr(void);
 static struct node *parse_params(void);
 static struct node *parse_interface(void);
+static struct node *parse_funclit(void);
+static struct node *parse_stmts(const int *terms);
 
 static struct ex_type *
 new_type(int kind)
@@ -218,6 +220,31 @@ parse_type(void)
     case T_TSTR: case T_TBOOL: case T_TERR: case T_TPROP:
         advance();
         return new_type(t.kind);
+    case T_FUNC: {
+        /* a func value's type: `func(T1, T2) returns U` (function-values.md
+         * D3). The parameters are bare types (positional, no names); the
+         * result is optional. Held as an ET_FUNC whose `verbs` is a list of
+         * N_PARAM nodes carrying the parameter types and `inner` the result. */
+        struct list ps;
+        advance();
+        expect(T_LPAREN);
+        list_init(&ps);
+        if (!at(T_RPAREN)) {
+            for (;;) {
+                struct node *p = nn(N_PARAM);
+                p->type = parse_type();
+                list_add(&ps, p);
+                if (!accept(T_COMMA))
+                    break;
+            }
+        }
+        expect(T_RPAREN);
+        ty = new_type(ET_FUNC);
+        ty->verbs = ps.head;
+        if (accept(T_RETURNS))
+            ty->inner = parse_type();
+        return ty;
+    }
     case T_TLIST:
         advance();
         expect(T_LT);
@@ -264,6 +291,29 @@ parse_type(void)
             advance();              /* of */
             ty = new_type(T_TSET);
             ty->inner = parse_type();
+            return ty;
+        }
+        /* `source of T` (sources.md D4): the failable-continuation source.
+         * Contextual like `set of`, so `source` stays an ordinary
+         * identifier elsewhere. The element is word-sized, the same set a
+         * `maybe` accepts, since the pump yields through the null-word
+         * maybe protocol. */
+        if (ex_ci_eq(t.sval, "source") && lex_peek2().kind == T_IDENT &&
+            ex_ci_eq(lex_peek2().sval, "of")) {
+            struct ex_type *in;
+            advance();              /* source */
+            advance();              /* of */
+            in = parse_type();
+            switch (in->kind) {
+            case T_TINT: case T_TBOOL: case T_TDEC:
+            case T_TSTR: case T_TLIST:
+                break;
+            default:
+                perr("a source's element must be int, bool, decimal, str, "
+                     "or a list (the word-sized set a maybe accepts)");
+            }
+            ty = new_type(ET_SOURCE);
+            ty->inner = in;
             return ty;
         }
         ty = new_type(T_IDENT);
@@ -382,6 +432,67 @@ parse_arg_list(void)
     }
     in_cond = outer;
     return args.head;
+}
+
+/* Is the `[...]` at the cursor a comprehension? Scan to the matching `]`,
+ * looking for a `for` at the comprehension's own bracket level (a nested
+ * `[...]` in the head hides its own `for` at a deeper depth). The lexer state
+ * is saved and restored, so this is pure lookahead. */
+static int
+lbrack_is_comprehension(void)
+{
+    struct lex_state save;
+    int depth = 0, found = 0;
+
+    lex_save(&save);
+    for (;;) {
+        int k = lex_peek().kind;
+        if (k == T_EOF)
+            break;
+        if (k == T_LBRACK || k == T_LPAREN) {
+            depth++;
+        } else if (k == T_RBRACK || k == T_RPAREN) {
+            if (--depth == 0)
+                break;              /* the matching close bracket */
+        } else if (k == T_FOR && depth == 1) {
+            found = 1;
+            break;
+        }
+        lex_next();
+    }
+    lex_restore(&save);
+    return found;
+}
+
+/* `[HEAD for NAME in SOURCE (if COND)?]` (function-values.md D5): the one
+ * comprehension form for now, a single binder over a list or str source. It
+ * lowers to a `for` loop building a list (the lowering synthesizes the loop).
+ * Multiple `for` clauses, a range source, and a nested-head matrix are the
+ * deferred follow-ons. */
+static struct node *
+parse_comprehension(void)
+{
+    struct node *n = nn(N_COMP);
+
+    expect(T_LBRACK);
+    n->a = parse_expr();                /* the head expression */
+    expect(T_FOR);
+    n->name = expect(T_IDENT).sval;     /* the binder */
+    expect(T_IN);
+    n->b = parse_expr();                /* the source: a list, str, or range */
+    if (accept(T_TO)) {                 /* `for i in lo to hi`: a range */
+        struct node *r = nn(N_RANGE);
+        r->a = n->b;
+        r->b = parse_expr();
+        n->b = r;
+    }
+    if (at(T_FOR))
+        perr("a comprehension takes one `for` clause for now; a nested "
+             "iteration is not lowered yet");
+    if (accept(T_IF))
+        n->c = parse_expr();            /* the optional filter */
+    expect(T_RBRACK);
+    return n;
 }
 
 static struct node *
@@ -591,7 +702,18 @@ parse_primary(void)
         n = nn(N_NAME);
         n->name = t.sval;
         return n;
+    case T_FUNC:
+        /* `func(params) returns T ... endfunc`: an anonymous function value
+         * (function-values.md D1). The named form `func name(...)` is a class
+         * member, parsed elsewhere; here in expression position it is a
+         * lambda, always straight to `(`. */
+        return parse_funclit();
     case T_LBRACK:
+        /* `[e for x in xs if c]` is a comprehension, `[1 2 3]` a data literal.
+         * A top-level `for` inside the brackets tells them apart, and `for`
+         * is a keyword that cannot be a data atom, so the scan is exact. */
+        if (lbrack_is_comprehension())
+            return parse_comprehension();
         return parse_data_literal();
     case T_QUOTE:
         /* quote FORM: reify a form as data (meta.md). The form is a full
@@ -1366,6 +1488,24 @@ parse_stmt(void)
         advance();
         end_stmt();
         return nn(N_FAIL);
+    case T_YIELD:
+        /* yield EXPR: produce a value and suspend until the next pump
+         * (sources.md D4); legal only in a func returning `source of T`,
+         * which the checker enforces */
+        advance();
+        n = nn(N_YIELD);
+        n->a = parse_expr();
+        end_stmt();
+        return n;
+    case T_DEFER:
+        /* defer STMT: register one statement to run when the enclosing
+         * block exits (defer.md). The statement consumes its own newline
+         * (like the `on fail` handler), so no end_stmt() here; the
+         * checker enforces what a deferred statement may be. */
+        advance();
+        n = nn(N_DEFER);
+        n->a = parse_stmt();
+        return n;
     case T_TRACE_COMMENT:
         advance();
         n = nn(N_TRACE_CMT);
@@ -1412,6 +1552,36 @@ parse_stmt(void)
 /****************************************************************
  * Class members
  ****************************************************************/
+
+/* `func(params) returns T ... endfunc` in expression position: an anonymous
+ * function value (function-values.md D1). Its parameter and result types are
+ * explicit (D3); a valueless func omits `returns`. The body is the same
+ * statement list a named func has, closed by `endfunc`. */
+static struct node *
+parse_funclit(void)
+{
+    static const int fterms[] = { T_ENDFUNC, 0 };
+    struct node *n = nn(N_FUNCLIT);
+    int saved;
+
+    expect(T_FUNC);
+    expect(T_LPAREN);
+    n->a = at(T_RPAREN) ? NULL : parse_params();
+    expect(T_RPAREN);
+    /* from here the body's newlines flow even inside a call's parens */
+    saved = lex_body_begin();
+    if (accept(T_RETURNS)) {
+        n->type = parse_type();
+        if (n->type->kind == ET_MAYBE)
+            perr("a func value cannot be fallible here; a `maybe` result "
+                 "is not lowered for a lambda yet");
+    }
+    expect(T_NL);
+    n->b = parse_stmts(fterms);
+    expect(T_ENDFUNC);
+    lex_body_end(saved);
+    return n;
+}
 
 static struct node *
 parse_params(void)

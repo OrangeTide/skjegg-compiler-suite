@@ -231,7 +231,8 @@ so that boundary is free when it arrives, not to build it early.
 
 ## Implementation notes
 
-Per D7, one change landed, in the Excelsior runtime (`runtime/exc_host.c`):
+Per D7, one change landed, in the Excelsior runtime (now
+`runtime/libexc.c`; `exc_host.c` at the time):
 every **owned** buffer now carries a trailing NUL, so the owned invariant
 holds and views are the sole length-only values.
 

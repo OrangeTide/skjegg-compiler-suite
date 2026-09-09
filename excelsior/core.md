@@ -160,68 +160,74 @@ that later work should preserve:
 
 The design-note series. Each note is authoritative for its own decisions,
 rationale, and status (proposed / decided / implemented); this index is
-one-line pointers, so read the note for detail. approachability.md is the
+one-line pointers, so read the note for detail. The marker on each line
+mirrors the note's own status line as of 2026-07: (study) an exploration
+or survey, (proposed) a drafted design awaiting decision, (decided)
+decided but not yet implemented, (implemented) at
+least a v1 in the tree, (superseded) kept for the rationale trail. The
+note stays authoritative when the two drift. approachability.md is the
 R1-R19 beginner/content-creator review the series answers, and the R-number on
 a note below marks which finding it settles.
 
 - `grammar.ebnf` — the surface grammar
-- `host-abi.md` — the compiler/host boundary (dispatch, powers, freeze/thaw)
-- `verbs.md` — the verb/func boundary, dispatch, and the dot
-- `string-plan.md` — string values, `${}` interpolation, the concat-chain lowering
-- `sequences.md` — the quotation boundary (commas code, spaces data, newlines statements)
-- `fallible.md` — Icon-style success/failure propagation and its consumers
-- `else-operator.md` — the sources/continuation pump and `A otherwise B`
-- `case-select.md` — the value-chooser survey (largely superseded by choosers.md)
-- `approachability.md` — the R1-R19 beginner/content-creator design review
-- `runtime-errors.md` — faults, the trap UX, exit 70 (R1/R2/R8)
-- `output.md` — `tell` to players and the `///` trace channel (R10/R16)
-- `numbers.md` — base-10 `decimal` replacing binary fixed (R3/R17)
-- `typed-data.md` — `shape` schemas for symbolic data literals (R5)
-- `parse-traps.md` — teaching errors for the two documented misparses (R4)
-- `nil-nothing.md` — the two absence words, closing the ref soundness hole (R6)
-- `text-encoding.md` — UTF-8 storage, code-point character operations, a low-level `bytes` size accessor (R7)
-- `string-repr.md` — the owned-vs-view string and the trailing-NUL invariant
-- `can-fail.md` — `can fail` as a valueless signal, not a bool (R14)
-- `fallible-consumers.md` — bool-only `if`/`while` and the `on fail` handler
-- `fallback-words.md` — `else`/`otherwise`/`on fail` sorted one word per role
-- `slice-clamp.md` — point-versus-interval access (R9)
-- `shared-params.md` — the `shared` by-reference parameter mode
-- `enums.md` — first-class enums, qualified members, exhaustive match (R11)
-- `choosers.md` — the three value-choosers, retiring `select` (R13)
-- `tiers.md` — the three tiers World / Mechanics / Meta (R12)
-- `visibility.md` — per-member visibility, retiring the section headers (R15)
-- `debug-output.md` — `///` as the one author trace channel (R16)
-- `boolean-ops.md` — retiring `xor`, bitwise as compiler intrinsics (R18)
-- `quote.md` — `quote` leaves the base grammar for the meta layer (R19)
-- `backlog.md` — the queue of pending design passes
-- `records.md` — value-semantic records (the data pole)
-- `data-model.md` — records / objects / `any`, retiring `prop`
-- `mixed-lists.md` — `list of any` with boxed elements
-- `meta.md` — the macro and meta-layer surface
-- `union-types.md` — closed `any of (...)` unions
-- `record-introspection.md` — `typeof` / `fieldtype` / `fieldsof` meta primitives
-- `meta-values.md` — what a macro holds and computes: atoms (number, text, bool) beside forms and descriptions, `typeof` over either, bounded arithmetic, no compile-time execution
-- `set-of.md` — `set of E` flag bitmasks
-- `then-in-if.md` — `then` / `do` close conditions and loop headers
-- `match-when.md` — `when` opens each match arm
-- `defer.md` — `defer` block-scoped teardown
-- `buffer.md` — `buffer of T`, the mutable growable transient
-- `type-parameters.md` — the word `of` replaces `<T>`
-- `patterns.md` — typed-hole command templates, not raw regex
-- `capabilities.md` — `capability` / `include` reusable behavior
-- `inline-for.md` — `for` unrolls over a compile-time mixed sequence
-- `list-ops.md` — value-list composition, and `len` renamed `length`
-- `string-literals.md` — the `{...}` brace-delimited string for prose
-- `function-values.md` — `func` the primitive; named declaration and lambda are two surfaces over one macro-targetable core; comprehensions for map/filter; combinators (incl. `sort`) take func values
-- `memory.md` — no tracing GC: a per-turn arena for transients, a refcounted acyclic heap for escaped values, explicit `spawn`/`destroy` for actors, a transactional turn, a quota fault
-- `typed-macros.md` — the `_Generic` tier: a typed macro resolves at typecheck time, dispatches with `match typeof(x)`, splices types with `${T}`, monomorphizes per call; Meta-tier generics, no base-layer `<T>`
-- `blob.md` — the v1 binary-data type: a mutable, refcounted, bounded byte view (memory-safe yet aliasing); typed access is a decode/encode macro over literal width/sign/endian keywords, the matrix contained in the type
-- `equality.md` — equality is `=`, inequality `<>` (retiring `==`/`!=`), reclaiming math's own symbol from binding per symbols-do-math; `=` is value equality or obj identity; binding keeps `=` (the statement eats it before expression parsing); `is` stays the type word
-- `record-slicing.md` — `p with (x, y)` slices a record to a field subset (same-type, compile-time, no runtime mask): in-place subset compare/assign, and a field-restricted by-reference parameter (a `shared` view with a field mask)
-- `record-annotations.md` — Go-style field tags: a field line is a comma list of entries, a `tags [...]` clause decorates the preceding field, each tag a symbol plus atoms; free-form, compile-time only, surfaced as `fieldsof`'s `.tags` for a serializer macro to walk
-- `object-slices.md` — `o with (open, close)` slices an object to a verb subset: structural (cross-type) where the record slice is nominal, since a verb slice exposes dispatch not layout; a type usable anywhere, represented by the plain handle, restricting its holder to the verbs it names (an attenuated capability)
-- `interface-decl.md` — `interface Name ... endinterface` with a body of verb signatures (the `.exi` form), replacing the bare-identifier declaration; the inline `obj with (...)` slice stays as the name-only parameter form
-- `interface-support.md` — `supports Name` as a class-body directive: optional (conformance stays structural), brings signatures and no members, lets a verb be written without its signature, and checks the class at its declaration
+- `host-abi.md` (decided) — the two-layer compiler/libexc/host contract: dispatch, powers, freeze/thaw, the binding surface; grounded in the three target hosts, boris provisional
+- `verbs.md` (study) — the verb/func boundary, dispatch, and the dot
+- `string-plan.md` (study) — string values, `${}` interpolation, the concat-chain lowering
+- `sequences.md` (study) — the quotation boundary (commas code, spaces data, newlines statements)
+- `fallible.md` (implemented) — Icon-style success/failure propagation and its consumers
+- `else-operator.md` (superseded) — the origin of `A otherwise B` and the sources sketch
+- `sources.md` (implemented) — the fallible pump as the iteration protocol: cursor records and `source of T` continuations behind one `next` face, `yield` produces, the continuation source second-class and turn-local
+- `case-select.md` (superseded) — the value-chooser survey (largely superseded by choosers.md)
+- `approachability.md` (study) — the R1-R19 beginner/content-creator design review
+- `runtime-errors.md` (implemented) — faults, the trap UX, exit 70 (R1/R2/R8)
+- `output.md` (implemented) — `tell` to players and the `///` trace channel (R10/R16; the author channel is partly superseded by debug-output.md)
+- `numbers.md` (implemented) — base-10 `decimal` replacing binary fixed (R3/R17)
+- `typed-data.md` (implemented) — `shape` schemas for symbolic data literals (R5)
+- `parse-traps.md` (implemented) — teaching errors for the two documented misparses (R4)
+- `nil-nothing.md` (implemented) — the two absence words, closing the ref soundness hole (R6)
+- `text-encoding.md` (implemented) — UTF-8 storage, code-point character operations, a low-level `bytes` size accessor (R7)
+- `string-repr.md` (decided) — the owned-vs-view string and the trailing-NUL invariant
+- `can-fail.md` (implemented) — `can fail` as a valueless signal, not a bool (R14)
+- `fallible-consumers.md` (implemented) — bool-only `if`/`while` and the `on fail` handler
+- `fallback-words.md` (implemented) — `else`/`otherwise`/`on fail` sorted one word per role
+- `slice-clamp.md` (decided) — point-versus-interval access (R9)
+- `shared-params.md` (implemented) — the `shared` by-reference parameter mode
+- `enums.md` (implemented) — first-class enums, qualified members, exhaustive match (R11)
+- `choosers.md` (decided) — the three value-choosers, retiring `select` (R13)
+- `tiers.md` (decided) — the three tiers World / Mechanics / Meta (R12)
+- `visibility.md` (decided) — per-member visibility, retiring the section headers (R15)
+- `debug-output.md` (decided) — `///` as the one author trace channel (R16)
+- `boolean-ops.md` (decided) — retiring `xor`, bitwise as compiler intrinsics (R18)
+- `quote.md` (decided) — `quote` leaves the base grammar for the meta layer (R19)
+- `backlog.md` (living) — the queue of pending design passes
+- `records.md` (implemented) — value-semantic records (the data pole)
+- `data-model.md` (decided) — records / objects / `any`, retiring `prop`
+- `mixed-lists.md` (decided) — `list of any` with boxed elements
+- `meta.md` (implemented) — the macro and meta-layer surface
+- `union-types.md` (decided) — closed `any of (...)` unions
+- `record-introspection.md` (implemented) — `typeof` / `fieldtype` / `fieldsof` meta primitives
+- `meta-values.md` (implemented) — what a macro holds and computes: atoms (number, text, bool) beside forms and descriptions, `typeof` over either, bounded arithmetic, no compile-time execution
+- `set-of.md` (implemented) — `set of E` flag bitmasks
+- `then-in-if.md` (implemented) — `then` / `do` close conditions and loop headers
+- `match-when.md` (implemented) — `when` opens each match arm
+- `defer.md` (implemented) — `defer` block-scoped teardown
+- `buffer.md` (decided) — `buffer of T`, the mutable growable transient
+- `type-parameters.md` (decided) — the word `of` replaces `<T>`
+- `patterns.md` (decided) — typed-hole command templates, not raw regex
+- `capabilities.md` (decided) — `capability` / `include` reusable behavior
+- `inline-for.md` (decided) — `for` unrolls over a compile-time mixed sequence
+- `list-ops.md` (implemented) — value-list composition, and `len` renamed `length`
+- `string-literals.md` (decided) — the `{...}` brace-delimited string for prose
+- `function-values.md` (decided) — `func` the primitive; named declaration and lambda are two surfaces over one macro-targetable core; comprehensions for map/filter; combinators (incl. `sort`) take func values
+- `memory.md` (decided) — no tracing GC: a per-turn arena for transients, a refcounted acyclic heap for escaped values, explicit `spawn`/`destroy` for actors, a fault-aborted turn (rollback retired by the cost pass), a quota fault
+- `typed-macros.md` (implemented) — the `_Generic` tier: a typed macro resolves at typecheck time, dispatches with `match typeof(x)`, splices types with `${T}`, monomorphizes per call; Meta-tier generics, no base-layer `<T>`
+- `blob.md` (decided) — the v1 binary-data type: a mutable, refcounted, bounded byte view (memory-safe yet aliasing); typed access is a decode/encode macro over literal width/sign/endian keywords, the matrix contained in the type
+- `equality.md` (implemented) — equality is `=`, inequality `<>` (retiring `==`/`!=`), reclaiming math's own symbol from binding per symbols-do-math; `=` is value equality or obj identity; binding keeps `=` (the statement eats it before expression parsing); `is` stays the type word
+- `record-slicing.md` (implemented) — `p with (x, y)` slices a record to a field subset (same-type, compile-time, no runtime mask): in-place subset compare/assign, and a field-restricted by-reference parameter (a `shared` view with a field mask)
+- `record-annotations.md` (implemented) — Go-style field tags: a field line is a comma list of entries, a `tags [...]` clause decorates the preceding field, each tag a symbol plus atoms; free-form, compile-time only, surfaced as `fieldsof`'s `.tags` for a serializer macro to walk
+- `object-slices.md` (implemented) — `o with (open, close)` slices an object to a verb subset: structural (cross-type) where the record slice is nominal, since a verb slice exposes dispatch not layout; a type usable anywhere, represented by the plain handle, restricting its holder to the verbs it names (an attenuated capability)
+- `interface-decl.md` (implemented) — `interface Name ... endinterface` with a body of verb signatures (the `.exi` form), replacing the bare-identifier declaration; the inline `obj with (...)` slice stays as the name-only parameter form
+- `interface-support.md` (implemented) — `supports Name` as a class-body directive: optional (conformance stays structural), brings signatures and no members, lets a verb be written without its signature, and checks the class at its declaration
 
 ## Two layers that meet at expansion
 

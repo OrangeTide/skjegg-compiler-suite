@@ -45,6 +45,13 @@ never sees them.
   `freeze(p)` gets the record type with `typeof(p)`. It always succeeds (an
   expression has a static type). It also underpins the `_Generic` tier
   (core.md), which selects on an argument's static type.
+  A **fallible** expression's static type is its success type (decided
+  2026-07): `typeof(xs[i])` is the element type, not `maybe T`, matching
+  fallible.md's "inference never captures" (fallibility is an effect the
+  consumer handles, not part of the type). A variable declared `maybe T`
+  reports `maybe T`, since that is its static type. A `can fail` call has
+  no value, so `typeof` on one is the ordinary using-a-signal-as-a-value
+  teaching error (can-fail.md).
 - **`fieldtype(T, "name")`** is a **fallible** expression (fallible.md): it
   yields the field's type as a compile-time type value on success, and **fails
   when `T` has no field named `name`**. The field name is data that may or may

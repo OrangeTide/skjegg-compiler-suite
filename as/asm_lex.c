@@ -1,13 +1,13 @@
-/* lex.c : GAS syntax tokenizer for ColdFire assembler */
+/* asm_lex.c : arch-neutral GAS-syntax tokenizer */
 
-#include "as.h"
+#include "asm_lex.h"
 
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
 void
-lex_init(struct lexer *l, const char *src)
+lex_init(struct lexer *l, const char *src, char comment_ch, int reloc_pct)
 {
     l->src = src;
     l->pos = src;
@@ -15,6 +15,8 @@ lex_init(struct lexer *l, const char *src)
     l->str_buf = NULL;
     l->str_cap = 0;
     l->tok.type = T_NEWLINE;
+    l->comment_ch = comment_ch;
+    l->reloc_pct = reloc_pct;
 }
 
 static void
@@ -153,8 +155,21 @@ lex_next(struct lexer *l)
             return;
         }
 
-        if (*l->pos == '|') {
+        if (*l->pos == l->comment_ch) {
             skip_line_comment(l);
+            continue;
+        }
+
+        /* C-style block comment (GAS accepts it on every target) */
+        if (l->pos[0] == '/' && l->pos[1] == '*') {
+            l->pos += 2;
+            while (*l->pos && !(l->pos[0] == '*' && l->pos[1] == '/')) {
+                if (*l->pos == '\n')
+                    l->line++;
+                l->pos++;
+            }
+            if (*l->pos)
+                l->pos += 2;            /* consume the closing */
             continue;
         }
 
@@ -202,7 +217,12 @@ lex_next(struct lexer *l)
         case '+': l->pos++; l->tok.type = T_PLUS; return;
         case '%':
             l->pos++;
-            lex_ident(l, 0);
+            if (l->reloc_pct) {
+                lex_ident(l, 0);
+                l->tok.type = T_RELOC;
+            } else {
+                lex_ident(l, 0);
+            }
             return;
         default:
             l->pos++;

@@ -64,6 +64,14 @@ put32(uint8_t *p, uint32_t v)
     p[3] = (uint8_t)(v);
 }
 
+/* sh_addralign for a section: the strongest .align it saw, but never below
+   the 4-byte default the writer has always used. */
+static uint32_t
+sec_addralign(const struct section *s)
+{
+    return s->align > 4 ? (uint32_t)s->align : 4;
+}
+
 /****************************************************************
  * String table builder
  ****************************************************************/
@@ -184,11 +192,11 @@ elf_write(struct assembler *a, FILE *out)
      */
     strtab_init(&strtab);
 
-    int *sym_map = xmalloc(a->nsyms * sizeof(int));
+    int *sym_map = xmalloc(a->st.nsyms * sizeof(int));
 
     struct elf_sym *esyms;
     int nesyms = 0;
-    int esym_cap = 4 + a->nsyms;
+    int esym_cap = 4 + a->st.nsyms;
     esyms = xmalloc(esym_cap * sizeof(struct elf_sym));
 
     /* null symbol */
@@ -220,19 +228,19 @@ elf_write(struct assembler *a, FILE *out)
     sec_sym_bss = nesyms++;
 
     /* local defined symbols */
-    for (k = 0; k < a->nsyms; k++) {
-        if (a->syms[k].global || !a->syms[k].defined)
+    for (k = 0; k < a->st.nsyms; k++) {
+        if (a->st.syms[k].global || !a->st.syms[k].defined)
             continue;
         uint16_t shndx;
-        switch (a->syms[k].section) {
+        switch (a->st.syms[k].section) {
         case SEC_TEXT: shndx = SH_TEXT; break;
         case SEC_DATA: shndx = SH_DATA; break;
         case SEC_BSS:  shndx = SH_BSS; break;
         default:       shndx = SHN_UNDEF; break;
         }
         esyms[nesyms] = (struct elf_sym){
-            .st_name = (uint32_t)strtab_add(&strtab, a->syms[k].name),
-            .st_value = a->syms[k].value,
+            .st_name = (uint32_t)strtab_add(&strtab, a->st.syms[k].name),
+            .st_value = a->st.syms[k].value,
             .st_size = 0,
             .st_info = ELF32_ST_INFO(STB_LOCAL, STT_NOTYPE),
             .st_other = 0,
@@ -244,13 +252,13 @@ elf_write(struct assembler *a, FILE *out)
     nsyms_local = nesyms;
 
     /* global and undefined symbols */
-    for (k = 0; k < a->nsyms; k++) {
-        if (!a->syms[k].global && a->syms[k].defined)
+    for (k = 0; k < a->st.nsyms; k++) {
+        if (!a->st.syms[k].global && a->st.syms[k].defined)
             continue;
-        if (!a->syms[k].global && !a->syms[k].defined) {
+        if (!a->st.syms[k].global && !a->st.syms[k].defined) {
             /* undefined external */
             esyms[nesyms] = (struct elf_sym){
-                .st_name = (uint32_t)strtab_add(&strtab, a->syms[k].name),
+                .st_name = (uint32_t)strtab_add(&strtab, a->st.syms[k].name),
                 .st_value = 0,
                 .st_size = 0,
                 .st_info = ELF32_ST_INFO(STB_GLOBAL, STT_NOTYPE),
@@ -261,10 +269,10 @@ elf_write(struct assembler *a, FILE *out)
             continue;
         }
         uint16_t shndx;
-        if (!a->syms[k].defined) {
+        if (!a->st.syms[k].defined) {
             shndx = SHN_UNDEF;
         } else {
-            switch (a->syms[k].section) {
+            switch (a->st.syms[k].section) {
             case SEC_TEXT: shndx = SH_TEXT; break;
             case SEC_DATA: shndx = SH_DATA; break;
             case SEC_BSS:  shndx = SH_BSS; break;
@@ -272,8 +280,8 @@ elf_write(struct assembler *a, FILE *out)
             }
         }
         esyms[nesyms] = (struct elf_sym){
-            .st_name = (uint32_t)strtab_add(&strtab, a->syms[k].name),
-            .st_value = a->syms[k].value,
+            .st_name = (uint32_t)strtab_add(&strtab, a->st.syms[k].name),
+            .st_value = a->st.syms[k].value,
             .st_size = 0,
             .st_info = ELF32_ST_INFO(STB_GLOBAL, STT_NOTYPE),
             .st_other = 0,
@@ -306,15 +314,15 @@ elf_write(struct assembler *a, FILE *out)
         int elf_sym_idx = sym_map[r->sym_idx];
         int32_t addend = r->addend;
 
-        if (a->syms[r->sym_idx].defined && !a->syms[r->sym_idx].global) {
+        if (a->st.syms[r->sym_idx].defined && !a->st.syms[r->sym_idx].global) {
             int sec_sym;
-            switch (a->syms[r->sym_idx].section) {
+            switch (a->st.syms[r->sym_idx].section) {
             case SEC_TEXT: sec_sym = sec_sym_text; break;
             case SEC_DATA: sec_sym = sec_sym_data; break;
             case SEC_BSS:  sec_sym = sec_sym_bss; break;
             default:       sec_sym = 0; break;
             }
-            addend += (int32_t)a->syms[r->sym_idx].value;
+            addend += (int32_t)a->st.syms[r->sym_idx].value;
             elf_sym_idx = sec_sym;
         }
 
@@ -329,15 +337,15 @@ elf_write(struct assembler *a, FILE *out)
         int elf_sym_idx = sym_map[r->sym_idx];
         int32_t addend = r->addend;
 
-        if (a->syms[r->sym_idx].defined && !a->syms[r->sym_idx].global) {
+        if (a->st.syms[r->sym_idx].defined && !a->st.syms[r->sym_idx].global) {
             int sec_sym;
-            switch (a->syms[r->sym_idx].section) {
+            switch (a->st.syms[r->sym_idx].section) {
             case SEC_TEXT: sec_sym = sec_sym_text; break;
             case SEC_DATA: sec_sym = sec_sym_data; break;
             case SEC_BSS:  sec_sym = sec_sym_bss; break;
             default:       sec_sym = 0; break;
             }
-            addend += (int32_t)a->syms[r->sym_idx].value;
+            addend += (int32_t)a->st.syms[r->sym_idx].value;
             elf_sym_idx = sec_sym;
         }
 
@@ -412,7 +420,7 @@ elf_write(struct assembler *a, FILE *out)
     put32(shdr[SH_TEXT] + 8, SHF_ALLOC | SHF_EXECINSTR);
     put32(shdr[SH_TEXT] + 16, text_off);
     put32(shdr[SH_TEXT] + 20, (uint32_t)text_len);
-    put32(shdr[SH_TEXT] + 32, 4); /* sh_addralign */
+    put32(shdr[SH_TEXT] + 32, sec_addralign(&a->sections[SEC_TEXT]));
 
     /* SH_DATA */
     put32(shdr[SH_DATA] + 0, (uint32_t)shname[SH_DATA]);
@@ -420,7 +428,7 @@ elf_write(struct assembler *a, FILE *out)
     put32(shdr[SH_DATA] + 8, SHF_WRITE | SHF_ALLOC);
     put32(shdr[SH_DATA] + 16, data_off);
     put32(shdr[SH_DATA] + 20, (uint32_t)data_len);
-    put32(shdr[SH_DATA] + 32, 4); /* sh_addralign */
+    put32(shdr[SH_DATA] + 32, sec_addralign(&a->sections[SEC_DATA]));
 
     /* SH_BSS */
     put32(shdr[SH_BSS] + 0, (uint32_t)shname[SH_BSS]);
@@ -428,7 +436,7 @@ elf_write(struct assembler *a, FILE *out)
     put32(shdr[SH_BSS] + 8, SHF_WRITE | SHF_ALLOC);
     put32(shdr[SH_BSS] + 16, data_off + (uint32_t)data_len);
     put32(shdr[SH_BSS] + 20, (uint32_t)a->sections[SEC_BSS].len);
-    put32(shdr[SH_BSS] + 32, 4); /* sh_addralign */
+    put32(shdr[SH_BSS] + 32, sec_addralign(&a->sections[SEC_BSS]));
 
     /* SH_SYMTAB */
     put32(shdr[SH_SYMTAB] + 0, (uint32_t)shname[SH_SYMTAB]);

@@ -6,6 +6,11 @@ data-model spine (backlog.md, TODO line 30), building on data-model.md's
 (tiers.md); the tutorial uses homogeneous lists, and a mixed `list<any>` with
 runtime type dispatch is a systems tool.
 
+Note (2026-07): union-types.md D7 later revised this note's D1/D2/D5 to
+the closed-union form (a mixed list's element type is a closed `any of
+(...)`), leaving `obj` as the one intentionally open dynamic type. Read
+those decisions with that revision in mind.
+
 A homogeneous list already lowers (a `list<int>` is a constant global of raw
 words, with copy-on-write mutators). A heterogeneous or symbolic literal types
 `any` in the checker but does not lower, so a mixed list has a compile-time

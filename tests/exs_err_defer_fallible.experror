@@ -1,0 +1,2 @@
+# defer.md D6, enforced at the propagation site in the lowering
+a deferred statement must be infallible or consume its own failure

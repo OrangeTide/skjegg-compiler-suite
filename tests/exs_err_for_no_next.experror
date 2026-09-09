@@ -1,0 +1,3 @@
+# iter_element's cursor branch (sources.md D2/D3)
+cannot iterate over Point
+next(shared c is Point) returns maybe T

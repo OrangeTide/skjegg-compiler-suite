@@ -9,51 +9,8 @@
 
 #include "arena.h"
 #include "util.h"
-
-/****************************************************************
- * Tokens
- ****************************************************************/
-
-enum token_type {
-    T_IDENT,
-    T_DOT_IDENT,
-    T_INT,
-    T_STRING,
-    T_HASH,
-    T_COMMA,
-    T_COLON,
-    T_LPAREN,
-    T_RPAREN,
-    T_MINUS,
-    T_PLUS,
-    T_NEWLINE,
-    T_EOF,
-};
-
-struct token {
-    int type;
-    int line;
-    const char *str;
-    int str_len;
-    long ival;
-};
-
-/****************************************************************
- * Lexer
- ****************************************************************/
-
-struct lexer {
-    const char *src;
-    const char *pos;
-    int line;
-    struct token tok;
-    char *str_buf;
-    int str_cap;
-    struct arena *arena;
-};
-
-void lex_init(struct lexer *l, const char *src);
-void lex_next(struct lexer *l);
+#include "asm_lex.h"
+#include "asm_obj.h"
 
 /****************************************************************
  * Operands
@@ -92,33 +49,6 @@ enum section_id {
     SEC_COUNT,
 };
 
-struct reloc {
-    uint32_t offset;
-    int sym_idx;
-    int32_t addend;
-};
-
-struct section {
-    uint8_t *data;
-    int len;
-    int cap;
-    struct reloc *relocs;
-    int nrelocs;
-    int reloc_cap;
-};
-
-/****************************************************************
- * Symbols
- ****************************************************************/
-
-struct symbol {
-    const char *name;
-    int section;
-    uint32_t value;
-    int global;
-    int defined;
-};
-
 /****************************************************************
  * Assembler state
  ****************************************************************/
@@ -127,9 +57,7 @@ struct assembler {
     struct lexer lex;
     struct section sections[SEC_COUNT];
     int cur_section;
-    struct symbol *syms;
-    int nsyms;
-    int sym_cap;
+    struct symtab st;
     int pass;
     int errors;
     struct arena arena;
@@ -155,26 +83,5 @@ int encode_size(const char *mnemonic, int size,
  ****************************************************************/
 
 void elf_write(struct assembler *a, FILE *out);
-
-/****************************************************************
- * Symbol table helpers
- ****************************************************************/
-
-int sym_lookup(struct assembler *a, const char *name);
-int sym_add(struct assembler *a, const char *name);
-void sym_define(struct assembler *a, int idx, int section, uint32_t value);
-void sym_set_global(struct assembler *a, int idx);
-
-/****************************************************************
- * Section helpers
- ****************************************************************/
-
-void sec_emit8(struct section *s, uint8_t val);
-void sec_emit16(struct section *s, uint16_t val);
-void sec_emit32(struct section *s, uint32_t val);
-void sec_align(struct section *s, int alignment);
-void sec_space(struct section *s, int nbytes);
-void sec_add_reloc(struct section *s, uint32_t offset, int sym_idx,
-                   int32_t addend);
 
 #endif

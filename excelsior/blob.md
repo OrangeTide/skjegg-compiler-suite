@@ -111,8 +111,14 @@ plain signed `int`, with unsignedness contained at the blob boundary.
 ## Bridges: str and the byte builder
 
 A `str` and a blob meet at their edges: a `str` exposes its UTF-8 bytes as a blob
-(reading them is safe; writing through a str-backed blob is undefined, since a
-`str` is immutable), and a blob decodes to a `str` as UTF-8 (R7's lenient decode).
+(reading them is safe; a write through a str-backed blob is a **runtime fault**,
+decided 2026-07: the blob carries a writable flag, and a store through a
+read-only blob reports a teaching fault, a WRITE_TO_STR kind joining
+runtime-errors.md's list when blobs land. A `str` is immutable, other machinery
+relies on that, and the language has no undefined behavior; the fault keeps the
+read zero-copy at the cost of one branch per store, and tells the author why
+strings cannot be written in place instead of silently mutating a copy), and a
+blob decodes to a `str` as UTF-8 (R7's lenient decode).
 The growable, arena-managed `buffer of byte` (buffer.md) stays the tool for
 building a byte sequence of unknown length; a blob is the fixed-window typed
 accessor, and a blob can be taken over a buffer's bytes. Growth and the typed

@@ -6,111 +6,6 @@
 #include <string.h>
 
 /****************************************************************
- * Section helpers
- ****************************************************************/
-
-void
-sec_emit8(struct section *s, uint8_t val)
-{
-    if (s->len + 1 > s->cap) {
-        s->cap = s->cap ? s->cap * 2 : 256;
-        s->data = realloc(s->data, s->cap);
-    }
-    s->data[s->len++] = val;
-}
-
-void
-sec_emit16(struct section *s, uint16_t val)
-{
-    sec_emit8(s, (uint8_t)(val >> 8));
-    sec_emit8(s, (uint8_t)(val & 0xFF));
-}
-
-void
-sec_emit32(struct section *s, uint32_t val)
-{
-    sec_emit8(s, (uint8_t)(val >> 24));
-    sec_emit8(s, (uint8_t)(val >> 16));
-    sec_emit8(s, (uint8_t)(val >> 8));
-    sec_emit8(s, (uint8_t)(val & 0xFF));
-}
-
-void
-sec_align(struct section *s, int alignment)
-{
-    while (s->len % alignment)
-        sec_emit8(s, 0);
-}
-
-void
-sec_space(struct section *s, int nbytes)
-{
-    int k;
-    for (k = 0; k < nbytes; k++)
-        sec_emit8(s, 0);
-}
-
-void
-sec_add_reloc(struct section *s, uint32_t offset, int sym_idx, int32_t addend)
-{
-    if (s->nrelocs >= s->reloc_cap) {
-        s->reloc_cap = s->reloc_cap ? s->reloc_cap * 2 : 16;
-        s->relocs = realloc(s->relocs, s->reloc_cap * sizeof(struct reloc));
-    }
-    s->relocs[s->nrelocs].offset = offset;
-    s->relocs[s->nrelocs].sym_idx = sym_idx;
-    s->relocs[s->nrelocs].addend = addend;
-    s->nrelocs++;
-}
-
-/****************************************************************
- * Symbol table
- ****************************************************************/
-
-int
-sym_lookup(struct assembler *a, const char *name)
-{
-    int k;
-    for (k = 0; k < a->nsyms; k++) {
-        if (strcmp(a->syms[k].name, name) == 0)
-            return k;
-    }
-    return -1;
-}
-
-int
-sym_add(struct assembler *a, const char *name)
-{
-    int idx;
-
-    if (a->nsyms >= a->sym_cap) {
-        a->sym_cap = a->sym_cap ? a->sym_cap * 2 : 32;
-        a->syms = realloc(a->syms, a->sym_cap * sizeof(struct symbol));
-    }
-    idx = a->nsyms++;
-    a->syms[idx].name = arena_strdup(&a->arena, name);
-    a->syms[idx].section = -1;
-    a->syms[idx].value = 0;
-    a->syms[idx].global = 0;
-    a->syms[idx].defined = 0;
-    return idx;
-}
-
-void
-sym_define(struct assembler *a, int idx, int section, uint32_t value)
-{
-    a->syms[idx].section = section;
-    a->syms[idx].value = value;
-    a->syms[idx].defined = 1;
-}
-
-void
-sym_set_global(struct assembler *a, int idx)
-{
-    a->syms[idx].global = 1;
-}
-
-/****************************************************************
  * Register parsing
  ****************************************************************/
 
@@ -414,6 +309,10 @@ handle_directive(struct assembler *a, const char *dir)
         lex_next(&a->lex);
         if (a->lex.tok.type == T_INT) {
             int align = (int)a->lex.tok.ival;
+            /* record the section's strongest alignment so the ELF writer can
+               set sh_addralign and the linker places the section aligned */
+            if (align > s->align)
+                s->align = align;
             if (a->pass == 2)
                 sec_align(s, align);
             else {
@@ -427,10 +326,10 @@ handle_directive(struct assembler *a, const char *dir)
     if (strcmp(dir, ".globl") == 0) {
         lex_next(&a->lex);
         if (a->lex.tok.type == T_IDENT || a->lex.tok.type == T_DOT_IDENT) {
-            int idx = sym_lookup(a, a->lex.tok.str);
+            int idx = sym_lookup(&a->st, a->lex.tok.str);
             if (idx < 0)
-                idx = sym_add(a, a->lex.tok.str);
-            sym_set_global(a, idx);
+                idx = sym_add(&a->st, a->lex.tok.str);
+            sym_set_global(&a->st, idx);
             lex_next(&a->lex);
         }
         return;
@@ -457,9 +356,9 @@ handle_directive(struct assembler *a, const char *dir)
             } else if (a->lex.tok.type == T_IDENT
                        || a->lex.tok.type == T_DOT_IDENT) {
                 if (a->pass == 2) {
-                    int idx = sym_lookup(a, a->lex.tok.str);
+                    int idx = sym_lookup(&a->st, a->lex.tok.str);
                     if (idx < 0)
-                        idx = sym_add(a, a->lex.tok.str);
+                        idx = sym_add(&a->st, a->lex.tok.str);
                     sec_add_reloc(s, s->len, idx, 0);
                     sec_emit32(s, 0);
                 } else {
@@ -786,10 +685,10 @@ run_pass(struct assembler *a)
                 if (a->lex.tok.type == T_COLON) {
                     lex_next(&a->lex);
                     if (a->pass == 1) {
-                        int idx = sym_lookup(a, label);
+                        int idx = sym_lookup(&a->st, label);
                         if (idx < 0)
-                            idx = sym_add(a, label);
-                        sym_define(a, idx, a->cur_section,
+                            idx = sym_add(&a->st, label);
+                        sym_define(&a->st, idx, a->cur_section,
                                    a->sections[a->cur_section].len);
                     }
                     continue;
@@ -815,10 +714,10 @@ run_pass(struct assembler *a)
             if (a->lex.tok.type == T_COLON) {
                 lex_next(&a->lex);
                 if (a->pass == 1) {
-                    int idx = sym_lookup(a, name);
+                    int idx = sym_lookup(&a->st, name);
                     if (idx < 0)
-                        idx = sym_add(a, name);
-                    sym_define(a, idx, a->cur_section,
+                        idx = sym_add(&a->st, name);
+                    sym_define(&a->st, idx, a->cur_section,
                                a->sections[a->cur_section].len);
                 }
                 continue;
@@ -863,7 +762,8 @@ as_init(struct assembler *a, const char *src)
     memset(a, 0, sizeof(*a));
     arena_init(&a->arena);
     a->lex.arena = &a->arena;
-    lex_init(&a->lex, src);
+    a->st.arena = &a->arena;
+    lex_init(&a->lex, src, '|', 0);
 }
 
 void
@@ -875,7 +775,7 @@ as_free(struct assembler *a)
         free(a->sections[k].data);
         free(a->sections[k].relocs);
     }
-    free(a->syms);
+    free(a->st.syms);
     free(a->lex.str_buf);
     arena_free(&a->arena);
 }

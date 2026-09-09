@@ -1,77 +1,71 @@
-/* exc_host.c : minimal in-process test host for the Excelsior ABI.
+/* libexc.c : the portable Excelsior guest runtime (host-abi.md layer 1).
  *
- * Implements the send primitive, spawn with per-instance field segments, and
- * the bootstrap entry from host-abi.md, enough to run self, inherited,
- * overridden, and true cross-object sends (to a spawned actor of another
- * class) under qemu, without the scheduler or paging. One address space.
- *
- * The compiler emits, per class, a descriptor:
- *     struct class_desc { parent; nverbs; nwords; image;
- *                         (selector, code) * nverbs; }
- * where nwords sizes the object's field segment and image seeds it.
- * and, for the entry class, __exc_entry_class (a pointer to its descriptor)
- * and __exc_entry_selector (the entry verb's selector). __exc_send resolves
- * a selector against the receiver's descriptor chain and calls the verb.
+ * Everything the compiler emits calls to and nothing host-specific: the
+ * send primitive, spawn with per-instance field segments, the value
+ * helpers (strings, lists, records, decimals, sources), and fault and
+ * trace reporting. Host services arrive through the __exh_* binding
+ * (libexc.h, host-abi.md D5); the native binding and its entry driver
+ * are runtime/exc_native.c. The trap kinds and the source struct layout
+ * are kept in sync with excelsior/lower.c.
  *
  * Cross-compiled with the m68k toolchain (freestanding, no libc), like
- * pascal_rt.c, and linked with start.S which calls this main().
+ * pascal_rt.c, and linked with start.S.
  *
  * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
+#include "libexc.h"
 #include "utf8.h"        /* vendored decoder for code-point string ops (R7) */
 
-typedef long word;
+void __exc_trap(const struct exc_trapdesc *why, int a, int b);
 
-/* Fault reporting (excelsior/runtime-errors.md). The compiler emits one
- * { kind, line, &file, &name } descriptor per trap site and calls
- * __exc_trap(desc, a, b) with up to two kind-specific runtime words.
- * Kinds are kept in sync with excelsior/lower.c. */
-#define EXC_TRAP_NO_BRANCH   1
-#define EXC_TRAP_INDEX_RANGE 2
-#define EXC_TRAP_UNCONSUMED  3
-#define EXC_TRAP_DIV_ZERO    4
-#define EXC_TRAP_OVERFLOW    5
+/* A source (sources.md D4): the continuation backing is a stackful
+ * coroutine. The struct's layout is shared with the compiler (the
+ * argument words start at EXC_SRC_ARG0 = 28 in excelsior/lower.c) and
+ * with the context-switch helpers __exc_src_next / __exc_src_yield in
+ * runtime/start.S, which read the fields by byte offset. The private
+ * stack sits after the argument words and grows down from stack_top;
+ * there is no overflow check yet (the quota fault is memory.md's). */
+#define EXC_SRC_STACK 4096
 
-struct exc_trapdesc {
-    int kind;
-    int line;
-    const char *file;           /* NUL-terminated, or 0 (host-detected) */
-    const char *name;           /* the failing callee etc., or 0 */
+struct exc_src {
+    int state;                  /*  0: 0 new, 1 running, 2 done */
+    void *body;                 /*  4: the compiled body function */
+    char *body_sp;              /*  8: the suspended body's sp */
+    char *body_fp;              /* 12: the suspended body's fp */
+    char *pump_sp;              /* 16: the pump side, across a switch */
+    char *pump_fp;              /* 20 */
+    char *stack_top;            /* 24: the private stack's high end */
+    /* argument words follow (offset 28), then the private stack */
 };
 
-void __exc_trap(const struct exc_trapdesc *why, int a, int b);
-extern void *__moo_arena_alloc(int size);
+void *
+__exc_src_new(void *body, int argwords)
+{
+    int hdr = (int)sizeof(struct exc_src);
+    int total = hdr + argwords * 4 + EXC_SRC_STACK;
+    struct exc_src *s = __moo_arena_alloc(total);
+
+    if (!s)
+        return 0;
+    s->state = 0;
+    s->body = body;
+    s->stack_top = (char *)s + total;
+    return s;
+}
 
 /* decimal is base-10 fixed-point: value x 10^-4 in an int32 (numbers.md) */
 #define DEC_SCALE 10000
 
-struct class_desc {
-    struct class_desc *parent;
-    long nverbs;
-    long nwords;                /* field-segment size, in words */
-    const word *image;          /* initial field values, or 0 for all-zero */
-    long verbs[];               /* nverbs pairs: [selector, code] */
-};
+/* struct class_desc, struct exc_obj: libexc.h. An object is its header
+ * followed by its own field segment, so `self.field` is one load of the
+ * handle plus a constant offset, and two instances of a class never
+ * share storage; the segment lays out parent fields first, so an
+ * inherited field keeps its offset in a subclass (host-abi.md D3). */
 
-/* An object is its header followed by its own field segment, so `self.field`
- * is one load of the handle plus a constant offset, and two instances of a
- * class never share storage. The segment is laid out parent fields first, so
- * an inherited field keeps its offset in a subclass. */
-struct exc_obj {
-    struct class_desc *cls;
-    word fields[];
-};
-
-#define EXC_OBJ_HDR ((long)sizeof(struct exc_obj))
-
-/* The running actor handle. Compiled code reads it for `self`; the host
- * sets it before entering a verb (here, once, for the bootstrap actor). */
+/* The running actor handle. Compiled code reads it for `self`; the
+ * binding sets it before entering a verb. */
 struct exc_obj *__exc_self;
-
-/* Emitted by the compiler for the entry class (the one with `main`). */
-extern struct class_desc *__exc_entry_class;
-extern long __exc_entry_selector;
 
 /* Call a verb with argc words from argv. Excelsior's calling convention
  * (args pushed right to left, caller pops, result in d0) matches the m68k
@@ -201,14 +195,11 @@ __exc_decdiv(word a, word b)
     return (word)q;
 }
 
-/* Strings. A string value is a pointer to this descriptor; the compiler
- * emits literals as { len, &bytes } and routes concat/equality here. New
- * strings are bump-allocated from the arena in start.S (immutable, no free).
- * Ported from runtime/str.c (the MooScript string runtime). */
-struct exc_str {
-    int len;
-    const char *data;
-};
+/* Strings. A string value is a pointer to a struct exc_str descriptor
+ * (libexc.h); the compiler emits literals as { len, &bytes } and routes
+ * concat/equality here. New strings are bump-allocated from the arena in
+ * start.S (immutable, no free). Ported from runtime/str.c (the MooScript
+ * string runtime). */
 
 struct exc_str *
 __exc_str_concat(struct exc_str *a, struct exc_str *b)
@@ -362,9 +353,6 @@ __exc_str_at(struct exc_str *s, int i)
  * (the console object below); the old `log()` builtin retired into these
  * two. */
 
-extern int write(int fd, const char *buf, int n);
-extern void exit(int code);
-
 static int
 fmt_int(long v, char *buf)
 {
@@ -436,14 +424,14 @@ eputs(const char *s)
     int n = 0;
     while (s[n])
         n++;
-    write(2, s, n);
+    __exh_emit(0, s, n);            /* channel 0: the author channel */
 }
 
 static void
 eputi(long v)
 {
     char buf[16];
-    write(2, buf, fmt_int(v, buf));
+    __exh_emit(0, buf, fmt_int(v, buf));
 }
 
 static void
@@ -514,7 +502,7 @@ __exc_trap(const struct exc_trapdesc *why, int a, int b)
         eputs("no branch chosen and no else\n");
         break;
     }
-    exit(70);
+    __exh_fault(why, a, b);         /* does not return */
 }
 
 /* The R2 trace event: a `match` statement whose subject matched no arm
@@ -566,38 +554,38 @@ void
 __exc_trace_str(struct exc_str *s)
 {
     if (s && s->len)
-        write(2, s->data, s->len);
-    write(2, "\n", 1);
+        __exh_emit(0, s->data, s->len);
+    __exh_emit(0, "\n", 1);
 }
 
 void
 __exc_trace_int(long v)
 {
     char buf[24];
-    write(2, buf, fmt_int(v, buf));
-    write(2, "\n", 1);
+    __exh_emit(0, buf, fmt_int(v, buf));
+    __exh_emit(0, "\n", 1);
 }
 
 void
 __exc_trace_float(double v)
 {
     char buf[48];
-    write(2, buf, fmt_double(v, buf));
-    write(2, "\n", 1);
+    __exh_emit(0, buf, fmt_double(v, buf));
+    __exh_emit(0, "\n", 1);
 }
 
 void
 __exc_trace_dec(long v)
 {
     char buf[24];
-    write(2, buf, fmt_dec(v, buf));
-    write(2, "\n", 1);
+    __exh_emit(0, buf, fmt_dec(v, buf));
+    __exh_emit(0, "\n", 1);
 }
 
 void
 __exc_trace_bool(long v)
 {
-    write(2, v ? "true\n" : "false\n", v ? 5 : 6);
+    __exh_emit(0, v ? "true\n" : "false\n", v ? 5 : 6);
 }
 
 /* String conversions for interpolation holes: the compiler routes each
@@ -807,6 +795,81 @@ __exc_list_concat(struct exc_list *a, struct exc_list *b)
     return r;
 }
 
+/* The combinators (function-values.md D6/D7): map, filter, and sort over a
+ * list, each taking a func value (a code pointer) and calling it per element
+ * through the ordinary calling convention (a func value marshals like any
+ * call, so a plain indirect C call works, the same as call_verb above). Each
+ * returns a fresh copy-on-write list; the source is untouched. These are the
+ * compiler-known prelude: `map(xs, f)` lowers to a call here. They read as
+ * ordinary function calls (not a baked `by` clause, which function-values.md
+ * declines), and could move to a userland library once a module system lands.
+ */
+struct exc_list *
+__exc_list_map(struct exc_list *l, void *fp)
+{
+    word (*f)(word) = (word (*)(word))fp;
+    long i, c = l ? l->count : 0;
+    struct exc_list *r = __moo_arena_alloc((int)(sizeof(long) +
+                                                 c * sizeof(word)));
+    r->count = c;
+    for (i = 0; i < c; i++)
+        r->elem[i] = f(l->elem[i]);
+    return r;
+}
+
+struct exc_list *
+__exc_list_filter(struct exc_list *l, void *fp)
+{
+    word (*keep)(word) = (word (*)(word))fp;
+    long i, n = 0, c = l ? l->count : 0;
+    /* over-allocate c words, fill the kept ones, then set the real count;
+     * keep is called exactly once per element (no double-eval of a predicate
+     * with side effects) */
+    struct exc_list *r = __moo_arena_alloc((int)(sizeof(long) +
+                                                 c * sizeof(word)));
+    for (i = 0; i < c; i++)
+        if (keep(l->elem[i]))
+            r->elem[n++] = l->elem[i];
+    r->count = n;
+    return r;
+}
+
+/* reduce(list, init, step): fold the list left to right with the step func,
+ * `acc = step(acc, elem)`, seeded with init. Returns the accumulator (a word,
+ * whatever type the fold produces), not a list. */
+word
+__exc_list_reduce(struct exc_list *l, word init, void *fp)
+{
+    word (*step)(word, word) = (word (*)(word, word))fp;
+    long i, c = l ? l->count : 0;
+    word acc = init;
+
+    for (i = 0; i < c; i++)
+        acc = step(acc, l->elem[i]);
+    return acc;
+}
+
+struct exc_list *
+__exc_list_sort(struct exc_list *l, void *fp)
+{
+    word (*before)(word, word) = (word (*)(word, word))fp;
+    long i, j, c = l ? l->count : 0;
+    struct exc_list *r = __moo_arena_alloc((int)(sizeof(long) +
+                                                 c * sizeof(word)));
+    r->count = c;
+    for (i = 0; i < c; i++)
+        r->elem[i] = l->elem[i];
+    /* stable insertion sort: `before(a, b)` is true when a sorts ahead of b,
+     * and an element is inserted only past those it strictly precedes */
+    for (i = 1; i < c; i++) {
+        word key = r->elem[i];
+        for (j = i - 1; j >= 0 && before(key, r->elem[j]); j--)
+            r->elem[j + 1] = r->elem[j];
+        r->elem[j + 1] = key;
+    }
+    return r;
+}
+
 /* Records (records.md): a record value is a pointer to an arena block of its
  * word-sized fields (no header; the compiler knows the field count and each
  * field's offset). Value semantics are preserved by copying the block on
@@ -944,10 +1007,10 @@ __exc_str_find(struct exc_str *hay, struct exc_str *needle)
     return 0;
 }
 
-/* The selector-name table the compiler emits: { count, &name0, ... } in
- * selector-id order (output.md; the seed of host-abi.md's selector intern
- * table). The host resolves its native objects' verb names against it. */
-extern long __exc_selnames[];
+/* The selector-name table the compiler emits (__exc_selnames, libexc.h):
+ * { count, &name0, ... } in selector-id order (output.md; the seed of
+ * host-abi.md's selector intern table). A binding resolves its native
+ * objects' verb names against it through exc_sel_by_name. */
 
 static int
 ci_eq(const char *a, const char *b)
@@ -966,8 +1029,8 @@ ci_eq(const char *a, const char *b)
     return *a == *b;
 }
 
-static long
-sel_by_name(const char *name)
+long
+exc_sel_by_name(const char *name)
 {
     long n = __exc_selnames[0];
 
@@ -977,52 +1040,120 @@ sel_by_name(const char *name)
     return -1;
 }
 
-/* The console: a host-native player object whose tell(msg) writes the
- * string plus a newline to stdout. The bootstrap hands it to a
- * main(player is obj) entry verb (output.md), so output tests exercise
- * the real send path end to end. */
-static word
-console_tell(struct exc_str *msg)
+/****************************************************************
+ * The freeze/thaw walker (host-abi.md D7): the persistence bridge.
+ * The descriptor's field table sits after the verb pairs (nfields,
+ * then { &name, woffset, kind } per own field; the parent chain covers
+ * inherited fields, whose offsets are absolute in the segment). A word
+ * serializes as a decimal string, a str by content, capped at
+ * EXC_VALMAX-1 bytes (a host property is a short string); a record
+ * field is skipped (EXC_FK_REC, not walked yet). Keys carry the "x_"
+ * prefix so a field can never collide with a host's own reserved
+ * property names (smolmoo's name/verb/elf), while staying visible and
+ * editable in its property editor.
+ *
+ * Freeze writes every walked field unconditionally. The tempting
+ * delta-from-defaults freeze is unsound here: a field reverting to its
+ * default would write nothing, the stale property from an earlier
+ * freeze would survive, and the next thaw would resurrect the old
+ * value. Delta returns when a property-delete joins the binding
+ * surface (host-abi.md D5). Thaw overlays found properties onto the
+ * image-seeded segment, so an absent property is the default. On a
+ * host without persistence (__exh_prop_* returning negative) both are
+ * harmless no-ops.
+ ****************************************************************/
+
+#define EXC_KEYMAX 64
+#define EXC_VALMAX 256
+
+static const char *
+field_key(const char *name, char *buf)
 {
-    if (msg && msg->len)
-        write(1, msg->data, msg->len);
-    write(1, "\n", 1);
-    return 0;
+    int n = 0;
+
+    buf[n++] = 'x';
+    buf[n++] = '_';
+    while (*name && n < EXC_KEYMAX - 1)
+        buf[n++] = *name++;
+    buf[n] = 0;
+    return buf;
 }
 
-/* The console is native, so it has no fields: nwords 0, no image. */
-static struct {
-    struct class_desc *parent;
-    long nverbs;
-    long nwords;
-    const word *image;
-    long verbs[2];
-} console_desc = { 0, 0, 0, 0, { 0, 0 } };
-
-static struct exc_obj console_obj = { (struct class_desc *)&console_desc };
-
-extern long __exc_entry_argc;
-
-int
-main(void)
+static long
+parse_int(const char *s, long len)
 {
-    word argv[1];
-    long argc = 0;
-    long tell = sel_by_name("tell");
-    struct exc_obj *bootstrap;
+    long v = 0, i = 0, neg = 0;
 
-    if (tell >= 0) {                /* the module knows `tell` */
-        console_desc.nverbs = 1;
-        console_desc.verbs[0] = tell;
-        console_desc.verbs[1] = (long)console_tell;
+    if (i < len && s[i] == '-') {
+        neg = 1;
+        i++;
     }
-    /* the entry actor is spawned like any other, so it gets its own field
-     * segment seeded from its class image */
-    bootstrap = __exc_spawn(__exc_entry_class);
-    __exc_self = bootstrap;
-    if (__exc_entry_argc >= 1) {
-        argv[0] = (word)&console_obj;
-        argc = 1;
+    for (; i < len && s[i] >= '0' && s[i] <= '9'; i++)
+        v = v * 10 + (s[i] - '0');
+    return neg ? -v : v;
+}
+
+void
+exc_freeze(struct exc_obj *o, long host_obj)
+{
+    char key[EXC_KEYMAX], val[EXC_VALMAX];
+
+    if (!o || !o->cls)
+        return;
+    for (struct class_desc *c = o->cls; c; c = c->parent) {
+        const long *ft = c->verbs + 2 * c->nverbs;
+        long nf = ft[0];
+
+        for (long i = 0; i < nf; i++) {
+            const char *name = (const char *)ft[1 + 3 * i];
+            long off  = ft[2 + 3 * i];
+            long kind = ft[3 + 3 * i];
+            word v = o->fields[off];
+
+            if (kind == EXC_FK_WORD) {
+                val[fmt_int(v, val)] = 0;
+                __exh_prop_put(host_obj, field_key(name, key), val);
+            } else if (kind == EXC_FK_STR) {
+                struct exc_str *s = (struct exc_str *)v;
+                int n;
+
+                if (!s)
+                    continue;       /* no default, never assigned */
+                n = s->len < EXC_VALMAX - 1 ? s->len : EXC_VALMAX - 1;
+                for (int j = 0; j < n; j++)
+                    val[j] = s->data[j];
+                val[n] = 0;
+                __exh_prop_put(host_obj, field_key(name, key), val);
+            }
+            /* EXC_FK_REC, EXC_FK_MAYBE, EXC_FK_OBJ: not walked, stay the default */
+        }
     }
-    return (int)__exc_send(bootstrap, __exc_entry_selector, argc, argv);
+}
+
+void
+exc_thaw(struct exc_obj *o, long host_obj)
+{
+    char key[EXC_KEYMAX], val[EXC_VALMAX];
+
+    if (!o || !o->cls)
+        return;
+    for (struct class_desc *c = o->cls; c; c = c->parent) {
+        const long *ft = c->verbs + 2 * c->nverbs;
+        long nf = ft[0];
+
+        for (long i = 0; i < nf; i++) {
+            const char *name = (const char *)ft[1 + 3 * i];
+            long off  = ft[2 + 3 * i];
+            long kind = ft[3 + 3 * i];
+            long n = __exh_prop_get(host_obj, field_key(name, key),
+                                    val, EXC_VALMAX - 1);
+
+            if (n < 0)
+                continue;
+            if (kind == EXC_FK_WORD)
+                o->fields[off] = parse_int(val, n);
+            else if (kind == EXC_FK_STR)
+                o->fields[off] = (word)make_str(val, (int)n);
+        }
+    }
 }

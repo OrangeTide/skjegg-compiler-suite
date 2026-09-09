@@ -137,6 +137,11 @@ enum ir_op {
     /* AAPCS64: the indirect-result pointer for a memory-class struct return,
        placed in x8 (a = the result address) rather than a normal arg register */
     IR_ARG_X8,
+
+    /* basic inline assembly: sym holds the verbatim asm text (one string, the
+       body of an asm(...) statement).  A backend emits it as-is.  It is an
+       opaque barrier: no operands, no register allocation, no scheduling. */
+    IR_ASM,
 };
 
 /****************************************************************
@@ -171,6 +176,12 @@ struct ir_func {
     signed char *param_cls; /* psABI: 4 entries per param, the class of each
                            slot (0 = INTEGER/gp, 1 = FLOAT/fp); a -2 in slot 0
                            marks a MEMORY struct read from the stack */
+    signed char *param_fw; /* psABI: per-param 1 = a single-precision (4-byte)
+                           float scalar, 0 otherwise.  The RISC-V ilp32 ABI
+                           passes a single float in one integer register and a
+                           double in two, a distinction the local slot size
+                           loses (a float slot is widened to 8), so the RV
+                           backend reads it here; NULL unless set */
     signed char ret_neb; /* psABI: return-struct register slots (0 = scalar/void
                            via the ordinary RETV paths; 1-4 = struct in
                            registers; -1 = MEMORY, returned via a hidden ptr) */

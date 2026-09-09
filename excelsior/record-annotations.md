@@ -106,11 +106,10 @@ a compile-time sequence of tag forms. A serializer macro walks it:
         endfor
     endmacro
 
-This needs two things the macro interpreter does not have yet: a meta `if` and
-membership or head/rest access over a tag form (`t.head`, `t.rest`, or `symbol
-in t`). Those are the next macro-interpreter increment, so annotations land
-after it. The tag storage and the `.tags` accessor can be built first; the
-consuming macro waits on the increment.
+This needed two things the macro interpreter did not have at the time: a meta
+`if` and membership or head/rest access over a tag form (`t.head`, `t.rest`,
+or `symbol in t`). That macro-interpreter increment has since landed (see the
+D6 note below), so a serializer macro like this one runs today.
 
 ## Survey
 
@@ -137,8 +136,9 @@ consuming macro waits on the increment.
 The six decisions are confirmed and settled. The surface extends the field line
 to a comma list of entries, a `tags [...]` clause decorates the preceding field
 with a symbol-led atom list, and the tags are free-form compile-time metadata a
-macro reads through `fieldsof`'s new `.tags` accessor. Implementation waits on
-the macro-interpreter increment (D6); the storage and accessor can land first.
+macro reads through `fieldsof`'s new `.tags` accessor. The storage and
+accessor landed first and the macro-interpreter increment (D6) followed, so
+all six decisions are implemented.
 
 
 **D1. A field line is a comma list of entries, terminated by a newline.** An
@@ -170,6 +170,9 @@ layout and zero runtime cost. `fieldsof(T)` descriptors gain `.tags` beside
 `.name` and `.type`, a compile-time sequence of tag forms.
 
 **D6. Consuming tags waits on the macro-interpreter increment.** Walking `.tags`
-needs a meta `if` and head/rest or membership over a tag form, which the current
-interpreter does not have. The storage and `.tags` accessor can be implemented
-first; a serializer macro follows the increment.
+needs a meta `if` and head/rest or membership over a tag form, which the
+interpreter at the time did not have. The storage and `.tags` accessor were
+implemented first. (Since implemented: the increment landed with the meta
+`if`/`elseif`/`else`, `not`, `and`/`or`, symbol `=`/`<>`, a tag form's
+`.head` and `.rest`, `.first` on a sequence, and `text in seq` membership,
+so a serializer macro runs today.)

@@ -210,8 +210,11 @@ process_assigns(struct linker *ld, struct ld_output_sec *os,
     }
 }
 
-int
-ld_link(struct linker *ld)
+/* Arch-neutral layout: symbol collection, section placement, final symbol
+ * addresses and entry resolution.  Shared by the m68k and RISC-V linkers; the
+ * relocation application that follows is target-specific. */
+void
+ld_layout(struct linker *ld)
 {
     struct ld_script *sc = &ld->script;
 
@@ -332,6 +335,41 @@ ld_link(struct linker *ld)
             die("entry symbol '%s' is undefined", sc->entry);
         ld->entry_vaddr = ld->syms[ei].value;
     }
+}
+
+/* Locate the output section whose address range holds an input section, so a
+ * relocation can be patched into the merged output buffer.  Shared. */
+struct ld_output_sec *
+ld_find_output_sec(struct linker *ld, struct ld_input_sec *isec)
+{
+    struct ld_script *sc = &ld->script;
+    for (int s = 0; s < sc->nsections; s++) {
+        struct ld_output_sec *candidate = &sc->sections[s];
+        if (candidate->discard)
+            continue;
+        uint32_t sec_start = candidate->vaddr;
+        uint32_t sec_end = candidate->vaddr + candidate->size;
+        if (isec->assigned_vaddr >= sec_start &&
+            isec->assigned_vaddr < sec_end)
+            return candidate;
+    }
+    return NULL;
+}
+
+/* Report any global symbol that stayed undefined after relocation.  Shared. */
+void
+ld_check_undefined(struct linker *ld)
+{
+    for (int i = 0; i < ld->nsyms; i++) {
+        if (!ld->syms[i].defined && ld->syms[i].name[0] != '\0')
+            die("undefined symbol: %s", ld->syms[i].name);
+    }
+}
+
+int
+ld_link(struct linker *ld)
+{
+    ld_layout(ld);
 
     /* apply relocations */
     for (int oi = 0; oi < ld->nobjs; oi++) {
@@ -352,20 +390,7 @@ ld_link(struct linker *ld)
             if (!isec->matched)
                 continue;
 
-            /* find the output section containing this input section */
-            struct ld_output_sec *os = NULL;
-            for (int s = 0; s < sc->nsections; s++) {
-                struct ld_output_sec *candidate = &sc->sections[s];
-                if (candidate->discard)
-                    continue;
-                uint32_t sec_start = candidate->vaddr;
-                uint32_t sec_end = candidate->vaddr + candidate->size;
-                if (isec->assigned_vaddr >= sec_start &&
-                    isec->assigned_vaddr < sec_end) {
-                    os = candidate;
-                    break;
-                }
-            }
+            struct ld_output_sec *os = ld_find_output_sec(ld, isec);
             if (!os)
                 die("%s: cannot find output section for reloc", obj->path);
 
@@ -401,13 +426,23 @@ ld_link(struct linker *ld)
         }
     }
 
-    /* check for undefined globals */
-    for (int i = 0; i < ld->nsyms; i++) {
-        if (!ld->syms[i].defined && ld->syms[i].name[0] != '\0')
-            die("undefined symbol: %s", ld->syms[i].name);
-    }
-
+    ld_check_undefined(ld);
     return 0;
+}
+
+/* Append a zeroed object slot, growing the (arena-backed) object array.  The
+ * old array is abandoned to the arena; relocs pointers are carried by value so
+ * ld_free still frees each once.  Used for archive members and the synthetic
+ * GOT object. */
+struct ld_object *
+ld_add_object(struct linker *ld)
+{
+    struct ld_object *objs = arena_zalloc(&ld->arena,
+        (size_t)(ld->nobjs + 1) * sizeof(struct ld_object));
+    if (ld->nobjs)
+        memcpy(objs, ld->objs, (size_t)ld->nobjs * sizeof(struct ld_object));
+    ld->objs = objs;
+    return &ld->objs[ld->nobjs++];
 }
 
 void

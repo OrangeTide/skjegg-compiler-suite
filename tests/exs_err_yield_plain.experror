@@ -1,0 +1,2 @@
+# sources.md D4: yield is the source body's producer
+`yield` is only legal inside a func `returns source of T`

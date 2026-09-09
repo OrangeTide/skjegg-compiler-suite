@@ -52,6 +52,8 @@ enum tok {
     T_EQ, T_NE, T_LT, T_LE, T_GT, T_GE,
     T_ASSIGN,
     T_TO, T_THEN, T_DO, T_RETURNS, T_CAN, T_FAIL, T_WITH,
+    T_YIELD,                  /* source body: produce and suspend (sources.md) */
+    T_DEFER,                  /* block-scoped teardown (defer.md) */
     T_TAGS,                   /* record field annotations (record-annotations.md) */
     /***** punctuation *****/
     T_LPAREN, T_RPAREN, T_LBRACK, T_RBRACK,
@@ -85,6 +87,14 @@ int lex_trace_on(void);
 void lex_cond_begin(void);
 void lex_cond_end(void);
 
+/* A func literal's body has newline-separated statements, but a lambda is
+ * often written inside a call's `( )`, where newlines are suppressed. These
+ * reset the bracket depth to zero for the body (so its newlines flow) and
+ * restore it after `endfunc` (function-values.md). lex_body_begin returns the
+ * saved depth for lex_body_end; the pair nests for a lambda in a lambda. */
+int lex_body_begin(void);
+void lex_body_end(int saved);
+
 /* A saved lexer position, so the parser can scan ahead and rewind. Used
  * once, to tell an if-expression condition from a closing `then`
  * (then-in-if.md D5). The fields are the lexer's whole state; nothing
@@ -112,7 +122,14 @@ struct scope;
  * lives in lowering), and ET_DEC is an untyped decimal constant (a
  * literal that has not yet resolved to decimal or float; numbers.md). */
 enum { ET_ANY = 900, ET_NIL, ET_MAYBE, ET_DEC, ET_SIGNAL, ET_TYPEHOLE,
-       ET_SLICE };
+       ET_SLICE, ET_SOURCE, ET_FUNC };
+/* ET_FUNC is a function value's type (function-values.md D1/D3): a code
+ * pointer at rest. `inner` is the return type (NULL for a valueless func),
+ * and `verbs` reuses its node-list slot to point at the declaring node's
+ * N_PARAM list, so the parameter types are read from there. */
+/* ET_SOURCE is `source of T` (sources.md D4): a failable-continuation
+ * source, a suspended body each pump resumes. Second-class (D5): a local
+ * or func parameter, never a field, never sent. Its ->inner is T. */
 /* ET_SLICE is an object slice, `obj with (open, close)` (object-slices.md): a
  * structural verb subset. `verbs` is the N_NAME list of permitted verbs; the
  * value at rest is a plain object handle, so it lowers exactly like `obj`. */
@@ -162,12 +179,21 @@ enum node_kind {
     N_NOTHING,                /* the maybe absence literal */
     N_EMPTY, N_FULL,          /* set identity literals (set-of.md) */
     N_FAIL,                   /* fail statement */
+    N_YIELD,                  /* yield statement in a source body (sources.md) */
+    N_DEFER,                  /* `defer STMT` block-scoped teardown (defer.md) */
     N_TOSTR,                  /* stringify an interpolation hole */
     N_THENELSE,               /* `cond then A else B` if-expression */
     N_SELECT,                 /* `select idx from a, b, c otherwise d` */
     N_MATCHEXPR,               /* `match E` in expression position */
     N_OTHERWISE,              /* `A otherwise B` value fallback operator */
     N_DATALIT, N_DATAITEM, N_QUOTE,
+    N_COMP,                   /* list comprehension `[e for x in xs if c]`
+                               * (function-values.md D5): a=head, b=source,
+                               * c=cond (or NULL); name/sym the binder */
+    N_FUNCLIT,                /* anonymous func value `func(p) returns T ...
+                               * endfunc` (function-values.md D1): a=params,
+                               * b=body, type=return; name is a generated
+                               * label assigned at lower time */
     N_QUASI,                  /* quasi FORM: a template with ${} splices (meta.md) */
     N_HOLE,                   /* ${expr} element of a data literal / quasi splice */
 };

@@ -1,0 +1,1 @@
+`home` is a field of another object; reach it with a verb, not a direct read (the actor boundary)

@@ -7,6 +7,13 @@ operator has shipped with `else` baked into its grammar. This note explores
 generalizing `else` into a fallback operator usable beyond `select`, what
 "triggers" it, which types it covers, and a recommended path.
 
+Note (2026-07): the fallback operator spelled `A else B` throughout this
+note was later renamed to `A otherwise B` (fallback-words.md), and
+`select` was itself retired (choosers.md). Read every `A else B` below
+as `A otherwise B`. The sources/continuation-pump sketch that closed
+this note has been extracted to sources.md and decided there; nothing
+of it is implemented yet.
+
 Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
 
@@ -165,61 +172,10 @@ two consumers (`else` for the default, `if var` for the branch).
 
 ## Sources: `while var`, `for in`, and the generator question (2026-07)
 
-Icon's `every i := find("or", sentence) do write(i)` raised whether the
-language needs generators. The answer that survived discussion: the
-fallible pump IS the iteration protocol, and everything else follows.
-
-Once `while var i = next(c)` exists, "iterable" has a definition:
-anything that can be pumped for a value-or-failure. Then `for i in
-expr` is sugar for that loop. Lists, strings, and ranges are sources
-the compiler inlines (the counted loop shipped today, no continuation
-involved); any other source is a first-class value with the pump face:
-
-    for i in find("or", sentence)      // any source works here
-        write(i)
-    endfor
-
-    var c = find("or", sentence)       // or pump it by hand
-    while var i = next(c)
-        write(i)
-    endwhile
-
-A source value has two implementations behind one face:
-
-- **A cursor record** holding explicit position state; `next` is an
-  ordinary fallible func (UFCS will spell it `c.next()`).
-- **A failable continuation**: a function whose declared return type is
-  a source does not run its body when called; it hands back a suspended
-  computation, and each pump resumes it until it fails. The mechanism
-  is not speculative: TinC and TinScheme already lower delimited
-  continuations through `__cont_capture`/`__cont_resume` in
-  runtime/start.S and start_rv.S, so two backends are wired today and
-  Excelsior reuses the same primitives. The delimited discipline is
-  exactly the source discipline: the pump is the delimiter, the turn is
-  the outermost one, and the second-class rule below keeps every
-  captured source inside its delimiter. This is Icon's generator minus
-  the two poisons: the state is a declared, first-class value rather
-  than invisible call-site state, and resumption happens only at the
-  pump.
-
-Because a source is a value, iteration delegates: a func can take a
-source parameter, consume part of it, wrap one source in another
-(filter, take-while), or return one. `every` becomes ordinary code.
-
-The one restriction pays for freeze/thaw: a source is second-class. It
-lives as a local and passes down into funcs, but cannot be stored in a
-field or sent to another actor, so it is consumed within the turn that
-made it and the freeze boundary never sees a suspended stack. Persist
-the results as a list; a persistent producer is a session, which the
-actor model already provides.
-
-Rejected, precisely: implicit caller-saved call-site state (undeclared,
-breaks on nested loops and recursion, which is why Icon ties it to the
-generator frame), and suspended control flow that outlives the turn.
-The principle: **generation is data, a turn-local declared source, or
-an actor; never hidden call-site state, never suspended control flow
-across the freeze boundary.**
-
-Consumers of fallibility now number four: `else` for the default,
-`if var` for the branch, `while var` for the pump loop, and `for in`
-as sugar over the pump.
+The sketch that lived here (the fallible pump as the iteration protocol,
+sources as second-class turn-local values, the cursor-record and
+failable-continuation backings) moved to its own note, **sources.md**,
+and was decided there (2026-07). What stays for the
+rationale trail is the conclusion: consumers of fallibility number four,
+`otherwise` for the default, `if var` for the branch, `while var` for
+the pump loop, and `for in` as sugar over the pump.

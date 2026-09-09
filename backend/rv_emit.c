@@ -51,6 +51,188 @@ static const char *fregs[] = {
 #define FP_ALLOC_FIRST 2
 #define FP_ALLOC_LAST  13
 
+#ifdef CC_PSABI
+/****************************************************************
+ * The RISC-V ILP32 calling convention
+ *
+ * This is the platform ABI, so a function compiled here and one
+ * compiled by gcc -mabi=ilp32 can call each other.  Without it the
+ * backend uses the toolkit's own stack convention, which m68k's C ABI
+ * happens to match and RISC-V's does not, so a gcc-built runtime is
+ * unreachable there (doc/emulator.md).
+ *
+ * The rules, as gcc emits them:
+ *
+ *   - A one-word argument takes the next a-register, a0 through a7.
+ *   - A two-word one (long long, and a double, since the soft-float ABI
+ *     passes floating point in the integer registers) takes the next
+ *     two, low word first.  The pair is NOT aligned to an even
+ *     register, unlike ARM's EABI.
+ *   - With exactly one register left, a two-word argument splits: the
+ *     low word rides it and the high word goes to the stack.
+ *   - What is left goes in the outgoing block, a two-word argument
+ *     8-aligned within it.
+ *   - A double crosses through memory, since RV32 has no instruction
+ *     moving the halves of an f-register to integer registers.  A
+ *     single crosses in one register through fmv.x.w.
+ *   - Results come back in a0, or a0 and a1 for two words.
+ *
+ * a0-a7 are neither allocated nor used as scratch (only t0 and t1 are),
+ * so argument registers can be written in any order with no hazard.
+ ****************************************************************/
+
+static const char *argreg[] = {
+    "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7",
+};
+
+#define NARGREG 8
+
+/* Where one argument or parameter lives. */
+struct rv_ploc {
+    int words;      /* 1 or 2 (a larger aggregate rides the stack whole) */
+    int ireg;       /* first a-register index, -1 if none */
+    int nreg;       /* registers used: 0, 1 (split low word), or words */
+    int soff;       /* byte offset of the stack part within the block */
+};
+
+/*
+ * Assign homes to a sequence of arguments given their widths in words.
+ * Returns the size of the outgoing stack block.  Both the caller and the
+ * callee run this over the same sequence, which is what makes the two
+ * sides agree.
+ */
+static int
+rv_abi_assign(const int *words, int n, struct rv_ploc *loc)
+{
+    int ix = 0, soff = 0, k;
+
+    for (k = 0; k < n; k++) {
+        int w = words[k];
+
+        loc[k].words = w;
+        loc[k].ireg = -1;
+        loc[k].nreg = 0;
+        loc[k].soff = 0;
+
+        if (w == 1) {
+            if (ix < NARGREG) {
+                loc[k].ireg = ix++;
+                loc[k].nreg = 1;
+            } else {
+                loc[k].soff = soff;
+                soff += 4;
+            }
+        } else if (w == 2) {
+            if (ix + 1 < NARGREG) {
+                loc[k].ireg = ix;
+                loc[k].nreg = 2;
+                ix += 2;
+            } else if (ix < NARGREG) {
+                /* split: the low word takes the last register, the high
+                   word opens the stack block */
+                loc[k].ireg = ix;
+                loc[k].nreg = 1;
+                ix = NARGREG;
+                loc[k].soff = soff;
+                soff += 4;
+            } else {
+                soff = (soff + 7) & ~7;
+                loc[k].soff = soff;
+                soff += 8;
+            }
+        } else {
+            /* an aggregate wider than two words: stack, 8-aligned */
+            ix = NARGREG;
+            soff = (soff + 7) & ~7;
+            loc[k].soff = soff;
+            soff += w * 4;
+        }
+    }
+    return soff;
+}
+
+/* Width in words of parameter `slot`, from its slot size. */
+static int
+rv_param_words(struct ir_func *fn, int slot)
+{
+    int sz = (fn->slot_size[slot] + 3) & ~3;
+
+    /* A single-precision float is one ABI word even though its local slot is
+       widened to 8 bytes; the caller passes it in one integer register, so
+       the callee must count it the same way (see param_fw). */
+    if (fn->param_fw && fn->param_fw[slot])
+        return 1;
+    return sz / 4 < 1 ? 1 : sz / 4;
+}
+
+/*
+ * Home of parameter `slot` on the callee side, plus the byte offset of
+ * its home slot in the frame when it arrives in registers.  Homes are
+ * laid out below s0 in parameter order, each 8-aligned when two words
+ * wide, so a register parameter is spilled once in the prologue and read
+ * from its home by the ordinary slot-based lowering afterwards.
+ */
+static void
+rv_param(struct ir_func *fn, int slot, struct rv_ploc *out, int *home)
+{
+    struct rv_ploc loc[64];
+    int words[64] = { 0 };
+    int n = fn->nparams;
+    int i, h = 0;
+
+    if (n > 64)
+        n = 64;
+    for (i = 0; i < n; i++)
+        words[i] = rv_param_words(fn, i);
+    rv_abi_assign(words, n, loc);
+
+    for (i = 0; i < n; i++) {
+        int sz = words[i] * 4;
+        if (loc[i].nreg == 0)
+            continue;
+        if (sz % 8 == 0)
+            h = (h + 7) & ~7;
+        h += sz;
+        if (i == slot) {
+            *out = loc[i];
+            *home = -h;
+            return;
+        }
+    }
+    *out = loc[slot < n ? slot : 0];
+    *home = 0;
+}
+
+/* Bytes reserved below s0 for register-parameter homes. */
+static int
+param_home(struct ir_func *fn)
+{
+    struct rv_ploc p;
+    int i, h = 0, home;
+
+    for (i = 0; i < fn->nparams; i++) {
+        rv_param(fn, i, &p, &home);
+        if (p.nreg == 0)
+            continue;
+        if (-home > h)
+            h = -home;
+    }
+    return (h + 7) & ~7;
+}
+#endif /* CC_PSABI */
+
+/* Frame bytes reserved above the locals (0 under the stack convention). */
+static int
+frame_reserve(struct ir_func *fn)
+{
+#ifdef CC_PSABI
+    return param_home(fn);
+#else
+    (void)fn;
+    return 0;
+#endif
+}
+
 /****************************************************************
  * Frame layout helpers
  ****************************************************************/
@@ -90,6 +272,18 @@ slot_offset(struct ir_func *fn, int slot)
     int i, off;
 
     if (slot < fn->nparams) {
+#ifdef CC_PSABI
+        /* a register parameter reads from its home below s0, one the
+           caller left on the stack from the incoming block: s0 is the
+           entry sp minus 8, so the block starts at s0+8 */
+        struct rv_ploc p;
+        int home;
+
+        rv_param(fn, slot, &p, &home);
+        if (p.nreg > 0)
+            return home;
+        return 8 + p.soff;
+#else
         /* params sit above the frame from s0+8 upward */
         off = 8;
         for (i = 0; ; i++) {
@@ -100,8 +294,9 @@ slot_offset(struct ir_func *fn, int slot)
                 return off;
             off += sz;
         }
+#endif
     }
-    /* locals grow downward from s0 */
+    /* locals grow downward from s0, below the parameter homes */
     off = 0;
     for (i = fn->nparams; i <= slot; i++) {
         int sz = slot_bytes(fn, i);
@@ -109,13 +304,14 @@ slot_offset(struct ir_func *fn, int slot)
             off = (off + 7) & ~7;
         off += sz;
     }
-    return -off;
+    return -frame_reserve(fn) - off;
 }
 
 static int
 frame_size(struct ir_func *fn)
 {
-    return locals_size(fn) + fn->nfspills * 8 + fn->nspills * 4
+    return frame_reserve(fn) + locals_size(fn) + fn->nfspills * 8
+           + fn->nspills * 4
            + fn->ni64spills * 8;
 }
 
@@ -124,20 +320,22 @@ frame_size(struct ir_func *fn)
 static int
 fspill_byte_offset(struct ir_func *fn, int temp)
 {
-    return -locals_size(fn) - (fn->temp_spill[temp] + 8);
+    return -frame_reserve(fn) - locals_size(fn) - (fn->temp_spill[temp] + 8);
 }
 
 static int
 spill_byte_offset(struct ir_func *fn, int temp)
 {
-    return -locals_size(fn) - fn->nfspills * 8 - (fn->temp_spill[temp] + 4);
+    return -frame_reserve(fn) - locals_size(fn) - fn->nfspills * 8
+           - (fn->temp_spill[temp] + 4);
 }
 
 /* i64 spills are read/written as lw/sw pairs, so 4-byte alignment suffices */
 static int
 i64spill_byte_offset(struct ir_func *fn, int temp)
 {
-    return -locals_size(fn) - fn->nfspills * 8 - fn->nspills * 4
+    return -frame_reserve(fn) - locals_size(fn) - fn->nfspills * 8
+           - fn->nspills * 4
            - (fn->temp_spill[temp] + 8);
 }
 
@@ -484,6 +682,29 @@ emit_prologue(FILE *out, struct ir_func *fn)
     for (k = 0; k < n_used_fregs; k++)
         fprintf(out, "\tfsd %s, %d(sp)\n",
             fregs[used_fregs[k]], pad + NSAVED * 4 + k * 8);
+
+#ifdef CC_PSABI
+    /* Spill the register parameters into their homes, so every
+       parameter is read from a slot afterwards and the rest of the
+       lowering does not know the difference.  A split parameter's high
+       word is copied down from the caller's block into the same home,
+       which makes it contiguous like the others. */
+    for (k = 0; k < fn->nparams; k++) {
+        struct rv_ploc p;
+        int home;
+
+        rv_param(fn, k, &p, &home);
+        if (p.nreg == 0)
+            continue;
+        fprintf(out, "\tsw %s, %d(s0)\n", argreg[p.ireg], home);
+        if (p.nreg == 2)
+            fprintf(out, "\tsw %s, %d(s0)\n", argreg[p.ireg + 1], home + 4);
+        else if (p.words == 2) {
+            fprintf(out, "\tlw t0, %d(s0)\n", 8 + p.soff);
+            fprintf(out, "\tsw t0, %d(s0)\n", home + 4);
+        }
+    }
+#endif
 }
 
 static void
@@ -514,6 +735,142 @@ emit_epilogue(FILE *out, struct ir_func *fn)
     fprintf(out, "\tret\n");
 }
 
+#ifdef CC_PSABI
+/*
+ * Set up the arguments in a0-a7 and the outgoing block, call, and take
+ * the result.  A double crosses in two integer registers and so has to
+ * pass through memory: `stage` is 8 bytes at the top of the block kept
+ * for that, and for a double result on the way back.
+ */
+static void
+emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
+                int indirect, int retkind)
+{
+    struct rv_ploc loc[16];
+    int words[16] = { 0 };
+    int k, push_bytes, stack_bytes, stage, need_stage;
+
+    for (k = 0; k < narg; k++) {
+        if (arg_is_i64[k])
+            words[k] = 2;
+        else if (arg_is_float[k])
+            words[k] = arg_fw[k] ? 1 : 2;    /* a single rides one word */
+        else
+            words[k] = 1;
+    }
+    stack_bytes = rv_abi_assign(words, narg, loc);
+
+    need_stage = (retkind == RET_FLOAT && i->imm != FWIDTH_F32);
+    for (k = 0; k < narg; k++)
+        if (arg_is_float[k] && !arg_fw[k])
+            need_stage = 1;
+
+    stage = (stack_bytes + 7) & ~7;
+    push_bytes = stage + (need_stage ? 8 : 0);
+    push_bytes = (push_bytes + 15) & ~15;
+    if (need_stage && push_bytes < stage + 8)
+        push_bytes = stage + 16;
+
+    if (push_bytes > 0)
+        fprintf(out, "\taddi sp, sp, -%d\n", push_bytes);
+
+    for (k = 0; k < narg; k++) {
+        struct rv_ploc *p = &loc[k];
+
+        if (arg_is_float[k] && !arg_fw[k]) {
+            /* double: park it, then move the halves as words */
+            const char *sa = frs_w(out, fn, arg_temps[k], 0, 0);
+            fprintf(out, "\tfsd %s, %d(sp)\n", sa, stage);
+            if (p->nreg >= 1)
+                fprintf(out, "\tlw %s, %d(sp)\n", argreg[p->ireg], stage);
+            else
+                fprintf(out, "\tlw t0, %d(sp)\n\tsw t0, %d(sp)\n",
+                    stage, p->soff);
+            if (p->nreg == 2)
+                fprintf(out, "\tlw %s, %d(sp)\n", argreg[p->ireg + 1],
+                    stage + 4);
+            else
+                fprintf(out, "\tlw t0, %d(sp)\n\tsw t0, %d(sp)\n",
+                    stage + 4, p->soff + (p->nreg == 1 ? 0 : 4));
+        } else if (arg_is_float[k]) {
+            /* single: one integer register's worth of bits */
+            const char *sa = frs_w(out, fn, arg_temps[k], 0, 1);
+            if (p->nreg == 1) {
+                fprintf(out, "\tfmv.x.w %s, %s\n", argreg[p->ireg], sa);
+            } else {
+                fprintf(out, "\tfmv.x.w t0, %s\n", sa);
+                fprintf(out, "\tsw t0, %d(sp)\n", p->soff);
+            }
+        } else if (arg_is_i64[k]) {
+            const char *lo = i64_rs_lo(out, fn, arg_temps[k], 0);
+            if (p->nreg >= 1)
+                fprintf(out, "\tmv %s, %s\n", argreg[p->ireg], lo);
+            else
+                fprintf(out, "\tsw %s, %d(sp)\n", lo, p->soff);
+            {
+                const char *hi = i64_rs_hi(out, fn, arg_temps[k], 0);
+                if (p->nreg == 2)
+                    fprintf(out, "\tmv %s, %s\n", argreg[p->ireg + 1], hi);
+                else
+                    fprintf(out, "\tsw %s, %d(sp)\n", hi,
+                        p->soff + (p->nreg == 1 ? 0 : 4));
+            }
+        } else {
+            const char *sa = rs(out, fn, arg_temps[k], 0);
+            if (p->nreg == 1)
+                fprintf(out, "\tmv %s, %s\n", argreg[p->ireg], sa);
+            else
+                fprintf(out, "\tsw %s, %d(sp)\n", sa, p->soff);
+        }
+    }
+
+    if (indirect) {
+        /* the target is read before the call, and a0-a7 are already
+           loaded, so it goes through a scratch register */
+        const char *sa = rs(out, fn, i->a, 0);
+        if (strcmp(sa, "t0") != 0)
+            fprintf(out, "\tmv t0, %s\n", sa);
+        fprintf(out, "\tjalr ra, t0, 0\n");
+    } else {
+        fprintf(out, "\tjal ra, %s\n", i->sym);
+    }
+    narg = 0;
+
+    if (i->dst >= 0) {
+        if (retkind == RET_I64) {
+            const char *dlo = i64_rd_lo(fn, i->dst, 0);
+            const char *dhi = i64_rd_hi(fn, i->dst, 1);
+            if (strcmp(dlo, "a0") != 0)
+                fprintf(out, "\tmv %s, a0\n", dlo);
+            if (strcmp(dhi, "a1") != 0)
+                fprintf(out, "\tmv %s, a1\n", dhi);
+            i64_wd_lo(out, fn, i->dst, dlo);
+            i64_wd_hi(out, fn, i->dst, dhi);
+        } else if (retkind == RET_FLOAT) {
+            int f32 = i->imm == FWIDTH_F32;
+            const char *sd = frd_w(fn, i->dst, 0);
+            if (f32) {
+                fprintf(out, "\tfmv.w.x %s, a0\n", sd);
+            } else {
+                fprintf(out, "\tsw a0, %d(sp)\n", stage);
+                fprintf(out, "\tsw a1, %d(sp)\n", stage + 4);
+                fprintf(out, "\tfld %s, %d(sp)\n", sd, stage);
+            }
+            fwd_f(out, fn, i->dst, sd, f32);
+        } else {
+            const char *sd = rd(fn, i->dst, 0);
+            if (strcmp(sd, "a0") != 0)
+                fprintf(out, "\tmv %s, a0\n", sd);
+            wd(out, fn, i->dst, sd);
+        }
+    }
+
+    /* the block is released only after a double result has been read
+       out of the staging area */
+    if (push_bytes > 0)
+        fprintf(out, "\taddi sp, sp, %d\n", push_bytes);
+}
+#else
 static void
 emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
                 int indirect, int retkind)
@@ -593,7 +950,79 @@ emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
         }
     }
 }
+#endif /* CC_PSABI */
 
+#ifdef CC_PSABI
+/*
+ * A tail call under the platform ABI.  With every argument in a
+ * register the frame can go before the jump, which is a real tail call.
+ * With an argument in the outgoing block it cannot: that block lives
+ * below the frame being torn down.  The fall-back is an ordinary call
+ * and a return, which is correct but keeps the frame, so a tail-
+ * recursive loop through it grows the stack.  Only the Scheme front end
+ * relies on the tail property, and it does not target this ABI.
+ */
+static void
+emit_tailcall_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
+                    int indirect)
+{
+    struct rv_ploc loc[16];
+    int words[16] = { 0 };
+    int k, stack_bytes;
+
+    for (k = 0; k < narg; k++) {
+        if (arg_is_i64[k])
+            words[k] = 2;
+        else if (arg_is_float[k])
+            words[k] = arg_fw[k] ? 1 : 2;
+        else
+            words[k] = 1;
+    }
+    stack_bytes = rv_abi_assign(words, narg, loc);
+
+    if (stack_bytes > 0) {
+        struct ir_insn call = *i;
+        call.dst = -1;
+        emit_call_flush(out, fn, &call, indirect, RET_INT);
+        emit_epilogue(out, fn);
+        return;
+    }
+
+    for (k = 0; k < narg; k++) {
+        struct rv_ploc *p = &loc[k];
+
+        if (arg_is_float[k] && !arg_fw[k]) {
+            const char *sa = frs_w(out, fn, arg_temps[k], 0, 0);
+            fprintf(out, "\taddi sp, sp, -8\n");
+            fprintf(out, "\tfsd %s, 0(sp)\n", sa);
+            fprintf(out, "\tlw %s, 0(sp)\n", argreg[p->ireg]);
+            fprintf(out, "\tlw %s, 4(sp)\n", argreg[p->ireg + 1]);
+            fprintf(out, "\taddi sp, sp, 8\n");
+        } else if (arg_is_float[k]) {
+            const char *sa = frs_w(out, fn, arg_temps[k], 0, 1);
+            fprintf(out, "\tfmv.x.w %s, %s\n", argreg[p->ireg], sa);
+        } else if (arg_is_i64[k]) {
+            const char *lo = i64_rs_lo(out, fn, arg_temps[k], 0);
+            fprintf(out, "\tmv %s, %s\n", argreg[p->ireg], lo);
+            fprintf(out, "\tmv %s, %s\n", argreg[p->ireg + 1],
+                i64_rs_hi(out, fn, arg_temps[k], 0));
+        } else {
+            const char *sa = rs(out, fn, arg_temps[k], 0);
+            fprintf(out, "\tmv %s, %s\n", argreg[p->ireg], sa);
+        }
+    }
+    if (indirect) {
+        const char *sa = rs(out, fn, i->a, 0);
+        fprintf(out, "\tmv t2, %s\n", sa);
+    }
+    narg = 0;
+    emit_epilogue_no_ret(out, fn);
+    if (indirect)
+        fprintf(out, "\tjr t2\n");
+    else
+        fprintf(out, "\tj %s\n", i->sym);
+}
+#else
 static void
 emit_tailcall_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
                     int indirect)
@@ -615,12 +1044,18 @@ emit_tailcall_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
     else
         fprintf(out, "\tj %s\n", i->sym);
 }
+#endif /* CC_PSABI */
 
 static void
 emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
 {
     switch (i->op) {
     case IR_NOP:
+        break;
+
+    case IR_ASM:
+        /* basic inline asm: the string is emitted verbatim */
+        fprintf(out, "%s\n", i->sym);
         break;
 
     case IR_LIC: {
@@ -951,8 +1386,22 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_FRETV: {
         int f32 = i->imm == FWIDTH_F32;
         const char *sa = frs_w(out, fn, i->a, 0, f32);
+#ifdef CC_PSABI
+        /* the soft-float ABI returns in a0 (and a1 for a double), which
+           on RV32 a double can only reach through memory */
+        if (f32) {
+            fprintf(out, "\tfmv.x.w a0, %s\n", sa);
+        } else {
+            fprintf(out, "\taddi sp, sp, -8\n");
+            fprintf(out, "\tfsd %s, 0(sp)\n", sa);
+            fprintf(out, "\tlw a0, 0(sp)\n");
+            fprintf(out, "\tlw a1, 4(sp)\n");
+            fprintf(out, "\taddi sp, sp, 8\n");
+        }
+#else
         if (strcmp(sa, "fa0") != 0)
             fprintf(out, "\tfmv.%s fa0, %s\n", f32 ? "s" : "d", sa);
+#endif
         emit_epilogue(out, fn);
         break;
     }

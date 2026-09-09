@@ -55,10 +55,12 @@ The largest thread, and ordered: each pass depends on the one before it.
    the runtime form symbolic data (typed-data.md) can lower to.
 
 4. **Record introspection for macros** (TODO line 46). **record-introspection.md
-   (decided, implemented as a slice)** settles this, the spine's final pass: four bare-name
+   (decided, implemented as a slice)** settles this, the spine's final pass: three bare-name
    compile-time meta primitives a procedural macro calls, `typeof(expr)` (the
-   value-to-type bridge), `hasfield(T, "name")` (presence), `fieldtype(T,
-   "name")` (the field's type; the "field of type T" predicate is
+   value-to-type bridge), `fieldtype(T,
+   "name")` (the field's type, fallible; presence is consuming its failure,
+   which subsumed the separate `hasfield` first sketched here; the "field of
+   type T" predicate is
    `fieldtype(...) is int`), and `fieldsof(T)` (the fields in declaration order
    as `.name`/`.type` descriptors); names run their words together with no
    sigil and no underscore (Zig's `@` and D's `__traits` ruled out; `fieldsof`
@@ -182,8 +184,11 @@ The largest thread, and ordered: each pass depends on the one before it.
 
 ## Functions: a lambda / block design
 
-- **A first-class function or block value.** **function-values.md (decided, not
-  yet implemented)** settles this. The guiding constraint is that every construct should be an
+- **A first-class function or block value.** **function-values.md (decided,
+  largely implemented: the func value core, func-typed params, non-capture, and
+  the D5 comprehension are in; contextual inference, the named-decl macro, and
+  escaping closures remain)** settles
+  this. The guiding constraint is that every construct should be an
   ordinary function or a binding (macro-synthesizable), not a special form frozen
   into the compiler. So `func(params) returns T ... endfunc` is the one anonymous
   primitive; a named function keeps its readable `func name(...) ... endfunc`
@@ -275,14 +280,15 @@ The largest thread, and ordered: each pass depends on the one before it.
 
 ## Control flow and lifetime
 
-- **`defer`** (TODO line 52). **defer.md (decided)** settles this: `defer STMT`
+- **`defer`** (TODO line 52). **defer.md (decided, implemented)** settles this: `defer STMT`
   registers a statement to run when its enclosing lexical block exits (block
   scope, LIFO, run at exit reading current values). The key finding is that
   `defer` is **not** a memory tool here (the arena reclaims memory) but the
   teardown complement to Icon-style fallibility, the restore/release that
   survives the invisible exit a propagating fallible creates; it runs on every
   structured exit (fall-through, `return`, `break`/`continue`, fallible
-  propagation) but not on a hard fault (which rolls back the turn), so it is not
+  propagation) but not on a hard fault (which aborts the turn; rollback was
+  retired from memory.md D6), so it is not
   a general `finally`. This **decouples `defer` from the memory work below**: it
   needs nothing from the memory-management design. `errdefer` (a failure-only
   teardown) is deferred. Tier Mechanics.
@@ -294,9 +300,10 @@ The largest thread, and ordered: each pass depends on the one before it.
   start mark on a fault); an escaped immutable value lives in a reference-counted
   heap that needs no cycle collector (values are acyclic by construction) and is
   shared O(1) across actors; actors have an explicit lifecycle (`spawn`/`destroy`,
-  a destroyed reference failing safely) so object cycles do not leak. The turn is
-  transactional (settling runtime-errors.md's open question: journaled field
-  writes commit or roll back), memory is bounded by a quota (exhaustion an
+  a destroyed reference failing safely) so object cycles do not leak. A fault
+  aborts the turn without rollback (D6 as revised by the cost pass; the
+  first version's journaled transaction was retired), memory is bounded by a
+  quota (exhaustion an
   `OVERFLOW`-class fault), and persist/freeze/refcount are the same type set
   (buffers and closures excluded, so escaping closures stay forbidden and a
   persistent buffer is uniquely-owned). Deferred: the coarse object cycle sweep,
@@ -396,7 +403,8 @@ endmacro` def keyword in template and procedural tiers, reification by
   placement).
 - **Record introspection primitives** (data-model spine item 4, above).
   **Settled: record-introspection.md** names the primitives (`typeof` /
-  `hasfield` / `fieldtype` / `fieldsof`), the field-iteration static-foreach,
+  `fieldtype` / `fieldsof`; its D2 made `fieldtype` fallible, subsuming the
+  separate `hasfield`), the field-iteration static-foreach,
   and the guardrails. What remains is implementation, not a pass. Tier: Meta.
   A first vertical slice is implemented (`typeof` / `fieldsof` / `fieldtype`,
   quote/quasi, a compile-time `for`, and `get(rec, "field")`), enough to run a
@@ -473,6 +481,58 @@ endmacro` def keyword in template and procedural tiers, reification by
   execution: no meta `while`, no recursion, no user meta functions, so the only
   meta loop remains the bounded `for` and expansion terminates structurally.
   Depends on meta.md, and typed-macros.md wants the constants. Tier: Meta.
+
+- **The source type and the iteration pump** (raised 2026-07).
+  **Settled: sources.md (decided)**, extracted from else-operator.md and
+  decided in its own pass: `while var i = next(c)` is the pump, `for in`
+  its sugar, and both backings are in, the cursor record (plain data, a
+  `next(shared c is C) returns maybe T` func, only the `for` desugar is
+  new) and the `source of T` failable continuation (`yield` produces,
+  `fail` or the body's end exhausts, second-class and turn-local, over
+  the `__cont_capture`/`__cont_resume` machinery TinC and TinScheme
+  already lower). Both halves are implemented
+  (`tests/exs_source_cursor.exs`, `tests/exs_source_yield.exs`); the
+  continuation backing landed as a stackful coroutine on a private
+  per-source stack, the mechanism amendment recorded at sources.md D1.
+  Tier: Mechanics.
+
+- **The host ABI** (raised 2026-07). **Settled: host-abi.md (decided, v1)**,
+  promoted from the v0 sketch after surveying the three target hosts
+  (boris, smolmoo, aldeby; all ColdFire VM) plus the native tier. Two
+  layers: the fixed compiler-to-libexc contract (largely implemented,
+  today's test host is its reference) and the small versioned
+  `__exh_*` host binding (output, properties, wait/sleep, post, fault,
+  spawn), hypercalls on VM hosts and plain calls natively. Sends stay
+  synchronous and VM-local in v1 (a remote handle range reserves the
+  future rendezvous send); per-instance state settled as
+  handle-plus-offset; the descriptor freeze/thaw walker is the
+  persistence bridge per host. Implementation queue: the libexc /
+  native-binding split and the smolmoo binding are done
+  (`runtime/libexc.{c,h}`, `runtime/exc_native.c`,
+  `runtime/exc_smolmoo.c` + `smolmoo_rt.S` + `smolmoo.ld`,
+  `make smolmoo-demo`; the binding work also made the ColdFire backend
+  strictly CF-legal), and so is the freeze/thaw walker
+  (`exc_freeze`/`exc_thaw` over the descriptor's new field tables,
+  `make test-exc-walker`; the smolmoo `_start` thaw-run-freezes, so the
+  host object is the persistent actor). Validated against a live
+  smolmoo server (2026-07): full demo output to a player session, and
+  a counter verb persisting across fresh-VM invocations with its state
+  a readable host property. The boris mapping tracks its pre-freeze
+  spec. Tier: host concern surfaced at Mechanics.
+
+- **The transactional turn's cost model** (raised 2026-07, reopening
+  memory.md D6). **Settled: D6 revised, rollback retired** (2026-07).
+  The pass costed the candidates against the real hosts' budgets
+  (60-512KB VMs, 4096-10000-instruction tick slices): a per-write
+  journal is unbounded by a write-heavy loop, a whole-heap snapshot
+  burns one to two tick budgets per turn, and the affordable
+  send-boundary copy-on-write (the actor rule makes send receivers the
+  only mutable state) still drags in epochs, phases, refcount diffing,
+  and a spawn release list. The machinery was judged too complicated
+  for its value: a fault aborts the turn, state stands as written,
+  refcounts reclaim eagerly, and per-invocation hosts keep
+  discard-on-fault for free through the walker. defer.md D4 keeps its
+  outcome with a revised rationale and is unblocked. Tier: Mechanics.
 
 ## Folded and closed
 

@@ -1,6 +1,25 @@
 # Function values: `func` as the primitive, named by binding
 
-Status: decided (2026-07), not yet implemented. The lambda/block pass from the backlog (backlog.md),
+Status: decided (2026-07); largely implemented. **The `func` value core** (D1)
+is in: an anonymous `func(params) returns T ... endfunc` is a value (a code
+pointer), bound to a local, passed as an argument, and called through an
+indirect call; its type is `func(T1, T2) returns U` (D3, the explicit form).
+**Non-capture** (D4) is enforced: a lambda sees only its own parameters and
+module-level names, and capturing an enclosing local or `self` is a teaching
+error (escaping closures stay deferred). **map, filter, sort, and reduce** (D6/D7)
+ship as a compiler-known **prelude**: each takes a list and a func value,
+lowering to a runtime helper that calls the func value per element. `map`,
+`filter`, and `sort` return a fresh copy-on-write list; `reduce(xs, init, step)`
+folds to a single value. They read as ordinary calls (`sort(xs, before)`, not a
+baked `by` clause, which the note declines) and could move to a userland library
+once a module system exists. A key-func `sort` overload is the remaining
+combinator. **D5's list comprehension** landed first: `[HEAD for x in SOURCE (if
+COND)?]` over a list, str, or range source (a nested-head list of lists works).
+Still to come: contextual type inference for a bare literal (D3's inference
+half), the named-declaration prelude macro (D2), a named func referenced as a
+value, a captured closure (D4's escaping half), a `maybe`/float result through
+a func value, and multiple `for` clauses in one comprehension. See the
+implementation notes at the end. The lambda/block pass from the backlog (backlog.md),
 the design `list-ops.md` (D5) defers `map`/`filter`/`reduce` and `sort` to. Tier:
 comprehensions are World; a `func` value and the combinators are Mechanics; an
 escaping captured closure is deferred. Builds on the actor-safety rule of
@@ -258,3 +277,112 @@ the guiding constraint of this pass.
 taking `func` values (Mechanics tier).** Named aggregates (`sum`/`count`/...) as
 the World-tier reduce-avoidance are a deferred follow-on; the general `reduce`
 covers them meanwhile.
+
+## Implementation notes
+
+**The comprehension landed first, and it needs no function value.** D5 is the
+World-tier piece an author reaches for most (everyday map and filter), and it
+is self-contained: no `func` type, no closure, no indirect call. That made it
+the right first slice of a large note, exactly as the note frames it ("the one
+sugar, and it is just a loop").
+
+**Lowered by synthesizing a `for` statement.** A comprehension is an
+expression that produces a value, and the language has no block-expression to
+desugar into. So the lowering builds the loop as real statement AST at lower
+time, `for x in SOURCE do result = append(result, HEAD) endfor` (the append
+wrapped in `if COND`), and runs it through the ordinary statement path. This
+reuses the list/str iteration and the append builtin verbatim rather than
+replicating them, and it is why a source-pump or range source (which the `for`
+statement also handles) is a small extension rather than new code. The result
+list is seeded empty and appended into; append is copy-on-write, so this is
+O(n^2) for now, and the buffer.md builder is its eventual home.
+
+**One `for` clause for now.** A single binder over a list, str, or range is
+the slice. What that first slice already covers, once implemented, is more than
+the minimum: a range source (`for i in 1 to 5`) fell out of reusing the `for`
+statement's own range path, and a nested-head comprehension (a list of lists)
+works because the head is an ordinary expression. What is genuinely deferred is
+a **second `for` clause** in one comprehension (nested iteration); it is a
+teaching error rather than a silent misparse. A comprehension is recognised at
+`[` by scanning for a top-level `for` (a keyword that cannot be a data atom, so
+the scan is exact and a plain `[1 2 3]` literal is untouched).
+
+**The func value itself is the next slice.** A non-capturing `func` value is a
+code pointer (`IR_CALLI` already exists), a captured one is the harder closure
+case (D4), and the combinators are ordinary functions over those. None of that
+is needed for the comprehension, which is why it went first.
+
+## Implementation notes (the func value core)
+
+**A lambda lowers as its own top-level function.** The value `func(...) ...
+endfunc` is an `IR_LEA` of a generated label (`__lambda_N`); the body is queued
+and lowered after the class members from a worklist that drains nested lambdas
+too. So a func value is a plain code pointer, and calling one is an indirect
+call (`IR_CALLI`) whose signature comes from the func type. This is the
+non-capturing case the note leads with; nothing is captured, so no environment
+is needed and the pointer is the whole value.
+
+**Non-capture is enforced by walking, not by scoping.** The lambda body is
+resolved against the enclosing scope so a captured name *resolves* and can be
+named in the error, then the body is walked and every capture rejected: an
+enclosing local or parameter, a self field, or `self`. That gives a precise
+message ("cannot capture `k` ...; pass it as a parameter") rather than a
+downstream "not in scope". A nested lambda checked itself when it resolved, so
+its subtree is skipped.
+
+**A lambda may call a sibling func, but not a sibling verb.** A sibling
+*func* is a static helper (no `self`), so a lambda may call it; because the
+lambda lowers as its own function, the call must mangle against the lambda's
+*defining* class, not whichever class was lowered last (the class is stashed
+on the literal at resolve). A sibling *verb* is a self-send, which needs
+`self`, which a func value may not capture, so a bare sibling-verb call in a
+lambda is a teaching error; an explicit `recv.verb()` to a parameter is fine.
+A **func-typed field** is likewise rejected at its declaration: a func in a
+field is a stored closure (deferred), and behavior on an object is a verb or a
+capability, not a field. A non-capturing func may still be *returned*, since it
+is a free value.
+
+**Combinators need no compiler support.** A func-typed parameter (`keep is
+func(int) returns bool`) works, so a higher-order function is an ordinary func:
+`func countIf(xs, keep) ... if keep(x) then ...`. That is exactly D6/D7's
+"ordinary functions taking func values, never baked clauses". What is missing
+is only a standard prelude to define `map`/`filter`/`reduce`/`sort` once; the
+mechanism they need is already here.
+
+**A lambda inside a call keeps its statement newlines.** A func literal has a
+newline-separated body, but a lambda is usually written inside a call's `( )`,
+where the lexer suppresses newlines. So the body resets the bracket depth to
+zero for its span (`lex_body_begin`/`lex_body_end`) and restores it at
+`endfunc`, and the pair nests for a lambda in a lambda.
+
+**Deferred within the core.** Contextual inference (a bare `func(acc, x) ...`
+whose types come from the combinator it is passed to) is not in, so a lambda
+states its parameter and result types. A named func referenced as a value, a
+captured (escaping) closure, and a `maybe` or float result through a func value
+are the remaining pieces.
+
+## Implementation notes (the prelude)
+
+**map/filter/sort are runtime helpers, not userland source, and this is a
+compromise the note names.** Excelsior has no module system and no free
+functions (a func is a class-private helper), so there is nowhere for a
+userland `map` to live yet. The design's point stands: because a func-typed
+parameter works, these ARE ordinary functions over func values, and the only
+reason they are compiler-known is the missing prelude mechanism. They are
+`__exc_list_map`/`_filter`/`_sort` in libexc, each calling the passed func
+pointer per element through the ordinary calling convention (the same plain
+indirect call `call_verb` uses for a verb), and the compiler lowers `map(xs,
+f)` to the helper. When a module system lands they can move to a library
+unchanged, since nothing about them is a special form.
+
+`filter` calls its predicate exactly once per element (a single pass that
+over-allocates and sets the real count), so a predicate with a side effect is
+not double-evaluated. `sort` is a stable insertion sort whose comparator
+`before(a, b)` is true when `a` sorts ahead of `b`; a non-bool comparator is a
+teaching error. `map`, `filter`, and `sort` are copy-on-write, so the source
+list is untouched. `reduce(xs, init, step)` folds left to right (`acc =
+step(acc, elem)`, seeded by `init`) to a single value of the initial value's
+type, which may differ from the element type, and an empty list returns the
+seed. A wrong-arity call to any of the four is a clear error naming the
+arguments, not the generic "not a sibling verb" that a fall-through gave before
+(a review fix). A key-function `sort` overload is the combinator still to add.

@@ -85,6 +85,8 @@ static const struct kw keywords[] = {
     { "tags",      T_TAGS },
     { "overlaps",  T_OVERLAPS },
     { "shared",    T_SHARED },
+    { "yield",     T_YIELD },
+    { "defer",     T_DEFER },
     { "self",      T_SELF },
     { "is",        T_IS },
     { "as",        T_AS },
@@ -151,6 +153,29 @@ lex_cond_end(void)
 {
     if (cond_depth > 0)
         cond_depth--;
+}
+
+int
+lex_body_begin(void)
+{
+    int saved = paren_depth;
+    paren_depth = 0;                    /* the body's newlines flow again */
+    if (peeked && peek_tok.kind == T_NL) {
+        /* a newline already read under the old depth belongs to the body */
+        if (peeked2) {
+            peek_tok = peek2_tok;
+            peeked2 = 0;
+        } else {
+            peeked = 0;
+        }
+    }
+    return saved;
+}
+
+void
+lex_body_end(int saved)
+{
+    paren_depth = saved;
 }
 
 void
@@ -736,6 +761,8 @@ tok_str(int kind)
     case T_FULL:      return "full";
     case T_OVERLAPS:  return "overlaps";
     case T_SHARED:    return "shared";
+    case T_YIELD:     return "yield";
+    case T_DEFER:     return "defer";
     case T_SELF:      return "self";
     case T_IS:        return "is";
     case T_AS:        return "as";

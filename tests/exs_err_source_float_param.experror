@@ -1,0 +1,2 @@
+# sources.md: word-sized constructor arguments only, for now
+a float parameter on a source func is not supported yet

@@ -59,7 +59,7 @@
  *
  * Entry: the compiler emits __exc_entry_class and __exc_entry_selector for
  * the class holding a verb whose name folds to `main`; the test host
- * (runtime/exc_host.c) bootstraps an actor of that class and sends it the
+ * (runtime/exc_native.c) bootstraps an actor of that class and sends it the
  * entry selector. Members are emitted as `Class__member`.
  *
  * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
@@ -169,10 +169,37 @@ struct lslot {
 static struct lslot *lslots;
 static int nlslots, lslot_cap;
 
-/* loop break / continue targets */
-struct loopf { int brk, cont; };
+/* loop break / continue targets; defer_base is the pending-defer stack
+ * height at loop entry, so break/continue unwind the loop's defers */
+struct loopf { int brk, cont, defer_base; };
 static struct loopf loops[64];
 static int nloops;
+
+/* Pending defers (defer.md): a per-function stack of registered
+ * teardown statements. lower_stmts scopes it per block (fall-through
+ * runs a block's defers LIFO); return and fail emit every pending
+ * statement inline, break/continue emit down to the loop's base, and a
+ * fallible propagation in a fallible func routes through a lazy cold
+ * chain built in fail_target, so the invisible exits run them too. A
+ * trap (fault) bypasses them, which is D4's no-run-on-a-fault. A
+ * deferred statement re-lowers at each exit site; the checker keeps it
+ * free of return/fail/yield/break-out, and fail_target rejects a
+ * propagating failure inside one (D6). */
+#define MAX_DEFERS 32
+static struct {
+    struct node *stmt;
+    int chain_label;              /* lazy cold-chain label, or -1 */
+} defers[MAX_DEFERS];
+static int ndefers;
+static int in_defer_lower;        /* emitting a deferred statement */
+
+/* cold defer-chain trampolines, emitted at function end */
+static struct {
+    struct node *stmt;
+    int label;
+    int next_label;
+} dchains[MAX_DEFERS];
+static int ndchains;
 
 static int
 alloc_slot(int bytes)
@@ -399,7 +426,7 @@ lower_strlit(const char *s, int len)
  * __exc_trap(desc, a, b) along with up to two runtime words.
  ****************************************************************/
 
-/* kinds, kept in sync with runtime/exc_host.c */
+/* kinds, kept in sync with runtime/libexc.h */
 enum {
     EXC_TRAP_NO_BRANCH   = 1,
     EXC_TRAP_INDEX_RANGE = 2,
@@ -684,6 +711,13 @@ static int
 node_is_list(struct node *n)
 {
     return n->type && lstrip(n->type)->kind == T_TLIST;
+}
+
+/* a `source of T` value (sources.md D4) */
+static int
+node_is_source(struct node *n)
+{
+    return n->type && n->type->kind == ET_SOURCE;
 }
 
 /* the element enum of a `set of E` type / node, or NULL (set-of.md) */
@@ -1010,6 +1044,15 @@ static void lower_cond(struct node *n, int ltrue, int lfalse);
  ****************************************************************/
 
 static int cur_fail;              /* the active fail label */
+
+/* A source body (sources.md D4): the slot holding the incoming source
+ * struct pointer (slot 0, the body's one argument), and the element type
+ * a `yield` produces. -1 / NULL outside a source body. The struct's
+ * argument words start at EXC_SRC_ARG0 (mirroring runtime/libexc.c's
+ * struct exc_src). */
+#define EXC_SRC_ARG0 28
+static int cur_src_slot = -1;
+static struct ex_type *cur_src_elem;
 static int fn_fail_label;         /* the function's default, lazy */
 static int fn_fallible;           /* current member may fail itself */
 
@@ -1058,16 +1101,92 @@ trap_site(int kind, struct node *n, const char *name,
     return s->label;
 }
 
+static void lower_stmt(struct node *n);
+static int lower_comprehension(struct node *n);
+static int lower_funclit(struct node *n);
+static void emit_jmp(int label);
+
+/* The cold-chain label for "run defers[i], then keep unwinding": each
+ * link runs one deferred statement and jumps to the link below, the
+ * bottom one to the function's shared propagate label. Built lazily,
+ * only when a fallible propagation actually crosses pending defers. */
+static int
+defer_chain_label(int i)
+{
+    if (defers[i].chain_label < 0) {
+        int lbl = new_label(), nxt;
+
+        defers[i].chain_label = lbl;
+        nxt = i > 0 ? defer_chain_label(i - 1) : default_fail();
+        if (ndchains >= MAX_DEFERS)
+            lerr(defers[i].stmt, "too many defer chains in one member");
+        dchains[ndchains].stmt = defers[i].stmt;
+        dchains[ndchains].label = lbl;
+        dchains[ndchains].next_label = nxt;
+        ndchains++;
+    }
+    return defers[i].chain_label;
+}
+
 /* Failure target for a fallible producer: a consumer's label when one
- * is active, the shared propagate label in a fallible func, or a fresh
- * trap site that reports this exact producer. */
+ * is active; in a fallible func the propagate path, through the pending
+ * defers' chain when any are registered (defer.md D3), and a compile
+ * error inside a deferred statement itself (D6: an unwind has no
+ * consumer for a failure raised while unwinding); otherwise a fresh
+ * trap site that reports this exact producer, bypassing defers (D4). */
 static int
 fail_target(int kind, struct node *n, const char *name,
             int aslot, int bslot, int bderef)
 {
-    if (cur_fail != fn_fail_label || fn_fallible)
-        return cur_fail;
+    if (cur_fail != fn_fail_label)
+        return cur_fail;                /* an active consumer */
+    if (fn_fallible) {
+        if (in_defer_lower)
+            lerr(n, "a deferred statement must be infallible or consume "
+                    "its own failure (`defer act() on fail ...`)");
+        if (ndefers > 0)
+            return defer_chain_label(ndefers - 1);
+        return cur_fail;                /* the shared propagate label */
+    }
     return trap_site(kind, n, name, aslot, bslot, bderef);
+}
+
+/* Emit the pending deferred statements from the top of the stack down
+ * to base, inline at a structured exit (fall-through, return, fail,
+ * break/continue). LIFO, reading current values (defer.md D1/D2). The
+ * stack itself is not popped: an exit path is one path; the owning
+ * block pops at its end. */
+static void
+emit_defers_inline(int base)
+{
+    int save_loops = nloops, save_fail = cur_fail;
+
+    in_defer_lower++;
+    nloops = 0;                     /* an outer break/continue cannot be
+                                     * meant from inside the teardown */
+    for (int i = ndefers - 1; i >= base; i--)
+        lower_stmt(defers[i].stmt);
+    nloops = save_loops;
+    cur_fail = save_fail;
+    in_defer_lower--;
+}
+
+/* the cold section for the propagation chains */
+static void
+emit_defer_chains(void)
+{
+    int save_loops = nloops;
+
+    in_defer_lower++;
+    nloops = 0;
+    for (int i = 0; i < ndchains; i++) {
+        emit_label(dchains[i].label);
+        lower_stmt(dchains[i].stmt);
+        emit_jmp(dchains[i].next_label);
+    }
+    nloops = save_loops;
+    in_defer_lower--;
+    ndchains = 0;
 }
 
 /* the cold section: one trampoline per registered site */
@@ -1287,11 +1406,29 @@ lower_bool(struct node *n)
 /****************************************************************
  * Fields (the VM static segment)
  *
- * A class field compiles to a module global at a fixed address; `self.x`
- * (or a bare `x` that resolved to a field) is a load/store of that global.
- * This models one actor context: the running VM is the actor, and its
- * fields are the static segment. Only int/bool scalar fields lower yet.
+ * Every object carries its own field segment behind its header; `self.x`
+ * (or a bare `x` that resolved to a field) is the running-actor handle plus
+ * the field's constant offset. Scalar fields (int/bool/decimal/str/enum/set
+ * and an obj/class/interface handle) are one word; a record field is inline
+ * and blitted. A field of another actor is not reachable, only self's.
  ****************************************************************/
+
+/* A field lowered as a reference handle: `obj`, a class, or an interface
+ * slice. Its value is a 32-bit object handle (nil is 0), so it stores and
+ * loads as one plain word with reference semantics, unlike a record field
+ * which is inline and blitted. This is what makes an object graph
+ * expressible: one actor can hold another. */
+static int
+type_is_handle(struct ex_type *t)
+{
+    t = t ? lstrip(t) : NULL;
+    if (!t)
+        return 0;
+    if (t->kind == T_TOBJ || t->kind == ET_SLICE)
+        return 1;
+    return t->kind == T_IDENT && t->sym &&
+           (t->sym->kind == SYM_CLASS || t->sym->kind == SYM_INTERFACE);
+}
 
 static int
 field_is_scalar(struct sym *f)
@@ -1307,6 +1444,8 @@ field_is_scalar(struct sym *f)
         return 1;                       /* an enum field is a small int (D1) */
     if (type_set_enum(t))
         return 1;                       /* a set field is a bitmask word */
+    if (type_is_handle(t))
+        return 1;                       /* an obj / class / interface handle */
     return type_record_sym(t) != NULL;
 }
 
@@ -1418,6 +1557,13 @@ image_fill(struct sym *cls, struct ir_global *g)
              * compile-time record default is not lowered yet) */
             lerr(m->a, "a record field default is not lowered yet; "
                        "assign the record before use");
+        } else if (type_is_handle(m->sym->type)) {
+            /* an obj / class / interface field defaults to nil (0), which
+             * is the zero the image already holds; any other default names
+             * an actor that does not exist until spawn */
+            if (m->a->kind != N_NIL)
+                lerr(m->a, "an object field defaults to `nil`; assign a "
+                           "spawned actor to it in a verb");
         } else {                        /* int / bool / decimal / enum / set */
             g->init_ivals[i] = const_eval(m->a);
         }
@@ -1480,27 +1626,34 @@ emit_enum_names(struct node *en)
     cur_prog->globals = g;
 }
 
-/* the class descriptor (host-abi.md): { parent, nverbs, (selector, code)* }.
- * The host resolves a send by walking this and its parent chain, so
- * inherited, overridden, and cross-object dispatch all go through it. */
+/* the class descriptor (host-abi.md): { parent, nverbs, nwords, image,
+ * (selector, code)*, nfields, (name, woffset, kind)* }. The host resolves
+ * a send by walking this and its parent chain, so inherited, overridden,
+ * and cross-object dispatch all go through it; the trailing field table
+ * (own fields only, the chain covers inherited ones) is the freeze/thaw
+ * walker's map (host-abi.md D7). Kinds are libexc.h's EXC_FK_*: 0 a
+ * word, 1 a str (serialized by content), 2 a record (not walked yet). */
 static void
 emit_class_desc(struct node *cls)
 {
     struct ir_global *g;
-    int nverbs = 0, n, i;
+    int nverbs = 0, nfields = 0, n, i, fbase;
 
-    for (struct node *m = cls->a; m; m = m->next)
+    for (struct node *m = cls->a; m; m = m->next) {
         if (m->kind == N_VERB)
             nverbs++;
+        if (m->kind == N_FIELD)
+            nfields++;
+    }
 
-    /* { parent, nverbs, nwords, image, (selector, code)* } : nwords sizes the
-     * per-instance field segment and image seeds it (host-abi.md) */
-    n = 4 + 2 * nverbs;
+    n = 4 + 2 * nverbs + 1 + 3 * nfields;
     g = arena_zalloc(la, sizeof *g);
     g->name = desc_symbol(cls->name);
     g->base_type = IR_I32;
     g->arr_size = n;
-    g->is_local = 1;
+    g->is_local = 0;    /* the descriptor is the host-facing metadata: a
+                         * binding or driver in another object reads it
+                         * (dispatch, the freeze/thaw walker) */
     g->init_count = n;
     g->init_syms = arena_zalloc(la, n * sizeof *g->init_syms);
     g->init_ivals = arena_zalloc(la, n * sizeof *g->init_ivals);
@@ -1516,6 +1669,39 @@ emit_class_desc(struct node *cls)
             continue;
         g->init_ivals[4 + 2 * i] = sel_id(m->name);            /* selector */
         g->init_syms[5 + 2 * i] = member_symbol(cls->name, m->name); /* code */
+        i++;
+    }
+    fbase = 4 + 2 * nverbs;
+    g->init_ivals[fbase] = nfields;
+    i = 0;
+    for (struct node *m = cls->a; m; m = m->next) {
+        int kind;
+        if (m->kind != N_FIELD)
+            continue;
+        kind = 0;                                       /* EXC_FK_WORD */
+        if (m->type && m->type->kind == T_TSTR)
+            kind = 1;                                   /* EXC_FK_STR */
+        else if (m->type && type_record_sym(m->type))
+            kind = 2;                                   /* EXC_FK_REC */
+        else if (m->type && m->type->kind == ET_MAYBE)
+            kind = 3;                                   /* EXC_FK_MAYBE: a
+                                                         * null-word pointer
+                                                         * at rest, so the
+                                                         * walker must skip
+                                                         * it, never write
+                                                         * it as a word */
+        else if (type_is_handle(m->type))
+            kind = 4;                                   /* EXC_FK_OBJ: a
+                                                         * handle, not stable
+                                                         * across a freeze, so
+                                                         * skipped, never
+                                                         * persisted as a word */
+        g->init_syms[fbase + 1 + 3 * i] = intern_cstr(m->name);
+        /* segment-relative (image-indexed), like nwords and the image:
+         * field_woffset counts from the object base, past the header */
+        g->init_ivals[fbase + 2 + 3 * i] =
+            field_woffset(m->sym) - OBJ_HDR_WORDS;
+        g->init_ivals[fbase + 3 + 3 * i] = kind;
         i++;
     }
     g->next = cur_prog->globals;
@@ -1649,8 +1835,8 @@ resolve_lval(struct node *n)
     }
     if (is_self_field || is_bare_field) {
         if (!field_is_scalar(n->sym))
-            lerr(n, "only int, bool, decimal, str, and record fields are "
-                    "lowered yet");
+            lerr(n, "only int, bool, decimal, str, enum, set, record, and "
+                    "object fields are lowered yet");
         lv.kind = LV_FIELD;
         lv.field = n->sym;
         lv.slot = -1;
@@ -2355,6 +2541,40 @@ lower_call(struct node *n)
     struct ir_insn *ins;
     int args[32], nargs = 0;
 
+    /* calling a func value (function-values.md D1): the callee is a value of
+     * func type (a code pointer), so this is an indirect call through it. The
+     * signature comes from the func type; float args and results are deferred. */
+    if (n->a->type && n->a->type->kind == ET_FUNC) {
+        struct ex_type *ft = n->a->type;
+        struct node *param = ft->verbs;
+        int fptr, i;
+
+        if (is_ftype(ft->inner))
+            lerr(n, "a float result through a func value is not lowered yet");
+        for (struct node *a = n->b; a; a = a->next) {
+            struct ex_type *pt = param ? param->type : NULL;
+            if (is_ftype(pt))
+                lerr(a, "a float argument through a func value is not "
+                        "lowered yet");
+            if (nargs >= 32)
+                lerr(a, "too many arguments");
+            args[nargs++] = coerce(lower_expr(a), a, pt);
+            if (param)
+                param = param->next;
+        }
+        fptr = lower_expr(n->a);            /* the code pointer, last */
+        for (i = 0; i < nargs; i++) {
+            ins = emit(IR_ARG);
+            ins->a = args[i];
+            ins->imm = i;
+        }
+        ins = emit(IR_CALLI);
+        ins->a = fptr;
+        ins->dst = new_temp();
+        ins->nargs = nargs;
+        return ins->dst;
+    }
+
     /* record construction Point(1, 2) -> a fresh arena block with each field
      * stored positionally, missing trailing fields taking their default
      * (records.md; named args deferred). */
@@ -2502,6 +2722,40 @@ lower_call(struct node *n)
             ins->nargs = 2;
             return ins->dst;
         }
+        /* the prelude combinators (function-values.md D6/D7): map/filter/sort
+         * over a list and a func value. The func value lowers to a code
+         * pointer; the runtime helper calls it per element. */
+        if ((ex_ci_eq(bn, "map") || ex_ci_eq(bn, "filter") ||
+             ex_ci_eq(bn, "sort")) && a0 && a0->next && !a0->next->next) {
+            int l = lower_expr(a0);
+            int f = lower_expr(a0->next);          /* the func value pointer */
+            ins = emit(IR_ARG); ins->a = l; ins->imm = 0;
+            ins = emit(IR_ARG); ins->a = f; ins->imm = 1;
+            ins = emit(IR_CALL);
+            ins->dst = new_temp();
+            ins->sym = arena_strdup(la, ex_ci_eq(bn, "map")
+                                        ? "__exc_list_map"
+                                        : ex_ci_eq(bn, "filter")
+                                        ? "__exc_list_filter"
+                                        : "__exc_list_sort");
+            ins->nargs = 2;
+            return ins->dst;
+        }
+        /* reduce(list, init, step): fold to a single value (not a list) */
+        if (ex_ci_eq(bn, "reduce") && a0 && a0->next && a0->next->next &&
+            !a0->next->next->next) {
+            int l = lower_expr(a0);
+            int init = lower_expr(a0->next);
+            int f = lower_expr(a0->next->next);      /* the step func value */
+            ins = emit(IR_ARG); ins->a = l;    ins->imm = 0;
+            ins = emit(IR_ARG); ins->a = init; ins->imm = 1;
+            ins = emit(IR_ARG); ins->a = f;    ins->imm = 2;
+            ins = emit(IR_CALL);
+            ins->dst = new_temp();
+            ins->sym = arena_strdup(la, "__exc_list_reduce");
+            ins->nargs = 3;
+            return ins->dst;
+        }
         if (ex_ci_eq(bn, "set") && a0 && a0->next && a0->next->next &&
             !a0->next->next->next) {
             int l = lower_expr(a0);
@@ -2515,6 +2769,20 @@ lower_call(struct node *n)
             ins->sym = arena_strdup(la, "__exc_list_set");
             ins->nargs = 3;
             return ins->dst;
+        }
+        if (ex_ci_eq(bn, "next") && a0 && !a0->next && node_is_source(a0)) {
+            /* the built-in pump on a `source of T` (sources.md D4): runs
+             * or resumes the body on its private stack; the return is the
+             * null-word maybe protocol, 0 when exhausted, so the failure
+             * check is the ordinary unwrap (the checker stamped the call's
+             * maybe type on the node) */
+            int s = lower_expr(a0);
+            ins = emit(IR_ARG); ins->a = s; ins->imm = 0;
+            ins = emit(IR_CALL);
+            ins->dst = new_temp();
+            ins->sym = arena_strdup(la, "__exc_src_next");
+            ins->nargs = 1;
+            return unwrap_maybe(ins->dst, n->type, n, "next");
         }
         if (ex_ci_eq(bn, "find") && a0 && a0->next && !a0->next->next) {
             /* find(sub, s) returns maybe int: __exc_str_find yields the
@@ -3058,7 +3326,7 @@ lower_expr(struct node *n)
                              -1, -1, 0));
         return lower_const(0);      /* unreachable value */
     case N_NIL:
-        lerr(n, "nil is not lowered yet");
+        return lower_const(0);          /* the absent object is handle 0 */
     case N_FIELD_ACC: {
         struct sym *rec;
         /* a qualified enum member `Color.red` is its 0-based ordinal, a small
@@ -3210,10 +3478,91 @@ lower_expr(struct node *n)
         lerr(n, "only string and list slicing is lowered yet");
     case N_DATALIT:
         return lower_listlit(n);
+    case N_COMP:
+        return lower_comprehension(n);
+    case N_FUNCLIT:
+        return lower_funclit(n);
     case N_QUOTE:
         lerr(n, "data literals are not lowered yet");
     default:
         lerr(n, "expression kind %d is not lowered yet", n->kind);
+    }
+}
+
+/* a fresh node in the lowering arena, for the comprehension desugar */
+static struct node *
+lnode(int kind)
+{
+    struct node *n = arena_zalloc(la, sizeof *n);
+    n->kind = kind;
+    return n;
+}
+
+/* [head for x in source if cond] (function-values.md D5): build a fresh list
+ * by running the source through a `for` loop that appends the head. There is
+ * no block-expression to desugar into, so the loop is synthesized here and
+ * lowered through the ordinary statement path, which reuses the list/str
+ * iteration and the append builtin verbatim. Append is copy-on-write, so this
+ * is O(n^2) for now; the buffer.md builder is its eventual home. */
+static int
+lower_comprehension(struct node *n)
+{
+    struct sym *res;
+    struct node *empty, *result_ref, *append, *assign, *body, *forn;
+    int rslot;
+
+    /* the result list, seeded empty */
+    res = arena_zalloc(la, sizeof *res);
+    res->kind = SYM_LOCAL;
+    res->name = "__comp";
+    res->type = n->type;                    /* list<head>, from typecheck */
+    rslot = bind_slot(res, 4);
+    empty = lnode(N_DATALIT);               /* an empty list value */
+    store_slot(lower_listlit(empty), rslot);
+
+    /* result = append(result, head) */
+    result_ref = lnode(N_NAME);
+    result_ref->name = res->name;
+    result_ref->sym = res;
+    result_ref->next = n->a;                /* the head is the second arg */
+    append = lnode(N_CALL);
+    append->a = lnode(N_NAME);
+    append->a->name = "append";             /* bare builtin, sym stays NULL */
+    append->b = result_ref;
+    assign = lnode(N_ASSIGN);
+    assign->a = lnode(N_NAME);
+    assign->a->name = res->name;
+    assign->a->sym = res;
+    assign->b = append;
+    body = assign;
+
+    if (n->c) {                             /* wrap in `if cond` */
+        struct node *ifn = lnode(N_IF);
+        ifn->a = n->c;
+        ifn->b = body;
+        body = ifn;
+    }
+
+    /* for x in source do BODY endfor. A range source (N_RANGE) fills the
+     * for node's lo/hi (b non-NULL -> the range path); a list or str source
+     * goes in ->a with ->b NULL (the list/str iteration path). No source
+     * pump here (type NULL), so a cursor is not iterated in a comprehension. */
+    forn = lnode(N_FOR);
+    forn->sym = n->sym;
+    forn->name = n->name;
+    if (n->b->kind == N_RANGE) {
+        forn->a = n->b->a;
+        forn->b = n->b->b;
+    } else {
+        forn->a = n->b;
+    }
+    forn->c = body;
+    lower_stmt(forn);
+
+    {
+        int r = new_temp();
+        load_slot(r, rslot);
+        return r;
     }
 }
 
@@ -3255,8 +3604,20 @@ lower_cond(struct node *n, int ltrue, int lfalse)
 static void
 lower_stmts(struct node *list)
 {
+    int base = ndefers;
+
     for (struct node *s = list; s; s = s->next)
         lower_stmt(s);
+    if (ndefers > base) {
+        /* the block's fall-through exit runs its defers LIFO (defer.md);
+         * skip the dead copy when the block already left via a
+         * terminator (return/fail/break/continue emitted its own) */
+        struct ir_insn *t = cur_fn ? cur_fn->tail : NULL;
+        if (!t || (t->op != IR_RET && t->op != IR_RETV &&
+                   t->op != IR_FRETV && t->op != IR_JMP))
+            emit_defers_inline(base);
+        ndefers = base;
+    }
 }
 
 static void
@@ -3446,6 +3807,7 @@ lower_stmt(struct node *n)
         emit_label(lbody);
         loops[nloops].brk = lbrk;
         loops[nloops].cont = ltop;
+        loops[nloops].defer_base = ndefers;
         nloops++;
         lower_stmts(n->b);
         nloops--;
@@ -3480,6 +3842,7 @@ lower_stmt(struct node *n)
 
             loops[nloops].brk = lbrk;
             loops[nloops].cont = lcont;
+            loops[nloops].defer_base = ndefers;
             nloops++;
             lower_stmts(n->c);
             nloops--;
@@ -3493,6 +3856,59 @@ lower_stmt(struct node *n)
             ins->a = cur;
             ins->b = one;
             store_slot(next, slot);
+            emit_jmp(ltop);
+            emit_label(lbrk);
+        } else if (n->type && n->type->kind == ET_MAYBE) {
+            /* the pump loop (sources.md D3), shared by both backings:
+             *     var __c = E ; while var x = next(__c) do BODY endwhile
+             * A cursor record is copied in (value semantics: the loop does
+             * not disturb the caller's record) and pumped through the
+             * class's `next` func, which takes the cursor `shared`, so the
+             * argument is the cursor slot's address. A `source of T` is a
+             * handle: no copy, and the built-in pump takes it by value.
+             * `continue` re-pumps: the loop top is the continue target.
+             * The checker stamped the pump's `maybe T` on the node
+             * (iter_element). */
+            int is_src = node_is_source(n->a);
+            int cslot = alloc_slot(4);
+            int vslot = bind_slot(n->sym, type_size(n->sym->type));
+            int v, arg, d, r, save;
+
+            v = lower_expr(n->a);
+            if (!is_src && !is_record_ctor(n->a))
+                v = str_call2("__exc_rec_copy", v,
+                              lower_const(rec_flat_words(node_record_sym(n->a))));
+            store_slot(v, cslot);
+
+            emit_label(ltop);
+            arg = new_temp();
+            if (is_src) {
+                load_slot(arg, cslot);
+            } else {
+                ins = emit(IR_ADL);
+                ins->dst = arg;
+                ins->slot = cslot;
+            }
+            ins = emit(IR_ARG);
+            ins->a = arg;
+            ins->imm = 0;
+            ins = emit(IR_CALL);
+            ins->dst = d = new_temp();
+            ins->sym = is_src ? arena_strdup(la, "__exc_src_next")
+                              : member_symbol(cur_class, "next");
+            ins->nargs = 1;
+            save = cur_fail;
+            cur_fail = lbrk;
+            r = unwrap_maybe(d, n->type, n, "next");
+            cur_fail = save;
+            store_slot(r, vslot);
+
+            loops[nloops].brk = lbrk;
+            loops[nloops].cont = ltop;
+            loops[nloops].defer_base = ndefers;
+            nloops++;
+            lower_stmts(n->c);
+            nloops--;
             emit_jmp(ltop);
             emit_label(lbrk);
         } else {
@@ -3550,6 +3966,7 @@ lower_stmt(struct node *n)
 
             loops[nloops].brk = lbrk;
             loops[nloops].cont = lcont;
+            loops[nloops].defer_base = ndefers;
             nloops++;
             lower_stmts(n->c);
             nloops--;
@@ -3571,6 +3988,10 @@ lower_stmt(struct node *n)
         break;
     }
     case N_RETURN:
+        /* a return unwinds every block to the func boundary, so all
+         * pending defers run, after the value is computed (Swift's
+         * order, defer.md D1/D3); the value crosses the teardown in a
+         * slot since the deferred statements emit arbitrary code */
         if (n->a && cur_ret_type && cur_ret_type->kind == ET_MAYBE) {
             /* success returns the boxed/null-word value; an uncaught
              * inner failure returns nothing (Icon, one level up) */
@@ -3579,35 +4000,94 @@ lower_stmt(struct node *n)
             t = coerce(lower_expr(n->a), n->a, cur_ret_type->inner);
             cur_fail = save;
             bx = box_maybe(t, cur_ret_type);    /* compute, then return */
+            if (ndefers > 0) {
+                int slot = alloc_slot(4), r;
+                store_slot(bx, slot);
+                emit_defers_inline(0);
+                r = new_temp();
+                load_slot(r, slot);
+                bx = r;
+            }
             emit(IR_RETV)->a = bx;
             emit_label(lf);
+            emit_defers_inline(0);              /* the failing exit too */
             z = lower_const(0);
             emit(IR_RETV)->a = z;
         } else if (n->a) {
             /* compute (and coerce) before emitting the return */
             int t = coerce(lower_expr(n->a), n->a, cur_ret_type);
+            if (ndefers > 0) {
+                int slot = alloc_slot(cur_ret_float ? 8 : 4), r;
+                ins = emit(cur_ret_float ? IR_FSTL : IR_STL);
+                ins->a = t;
+                ins->slot = slot;
+                emit_defers_inline(0);
+                r = new_temp();
+                ins = emit(cur_ret_float ? IR_FLDL : IR_LDL);
+                ins->dst = r;
+                ins->slot = slot;
+                t = r;
+            }
             emit(cur_ret_float ? IR_FRETV : IR_RETV)->a = t;
         } else if (fn_fallible && !cur_ret_type) {
-            int one = lower_const(1);           /* can fail: success */
+            int one;
+            emit_defers_inline(0);
+            one = lower_const(1);               /* can fail: success */
             emit(IR_RETV)->a = one;
         } else {
+            emit_defers_inline(0);
             emit(IR_RET);
         }
         break;
     case N_FAIL: {
-        int z = lower_const(0);                 /* the null word */
+        int z;
+        emit_defers_inline(0);                  /* fail unwinds to the
+                                                 * func boundary too */
+        z = lower_const(0);                     /* the null word */
         emit(IR_RETV)->a = z;
+        break;
+    }
+    case N_YIELD: {
+        /* produce a value and suspend (sources.md D4): box through the
+         * null-word maybe protocol (so 0 stays the exhaustion sentinel)
+         * and hand it to the pump; __exc_src_yield switches back to the
+         * pump's context, and a later next resumes right after this call */
+        struct ex_type mt = {0};
+        int v, bx, src;
+        if (cur_src_slot < 0)
+            lerr(n, "yield outside a source body (checker bug)");
+        mt.kind = ET_MAYBE;
+        mt.inner = cur_src_elem;
+        v = coerce(lower_expr(n->a), n->a, cur_src_elem);
+        bx = box_maybe(v, &mt);
+        src = new_temp();
+        load_slot(src, cur_src_slot);
+        ins = emit(IR_ARG); ins->a = src; ins->imm = 0;
+        ins = emit(IR_ARG); ins->a = bx;  ins->imm = 1;
+        ins = emit(IR_CALL);
+        ins->dst = new_temp();
+        ins->sym = arena_strdup(la, "__exc_src_yield");
+        ins->nargs = 2;
         break;
     }
     case N_BREAK:
         if (!nloops)
             lerr(n, "break outside a loop");
+        emit_defers_inline(loops[nloops - 1].defer_base);
         emit_jmp(loops[nloops - 1].brk);
         break;
     case N_CONTINUE:
         if (!nloops)
             lerr(n, "continue outside a loop");
+        emit_defers_inline(loops[nloops - 1].defer_base);
         emit_jmp(loops[nloops - 1].cont);
+        break;
+    case N_DEFER:
+        if (ndefers >= MAX_DEFERS)
+            lerr(n, "too many defers in one member");
+        defers[ndefers].stmt = n->a;
+        defers[ndefers].chain_label = -1;
+        ndefers++;
         break;
     case N_MATCH: {
         int subjslot = alloc_slot(4);
@@ -3680,6 +4160,8 @@ lower_stmt(struct node *n)
  * Function and program lowering
  ****************************************************************/
 
+static struct ir_func *lower_source_member(struct node *cls, struct node *m);
+
 static struct ir_func *
 lower_member(struct node *cls, struct node *m)
 {
@@ -3687,6 +4169,9 @@ lower_member(struct node *cls, struct node *m)
     struct ir_insn *ins;
     char *mangled = member_symbol(cls->name, m->name);
     int nparams = 0;
+
+    if (m->kind == N_FUNC && m->type && m->type->kind == ET_SOURCE)
+        return lower_source_member(cls, m);
 
     fn = ir_new_func(la, mangled);
     fn->is_local = !(m->flags & NF_PUBLIC);
@@ -3698,6 +4183,9 @@ lower_member(struct node *cls, struct node *m)
     cur_ret_type = m->type;
     fn_fail_label = -1;
     nsites = 0;
+    ndefers = 0;
+    ndchains = 0;
+    in_defer_lower = 0;
     fn_fallible = (m->type && m->type->kind == ET_MAYBE) ||
                   (m->flags & NF_CANFAIL);
 
@@ -3741,6 +4229,7 @@ lower_member(struct node *cls, struct node *m)
             emit(IR_RETV)->a = z;
         }
     }
+    emit_defer_chains();            /* the defer cold chains */
     emit_trap_sites();              /* the cold section */
     emit(IR_ENDF);
 
@@ -3748,6 +4237,231 @@ lower_member(struct node *cls, struct node *m)
     fn->slot_size = arena_alloc(la, (nslots ? nslots : 1) * sizeof(int));
     memcpy(fn->slot_size, slot_sizes, nslots * sizeof(int));
     return fn;
+}
+
+/* Anonymous func values (function-values.md D1). A `func(...) ... endfunc`
+ * literal lowers as its own top-level function: the expression emits an
+ * IR_LEA of the function's label (a code pointer), and the body is lowered
+ * separately, from a worklist drained after the class members. A funclit is
+ * never public and never a source; captures are forbidden at resolve time,
+ * so its body sees only its own parameters and module-level names. */
+static struct node **pending_funclits;
+static int npending, pending_cap, funclit_ctr;
+
+static struct ir_func *
+lower_funclit_fn(struct node *lit)
+{
+    struct ir_func *fn = ir_new_func(la, lit->name);
+    struct ir_insn *ins;
+    int nparams = 0;
+
+    fn->is_local = 1;
+    cur_fn = fn;
+    /* the lambda's defining class (stashed at resolve): a bare sibling-func
+     * call in the body mangles against it, so set cur_class here rather than
+     * leave whatever class was lowered last */
+    if (lit->sym)
+        cur_class = lit->sym->name;
+    nslots = 0;
+    nlslots = 0;
+    nloops = 0;
+    cur_ret_float = is_ftype(lit->type);
+    cur_ret_type = lit->type;
+    fn_fail_label = -1;
+    nsites = 0;
+    ndefers = 0;
+    ndchains = 0;
+    in_defer_lower = 0;
+    fn_fallible = 0;
+
+    for (struct node *p = lit->a; p; p = p->next) {
+        bind_slot(p->sym, type_size(p->sym->type));
+        nparams++;
+    }
+    fn->nparams = nparams;
+    ins = emit(IR_FUNC);
+    ins->sym = arena_strdup(la, lit->name);
+    ins->nargs = nparams;
+
+    lower_stmts(lit->b);
+
+    if (!fn->tail || (fn->tail->op != IR_RET && fn->tail->op != IR_RETV &&
+                      fn->tail->op != IR_FRETV)) {
+        if (cur_ret_float) {
+            emit(IR_FRETV)->a = lower_flt(0.0);
+        } else if (lit->type) {
+            emit(IR_RETV)->a = lower_const(0);
+        } else {
+            emit(IR_RET);
+        }
+    }
+    emit_defer_chains();
+    emit_trap_sites();
+    emit(IR_ENDF);
+    fn->nslots = nslots;
+    fn->slot_size = arena_alloc(la, (nslots ? nslots : 1) * sizeof(int));
+    memcpy(fn->slot_size, slot_sizes, nslots * sizeof(int));
+    return fn;
+}
+
+/* the value of a `func(...) ... endfunc` literal: a code pointer. The body is
+ * queued and lowered later (draining nested lambdas too), so a reference is
+ * just the label's address. */
+static int
+lower_funclit(struct node *n)
+{
+    struct ir_insn *ins;
+
+    if (!n->name) {
+        char buf[32];
+        snprintf(buf, sizeof buf, "__lambda_%d", funclit_ctr++);
+        n->name = arena_strdup(la, buf);
+        if (npending == pending_cap) {
+            pending_cap = pending_cap ? pending_cap * 2 : 16;
+            pending_funclits = realloc(pending_funclits,
+                                       pending_cap * sizeof *pending_funclits);
+            if (!pending_funclits)
+                die("lower: out of memory");
+        }
+        pending_funclits[npending++] = n;
+    }
+    ins = emit(IR_LEA);
+    ins->dst = new_temp();
+    ins->sym = arena_strdup(la, n->name);
+    return ins->dst;
+}
+
+/* A func `returns source of T` (sources.md D4) lowers to two functions.
+ * The declared symbol becomes the CONSTRUCTOR: it allocates the source
+ * struct with its private stack (__exc_src_new) and stores the incoming
+ * arguments into the struct's argument words, so calling the func never
+ * runs the body. `<name>__body` is the suspended body the pump launches
+ * on the private stack: it takes the source struct as its one argument,
+ * copies the argument words into ordinary local slots, and produces via
+ * `yield` (__exc_src_yield). Returning from the body (falling off the
+ * end, or `fail`'s RETV 0, the value ignored) is exhaustion: the launch
+ * shim in runtime/start.S marks the source done and returns the pump's 0. */
+static struct ir_func *
+lower_source_member(struct node *cls, struct node *m)
+{
+    struct ir_func *ctor, *body;
+    struct ir_insn *ins;
+    char *mangled = member_symbol(cls->name, m->name);
+    char bodyname[256];
+    int nparams = 0;
+
+    snprintf(bodyname, sizeof bodyname, "%s__body", mangled);
+    for (struct node *p = m->a; p; p = p->next)
+        nparams++;
+
+    /* ---- the constructor, under the declared name ---- */
+    ctor = ir_new_func(la, mangled);
+    ctor->is_local = !(m->flags & NF_PUBLIC);
+    cur_fn = ctor;
+    nslots = 0;
+    nlslots = 0;
+    nloops = 0;
+    cur_ret_float = 0;
+    cur_ret_type = m->type;
+    fn_fail_label = -1;
+    nsites = 0;
+    ndefers = 0;
+    ndchains = 0;
+    in_defer_lower = 0;
+    fn_fallible = 0;
+
+    for (struct node *p = m->a; p; p = p->next)
+        bind_slot(p->sym, 4);
+    ctor->nparams = nparams;
+    ins = emit(IR_FUNC);
+    ins->sym = arena_strdup(la, mangled);
+    ins->nargs = nparams;
+    {
+        int fnp, argw, srcslot = alloc_slot(4), src, i = 0;
+        ins = emit(IR_LEA);
+        ins->dst = fnp = new_temp();
+        ins->sym = arena_strdup(la, bodyname);
+        argw = lower_const(nparams);
+        ins = emit(IR_ARG); ins->a = fnp;  ins->imm = 0;
+        ins = emit(IR_ARG); ins->a = argw; ins->imm = 1;
+        ins = emit(IR_CALL);
+        ins->dst = src = new_temp();
+        ins->sym = arena_strdup(la, "__exc_src_new");
+        ins->nargs = 2;
+        store_slot(src, srcslot);
+        for (struct node *p = m->a; p; p = p->next, i++) {
+            int v = new_temp(), base, off, addr;
+            load_slot(v, find_slot(p->sym));
+            base = new_temp();
+            load_slot(base, srcslot);
+            off = lower_const(EXC_SRC_ARG0 + i * 4);
+            addr = new_temp();
+            ins = emit(IR_ADD); ins->dst = addr; ins->a = base; ins->b = off;
+            ins = emit(IR_SW);  ins->a = addr;   ins->b = v;
+        }
+        src = new_temp();
+        load_slot(src, srcslot);
+        emit(IR_RETV)->a = src;
+    }
+    emit(IR_ENDF);
+    ctor->nslots = nslots;
+    ctor->slot_size = arena_alloc(la, (nslots ? nslots : 1) * sizeof(int));
+    memcpy(ctor->slot_size, slot_sizes, nslots * sizeof(int));
+
+    /* ---- the body, run on the source's private stack ---- */
+    body = ir_new_func(la, arena_strdup(la, bodyname));
+    body->is_local = 1;
+    cur_fn = body;
+    nslots = 0;
+    nlslots = 0;
+    nloops = 0;
+    cur_ret_float = 0;
+    cur_ret_type = NULL;            /* yield produces; return is rejected */
+    fn_fail_label = -1;
+    nsites = 0;
+    ndefers = 0;
+    ndchains = 0;
+    in_defer_lower = 0;
+    fn_fallible = 0;
+
+    cur_src_slot = alloc_slot(4);   /* slot 0: the incoming source struct */
+    cur_src_elem = m->type->inner;
+    body->nparams = 1;
+    ins = emit(IR_FUNC);
+    ins->sym = arena_strdup(la, bodyname);
+    ins->nargs = 1;
+    {   /* the declared parameters live in the struct's argument words:
+         * copy them into ordinary local slots at entry */
+        int i = 0;
+        for (struct node *p = m->a; p; p = p->next, i++) {
+            int slot = bind_slot(p->sym, 4);
+            int src = new_temp(), off, addr, v;
+            load_slot(src, cur_src_slot);
+            off = lower_const(EXC_SRC_ARG0 + i * 4);
+            addr = new_temp();
+            ins = emit(IR_ADD); ins->dst = addr; ins->a = src; ins->b = off;
+            v = new_temp();
+            ins = emit(IR_LW);  ins->dst = v;    ins->a = addr;
+            store_slot(v, slot);
+        }
+    }
+
+    lower_stmts(m->b);
+
+    if (!body->tail || (body->tail->op != IR_RET &&
+                        body->tail->op != IR_RETV))
+        emit(IR_RET);               /* fell off the end: exhausted */
+    emit_defer_chains();            /* the defer cold chains */
+    emit_trap_sites();              /* the cold section */
+    emit(IR_ENDF);
+    body->nslots = nslots;
+    body->slot_size = arena_alloc(la, (nslots ? nslots : 1) * sizeof(int));
+    memcpy(body->slot_size, slot_sizes, nslots * sizeof(int));
+
+    cur_src_slot = -1;
+    cur_src_elem = NULL;
+    ctor->next = body;
+    return ctor;
 }
 
 struct ir_program *
@@ -3783,8 +4497,18 @@ lower_program(struct arena *a, struct node *file)
                 continue;           /* .exi signature, no body */
             fn = lower_member(it, m);
             *ftail = fn;
-            ftail = &fn->next;
+            while (*ftail)          /* a source func lowers to two funcs */
+                ftail = &(*ftail)->next;
         }
+    }
+    /* the func-value bodies (function-values.md D1): each lambda encountered
+     * while lowering a member queued itself; drain the worklist, which grows
+     * as a nested lambda queues its own body, until empty */
+    while (npending) {
+        struct ir_func *fn = lower_funclit_fn(pending_funclits[--npending]);
+        *ftail = fn;
+        while (*ftail)
+            ftail = &(*ftail)->next;
     }
     emit_entry(file);
     emit_selnames();                /* after emit_entry: id space complete */

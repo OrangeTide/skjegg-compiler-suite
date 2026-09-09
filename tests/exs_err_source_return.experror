@@ -1,0 +1,2 @@
+# sources.md D4: return is rejected in a source body
+a source body produces with `yield` and stops with `fail`

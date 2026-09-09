@@ -1,0 +1,6 @@
+a 21 busy 0 log w1 w2 
+b -1 busy 0 log w1 w2 
+pre 6 val 99
+counted 7 log i1 i2 i3 i4 i5 
+finale 7 log m1 caught m2 
+chain -1 log inner outer 

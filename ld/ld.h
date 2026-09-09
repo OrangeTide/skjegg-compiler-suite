@@ -207,6 +207,13 @@ void ld_default_script(struct arena *a, struct ld_script *script);
 
 /* link.c */
 int ld_link(struct linker *ld);
+/* shared layout core used by both the m68k and RISC-V linkers */
+void ld_layout(struct linker *ld);
+/* append a zeroed object slot, growing the object array (arena-backed) */
+struct ld_object *ld_add_object(struct linker *ld);
+struct ld_output_sec *ld_find_output_sec(struct linker *ld,
+                                         struct ld_input_sec *isec);
+void ld_check_undefined(struct linker *ld);
 
 /* elf_write.c */
 int ld_write_exec(struct linker *ld, const char *path);

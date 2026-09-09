@@ -30,7 +30,7 @@ Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
 - **The runtime arena already exists.** `start.S` provides
   `__moo_arena_alloc` / `__moo_arena_reset` (bump allocator), which
-  `runtime/str.c` builds on. `exc_host.c` links `start.S`, so the allocator is
+  `runtime/str.c` builds on. `libexc.c` (at the time `exc_host.c`) links `start.S`, so the allocator is
   already reachable.
 
 
@@ -112,7 +112,7 @@ bounds-checks before the `__exc_str_at` call and branches to the active
 fail label when out of range, so a bare out-of-range index traps and
 `s[i] else d` catches it. The slice stays clamped.)
 
-Runtime (in a new `runtime/exc_str.c`, or appended to `exc_host.c`), thin
+Runtime (in a new `runtime/exc_str.c`, or appended to the Excelsior runtime, now `libexc.c`), thin
 adaptations of `runtime/str.c`:
 
     struct exc_str *__exc_str_concat(struct exc_str *a, struct exc_str *b);
@@ -200,7 +200,7 @@ send to a well-known `player`/`log` object.
    `lower_binop`. No output, no harness change. Smallest slice that proves the
    representation end to end. **Done** (test `exs_str`): a string is a pointer
    to a `{ len, data }` descriptor, literals emit two globals, and
-   `__exc_str_concat`/`__exc_str_eq` live in `exc_host.c`.
+   `__exc_str_concat`/`__exc_str_eq` live in the Excelsior runtime (now `libexc.c`).
 2. **Ordering + indexing + slicing** (`< <= > >=`, `s[i]`, `s[lo to hi]`),
    still exit-code tested via comparison of the result. **Done** (test
    `exs_str_ops`): ordering is `__exc_str_cmp` against 0; `s[i]` and
@@ -255,7 +255,7 @@ send to a well-known `player`/`log` object.
   leans toward "no ambient authority", which argues against a global say power
   and toward a disclosed capability. For a *test* host a bare power is fine;
   the question is what the real ABI commits to.
-- **Runtime file:** extend `exc_host.c`, or a separate `runtime/exc_str.c`
+- **Runtime file:** extend the Excelsior runtime (now `libexc.c`), or a separate `runtime/exc_str.c`
   linked alongside it (cleaner, mirrors moo's split)?
 - **Helper naming:** `__exc_str_*` (chosen here) vs. reusing `__moo_str_*`
   wholesale by linking `runtime/str.c` directly. Reusing avoids a copy but

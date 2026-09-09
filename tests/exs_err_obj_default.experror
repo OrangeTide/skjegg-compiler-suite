@@ -1,0 +1,1 @@
+an object field defaults to `nil`; assign a spawned actor to it in a verb
