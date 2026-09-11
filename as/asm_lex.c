@@ -17,6 +17,7 @@ lex_init(struct lexer *l, const char *src, char comment_ch, int reloc_pct)
     l->tok.type = T_NEWLINE;
     l->comment_ch = comment_ch;
     l->reloc_pct = reloc_pct;
+    l->dollar_reg = 0;
 }
 
 static void
@@ -204,6 +205,22 @@ lex_next(struct lexer *l)
                 lex_ident(l, 0);
                 return;
             }
+            return;
+        }
+
+        /* MIPS register sigil: '$t0', '$f12', '$0' lex as one identifier that
+         * keeps the leading '$', so the register lookup is unambiguous against
+         * a bare symbol or integer.  Off by default (m68k and RISC-V). */
+        if (l->dollar_reg && *l->pos == '$') {
+            const char *start = l->pos;
+            int len;
+            l->pos++;
+            while (is_ident_char(*l->pos))
+                l->pos++;
+            len = (int)(l->pos - start);
+            l->tok.type = T_IDENT;
+            l->tok.str = arena_strndup(l->arena, start, len);
+            l->tok.str_len = len;
             return;
         }
 

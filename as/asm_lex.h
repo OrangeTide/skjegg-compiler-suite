@@ -5,7 +5,13 @@
  *   reloc_pct  : how a leading '%' is treated.  0 strips it and re-lexes the
  *                identifier (m68k register names arrive as %d0/%a1); 1 emits a
  *                T_RELOC token carrying the operator name (RISC-V relocation
- *                operators %hi/%lo/%pcrel_hi/%pcrel_lo). */
+ *                operators %hi/%lo/%pcrel_hi/%pcrel_lo).
+ *
+ * One field is set directly after lex_init rather than through it, to keep the
+ * init signature stable for the existing callers:
+ *   dollar_reg : when nonzero, a '$' begins a register token (MIPS $t0, $f12,
+ *                $0) lexed as a T_IDENT whose text keeps the leading '$'.  When
+ *                zero (the default) a '$' is skipped as before. */
 
 #ifndef ASM_LEX_H
 #define ASM_LEX_H
@@ -47,6 +53,7 @@ struct lexer {
     struct arena *arena;
     char comment_ch;
     int reloc_pct;
+    int dollar_reg;             /* nonzero: '$' begins a register token */
 };
 
 void lex_init(struct lexer *l, const char *src, char comment_ch, int reloc_pct);

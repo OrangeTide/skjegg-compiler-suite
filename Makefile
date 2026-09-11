@@ -42,9 +42,12 @@ QEMU    ?= qemu-m68k
 RV_AS   ?= riscv64-linux-gnu-as
 RV_LD   ?= riscv64-linux-gnu-ld
 QEMU_RV ?= qemu-riscv32
-MIPS_AS ?= mipsel-unknown-elf-as
-MIPS_LD ?= mipsel-unknown-elf-ld
+MIPS_AS ?= mipsel-none-elf-as
+MIPS_LD ?= mipsel-none-elf-ld
+MIPS_OBJCOPY ?= mipsel-none-elf-objcopy
+MIPS_OBJDUMP ?= mipsel-none-elf-objdump
 QEMU_MIPS ?= qemu-mipsel
+SPIM ?= spim
 X86_ASM ?= nasm
 X86_LD  ?= ld
 QEMU_X86 ?= qemu-i386
@@ -80,7 +83,7 @@ PAS_TESTS := $(wildcard tests/pascal_*.pas)
 TOOLS := build/skj-tinc build/skj-tinc-rv build/skj-tinc-mips build/skj-tinc-x86 build/skj-tinc-arm64 \
          build/skj-sc build/skj-sc-rv build/skj-sc-mips build/skj-sc-x86 build/skj-sc-arm64 \
          build/skj-mooc build/skj-pc build/skj-as build/skj-ld \
-         build/skj-as-rv build/skj-ld-rv \
+         build/skj-as-rv build/skj-ld-rv build/skj-as-mips build/skj-ld-mips build/skj-ar \
          build/skj-cpp build/skj-cc build/skj-cc-x86-64 build/skj-cc-arm64 \
          build/skj-cc-rv build/skj-cc-rv-psabi build/skj-run
 
@@ -185,6 +188,14 @@ AS_RV_SRC := as/rv_main.c as/asm_lex.c as/asm_obj.c as/rv_parse.c \
 build/skj-as-rv: $(AS_RV_SRC) as/rv.h as/asm_lex.h as/asm_obj.h | build
 	$(CC) $(CFLAGS) -Ias -Iir -o $@ $(AS_RV_SRC)
 
+## MIPS I assembler (shares the lexer + object helpers with skj-as)
+## Built up in steps; step 2 encodes the instruction set.  See doc/mips.md.
+AS_MIPS_SRC := as/mips_main.c as/asm_lex.c as/asm_obj.c as/mips_parse.c \
+               as/mips_encode.c as/mips_elf.c as/mips_sched.c ir/util.c ir/arena.c
+
+build/skj-as-mips: $(AS_MIPS_SRC) as/mips.h as/asm_lex.h as/asm_obj.h | build
+	$(CC) $(CFLAGS) -Ias -Iir -o $@ $(AS_MIPS_SRC)
+
 ## skj-ld linker
 LD_SRC := ld/main.c ld/elf_read.c ld/script.c ld/link.c ld/elf_write.c ld/mapfile.c ir/util.c ir/arena.c
 
@@ -198,6 +209,23 @@ LD_RV_SRC := ld/rv_main.c ld/rv_elf_read.c ld/rv_link.c ld/rv_elf_write.c \
 
 build/skj-ld-rv: $(LD_RV_SRC) ld/ld.h ld/rv_ld.h ld/mapfile.h | build
 	$(CC) $(CFLAGS) -Ild -Iir -o $@ $(LD_RV_SRC)
+
+## MIPS I linker (shares layout core, script parser and mapfile reader).
+## REL relocations with the o32 HI16/LO16 addend carry-pairing.  See doc/mips.md.
+LD_MIPS_SRC := ld/mips_main.c ld/mips_elf_read.c ld/mips_link.c \
+               ld/mips_elf_write.c ld/mips_psexe_write.c ld/mips_archive.c \
+               ld/link.c ld/script.c ld/mapfile.c ir/util.c ir/arena.c
+
+build/skj-ld-mips: $(LD_MIPS_SRC) ld/ld.h ld/mips_ld.h ld/mapfile.h | build
+	$(CC) $(CFLAGS) -Ild -Iir -o $@ $(LD_MIPS_SRC)
+
+## skj-ar: a minimal ar(1) archive tool (create with symbol index, list,
+## extract).  Generic over the object machine and byte order, so one tool
+## serves every target's linker.
+AR_SRC := ar/main.c ld/mapfile.c ir/util.c ir/arena.c
+
+build/skj-ar: $(AR_SRC) ld/mapfile.h ir/util.h ir/arena.h | build
+	$(CC) $(CFLAGS) -Ild -Iir -o $@ $(AR_SRC)
 
 # Per-test rules: tests/<name>.tc -> build/<name>.s -> build/<name>.o
 #                 + build/start.o -> build/<name>
@@ -272,7 +300,7 @@ check-rv: build/skj-tinc-rv build/skj-sc-rv $(RV_TESTS:tests/%.tc=build/rv/%) $(
 	@sh tests/run-tests.sh "$(QEMU_RV)" build/rv
 
 ## MIPS I per-test rules: tests/<name>.tc -> build/mips/<name>.s -> .o -> binary.
-## The toolchain (mipsel-unknown-elf) defaults to -march=mips1, o32,
+## The toolchain (mipsel-none-elf) defaults to -march=mips1, o32,
 ## little-endian; the generated asm leans on the assembler's default
 ## `.set reorder` to fill the load/branch delay slots for R2000/R3000.
 MIPS_TESTS     := $(TESTS)
@@ -288,6 +316,10 @@ build/mips/%.o: build/mips/%.s
 	$(MIPS_AS) -march=mips1 -EL -o $@ $<
 
 build/mips/start.o: runtime/start_mips.S | build/mips
+	$(MIPS_AS) -march=mips1 -EL -o $@ $<
+
+## The PlayStation BIOS-TTY crt (PS-EXE builds link this instead of start.o).
+build/mips/start_psx.o: runtime/start_psx.S | build/mips
 	$(MIPS_AS) -march=mips1 -EL -o $@ $<
 
 build/mips/%: build/mips/%.o build/mips/start.o
@@ -308,7 +340,7 @@ check-mips: build/skj-tinc-mips build/skj-sc-mips $(MIPS_TESTS:tests/%.tc=build/
 ## arrives in $f12/$f14 and a double result in $f0; the backend's psABI emits
 ## exactly that at the boundary.
 MIPS_RT_CFLAGS := -march=mips1 -EL -G 0 -std=c99 -O2 -Wall -ffreestanding
-MIPS_CC ?= mipsel-unknown-elf-gcc
+MIPS_CC ?= mipsel-none-elf-gcc
 
 build/mips/start_rt.o: runtime/start_mips.S | build/mips
 	$(MIPS_AS) -march=mips1 -EL -o $@ $<
@@ -1792,6 +1824,104 @@ check-cc-mips: build/skj-cc-mips build/mips/start.o build/mips/half.o
 	 EXCLUDE="$(NOPSABI_EXCLUDE)" \
 	 sh tests/run-cc-tests.sh
 
+## skj-as-mips validation: the encoding golden-master against GNU as (the
+## .set noreorder enc_*.s fixtures, byte-for-byte), runnable programs under
+## qemu-mipsel, and the spim R2000 load-delay tier that catches the hazard
+## qemu's interlocked pipeline hides.  Needs mipsel-none-elf-{as,ld,objcopy}
+## and qemu-mipsel; the spim tier is skipped if spim is absent.
+check-mipsas: build/skj-as-mips build/skj-ld-mips
+	@SKJ="$(CURDIR)/build/skj-as-mips" SKJLD="$(CURDIR)/build/skj-ld-mips" \
+	 GAS="$(MIPS_AS)" GLD="$(MIPS_LD)" \
+	 OBJCOPY="$(MIPS_OBJCOPY)" QEMU="$(QEMU_MIPS)" SPIM="$(SPIM)" \
+	 sh tests/run-mipsas-tests.sh
+
+## The C suite assembled by skj-as-mips (default .set reorder output) and
+## linked by skj-ld-mips, run under qemu-mipsel.  End-to-end proof of the
+## binutils-free MIPS toolchain, including the delay-slot scheduler, on real
+## backend output.  The counterpart of check-cc-rv-skj.
+check-cc-mips-skj: build/skj-cc-mips build/skj-as-mips build/skj-ld-mips build/mips/start.o build/mips/half.o
+	@CCBIN="$(CURDIR)/build/skj-cc-mips" \
+	 ASM="$(CURDIR)/build/skj-as-mips -o" \
+	 LD="$(CURDIR)/build/skj-ld-mips -o" \
+	 QEMU="$(QEMU_MIPS)" \
+	 START="$(CURDIR)/build/mips/start.o" \
+	 HALF="$(CURDIR)/build/mips/half.o" \
+	 OUTDIR="$(CURDIR)/build/cc-mips-skj" \
+	 EXCLUDE="$(NOPSABI_EXCLUDE)" \
+	 sh tests/run-cc-tests.sh
+
+## Archive (.a) support end to end: skj-ar builds a GNU archive with a symbol
+## index, and skj-ld-mips pulls the members that resolve undefined symbols
+## (member A, and B transitively) while skipping the unreferenced one (whose own
+## undefined symbol would break the link if it were wrongly pulled).  Proves
+## both the new skj-ar tool and the skj-ld-mips archive reader.  The fixtures
+## are the language-neutral archive C shared with the RISC-V archive test.
+test-mips-archive: build/skj-cc-mips build/skj-as-mips build/skj-ld-mips build/skj-ar build/mips/start.o build/mips/half.o | build/mips
+	@for m in a b unused; do \
+	    ./build/skj-cc-mips -o build/mips/arch_$$m.s tests/rv_archive_$$m.c; \
+	    ./build/skj-as-mips -o build/mips/arch_$$m.o build/mips/arch_$$m.s; \
+	 done
+	@rm -f build/mips/libarch.a
+	@./build/skj-ar rcs build/mips/libarch.a build/mips/arch_a.o \
+	    build/mips/arch_b.o build/mips/arch_unused.o
+	@./build/skj-cc-mips -o build/mips/arch_main.s tests/rv_archive_main.c
+	@./build/skj-as-mips -o build/mips/arch_main.o build/mips/arch_main.s
+	@./build/skj-ld-mips -o build/mips/arch build/mips/start.o build/mips/half.o \
+	    build/mips/arch_main.o build/mips/libarch.a
+	@$(QEMU_MIPS) ./build/mips/arch; ec=$$?; \
+	 if [ $$ec -eq 42 ]; then echo "PASS: mips archive link (skj-ar built, member pulled from .a, unused skipped, exit 42)"; \
+	 else echo "FAIL: mips archive link (exit $$ec, expected 42)"; exit 1; fi
+
+## PlayStation PS-EXE output: skj-ld-mips -f ps-exe writes the "PS-X EXE"
+## container the console loads, based at the PlayStation RAM address 0x80010000,
+## with the BIOS-TTY crt (start_psx.o).  No in-tree simulator loads a PS-EXE and
+## models the R3051, so this validates the container structurally (header +
+## flat image) and confirms the payload was relocated at the PlayStation base;
+## the code itself is run-verified at the Linux base by check-cc-mips-skj.  A
+## few C programs and a hand-written assembly program are packed and checked.
+test-mips-psexe: build/skj-cc-mips build/skj-as-mips build/skj-ld-mips build/mips/start_psx.o build/mips/half.o | build/mips
+	@for t in cc_t001_return cc_t040_func_ptr cc_t069_calls; do \
+	    ./build/skj-cc-mips -o build/mips/psx_$$t.s tests/$$t.c || exit 1; \
+	    ./build/skj-as-mips -o build/mips/psx_$$t.o build/mips/psx_$$t.s || exit 1; \
+	    ./build/skj-ld-mips -f ps-exe -o build/mips/psx_$$t.exe \
+	        build/mips/start_psx.o build/mips/half.o build/mips/psx_$$t.o || exit 1; \
+	    OBJDUMP="$(MIPS_OBJDUMP)" sh tests/run-psx-tests.sh build/mips/psx_$$t.exe || exit 1; \
+	 done
+
+## PS-EXE functional tier: actually run the PlayStation executables on the
+## PCSX-Redux emulator with a real BIOS ROM.  The BIOS-TTY crt's exit path
+## writes main's return value to the PCSX-Redux software-exit register, so in
+## test mode the emulator quits with that code and the run self-checks like the
+## qemu tiers.  Opt-in: needs pcsx-redux and a BIOS, skipped otherwise.  Pass
+## the BIOS with PSX_BIOS=/path/to/scphXXXX.bin.
+## Two phases.  Integer programs run natively on the R3051 (skj-cc-mips).  A
+## float program traps on the FPU-less R3051, so it goes through the soft-float
+## compiler (skj-cc-mips-sf, no cop-1) linked with softfloat.o: that is the
+## milestone-6 goal, float code running on the real console, demonstrated here.
+PCSX_REDUX ?= pcsx-redux
+test-mips-psexe-redux: build/skj-cc-mips build/skj-cc-mips-sf build/skj-as-mips build/skj-ld-mips build/mips/start_psx.o build/mips/half.o build/mips/softfloat.o | build/mips
+	@echo "== integer programs (native R3051) =="
+	@CCBIN="$(CURDIR)/build/skj-cc-mips" \
+	 ASM="$(CURDIR)/build/skj-as-mips -o" \
+	 LD="$(CURDIR)/build/skj-ld-mips -f ps-exe -o" \
+	 START="$(CURDIR)/build/mips/start_psx.o" \
+	 HALF="$(CURDIR)/build/mips/half.o" \
+	 OUTDIR="$(CURDIR)/build/psx-redux" \
+	 PCSX_REDUX="$(PCSX_REDUX)" PSX_BIOS="$(PSX_BIOS)" \
+	 sh tests/run-psx-redux-tests.sh \
+	    cc_t001_return cc_t002_arith cc_t003_if cc_t015_ternary \
+	    cc_t040_func_ptr cc_t017_bitwise
+	@echo "== float programs, soft-float (FPU-less R3051) =="
+	@CCBIN="$(CURDIR)/build/skj-cc-mips-sf" \
+	 ASM="$(CURDIR)/build/skj-as-mips -o" \
+	 LD="$(CURDIR)/build/skj-ld-mips -f ps-exe -o" \
+	 START="$(CURDIR)/build/mips/start_psx.o" \
+	 HALF="$(CURDIR)/build/mips/half.o" \
+	 EXTRA="$(CURDIR)/build/mips/softfloat.o" \
+	 OUTDIR="$(CURDIR)/build/psx-redux-sf" \
+	 PCSX_REDUX="$(PCSX_REDUX)" PSX_BIOS="$(PSX_BIOS)" \
+	 sh tests/run-psx-redux-tests.sh cc_t069_calls
+
 ## The .set noreorder tier: the same programs, but the backend fills the
 ## delay slots itself (SKJ_MIPS_NOREORDER=1) instead of the assembler.  This
 ## verifies the scheduler functionally: a wrong hoist changes results and
@@ -1925,4 +2055,4 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp c
 clean:
 	rm -rf build
 
-.PHONY: all release-check check check-rv test-rv-irq test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-emu check-rv-emu check-exc-emu check-emu-all test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86 check-x86-64 check-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive check-smoke test-gc test-fpu test-fpu-rv test-fpu-x86 test-fpu-x86-64 test-fpu-arm64 test-f32-rv test-i64 test-i64-rv test-i64-x86 test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86 test-ops-x86-64 test-ops-arm64 test-parse clean FORCE
+.PHONY: all release-check check check-rv test-rv-irq test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-emu check-rv-emu check-exc-emu check-emu-all test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86 check-x86-64 check-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive check-mipsas check-cc-mips-skj check-smoke test-gc test-fpu test-fpu-rv test-fpu-x86 test-fpu-x86-64 test-fpu-arm64 test-f32-rv test-i64 test-i64-rv test-i64-x86 test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86 test-ops-x86-64 test-ops-arm64 test-parse clean FORCE

@@ -9,7 +9,7 @@
 # Usage: vendor-skjegg.sh [-d DIR] [-r REF] [-u DIR] component ...
 #        update-skjegg.sh                      (re-vendor)
 #
-# Backends:  coldfire  riscv  x86
+# Backends:  coldfire  riscv  x86  mips
 # Frontends: tinc  scheme  moo  pascal  cc
 # Tools:     as  ld  cpp
 # Emulators: emu-cf  emu-rv
@@ -29,9 +29,12 @@ usage() {
 Usage: vendor-skjegg.sh [-d DIR] [-r REF] [-u DIR] component ...
        update-skjegg.sh                      (re-vendor)
 
-Backends:  coldfire  riscv  x86
+Backends:  coldfire  riscv  x86  mips
 Frontends: tinc  scheme  moo  pascal  cc
-Tools:     as  ld  as-rv  ld-rv  cpp   (as-rv/ld-rv: the RISC-V RV32 toolchain)
+Tools:     as  ld  as-rv  ld-rv  as-mips  ld-mips  ar  cpp
+             (as-rv/ld-rv: the RISC-V RV32 toolchain; as-mips/ld-mips: the
+              MIPS I toolchain, ld-mips writes ELF and PlayStation PS-EXE;
+              ar: a target-neutral archive tool for any of the linkers)
 Emulators: emu-cf  emu-rv    (skj-run; either, both, or neither)
 
 Options:
@@ -66,10 +69,11 @@ fi
 
 # ---- parse and validate components ----
 
-has_cf=0 has_rv=0 has_x86=0
+has_cf=0 has_rv=0 has_x86=0 has_mips=0
 has_tinc=0 has_scheme=0 has_moo=0 has_pascal=0 has_cc=0
 has_as=0 has_ld=0 has_cpp=0
 has_as_rv=0 has_ld_rv=0
+has_as_mips=0 has_ld_mips=0 has_ar=0
 has_emu_cf=0 has_emu_rv=0
 
 for comp in $COMPONENTS; do
@@ -77,6 +81,7 @@ for comp in $COMPONENTS; do
         coldfire) has_cf=1 ;;
         riscv)    has_rv=1 ;;
         x86)      has_x86=1 ;;
+        mips)     has_mips=1 ;;
         tinc)     has_tinc=1 ;;
         scheme)   has_scheme=1 ;;
         moo)      has_moo=1 ;;
@@ -86,6 +91,9 @@ for comp in $COMPONENTS; do
         ld)       has_ld=1 ;;
         as-rv)    has_as_rv=1 ;;
         ld-rv)    has_ld_rv=1 ;;
+        as-mips)  has_as_mips=1 ;;
+        ld-mips)  has_ld_mips=1 ;;
+        ar)       has_ar=1 ;;
         cpp)      has_cpp=1 ;;
         emu-cf)   has_emu_cf=1 ;;
         emu-rv)   has_emu_rv=1 ;;
@@ -94,7 +102,7 @@ for comp in $COMPONENTS; do
 done
 
 has_fe=$((has_tinc + has_scheme + has_moo + has_pascal + has_cc))
-has_be=$((has_cf + has_rv + has_x86))
+has_be=$((has_cf + has_rv + has_x86 + has_mips))
 
 if [ "$has_fe" -gt 0 ] && [ "$has_be" -eq 0 ]; then
     die "frontends require at least one backend"
@@ -149,6 +157,17 @@ if [ "$has_x86" -eq 1 ]; then
     cp "$S/backend/x86_emit.c" "$S/backend/regalloc_x86.c" "$DEST/backend/"
     cp "$S/runtime/start_x86.asm" "$DEST/runtime/"
 fi
+if [ "$has_mips" -eq 1 ]; then
+    # The Linux crt (start_mips.S), plus what MIPS I specifically needs: half.c
+    # (no hardware _Float16, so IR_FLH/FSH lower to these helpers) and
+    # softfloat.c (the FPU-less soft-float path, for skj-cc-mips-sf and the
+    # PlayStation R3051).  start_psx.S is the BIOS-TTY crt for the PS-EXE that
+    # skj-ld-mips writes.
+    mkdir -p "$DEST/backend" "$DEST/runtime"
+    cp "$S/backend/mips_emit.c" "$S/backend/regalloc_mips.c" "$DEST/backend/"
+    cp "$S/runtime/start_mips.S" "$S/runtime/start_psx.S" \
+       "$S/runtime/half.c" "$S/runtime/softfloat.c" "$DEST/runtime/"
+fi
 
 # frontends
 if [ "$has_tinc" -eq 1 ]; then
@@ -191,9 +210,10 @@ if [ "$has_cpp" -eq 1 ]; then
 fi
 
 # assembler.  The arch-neutral skeleton (asm_lex + asm_obj) is shared by the
-# ColdFire assembler (as) and the RISC-V one (as-rv); each front end plus its
-# standalone tool is taken separately, like the two emulator cores.
-if [ "$has_as" -eq 1 ] || [ "$has_as_rv" -eq 1 ]; then
+# ColdFire assembler (as), the RISC-V one (as-rv) and the MIPS one (as-mips);
+# each front end plus its standalone tool is taken separately, like the two
+# emulator cores.
+if [ "$has_as" -eq 1 ] || [ "$has_as_rv" -eq 1 ] || [ "$has_as_mips" -eq 1 ]; then
     mkdir -p "$DEST/as"
     cp "$S/as/asm_lex.c" "$S/as/asm_obj.c" \
        "$S/as/asm_lex.h" "$S/as/asm_obj.h" "$DEST/as/"
@@ -206,11 +226,16 @@ if [ "$has_as_rv" -eq 1 ]; then                 # RISC-V front end + tool
     cp "$S/as/rv_parse.c" "$S/as/rv_encode.c" "$S/as/rv_elf.c" \
        "$S/as/rv_macro.c" "$S/as/rv.h" "$S/as/rv_main.c" "$DEST/as/"
 fi
+if [ "$has_as_mips" -eq 1 ]; then               # MIPS front end + tool
+    cp "$S/as/mips_parse.c" "$S/as/mips_encode.c" "$S/as/mips_elf.c" \
+       "$S/as/mips_sched.c" "$S/as/mips.h" "$S/as/mips_main.c" "$DEST/as/"
+fi
 
 # linker.  The layout core, script parser and mapfile reader (link/script/
-# mapfile) are shared by the ColdFire linker (ld) and the RISC-V one (ld-rv);
-# each target's ELF I/O plus its tool is taken separately.
-if [ "$has_ld" -eq 1 ] || [ "$has_ld_rv" -eq 1 ]; then
+# mapfile) are shared by the ColdFire linker (ld), the RISC-V one (ld-rv) and
+# the MIPS one (ld-mips); each target's ELF I/O plus its tool is taken
+# separately.
+if [ "$has_ld" -eq 1 ] || [ "$has_ld_rv" -eq 1 ] || [ "$has_ld_mips" -eq 1 ]; then
     mkdir -p "$DEST/ld"
     cp "$S/ld/script.c" "$S/ld/link.c" "$S/ld/mapfile.c" \
        "$S/ld/ld.h" "$S/ld/mapfile.h" "$DEST/ld/"
@@ -221,6 +246,20 @@ fi
 if [ "$has_ld_rv" -eq 1 ]; then                 # RISC-V ELF I/O + reloc + tool
     cp "$S/ld/rv_elf_read.c" "$S/ld/rv_link.c" "$S/ld/rv_elf_write.c" \
        "$S/ld/rv_archive.c" "$S/ld/rv_ld.h" "$S/ld/rv_main.c" "$DEST/ld/"
+fi
+if [ "$has_ld_mips" -eq 1 ]; then               # MIPS ELF+PS-EXE I/O + reloc + tool
+    cp "$S/ld/mips_elf_read.c" "$S/ld/mips_link.c" "$S/ld/mips_elf_write.c" \
+       "$S/ld/mips_psexe_write.c" "$S/ld/mips_archive.c" "$S/ld/mips_ld.h" \
+       "$S/ld/mips_main.c" "$DEST/ld/"
+fi
+
+# skj-ar, a target-neutral archive tool.  It needs only the mapfile reader from
+# ld/, so a bare "ar" selection stays minimal; the copy is idempotent when a
+# linker already brought mapfile in.
+if [ "$has_ar" -eq 1 ]; then
+    mkdir -p "$DEST/ld" "$DEST/ar"
+    cp "$S/ld/mapfile.c" "$S/ld/mapfile.h" "$DEST/ld/"
+    cp "$S/ar/main.c" "$DEST/ar/"
 fi
 
 # emulator (skj-run).  The two CPU cores are independent: a project that
@@ -340,6 +379,14 @@ X86_ASM ?= nasm
 X86_LD  ?= ld
 MK
 fi
+if [ "$has_mips" -eq 1 ]; then
+    cat >> "$MK" <<'MK'
+
+MIPS_CC ?= mipsel-none-elf-gcc
+MIPS_AS ?= mipsel-none-elf-as
+MIPS_LD ?= mipsel-none-elf-ld
+MK
+fi
 
 # source variables
 {
@@ -355,6 +402,9 @@ if [ "$has_rv" -eq 1 ]; then
 fi
 if [ "$has_x86" -eq 1 ]; then
     printf 'SKJ_X86 := $(SKJEGG)backend/regalloc_x86.c $(SKJEGG)backend/x86_emit.c\n' >> "$MK"
+fi
+if [ "$has_mips" -eq 1 ]; then
+    printf 'SKJ_MIPS := $(SKJEGG)backend/regalloc_mips.c $(SKJEGG)backend/mips_emit.c\n' >> "$MK"
 fi
 
 if [ "$has_tinc" -eq 1 ]; then
@@ -421,6 +471,21 @@ SKJ_LD_RV_LIB := $(SKJEGG)ld/rv_elf_read.c $(SKJEGG)ld/rv_link.c \
                  $(SKJEGG)ld/link.c $(SKJEGG)ld/script.c $(SKJEGG)ld/mapfile.c
 MK
 fi
+if [ "$has_as_mips" -eq 1 ]; then
+    cat >> "$MK" <<'MK'
+SKJ_AS_MIPS_LIB := $(SKJEGG)as/asm_lex.c $(SKJEGG)as/asm_obj.c \
+                   $(SKJEGG)as/mips_parse.c $(SKJEGG)as/mips_encode.c \
+                   $(SKJEGG)as/mips_elf.c $(SKJEGG)as/mips_sched.c
+MK
+fi
+if [ "$has_ld_mips" -eq 1 ]; then
+    cat >> "$MK" <<'MK'
+SKJ_LD_MIPS_LIB := $(SKJEGG)ld/mips_elf_read.c $(SKJEGG)ld/mips_link.c \
+                   $(SKJEGG)ld/mips_elf_write.c $(SKJEGG)ld/mips_psexe_write.c \
+                   $(SKJEGG)ld/mips_archive.c $(SKJEGG)ld/link.c \
+                   $(SKJEGG)ld/script.c $(SKJEGG)ld/mapfile.c
+MK
+fi
 
 # compiler binary rules (frontend x backend)
 printf '\nSKJ_ALL :=\n' >> "$MK"
@@ -434,6 +499,9 @@ fi
 if [ "$has_tinc" -eq 1 ] && [ "$has_x86" -eq 1 ]; then
     emit_compiler skj-tinc-x86 SKJ_TINC SKJ_X86 '-I$(SKJEGG)ir -I$(SKJEGG)tinc'
 fi
+if [ "$has_tinc" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
+    emit_compiler skj-tinc-mips SKJ_TINC SKJ_MIPS '-I$(SKJEGG)ir -I$(SKJEGG)tinc'
+fi
 if [ "$has_scheme" -eq 1 ] && [ "$has_cf" -eq 1 ]; then
     emit_compiler skj-sc SKJ_SCHEME SKJ_CF '-I$(SKJEGG)scheme -I$(SKJEGG)ir'
 fi
@@ -442,6 +510,9 @@ if [ "$has_scheme" -eq 1 ] && [ "$has_rv" -eq 1 ]; then
 fi
 if [ "$has_scheme" -eq 1 ] && [ "$has_x86" -eq 1 ]; then
     emit_compiler skj-sc-x86 SKJ_SCHEME SKJ_X86 '-I$(SKJEGG)scheme -I$(SKJEGG)ir'
+fi
+if [ "$has_scheme" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
+    emit_compiler skj-sc-mips SKJ_SCHEME SKJ_MIPS '-I$(SKJEGG)scheme -I$(SKJEGG)ir'
 fi
 if [ "$has_moo" -eq 1 ] && [ "$has_cf" -eq 1 ]; then
     emit_compiler skj-mooc SKJ_MOO SKJ_CF '-I$(SKJEGG)moo -I$(SKJEGG)ir'
@@ -452,6 +523,9 @@ fi
 if [ "$has_moo" -eq 1 ] && [ "$has_x86" -eq 1 ]; then
     emit_compiler skj-mooc-x86 SKJ_MOO SKJ_X86 '-I$(SKJEGG)moo -I$(SKJEGG)ir'
 fi
+if [ "$has_moo" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
+    emit_compiler skj-mooc-mips SKJ_MOO SKJ_MIPS '-I$(SKJEGG)moo -I$(SKJEGG)ir'
+fi
 if [ "$has_pascal" -eq 1 ] && [ "$has_cf" -eq 1 ]; then
     emit_compiler skj-pc SKJ_PASCAL SKJ_CF '-I$(SKJEGG)pascal -I$(SKJEGG)ir'
 fi
@@ -460,6 +534,9 @@ if [ "$has_pascal" -eq 1 ] && [ "$has_rv" -eq 1 ]; then
 fi
 if [ "$has_pascal" -eq 1 ] && [ "$has_x86" -eq 1 ]; then
     emit_compiler skj-pc-x86 SKJ_PASCAL SKJ_X86 '-I$(SKJEGG)pascal -I$(SKJEGG)ir'
+fi
+if [ "$has_pascal" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
+    emit_compiler skj-pc-mips SKJ_PASCAL SKJ_MIPS '-I$(SKJEGG)pascal -I$(SKJEGG)ir'
 fi
 if [ "$has_cc" -eq 1 ] && [ "$has_cf" -eq 1 ]; then
     emit_compiler skj-cc SKJ_CC SKJ_CF \
@@ -473,6 +550,15 @@ if [ "$has_cc" -eq 1 ] && [ "$has_rv" -eq 1 ]; then
     # the standalone RV toolchain (as-rv/ld-rv) and runtime/start_rv_psabi_cc.S.
     emit_compiler skj-cc-rv-psabi SKJ_CC SKJ_RV \
         '-DCC_PSABI -I$(SKJEGG)cc -I$(SKJEGG)cpp -I$(SKJEGG)ir' '$(SKJ_CPP_LIB)'
+fi
+if [ "$has_cc" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
+    emit_compiler skj-cc-mips SKJ_CC SKJ_MIPS \
+        '-I$(SKJEGG)cc -I$(SKJEGG)cpp -I$(SKJEGG)ir' '$(SKJ_CPP_LIB)'
+    # The soft-float build: same sources with -DMIPS_SOFTFLOAT, emitting no
+    # coprocessor-1 instruction and lowering every float op to a runtime/
+    # softfloat.c call, for the FPU-less R3051 (the PlayStation).
+    emit_compiler skj-cc-mips-sf SKJ_CC SKJ_MIPS \
+        '-DMIPS_SOFTFLOAT -I$(SKJEGG)cc -I$(SKJEGG)cpp -I$(SKJEGG)ir' '$(SKJ_CPP_LIB)'
 fi
 if [ "$has_cc" -eq 1 ] && [ "$has_x86" -eq 1 ]; then
     emit_compiler skj-cc-x86 SKJ_CC SKJ_X86 \
@@ -513,6 +599,27 @@ if [ "$has_ld_rv" -eq 1 ]; then
         printf '\nSKJ_ALL += $(BUILD)/skj-ld-rv\n'
         printf '$(BUILD)/skj-ld-rv: $(SKJEGG)ld/rv_main.c $(SKJ_LD_RV_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c | $(BUILD)\n'
         printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)ld -I$(SKJEGG)ir -o $@ $(SKJEGG)ld/rv_main.c $(SKJ_LD_RV_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
+    } >> "$MK"
+fi
+if [ "$has_as_mips" -eq 1 ]; then
+    {
+        printf '\nSKJ_ALL += $(BUILD)/skj-as-mips\n'
+        printf '$(BUILD)/skj-as-mips: $(SKJEGG)as/mips_main.c $(SKJ_AS_MIPS_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c | $(BUILD)\n'
+        printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)as -I$(SKJEGG)ir -o $@ $(SKJEGG)as/mips_main.c $(SKJ_AS_MIPS_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
+    } >> "$MK"
+fi
+if [ "$has_ld_mips" -eq 1 ]; then
+    {
+        printf '\nSKJ_ALL += $(BUILD)/skj-ld-mips\n'
+        printf '$(BUILD)/skj-ld-mips: $(SKJEGG)ld/mips_main.c $(SKJ_LD_MIPS_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c | $(BUILD)\n'
+        printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)ld -I$(SKJEGG)ir -o $@ $(SKJEGG)ld/mips_main.c $(SKJ_LD_MIPS_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
+    } >> "$MK"
+fi
+if [ "$has_ar" -eq 1 ]; then
+    {
+        printf '\nSKJ_ALL += $(BUILD)/skj-ar\n'
+        printf '$(BUILD)/skj-ar: $(SKJEGG)ar/main.c $(SKJEGG)ld/mapfile.c $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c | $(BUILD)\n'
+        printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)ld -I$(SKJEGG)ir -o $@ $(SKJEGG)ar/main.c $(SKJEGG)ld/mapfile.c $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
     } >> "$MK"
 fi
 

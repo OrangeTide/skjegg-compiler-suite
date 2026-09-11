@@ -13,7 +13,14 @@ R3051 has no FPU at all. That split is why floating point is a configuration
 choice here rather than a fixed feature, discussed under "Floating point"
 below.
 
-Status: milestone 5. The backend is complete for two tiers. The stack
+Status: milestone 5 complete, milestone 6 (a stand-alone toolchain and a
+PlayStation target) done: the assembler `skj-as-mips`, the linker `skj-ld-mips`
+(with an `ar` reader and a PS-EXE output mode), the `skj-ar` archive tool, and
+the BIOS-TTY runtime are in place, so the MIPS toolchain is binutils-free
+(`as`, `ld`, `ar`) and writes the PlayStation executable format. The PS-EXE runs
+on the PCSX-Redux emulator booting a real BIOS, and the soft-float configuration
+runs float code there on the FPU-less R3051. The backend is complete
+for two tiers. The stack
 convention (the toolkit's own) runs TinC, TinScheme, and the C compiler; the
 o32 platform ABI runs Excelsior against a gcc-built C runtime. It passes the
 TinC and TinScheme suites (`make check-mips`), the `test-i64`, `test-ops`,
@@ -48,9 +55,9 @@ Running one test by hand:
 
 ```sh
 ./build/skj-tinc-mips -o build/mips/hello.s tests/hello.tc
-mipsel-unknown-elf-as -march=mips1 -EL -o build/mips/hello.o build/mips/hello.s
-mipsel-unknown-elf-as -march=mips1 -EL -o build/mips/start.o runtime/start_mips.S
-mipsel-unknown-elf-ld -o build/mips/hello build/mips/start.o build/mips/hello.o
+mipsel-none-elf-as -march=mips1 -EL -o build/mips/hello.o build/mips/hello.s
+mipsel-none-elf-as -march=mips1 -EL -o build/mips/start.o runtime/start_mips.S
+mipsel-none-elf-ld -o build/mips/hello build/mips/start.o build/mips/hello.o
 qemu-mipsel build/mips/hello ; echo $?
 ```
 
@@ -58,7 +65,7 @@ qemu-mipsel build/mips/hello ; echo $?
 
 The backend emits GAS assembly and hands it to an external assembler and
 linker, the same arrangement the RISC-V, x86, and AArch64 backends use. The
-toolchain is `mipsel-unknown-elf`, a bare-metal (newlib) cross toolchain
+toolchain is `mipsel-none-elf`, a bare-metal (newlib) cross toolchain
 whose defaults are exactly the R2000/R3000 profile:
 
 ```
@@ -234,7 +241,7 @@ is rounded up to a multiple of 16 so `$sp` stays 16-aligned across calls.
 `skj-exc-mips` is built `-DCC_PSABI` and emits the o32 C ABI, so a gcc-built
 guest runtime (libexc and its host binding) links against it and is called in
 both directions. This is the counterpart of the RISC-V `CC_PSABI` build. The
-runtime objects are cross-compiled with `mipsel-unknown-elf-gcc`, and the
+runtime objects are cross-compiled with `mipsel-none-elf-gcc`, and the
 entry point, syscalls, arena, and source coroutines come from
 `start_mips_psabi.S`, the o32 version of `start_mips.S`.
 
@@ -453,10 +460,249 @@ tests/test_softfloat.c     host-only unit test of softfloat.c against native dou
 The Makefile builds `skj-tinc-mips`, `skj-sc-mips`, `skj-cc-mips`,
 `skj-exc-mips`, and `skj-cc-mips-sf` (the soft-float C compiler) from these
 plus the shared IR, and the `check-*-mips` targets drive the suites through
-`mipsel-unknown-elf-{as,ld}` and `qemu-mipsel`. The FPU and C tests also link
-`build/mips/half.o`, the `mipsel-unknown-elf-gcc` build of `runtime/half.c`,
+`mipsel-none-elf-{as,ld}` and `qemu-mipsel`. The FPU and C tests also link
+`build/mips/half.o`, the `mipsel-none-elf-gcc` build of `runtime/half.c`,
 for the `IR_FLH`/`IR_FSH` softfloat helpers; the soft-float builds add
 `build/mips/softfloat.o`.
+
+## The stand-alone toolchain and PlayStation target (milestone 6, planned)
+
+Milestone 6 gives the soft-float configuration a way to run on real R3051
+hardware, not just under `qemu-mipsel` with the no-coprocessor-1 assertion.
+The vehicle is a MIPS toolchain that does not depend on GNU binutils
+`as`/`ld`/`ar`, built over the shared assembler skeleton (`as/asm_lex`,
+`as/asm_obj`) and the linker's layout core, the way the RISC-V
+`skj-as-rv` / `skj-ld-rv` toolchain is. This is the "real demand" the
+assembler-scope policy names: producing a PlayStation executable means owning
+the linker, so the whole MIPS toolchain moves in-tree.
+
+The decided approach:
+
+- **`skj-as-mips` replicates `.set reorder`.** It expands the macros the
+  backend emits (`li`, `la`, `mul`, `div`, `rem`, the branch pseudos) and fills
+  the branch and load delay slots, so the current backend output assembles
+  unchanged. The syntax is a chosen subset, roughly compatible with GNU as and
+  the original MIPS assembler, which are both a reference. This is the opposite
+  choice from the `SKJ_MIPS_NOREORDER` scheduler, which fills the slots in the
+  backend; the assembler tier keeps that work in the assembler where the other
+  toolchains put it.
+- **ELF first, then PS-EXE.** `skj-as-mips`, `skj-ld-mips`, and archive
+  support (an `ar` reader plus a `skj-ar`) emit ELF32 MIPSEL objects and
+  executables first. A `check-*-mips-skj` tier then runs the existing suites
+  under `qemu-mipsel` through the skj toolchain, with the assembler's encoding
+  checked byte for byte against GNU as, the way `check-cc-rv-skj` does for
+  RISC-V. Only after that does `skj-ld-mips` gain a second output mode that
+  writes the PS-EXE executable format the console loads.
+- **The PlayStation runtime is BIOS TTY.** The PS-EXE counterpart of
+  `start_mips.S`'s Linux `write`/`exit` routes output through the BIOS A0/B0
+  call tables, which is what most homebrew uses and is portable across the
+  console models. No GPU model.
+
+Verification is three complementary jobs, because no single available
+simulator both models the R2000 pipeline exactly and loads a PS-EXE:
+
+1. **`check-*-mips-skj` under `qemu-mipsel`.** The skj toolchain assembles and
+   links the existing suites: functional parity with GNU as, and the branch
+   delay slot, which qemu models.
+2. **A `spim` tier over generated assembly.** `spim` models the R2000 load
+   delay accurately, the hazard the noreorder discussion notes `qemu-mipsel`
+   cannot see. Running the generated code through it exercises that hazard on
+   both the `.set reorder` assembler output and the noreorder scheduler output.
+3. **The PS-EXE path through a retargetable BIOS shim.** The BIOS TTY calls are
+   one indirection, so the PlayStation program self-checks under `spim` (or
+   `qemu`) with the BIOS call backed by the simulator's own output syscall,
+   while the PS-EXE header and layout are validated structurally. There is no
+   full PlayStation emulator in the automated gate; MARS (a Java GUI simulator)
+   stays a manual reference.
+
+Jobs 2 and 3 converge: running the PlayStation program under `spim` with the
+BIOS TTY shimmed to the `spim` print syscall both exercises the program end to
+end and catches a load-delay bug in one run.
+
+### First sub-step: skj-as-mips, ELF first (done)
+
+The first sub-step is the assembler alone; the linker and the PS-EXE output
+come after. It mirrors the RISC-V port, plugging a front end (`mips.h`,
+`mips_parse.c`, `mips_encode.c`, `mips_elf.c`, `mips_sched.c`, `mips_main.c`)
+into the shared skeleton, with a `skj-as-mips` Makefile target beside
+`skj-as-rv`.
+
+The assembler accepts exactly what `backend/mips_emit.c` emits and nothing
+more: the integer R-, I-, and J-type instructions, the COP1 instructions the
+`fpu`/`f32` suites need (not the PlayStation soft-float path, which emits no
+COP1), the macros `li`, `la`, `move`, `negu`, `beqz`, `bnez`, `b`, `mul`,
+`div`, `divu`, `rem`, `remu`, `l.d`, `s.d`, and the directives `.text`,
+`.data`, `.globl`, `.word`, `.short`, `.byte`, `.ascii`, `.space`, `.align`,
+and `.set`.
+
+Three pieces are new relative to `skj-as-rv`: the `.set reorder` engine
+(delay-slot filling, the noreorder scheduler's hazard rules ported to the
+encoded instruction stream), macro expansion, and the MIPS relocations
+(`R_MIPS_32`, `R_MIPS_26`, `R_MIPS_HI16`, `R_MIPS_LO16`, `R_MIPS_PC16`), whose
+HI16/LO16 carry-pairing is the analog of the `PCREL_HI20`/`LO12` pairing the
+RISC-V linker already carries.
+
+The byte-exact decision landed with one refinement discovered in the build.
+`skj-as-mips` reproduces GNU as **byte for byte** for instruction encoding and
+macro expansion, including the **full signed `div`/`rem` trap sequences** (the
+divide-by-zero `break` and the `INT_MIN / -1` overflow check). It does **not**
+match GNU as's `.set reorder` slot filling byte for byte: GNU's reorder
+heuristic and the backend's own noreorder scheduler differ in both directions
+(each inserts a `nop` the other omits, and GNU hoists into `jal` slots more
+aggressively), so a byte match there would be a from-scratch reproduction of
+GNU's version-specific algorithm. The `.set reorder` engine instead fills the
+slots correctly (it ports the backend's proven scheduler) and is verified by
+running, not by diffing. So byte-exactness holds where it is cheap and
+checkable, the `.set noreorder` output, and correctness is the bar for
+`.set reorder`.
+
+The build order, all done:
+
+1. Skeleton fit and driver (`mips.h`, `mips_main.c`, the `asm_lex` `$`-register
+   knob).
+2. The core encoder (`mips_encode.c`): the integer R-, I-, and J-type
+   instructions and COP1, byte-identical to GNU as.
+3. The ELF writer (`mips_elf.c`): ELF32 MIPSEL objects, the REL relocation set,
+   and the local-symbol folding onto section symbols that a `la` or `.word` to
+   a local label needs.
+4. Macro expansion (`mips_encode.c`): `move`/`li`/`la`/`negu`/`neg`/`not`/the
+   branch pseudos/`l.d`/`s.d`, `mul`, and `div`/`rem` with the full trap
+   sequences, byte-identical to GNU as.
+5. The `.set reorder` engine (`mips_sched.c`): branch and load delay-slot
+   filling as a source pre-pass, `.set noreorder` regions passed through.
+6. The verification harness (`tests/mipsas/`, `make check-mipsas`): the
+   encoding golden-master against `mipsel-none-elf-as`, runnable programs under
+   `qemu-mipsel`, and the `spim -delayed_loads` R2000 tier (`skj-as-mips -S`
+   emits the scheduled assembly for `spim` to run on its accurate load-delay
+   model). `make check-cc-mips-skj` adds the whole C suite assembled by
+   `skj-as-mips` on its default `.set reorder` output.
+
+Verified: the encoding and macro fixtures and all real backend `.set noreorder`
+output are byte-identical to GNU as; the full 73-test C suite and the
+tinc/scheme programs assemble through `skj-as-mips` on `.set reorder` output,
+link, and run under `qemu-mipsel`; and the `spim` tier confirms the scheduled
+code is correct on the R2000 model the interlocked `qemu` cannot show.
+
+### Second sub-step: skj-ld-mips, ELF (done)
+
+The linker mirrors `skj-ld-rv`: a front end (`mips_ld.h`, `mips_elf_read.c`,
+`mips_link.c`, `mips_elf_write.c`, `mips_main.c`) over the arch-neutral layout
+core (`ld_layout` / `ld_find_output_sec` / `ld_check_undefined` from `link.c`),
+the script parser (`script.c`), and the mapfile reader (`mapfile.c`). It reads
+ELF32 little-endian `EM_MIPS` relocatable objects and writes an `ET_EXEC` based
+at `0x00400000` for `qemu-mipsel` user mode, with a `skj-ld-mips` Makefile
+target beside `skj-ld-rv`.
+
+Two things differ from the RISC-V linker:
+
+- **REL, not RELA.** MIPS relocations carry the addend in the relocated field,
+  not in the relocation entry, so each addend is read from the field before
+  patching. The reader stores a zero addend and the writer's `HI16` handler
+  reads the paired `LO16` field to recover the combined addend. Applied:
+  `R_MIPS_32` (`S + A`), `R_MIPS_26` (absolute 26-bit word address, region
+  checked), `R_MIPS_PC16` (a branch displacement), and the `R_MIPS_HI16` /
+  `R_MIPS_LO16` pair. The pair combines its addends the way the o32 ABI
+  specifies, `AHL = (HI << 16) + sign_extend(LO)`, resolving both fields against
+  `S + AHL` with the `+ 0x8000` carry into the high half. This is the analog of
+  the RISC-V `PCREL_HI20` / `LO12` pairing, and a `HI16` is resolved together
+  with the next `LO16` in the object.
+- **A `.MIPS.abiflags` record.** `qemu-mipsel` reads the `PT_MIPS_ABIFLAGS`
+  program header to choose the floating-point register mode. An o32 MIPS-I
+  image wants `fp_abi = DOUBLE` and FR=0; with no abiflags header `qemu` picks
+  the wrong mode and every double-precision computation produces garbage (this
+  was found the hard way: stripping the section from a GNU-linked binary breaks
+  it the same way). The writer emits the 24-byte `Mips_elf_abiflags_v0` record
+  byte-identical to GNU's, described by a `PT_MIPS_ABIFLAGS` program header and
+  a section header. The default script declares two program headers so
+  `ld_layout` reserves the header space, keeping the file-offset to vaddr
+  congruence the single-segment writer relies on.
+
+Verified: the full 73-test C suite assembled by `skj-as-mips` and linked by
+`skj-ld-mips` runs under `qemu-mipsel` (`make check-cc-mips-skj`), and the
+`run` tier of `make check-mipsas` links its hand-written assembly with
+`skj-ld-mips` too.
+
+### Third sub-step: archive support (done)
+
+`skj-ld-mips` reads `ar` archives (`mips_archive.c`), the RISC-V archive reader
+with `mips_parse_elf` used for a pulled member (the `ar` container is
+arch-neutral, so the rest is identical). An input with the `!<arch>\n` magic is
+consulted through its GNU symbol index rather than linked whole, pulling only
+the members that resolve a still-undefined symbol and iterating to a fixpoint
+(a pulled member can reference further members).
+
+`skj-ar` (`ar/main.c`) is the archive creator that closes the loop. It writes a
+GNU archive with a symbol index (the `s` of `ar rcs`, which the linker needs to
+find members), lists members (`t`), and extracts them (`x`). It is generic over
+the object machine and byte order: it reads each member's ELF32 symbol table
+(either endianness) for the defined global symbols the index records, and
+copies member bytes verbatim, so one `skj-ar` serves every skj target. Long
+member names go in the GNU `//` string table, and the output is deterministic
+(zero timestamps, mode 0644). This is target-neutral tooling, not MIPS-specific,
+but it lands here because the MIPS toolchain is the one being taken
+binutils-free end to end.
+
+Verified: `make test-mips-archive` compiles three members, packs them with
+`skj-ar`, and links a program that references one (which transitively pulls a
+second) with `skj-ld-mips`, leaving the third out; a wrongly pulled unused
+member would fail the link because it calls an undefined symbol, so a clean run
+to exit 42 under `qemu-mipsel` proves both the reader's selection and the
+tool's index. The archive format is cross-checked against GNU `nm`/`ar` on
+little- and big-endian objects, and GNU `ld` links `skj-ar` output.
+
+The MIPS toolchain is now binutils-free (`as`, `ld`, and `ar`).
+
+### Fourth sub-step: PS-EXE output (done)
+
+`skj-ld-mips -f ps-exe` writes the PlayStation executable the console loads
+(`mips_psexe_write.c`), the second output mode beside the ELF one. A PS-EXE is
+a 2048-byte header followed by a flat text+data image the BIOS loader copies
+into RAM, so the writer does not touch the ELF program/section machinery: it
+takes the sections `ld_layout` placed and `mips_ld_link` relocated and
+serializes the loaded image plus the header the loader reads. The header names
+the entry (`pc0`), the load address and size (`t_addr` / `t_size`, a multiple of
+2048), the bss to clear (`b_addr` / `b_size`), and the stack base (`s_addr`).
+A PS-EXE build uses the built-in PlayStation script (`mips_default_psx_script`,
+base `0x80010000` in main RAM) unless a `-T` script overrides it; no `.set`
+abiflags or program headers are involved.
+
+The runtime is the BIOS-TTY crt `runtime/start_psx.S`, the counterpart of
+`start_mips.S`. Its `_start`, `write`, and `exit` are the three entry points
+that touch the outside world; `_start` sets the stack, clears bss, and calls
+`main`, `write` sends each byte through the BIOS `A0(3Ch)` `std_out_putchar`
+call, and `exit` writes `main`'s return value to the PCSX-Redux software-exit
+register (`0x1f802082`) and then halts (the PlayStation has no process to return
+to; the store is a no-op on real hardware and quits the emulator in test mode).
+Everything below those, the 64-bit integer helpers, the arena, and the
+continuation capture/resume, is pure computation identical to `start_mips.S`, so
+the same compiled programs link.
+
+Verification has two tiers. The first is structural (`make test-mips-psexe`,
+always on): it links a few C programs to PS-EXE with the BIOS-TTY crt and
+`tests/run-psx-tests.sh` validates the container, the `PS-X EXE` magic, the load
+address and stack base, `t_size` a whole number of 2048-byte sectors matching
+the file, and the entry inside the image. It also disassembles the payload raw
+and confirms the jumps target the PlayStation base `0x8001xxxx` and never the
+Linux base `0x0040xxxx`, so the writer used the PS-EXE layout and relocated at
+the console address.
+
+The second tier actually runs the executable (`make test-mips-psexe-redux`,
+opt-in). It boots a real BIOS ROM on the PCSX-Redux emulator and loads each
+PS-EXE. The BIOS-TTY crt's exit path writes `main`'s return value to the
+PCSX-Redux software-exit register (`pcsx_exit`, a halfword store to
+`0x1f802082`, harmless on real hardware), so in `-testmode` the emulator quits
+with that code and the run self-checks like the qemu tiers. The tier has two
+phases: integer programs run natively on the R3051 (`skj-cc-mips`), and a float
+program, which would trap on the FPU-less R3051, runs through the soft-float
+compiler (`skj-cc-mips-sf`, no coprocessor-1) linked with `softfloat.o`. That
+second phase is the milestone-6 goal reached on an emulated console: float code
+running on the FPU-less R3051. It is opt-in because it needs PCSX-Redux and a
+BIOS ROM (`make test-mips-psexe-redux PSX_BIOS=/path/to/scphXXXX.bin`), and is
+skipped cleanly when either is absent. MARS stays a manual reference.
+
+The MIPS toolchain is binutils-free (`as`, `ld`, `ar`), reaches the PlayStation,
+and its output runs on an emulated console booting a real BIOS; the soft-float
+configuration runs float code there without an FPU.
 
 ## What the backend does not cover yet
 
@@ -472,7 +718,9 @@ for the `IR_FLH`/`IR_FSH` softfloat helpers; the soft-float builds add
   configuration is in place and verified (see "Soft-float (PlayStation)"), but
   there is no PS1 executable format, BIOS, or GPU model in-tree, so it is
   exercised under `qemu-mipsel` with an assertion that no coprocessor-1
-  instruction is emitted, not on a PlayStation.
+  instruction is emitted, not on a PlayStation. This is milestone 6, and its
+  vehicle is a stand-alone binutils-free MIPS toolchain (see "The stand-alone
+  toolchain and PlayStation target").
 - Pascal and MooScript. Neither front end was ported to a non-ColdFire
   backend (RISC-V did not bring them up either), so they are not part of the
   MIPS tier. The C compiler and Excelsior are.
@@ -499,5 +747,21 @@ for the `IR_FLH`/`IR_FSH` softfloat helpers; the soft-float builds add
    instruction is emitted and the code runs on the FPU-less R3051. Verified by
    `make check-mips-sf` (the softfloat library on the host, the fpu/f32 suites
    with a no-`$f`-register assertion, and the C suite compiled soft-float).
-   (Done.) Remaining on this track: extended asm with operand constraints, and
-   a PlayStation executable target to run soft-float on real hardware.
+   (Done.) Remaining on this track: extended asm with operand constraints.
+6. A PlayStation target for the soft-float configuration, so it runs on real
+   R3051 hardware rather than only under `qemu-mipsel` with the no-coprocessor-1
+   assertion. The vehicle is a stand-alone MIPS toolchain that does not depend
+   on GNU binutils `as`/`ld`/`ar`: `skj-as-mips` (replicating `.set reorder`),
+   `skj-ld-mips`, and archive support, built over the shared assembler skeleton
+   and the linker's layout core like the RISC-V toolchain, emitting ELF first
+   and the PS-EXE format second, with a BIOS-TTY runtime. Verified by a
+   `check-*-mips-skj` tier under `qemu-mipsel`, a `spim` tier for R2000
+   load-delay accuracy, and a retargetable BIOS shim for the PS-EXE path. See
+   "The stand-alone toolchain and PlayStation target" above for the full plan.
+   (Done: `skj-as-mips`, `skj-ld-mips` with its `ar` reader and a `-f ps-exe`
+   PS-EXE output mode, the `skj-ar` archive tool, and the BIOS-TTY runtime
+   `start_psx.S` are in place, so the MIPS toolchain is binutils-free
+   (`as`, `ld`, `ar`) and writes the PlayStation executable format, validated
+   structurally by `make test-mips-psexe` and run on the PCSX-Redux emulator
+   with a real BIOS by `make test-mips-psexe-redux` (integer programs native,
+   float programs through soft-float on the FPU-less R3051).)
