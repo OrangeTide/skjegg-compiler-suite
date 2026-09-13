@@ -340,6 +340,50 @@ i64spill_byte_offset(struct ir_func *fn, int temp)
 }
 
 /****************************************************************
+ * Base-relative load/store with large-offset lowering
+ *
+ * A 12-bit signed immediate reaches only -2048..+2047 from the base.  A
+ * frame larger than that (a function with big locals) puts spills, slot
+ * accesses, and the callee-save reloads past that range, where the bare
+ * `op reg, off(base)` would be unencodable.  This routes every
+ * frame-relative access through one place: in range it emits the direct
+ * form, out of range it materialises base+off in t6 and uses 0(t6).
+ *
+ * t6 is safe as the scratch: it is not in regs[] so the allocator never
+ * assigns it, and no other emission uses it, so it holds nothing live
+ * across the three instructions.  reg is always a saved, scratch, or float
+ * register, never t6.
+ ****************************************************************/
+
+#define IMM12_MIN (-2048)
+#define IMM12_MAX 2047
+
+static void
+emit_mem(FILE *out, const char *op, const char *reg, int off, const char *base)
+{
+    if (off >= IMM12_MIN && off <= IMM12_MAX) {
+        fprintf(out, "\t%s %s, %d(%s)\n", op, reg, off, base);
+        return;
+    }
+    fprintf(out, "\tli t6, %d\n", off);
+    fprintf(out, "\tadd t6, %s, t6\n", base);
+    fprintf(out, "\t%s %s, 0(t6)\n", op, reg);
+}
+
+/* Emit `addi dst, base, imm`, going through t6 when imm is out of range.
+   dst may equal base (an sp or s0 adjustment); dst must not be t6. */
+static void
+emit_addbig(FILE *out, const char *dst, const char *base, int imm)
+{
+    if (imm >= IMM12_MIN && imm <= IMM12_MAX) {
+        fprintf(out, "\taddi %s, %s, %d\n", dst, base, imm);
+        return;
+    }
+    fprintf(out, "\tli t6, %d\n", imm);
+    fprintf(out, "\tadd %s, %s, t6\n", dst, base);
+}
+
+/****************************************************************
  * Float temp -> register materialisation
  *
  * f32 selects the reload/store width (flw/fsw vs fld/fsd); the register
@@ -354,8 +398,8 @@ frs_w(FILE *out, struct ir_func *fn, int t, int scratch, int f32)
 
     if (r >= 0)
         return fregs[r];
-    fprintf(out, "\t%s %s, %d(s0)\n", f32 ? "flw" : "fld",
-        fregs[scratch], fspill_byte_offset(fn, t));
+    emit_mem(out, f32 ? "flw" : "fld", fregs[scratch],
+        fspill_byte_offset(fn, t), "s0");
     return fregs[scratch];
 }
 
@@ -372,8 +416,7 @@ fwd_f(FILE *out, struct ir_func *fn, int t, const char *reg, int f32)
 {
     if (fn->temp_reg[t] >= 0)
         return;
-    fprintf(out, "\t%s %s, %d(s0)\n", f32 ? "fsw" : "fsd",
-        reg, fspill_byte_offset(fn, t));
+    emit_mem(out, f32 ? "fsw" : "fsd", reg, fspill_byte_offset(fn, t), "s0");
 }
 
 /****************************************************************
@@ -387,8 +430,7 @@ rs(FILE *out, struct ir_func *fn, int t, int scratch)
 
     if (r >= 0)
         return regs[r];
-    fprintf(out, "\tlw %s, %d(s0)\n",
-        regs[scratch], spill_byte_offset(fn, t));
+    emit_mem(out, "lw", regs[scratch], spill_byte_offset(fn, t), "s0");
     return regs[scratch];
 }
 
@@ -407,8 +449,7 @@ wd(FILE *out, struct ir_func *fn, int t, const char *reg)
 {
     if (fn->temp_reg[t] >= 0)
         return;
-    fprintf(out, "\tsw %s, %d(s0)\n",
-        reg, spill_byte_offset(fn, t));
+    emit_mem(out, "sw", reg, spill_byte_offset(fn, t), "s0");
 }
 
 /****************************************************************
@@ -430,8 +471,7 @@ i64_rs_lo(FILE *out, struct ir_func *fn, int t, int scratch)
     int pair = fn->temp_reg[t];
     if (pair >= 0)
         return regs[i64_lo_idx(pair)];
-    fprintf(out, "\tlw %s, %d(s0)\n",
-            regs[scratch], i64spill_byte_offset(fn, t));
+    emit_mem(out, "lw", regs[scratch], i64spill_byte_offset(fn, t), "s0");
     return regs[scratch];
 }
 
@@ -441,8 +481,7 @@ i64_rs_hi(FILE *out, struct ir_func *fn, int t, int scratch)
     int pair = fn->temp_reg[t];
     if (pair >= 0)
         return regs[i64_hi_idx(pair)];
-    fprintf(out, "\tlw %s, %d(s0)\n",
-            regs[scratch], i64spill_byte_offset(fn, t) + 4);
+    emit_mem(out, "lw", regs[scratch], i64spill_byte_offset(fn, t) + 4, "s0");
     return regs[scratch];
 }
 
@@ -469,8 +508,7 @@ i64_wd_lo(FILE *out, struct ir_func *fn, int t, const char *reg)
 {
     if (fn->temp_reg[t] >= 0)
         return;
-    fprintf(out, "\tsw %s, %d(s0)\n",
-            reg, i64spill_byte_offset(fn, t));
+    emit_mem(out, "sw", reg, i64spill_byte_offset(fn, t), "s0");
 }
 
 static void
@@ -478,8 +516,7 @@ i64_wd_hi(FILE *out, struct ir_func *fn, int t, const char *reg)
 {
     if (fn->temp_reg[t] >= 0)
         return;
-    fprintf(out, "\tsw %s, %d(s0)\n",
-            reg, i64spill_byte_offset(fn, t) + 4);
+    emit_mem(out, "sw", reg, i64spill_byte_offset(fn, t) + 4, "s0");
 }
 
 /****************************************************************
@@ -600,10 +637,15 @@ emit_funop(FILE *out, struct ir_func *fn, struct ir_insn *i,
 #define RET_I64   1
 #define RET_FLOAT 2
 
-static int arg_temps[16];
-static int arg_is_i64[16];
-static int arg_is_float[16];
-static int arg_fw[16];       /* per-arg float width: 1 = F32, 0 = F64 */
+/* Maximum arguments in one call. Mirrors the C front end's cap (lower.c:
+   "too many arguments"); the two must agree, or a call the front end accepts
+   would be rejected here. */
+#define RV_MAX_ARGS 32
+
+static int arg_temps[RV_MAX_ARGS];
+static int arg_is_i64[RV_MAX_ARGS];
+static int arg_is_float[RV_MAX_ARGS];
+static int arg_fw[RV_MAX_ARGS];   /* per-arg float width: 1 = F32, 0 = F64 */
 static int narg;
 static int label_prefix;
 static int i64cmp_serial;
@@ -673,10 +715,10 @@ emit_prologue(FILE *out, struct ir_func *fn)
     int pad = total - (8 + base);
     int k;
 
-    fprintf(out, "\taddi sp, sp, -%d\n", total);
-    fprintf(out, "\tsw ra, %d(sp)\n", total - 4);
-    fprintf(out, "\tsw s0, %d(sp)\n", total - 8);
-    fprintf(out, "\taddi s0, sp, %d\n", total - 8);
+    emit_addbig(out, "sp", "sp", -total);
+    emit_mem(out, "sw", "ra", total - 4, "sp");
+    emit_mem(out, "sw", "s0", total - 8, "sp");
+    emit_addbig(out, "s0", "sp", total - 8);
     for (k = 0; k < NSAVED; k++)
         fprintf(out, "\tsw %s, %d(sp)\n", regs[k + 2], pad + k * 4);
     for (k = 0; k < n_used_fregs; k++)
@@ -717,11 +759,9 @@ emit_epilogue_no_ret(FILE *out, struct ir_func *fn)
     int k;
 
     for (k = 0; k < NSAVED; k++)
-        fprintf(out, "\tlw %s, %d(s0)\n",
-            regs[k + 2], int_base + k * 4);
+        emit_mem(out, "lw", regs[k + 2], int_base + k * 4, "s0");
     for (k = 0; k < n_used_fregs; k++)
-        fprintf(out, "\tfld %s, %d(s0)\n",
-            fregs[used_fregs[k]], fp_base + k * 8);
+        emit_mem(out, "fld", fregs[used_fregs[k]], fp_base + k * 8, "s0");
     fprintf(out, "\tlw ra, 4(s0)\n");
     fprintf(out, "\tlw t0, 0(s0)\n");
     fprintf(out, "\taddi sp, s0, 8\n");
@@ -746,8 +786,8 @@ static void
 emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
                 int indirect, int retkind)
 {
-    struct rv_ploc loc[16];
-    int words[16] = { 0 };
+    struct rv_ploc loc[RV_MAX_ARGS];
+    int words[RV_MAX_ARGS] = { 0 };
     int k, push_bytes, stack_bytes, stage, need_stage;
 
     for (k = 0; k < narg; k++) {
@@ -966,8 +1006,8 @@ static void
 emit_tailcall_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
                     int indirect)
 {
-    struct rv_ploc loc[16];
-    int words[16] = { 0 };
+    struct rv_ploc loc[RV_MAX_ARGS];
+    int words[RV_MAX_ARGS] = { 0 };
     int k, stack_bytes;
 
     for (k = 0; k < narg; k++) {
@@ -1075,7 +1115,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_ADL: {
         const char *sd = rd(fn, i->dst, 0);
         int off = slot_offset(fn, i->slot);
-        fprintf(out, "\taddi %s, s0, %d\n", sd, off);
+        emit_addbig(out, sd, "s0", off);
         wd(out, fn, i->dst, sd);
         break;
     }
@@ -1119,7 +1159,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_LDL: {
         const char *sd = rd(fn, i->dst, 0);
         int off = slot_offset(fn, i->slot);
-        fprintf(out, "\tlw %s, %d(s0)\n", sd, off);
+        emit_mem(out, "lw", sd, off, "s0");
         wd(out, fn, i->dst, sd);
         break;
     }
@@ -1127,7 +1167,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_STL: {
         const char *sa = rs(out, fn, i->a, 0);
         int off = slot_offset(fn, i->slot);
-        fprintf(out, "\tsw %s, %d(s0)\n", sa, off);
+        emit_mem(out, "sw", sa, off, "s0");
         break;
     }
 
@@ -1171,14 +1211,14 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
 
     case IR_ARG:
-        if (narg >= 16)
+        if (narg >= RV_MAX_ARGS)
             die("rv_emit: too many args");
         arg_is_i64[narg] = 0;
         arg_is_float[narg] = 0;
         arg_temps[narg++] = i->a;
         break;
     case IR_ARG64:
-        if (narg >= 16)
+        if (narg >= RV_MAX_ARGS)
             die("rv_emit: too many args");
         arg_is_i64[narg] = 1;
         arg_is_float[narg] = 0;
@@ -1212,12 +1252,12 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         const char *sd = rd(fn, i->dst, 0);
         int off = slot_offset(fn, i->slot);
 
-        fprintf(out, "\tsw s0, %d(s0)\n", off);
-        fprintf(out, "\tsw sp, %d(s0)\n", off + 4);
+        emit_mem(out, "sw", "s0", off, "s0");
+        emit_mem(out, "sw", "sp", off + 4, "s0");
         fprintf(out, "\tla t0, .Lmark%d_%d\n",
             label_prefix, i->label);
-        fprintf(out, "\tsw t0, %d(s0)\n", off + 8);
-        fprintf(out, "\taddi t0, s0, %d\n", off);
+        emit_mem(out, "sw", "t0", off + 8, "s0");
+        emit_addbig(out, "t0", "s0", off);
         fprintf(out, "\tla t1, __cont_mark_sp\n");
         fprintf(out, "\tsw t0, 0(t1)\n");
         fprintf(out, "\tli a0, 0\n");
@@ -1318,8 +1358,8 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_FLDL: {
         int f32 = i->imm == FWIDTH_F32;
         const char *sd = frd_w(fn, i->dst, 0);
-        fprintf(out, "\t%s %s, %d(s0)\n", f32 ? "flw" : "fld",
-            sd, slot_offset(fn, i->slot));
+        emit_mem(out, f32 ? "flw" : "fld", sd,
+            slot_offset(fn, i->slot), "s0");
         fwd_f(out, fn, i->dst, sd, f32);
         break;
     }
@@ -1327,8 +1367,8 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_FSTL: {
         int f32 = i->imm == FWIDTH_F32;
         const char *sa = frs_w(out, fn, i->a, 0, f32);
-        fprintf(out, "\t%s %s, %d(s0)\n", f32 ? "fsw" : "fsd",
-            sa, slot_offset(fn, i->slot));
+        emit_mem(out, f32 ? "fsw" : "fsd", sa,
+            slot_offset(fn, i->slot), "s0");
         break;
     }
 
@@ -1407,7 +1447,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     }
 
     case IR_FARG:
-        if (narg >= 16)
+        if (narg >= RV_MAX_ARGS)
             die("rv_emit: too many args");
         arg_is_i64[narg] = 0;
         arg_is_float[narg] = 1;
@@ -1706,8 +1746,8 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         int off = slot_offset(fn, i->slot);
         const char *dlo = i64_rd_lo(fn, i->dst, 0);
         const char *dhi = i64_rd_hi(fn, i->dst, 1);
-        fprintf(out, "\tlw %s, %d(s0)\n", dlo, off);
-        fprintf(out, "\tlw %s, %d(s0)\n", dhi, off + 4);
+        emit_mem(out, "lw", dlo, off, "s0");
+        emit_mem(out, "lw", dhi, off + 4, "s0");
         i64_wd_lo(out, fn, i->dst, dlo);
         i64_wd_hi(out, fn, i->dst, dhi);
         break;
@@ -1716,9 +1756,9 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_STL64: {
         int off = slot_offset(fn, i->slot);
         const char *alo = i64_rs_lo(out, fn, i->a, 0);
-        fprintf(out, "\tsw %s, %d(s0)\n", alo, off);
+        emit_mem(out, "sw", alo, off, "s0");
         const char *ahi = i64_rs_hi(out, fn, i->a, 1);
-        fprintf(out, "\tsw %s, %d(s0)\n", ahi, off + 4);
+        emit_mem(out, "sw", ahi, off + 4, "s0");
         break;
     }
 

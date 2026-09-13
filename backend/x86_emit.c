@@ -615,10 +615,15 @@ emit_fbinop(FILE *out, struct ir_func *fn, struct ir_insn *i,
  * Per-instruction emission
  ****************************************************************/
 
-static int arg_temps[16];
-static int arg_is_float[16];
-static int arg_is_i64[16];
-static int arg_mem[16];         /* >0: a by-value MEMORY struct arg of this size */
+/* Maximum arguments in one call. Mirrors the C front end's cap (lower.c:
+   "too many arguments"); the two must agree, or a call the front end accepts
+   would be rejected here. */
+#define X86_MAX_ARGS 32
+
+static int arg_temps[X86_MAX_ARGS];
+static int arg_is_float[X86_MAX_ARGS];
+static int arg_is_i64[X86_MAX_ARGS];
+static int arg_mem[X86_MAX_ARGS];   /* >0: a by-value MEMORY struct arg of this size */
 static int narg;
 static int label_prefix;
 static int fcmp_serial;
@@ -732,7 +737,8 @@ emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
     {
         /* System V AMD64: classify each arg into an integer register, an SSE
            register, or the overflow stack. */
-        int ireg[16], sreg[16], on_stack[16], ssize[16];
+        int ireg[X86_MAX_ARGS], sreg[X86_MAX_ARGS];
+        int on_stack[X86_MAX_ARGS], ssize[X86_MAX_ARGS];
         int int_used = 0, sse_used = 0, stack_bytes = 0;
         for (k = 0; k < narg; k++) {
             ireg[k] = sreg[k] = -1;
@@ -1226,7 +1232,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
 
     case IR_ARG:
-        if (narg >= 16)
+        if (narg >= X86_MAX_ARGS)
             die("x86_emit: too many args");
         arg_is_float[narg] = 0;
         arg_is_i64[narg] = 0;
@@ -1234,7 +1240,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         arg_temps[narg++] = i->a;
         break;
     case IR_FARG:
-        if (narg >= 16)
+        if (narg >= X86_MAX_ARGS)
             die("x86_emit: too many args");
         arg_is_float[narg] = 1;
         arg_is_i64[narg] = 0;
@@ -1243,7 +1249,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
 #if defined(CC_PSABI) && X86_BITS == 64
     case IR_ARG_MEM:
-        if (narg >= 16)
+        if (narg >= X86_MAX_ARGS)
             die("x86_emit: too many args");
         arg_is_float[narg] = 0;
         arg_is_i64[narg] = 0;
@@ -1775,7 +1781,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     }
 
     case IR_ARG64:
-        if (narg >= 16)
+        if (narg >= X86_MAX_ARGS)
             die("x86_emit: too many args");
         arg_is_float[narg] = 0;
         arg_is_i64[narg] = 1;
@@ -2186,7 +2192,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     }
 
     case IR_ARG64:
-        if (narg >= 16)
+        if (narg >= X86_MAX_ARGS)
             die("x86_emit: too many args");
         arg_is_float[narg] = 0;
         arg_is_i64[narg] = 1;

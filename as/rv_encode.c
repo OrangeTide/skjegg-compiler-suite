@@ -409,8 +409,13 @@ enc_op_imm(struct rv_asm *a, const char *m, struct rv_operand *ops, int nops,
         return 4;
     }
 
-    if (emit)
-        emit_word(a, enc_i(op, f3, ops[0].reg, ops[1].reg, (int)ops[2].imm));
+    {
+        int imm = (int)ops[2].imm;
+        if (imm < -2048 || imm > 2047)
+            die("'%s' immediate %d out of range [-2048, 2047]", m, imm);
+        if (emit)
+            emit_word(a, enc_i(op, f3, ops[0].reg, ops[1].reg, imm));
+    }
     return 4;
 }
 
@@ -447,8 +452,13 @@ enc_load(struct rv_asm *a, const char *m, struct rv_operand *ops, int nops,
         return 4;
     }
 
-    if (emit)
-        emit_word(a, enc_i(op, f3, ops[0].reg, ops[1].reg, (int)ops[1].imm));
+    {
+        int imm = (int)ops[1].imm;
+        if (imm < -2048 || imm > 2047)
+            die("'%s' offset %d out of range [-2048, 2047]", m, imm);
+        if (emit)
+            emit_word(a, enc_i(op, f3, ops[0].reg, ops[1].reg, imm));
+    }
     return 4;
 }
 
@@ -483,8 +493,13 @@ enc_store(struct rv_asm *a, const char *m, struct rv_operand *ops, int nops,
         return 4;
     }
 
-    if (emit)
-        emit_word(a, enc_s(op, f3, ops[1].reg, ops[0].reg, (int)ops[1].imm));
+    {
+        int imm = (int)ops[1].imm;
+        if (imm < -2048 || imm > 2047)
+            die("'%s' offset %d out of range [-2048, 2047]", m, imm);
+        if (emit)
+            emit_word(a, enc_s(op, f3, ops[1].reg, ops[0].reg, imm));
+    }
     return 4;
 }
 
@@ -618,6 +633,8 @@ enc_jalr(struct rv_asm *a, const char *m, struct rv_operand *ops, int nops,
         }
     }
 
+    if (imm < -2048 || imm > 2047)
+        die("'%s' immediate %d out of range [-2048, 2047]", m, imm);
     if (emit)
         emit_word(a, enc_i(0x67, 0, rd, rs1, imm));
     return 4;

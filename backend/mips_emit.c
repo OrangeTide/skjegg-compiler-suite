@@ -549,10 +549,15 @@ emit_funop(FILE *out, struct ir_func *fn, struct ir_insn *i,
 #define RET_I64   1
 #define RET_FLOAT 2
 
-static int arg_temps[16];
-static int arg_is_i64[16];
-static int arg_is_float[16];
-static int arg_fw[16];       /* per-arg float width: 1 = F32, 0 = F64 */
+/* Maximum arguments in one call. Mirrors the C front end's cap (lower.c:
+   "too many arguments"); the two must agree, or a call the front end accepts
+   would be rejected here. */
+#define MIPS_MAX_ARGS 32
+
+static int arg_temps[MIPS_MAX_ARGS];
+static int arg_is_i64[MIPS_MAX_ARGS];
+static int arg_is_float[MIPS_MAX_ARGS];
+static int arg_fw[MIPS_MAX_ARGS];   /* per-arg float width: 1 = F32, 0 = F64 */
 static int narg;
 static int label_prefix;
 #ifndef MIPS_SOFTFLOAT
@@ -701,7 +706,7 @@ static void
 emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
                 int indirect, int retkind)
 {
-    struct { int words, ireg, boff, fpreg; } loc[16];
+    struct { int words, ireg, boff, fpreg; } loc[MIPS_MAX_ARGS];
     int k, wi, block, rawbytes;
     int leading_fp = 1, fpidx = 0;
 
@@ -1089,21 +1094,21 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
 
     case IR_ARG:
-        if (narg >= 16)
+        if (narg >= MIPS_MAX_ARGS)
             die("mips_emit: too many args");
         arg_is_i64[narg] = 0;
         arg_is_float[narg] = 0;
         arg_temps[narg++] = i->a;
         break;
     case IR_ARG64:
-        if (narg >= 16)
+        if (narg >= MIPS_MAX_ARGS)
             die("mips_emit: too many args");
         arg_is_i64[narg] = 1;
         arg_is_float[narg] = 0;
         arg_temps[narg++] = i->a;
         break;
     case IR_FARG:
-        if (narg >= 16)
+        if (narg >= MIPS_MAX_ARGS)
             die("mips_emit: too many args");
         arg_is_i64[narg] = 0;
         arg_is_float[narg] = 1;

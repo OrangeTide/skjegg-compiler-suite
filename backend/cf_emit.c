@@ -329,10 +329,15 @@ emit_funop(FILE *out, struct ir_func *fn, struct ir_insn *i,
  * Per-instruction emission
  ****************************************************************/
 
-static int arg_temps[16];
-static int arg_is_float[16];
-static int arg_is_f32[16];
-static int arg_is_i64[16];
+/* Maximum arguments in one call. Mirrors the C front end's cap (lower.c:
+   "too many arguments"); the two must agree, or a call the front end accepts
+   would be rejected here. */
+#define CF_MAX_ARGS 32
+
+static int arg_temps[CF_MAX_ARGS];
+static int arg_is_float[CF_MAX_ARGS];
+static int arg_is_f32[CF_MAX_ARGS];
+static int arg_is_i64[CF_MAX_ARGS];
 static int narg;
 static int label_prefix;
 static int uses_floats;
@@ -680,7 +685,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
 
     case IR_ARG:
-        if (narg >= 16)
+        if (narg >= CF_MAX_ARGS)
             die("cf_emit: too many args");
         arg_is_float[narg] = 0;
         arg_is_f32[narg] = 0;
@@ -688,7 +693,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         arg_temps[narg++] = i->a;
         break;
     case IR_FARG:
-        if (narg >= 16)
+        if (narg >= CF_MAX_ARGS)
             die("cf_emit: too many args");
         arg_is_float[narg] = 1;
         arg_is_f32[narg] = (i->imm == FWIDTH_F32);
@@ -1383,7 +1388,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     }
 
     case IR_ARG64:
-        if (narg >= 16)
+        if (narg >= CF_MAX_ARGS)
             die("cf_emit: too many args");
         arg_is_float[narg] = 0;
         arg_is_i64[narg] = 1;

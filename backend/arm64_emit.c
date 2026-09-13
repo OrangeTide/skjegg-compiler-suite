@@ -572,11 +572,16 @@ cmp64_cond(int op)
  * Per-instruction emission
  ****************************************************************/
 
-static int arg_temps[16];
-static int arg_is_i64[16];
-static int arg_is_float[16];
-static int arg_f32[16];         /* a float arg is single (s-reg) vs double (d) */
-static int arg_mem[16];         /* >0: a by-value struct arg of this byte size */
+/* Maximum arguments in one call. Mirrors the C front end's cap (lower.c:
+   "too many arguments"); the two must agree, or a call the front end accepts
+   would be rejected here. */
+#define ARM64_MAX_ARGS 32
+
+static int arg_temps[ARM64_MAX_ARGS];
+static int arg_is_i64[ARM64_MAX_ARGS];
+static int arg_is_float[ARM64_MAX_ARGS];
+static int arg_f32[ARM64_MAX_ARGS];   /* a float arg is single (s-reg) vs double (d) */
+static int arg_mem[ARM64_MAX_ARGS];   /* >0: a by-value struct arg of this byte size */
 static int narg;
 #ifdef CC_PSABI
 static int x8_arg = -1;         /* AAPCS64 indirect-result pointer temp, or -1 */
@@ -707,7 +712,8 @@ emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
            stack.  Register targets are disjoint from the allocatable regs
            (x19-x28 / d8-d15), so each source moves straight into its target
            with no parallel-move hazard. */
-        int treg[16], onstk[16], ssize[16], iu = 0, du = 0, stack_bytes = 0;
+        int treg[ARM64_MAX_ARGS], onstk[ARM64_MAX_ARGS], ssize[ARM64_MAX_ARGS];
+        int iu = 0, du = 0, stack_bytes = 0;
         for (k = 0; k < narg; k++) {
             onstk[k] = 0;
             ssize[k] = 0;
@@ -1015,7 +1021,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
 
     case IR_ARG:
-        if (narg >= 16)
+        if (narg >= ARM64_MAX_ARGS)
             die("arm64_emit: too many args");
         arg_is_i64[narg] = 0;
         arg_is_float[narg] = 0;
@@ -1023,7 +1029,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         arg_temps[narg++] = i->a;
         break;
     case IR_ARG64:
-        if (narg >= 16)
+        if (narg >= ARM64_MAX_ARGS)
             die("arm64_emit: too many args");
         arg_is_i64[narg] = 1;
         arg_is_float[narg] = 0;
@@ -1032,7 +1038,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
 #ifdef CC_PSABI
     case IR_ARG_MEM:
-        if (narg >= 16)
+        if (narg >= ARM64_MAX_ARGS)
             die("arm64_emit: too many args");
         arg_is_i64[narg] = 0;
         arg_is_float[narg] = 0;
@@ -1247,7 +1253,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     }
 
     case IR_FARG:
-        if (narg >= 16)
+        if (narg >= ARM64_MAX_ARGS)
             die("arm64_emit: too many args");
         arg_is_i64[narg] = 0;
         arg_is_float[narg] = 1;
