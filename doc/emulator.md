@@ -386,6 +386,59 @@ registers, and the backend allocates them as doubles, so the honest
 fixes are a build variant or nothing. It is left as a known wart rather
 than a reason to reopen D.
 
+## Single-precision determinism across backends
+
+The single-precision core is not just a convenience, it is the
+deterministic floating-point surface the VM hosts build on. A game that
+runs its simulation on a smolmoo server and predicts it on a client
+needs both sides to compute the same `float` bits, or the prediction
+drifts from the authority. The core is built for exactly this: it
+depends on no host rounding mode (see above), so its `fadd.s` and the
+rest are a fixed function of their inputs on any host, and that function
+is verified bit-for-bit against qemu by the fuzz, lockstep and
+riscv-arch-test rigs.
+
+That guarantee holds for two peers **running the same core**. It does
+not automatically extend to two peers on different code generators. The
+plain `test-f32-*` suites do not catch the difference: they use only
+exact integer-valued operands, which every IEEE-ish FPU agrees on. The
+interesting cases are the inexact, subnormal, NaN and conversion results
+where hardware FPUs are free to differ.
+
+`make test-f32-diff` measures that. The oracle is the RV32 core itself:
+`tests/f32_oracle.c` drives `emu/rv32.c` over a vector table
+(`tests/f32_vectors.h`) and freezes the results as a committed golden
+master (`tests/f32_golden.inc`). Each backend's `skj-cc` then compiles
+`tests/f32_diff.c`, runs it under that backend's qemu, and checks every
+vector against the golden, naming the first divergence.
+
+The finding is that **only peers all running the RV32 emulator are a
+verified f32 sync set.** The native-FPU backends diverge from the core
+on IEEE-underspecified behavior, and they do not even agree with each
+other:
+
+- x86-64 and MIPS produce the opposite NaN sign for `0 / 0`
+  (`0xffc00000` where the core canonicalizes to `0x7fc00000`).
+- AArch64 agrees there but differs on signaling-NaN quieting.
+- ColdFire cannot hold a bit-exact binary32 at all: its FPU computes in
+  a wider internal format, so injecting an exact single already loses
+  the pattern.
+
+These are reported as XFAIL, not build failures, because they are facts
+about the hardware rather than regressions. The one hard gate is
+`test-f32-diff-rv`, which catches a real codegen regression in the
+shared f32 core (that would break many vectors, not one NaN sign), and
+`f32-golden-check` enforces that the committed golden tracks the vector
+table. Making a native backend a valid sync peer would mean
+canonicalizing NaNs in its codegen, which is not done and is not needed
+as long as the peers share the emulator.
+
+This is also what makes an f32 Excelsior practical. Excelsior's `float`
+is a double today, off the deterministic surface (see above). The IR,
+every backend, and this test already carry a proven single-precision
+path, so moving Excelsior's `float` to `IR_F32` would land it inside the
+determinism the games need, with no new emulator work.
+
 ## Limits
 
 - The RV32 core has F, and neither D nor Zfh, by decision rather than

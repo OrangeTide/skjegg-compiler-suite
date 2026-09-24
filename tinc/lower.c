@@ -354,7 +354,12 @@ lower_call(struct node *n)
 
     if (n->a->kind == N_NAME &&
         strcmp(n->a->name, "mark") == 0) {
-        int slot = alloc_slot(12);
+        /* 16 bytes: the 12-byte mark record plus a fourth word where MARK
+         * stashes the continuation-arena high-water mark.  TinC exposes the
+         * raw mark/capture/resume primitives with no lexical delimiter, so
+         * there is no reclamation point to restore it at (unlike Scheme's
+         * `reset`); the word is reserved for slot-layout parity with MARK. */
+        int slot = alloc_slot(16);
         ins = emit(IR_MARK);
         ins->dst = new_temp();
         ins->slot = slot;

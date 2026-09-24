@@ -18,6 +18,7 @@
 #   RV_AS      RISC-V cross assembler
 #   RV_LD      RISC-V cross linker
 #   QEMU_RV    qemu-riscv32
+#   QEMU_RV_CPU  qemu -cpu string matching the rv32.c emulator (run-rv)
 
 CC      ?= cc
 CFLAGS  ?= -std=c99 -O2 -Wall -Wextra -Wpedantic -Wno-unused-parameter
@@ -42,15 +43,18 @@ QEMU    ?= qemu-m68k
 RV_AS   ?= riscv64-linux-gnu-as
 RV_LD   ?= riscv64-linux-gnu-ld
 QEMU_RV ?= qemu-riscv32
+# The ISA the rv32.c emulator implements: RV32IMAFC + Zicsr/Zifencei (on in the
+# rv32 base CPU) plus Zba/Zbb/Zbs/Zcb (which the base CPU leaves off).  This is
+# the closest qemu match, used by the `run-rv` target.  The one divergence is
+# that qemu's rv32 CPU has D on where the emulator is single-precision only; the
+# lockstep and fuzz harnesses handle that rather than turning D off.
+QEMU_RV_CPU ?= rv32,zba=true,zbb=true,zbs=true,zcb=true
 MIPS_AS ?= mipsel-none-elf-as
 MIPS_LD ?= mipsel-none-elf-ld
 MIPS_OBJCOPY ?= mipsel-none-elf-objcopy
 MIPS_OBJDUMP ?= mipsel-none-elf-objdump
 QEMU_MIPS ?= qemu-mipsel
 SPIM ?= spim
-X86_ASM ?= nasm
-X86_LD  ?= ld
-QEMU_X86 ?= qemu-i386
 A64_AS  ?= aarch64-linux-gnu-as
 A64_LD  ?= aarch64-linux-gnu-ld
 A64_CC  ?= aarch64-linux-gnu-gcc
@@ -63,14 +67,17 @@ IR_SRC  := ir/ir.c ir/util.c ir/arena.c
 BE_CF   := backend/regalloc_cf.c backend/cf_emit.c
 BE_RV   := backend/regalloc_rv.c backend/rv_emit.c
 BE_MIPS := backend/regalloc_mips.c backend/mips_emit.c
-BE_X86  := backend/regalloc_x86.c backend/x86_emit.c
 BE_A64  := backend/regalloc_arm64.c backend/arm64_emit.c
 BE_X64  := backend/regalloc_x86.c backend/x86_emit.c
+# The unified x86-64 (LP64) backend: the shared instruction selector over the
+# NASM text sink, driven by the AOT driver.  skj-cc-x86-64 uses this; the other
+# x86-64 tools still use BE_X64 (x86_emit.c) until M3 moves them over.
+BE_X64_SEL := backend/regalloc_x86.c backend/x86_select.c backend/mc_text.c \
+              backend/x86_aot.c
 TC_SRC  := tinc/lex.c tinc/parse.c tinc/lower.c tinc/main.c
 SRC     := $(IR_SRC) $(BE_CF) $(TC_SRC)
 SRC_RV  := $(IR_SRC) $(BE_RV) $(TC_SRC)
 SRC_MIPS := $(IR_SRC) $(BE_MIPS) $(TC_SRC)
-SRC_X86 := $(IR_SRC) $(BE_X86) $(TC_SRC)
 SRC_A64 := $(IR_SRC) $(BE_A64) $(TC_SRC)
 SRC_X64 := $(IR_SRC) $(BE_X64) $(TC_SRC)
 
@@ -80,12 +87,13 @@ MOO_TESTS := $(filter-out tests/moo_room.moo tests/moo_toy_%.moo,$(wildcard test
 MOO_TOY_TESTS := $(wildcard tests/moo_toy_*.moo)
 PAS_TESTS := $(wildcard tests/pascal_*.pas)
 
-TOOLS := build/skj-tinc build/skj-tinc-rv build/skj-tinc-mips build/skj-tinc-x86 build/skj-tinc-arm64 \
-         build/skj-sc build/skj-sc-rv build/skj-sc-mips build/skj-sc-x86 build/skj-sc-arm64 \
+TOOLS := build/skj-tinc build/skj-tinc-rv build/skj-tinc-mips build/skj-tinc-arm64 \
+         build/skj-sc build/skj-sc-rv build/skj-sc-mips build/skj-sc-arm64 \
          build/skj-mooc build/skj-pc build/skj-as build/skj-ld \
          build/skj-as-rv build/skj-ld-rv build/skj-as-mips build/skj-ld-mips build/skj-ar \
          build/skj-cpp build/skj-cc build/skj-cc-x86-64 build/skj-cc-arm64 \
-         build/skj-cc-rv build/skj-cc-rv-psabi build/skj-run
+         build/skj-cc-rv build/skj-run \
+         build/skj-jit
 
 all: $(TOOLS)
 
@@ -97,9 +105,6 @@ build/skj-tinc-rv: $(SRC_RV) ir/ir.h tinc/tinc.h | build
 
 build/skj-tinc-mips: $(SRC_MIPS) ir/ir.h tinc/tinc.h | build
 	$(CC) $(CFLAGS) -Iir -Itinc -o $@ $(SRC_MIPS)
-
-build/skj-tinc-x86: $(SRC_X86) ir/ir.h tinc/tinc.h | build
-	$(CC) $(CFLAGS) -Iir -Itinc -o $@ $(SRC_X86)
 
 build/skj-tinc-arm64: $(SRC_A64) ir/ir.h tinc/tinc.h | build
 	$(CC) $(CFLAGS) -Iir -Itinc -o $@ $(SRC_A64)
@@ -117,7 +122,7 @@ build/skj-cpp: cpp/main.c $(CPP_SRC) cpp/cpp.h cpp/internal.h | build
 CC_FE  := cc/lex.c cc/parse.c cc/type.c cc/lower.c cc/main.c
 CC_CPP := cpp/tok.c cpp/macro.c cpp/cond.c cpp/dir.c
 CC_SRC := $(CC_FE) $(CC_CPP) $(IR_SRC) $(BE_CF)
-CC_SRC_X64 := $(CC_FE) $(CC_CPP) $(IR_SRC) $(BE_X64)
+CC_SRC_X64 := $(CC_FE) $(CC_CPP) $(IR_SRC) $(BE_X64_SEL)
 CC_SRC_A64 := $(CC_FE) $(CC_CPP) $(IR_SRC) $(BE_A64)
 CC_SRC_RV := $(CC_FE) $(CC_CPP) $(IR_SRC) $(BE_RV)
 CC_SRC_MIPS := $(CC_FE) $(CC_CPP) $(IR_SRC) $(BE_MIPS)
@@ -125,8 +130,8 @@ CC_SRC_MIPS := $(CC_FE) $(CC_CPP) $(IR_SRC) $(BE_MIPS)
 build/skj-cc: $(CC_SRC) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | build
 	$(CC) $(CFLAGS) -DCC_M68K -Icc -Icpp -Iir -o $@ $(CC_SRC)
 
-build/skj-cc-x86-64: $(CC_SRC_X64) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | build
-	$(CC) $(CFLAGS) -DX86_BITS=64 -DCC_LP64 -DCC_PSABI -DCC_STRUCT_ABI -Icc -Icpp -Iir -o $@ $(CC_SRC_X64)
+build/skj-cc-x86-64: $(CC_SRC_X64) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h backend/mc.h backend/mc_text.h backend/x86_select.h | build
+	$(CC) $(CFLAGS) -DX86_BITS=64 -DCC_LP64 -DCC_PSABI -DCC_STRUCT_ABI -Icc -Icpp -Iir -Ibackend -o $@ $(CC_SRC_X64)
 
 build/skj-cc-arm64: $(CC_SRC_A64) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | build
 	$(CC) $(CFLAGS) -DCC_LP64 -DCC_PSABI -DCC_ARM64 -Icc -Icpp -Iir -o $@ $(CC_SRC_A64)
@@ -134,13 +139,27 @@ build/skj-cc-arm64: $(CC_SRC_A64) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | bui
 build/skj-cc-rv: $(CC_SRC_RV) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | build
 	$(CC) $(CFLAGS) -Icc -Icpp -Iir -o $@ $(CC_SRC_RV)
 
-## The psABI build of the RISC-V C compiler: -DCC_PSABI emits the standard
-## RISC-V ILP32 register convention (a0..a7) instead of the toolkit's stack
-## convention, so its output interlinks with gcc-built objects.  The 64-bit
-## integer helpers stay an internal stack-passed backend/runtime ABI either
-## way (see runtime/start_rv_psabi_cc.S).
-build/skj-cc-rv-psabi: $(CC_SRC_RV) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | build
-	$(CC) $(CFLAGS) -DCC_PSABI -Icc -Icpp -Iir -o $@ $(CC_SRC_RV)
+## skj-jit: the in-process x86-64 JIT.  The cc front end lowers a C source to
+## an ir_program which the jit/ library compiles to native code and runs in
+## the same process, with no assembler, linker, or emulator.  The front end is
+## built ILP32-address + SysV register ABI (CC_PSABI, not CC_LP64), the model
+## the JIT selector (jit/jit_x86.c) emits, over the shared register allocator.
+## CC_STRUCT_ABI turns on the SysV eightbyte classification so a small struct is
+## passed and returned in registers (the psABI struct-by-value rules), the same
+## as skj-cc-x86-64.  jit/jit_x86.c is the embeddable library; jit/main.c is the
+## driver over it.
+JIT_FE  := cc/lex.c cc/parse.c cc/type.c cc/lower.c
+JIT_SRC := jit/main.c jit/jit_x86.c jit/emit_x86.c jit/call_guest_x86.S \
+           backend/x86_select.c backend/regalloc_x86.c $(JIT_FE) $(CC_CPP) $(IR_SRC)
+build/skj-jit: $(JIT_SRC) cc/cc.h jit/jit_x86.h jit/emit_x86.h backend/mc.h backend/x86_select.h ir/ir.h Makefile build/version.h | build
+	$(CC) $(CFLAGS) -DX86_BITS=64 -DCC_PSABI -DCC_STRUCT_ABI -Icc -Icpp -Iir -Ijit -Ibackend -o $@ $(JIT_SRC)
+
+## Run the C suite in-process through skj-jit and compare exit codes, the
+## counterpart of check-cc without an assembler, linker, or qemu.  The runner
+## skips the tests whose features the JIT does not yet cover (see its EXCLUDE).
+check-jit: build/skj-jit
+	@sh tests/run-jit-tests.sh
+
 
 build/skj-cc-mips: $(CC_SRC_MIPS) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | build
 	$(CC) $(CFLAGS) -Icc -Icpp -Iir -o $@ $(CC_SRC_MIPS)
@@ -298,6 +317,12 @@ build/rv:
 
 check-rv: build/skj-tinc-rv build/skj-sc-rv $(RV_TESTS:tests/%.tc=build/rv/%) $(RV_SCM_TESTS:tests/%.scm=build/rv/%)
 	@sh tests/run-tests.sh "$(QEMU_RV)" build/rv
+
+## Run an ELF under qemu-riscv32 configured to match the rv32.c emulator's ISA.
+## Usage: make run-rv ELF=build/rv/foo [ARGS='...']
+run-rv:
+	@test -n "$(ELF)" || { echo "usage: make run-rv ELF=<path> [ARGS='...']" >&2; exit 2; }
+	$(QEMU_RV) -cpu $(QEMU_RV_CPU) $(ELF) $(ARGS)
 
 ## MIPS I per-test rules: tests/<name>.tc -> build/mips/<name>.s -> .o -> binary.
 ## The toolchain (mipsel-none-elf) defaults to -march=mips1, o32,
@@ -468,6 +493,110 @@ test-f32-mips-sf: build/mips/f32_test_sf
 	@$(QEMU_MIPS) ./build/mips/f32_test_sf && echo "PASS: f32_test (mips soft-float)" || (echo "FAIL: f32_test (mips soft-float)"; exit 1)
 
 ## ---------------------------------------------------------------
+## Cross-backend single-precision differential test (f32 determinism)
+##
+## The plain test-f32-* suites prove each backend computes single
+## precision for *exact* integer-valued cases.  They do NOT prove the
+## backends round identically on inexact, subnormal, NaN or conversion
+## cases, which is what a game syncing f32 state across two peers on
+## different backends needs.  This suite does.
+##
+## The oracle is the RV32 emulator's own f32 core (emu/rv32.c), already
+## verified bit-for-bit against qemu; f32_oracle.c drives it over the
+## vector table (tests/f32_vectors.h) and freezes the results as the
+## golden master tests/f32_golden.inc (committed).  test-f32-diff-<backend>
+## compiles tests/f32_diff.c with that backend's skj-cc, runs it under the
+## backend's qemu, and checks every vector against the golden.  A
+## divergence names the first offending vector.
+build/test_f32_oracle: tests/f32_oracle.c tests/f32_vectors.h emu/rv32.c emu/rv32.h | build
+	$(CC) $(CFLAGS) -Iemu -Itests -o $@ tests/f32_oracle.c emu/rv32.c -lm
+
+## The x86-64 byte encoder (jit/emit_x86.c) checked byte for byte against
+## nasm, the golden-master counterpart of check-rvas / check-mipsas.  Needs
+## nasm (already an x86 prerequisite); no IR or backend is involved.
+## Named test_* so `make check`'s run-tests.sh skips it (it is a host tool,
+## not a qemu-m68k guest), the same guard build/test_f32_oracle relies on.
+build/test_x86_oracle: tests/x86_oracle.c jit/emit_x86.c jit/emit_x86.h | build
+	$(CC) $(CFLAGS) -Ijit -o $@ tests/x86_oracle.c jit/emit_x86.c
+
+check-x86-oracle: build/test_x86_oracle
+	@./build/test_x86_oracle
+
+## Regenerate the committed golden master and the index (run after editing
+## tests/f32_vectors.h, then commit tests/f32_golden.inc).
+f32-oracle: build/test_f32_oracle
+	@./build/test_f32_oracle tests/f32_golden.inc build/f32_index.txt
+
+## The human-readable index (vector number -> description + golden value),
+## used by the runner to name a diverging vector.  Always regenerated from
+## the current oracle so it tracks the vector table.
+build/f32_index.txt: build/test_f32_oracle tests/f32_vectors.h
+	@./build/test_f32_oracle build/f32_golden_check.inc build/f32_index.txt
+
+## Fail if the committed golden is stale relative to the vector table.  Runs
+## the oracle to a scratch file and compares, so it never depends on a
+## side-effect of another rule.
+f32-golden-check: build/test_f32_oracle tests/f32_vectors.h
+	@./build/test_f32_oracle build/f32_golden_check.inc build/f32_index.txt
+	@cmp -s build/f32_golden_check.inc tests/f32_golden.inc \
+	    && echo "PASS: f32 golden is current" \
+	    || (echo "FAIL: tests/f32_golden.inc is stale; run 'make f32-oracle'"; exit 1)
+
+F32_DIFF_DEPS := tests/f32_diff.c tests/f32_golden.inc build/f32_index.txt
+
+test-f32-diff-rv: build/skj-cc-rv build/rv/start.o $(F32_DIFF_DEPS)
+	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
+	 ASM="$(RV_AS) -march=rv32imfd_zfh -mabi=ilp32 -o" \
+	 LD="$(RV_LD) -m elf32lriscv -o" \
+	 QEMU="$(QEMU_RV)" START="$(CURDIR)/build/rv/start.o" \
+	 OUTDIR="$(CURDIR)/build/f32diff-rv" LABEL="rv32" \
+	 sh tests/run-f32-diff.sh
+
+## Native-FPU backends (x86-64, arm64, mips) diverge from the deterministic
+## RV32 core on inherent IEEE-underspecified behavior (NaN sign and payload
+## quieting), and they do not even agree with each other.  These are XFAIL:
+## the divergence is reported for the record, but only a codegen regression
+## in the shared f32 core (which would break many vectors) is a hard error
+## via test-f32-diff-rv.  Only peers all running the RV32 emulator (smolmoo's
+## model) are a verified f32 sync set.
+test-f32-diff-x86-64: build/skj-cc-x86-64 build/x86_64/start_sysv.o $(F32_DIFF_DEPS)
+	@CCBIN="$(CURDIR)/build/skj-cc-x86-64" \
+	 ASM="$(X64_ASM) -f elf64 -o" LD="$(X64_LD) -m elf_x86_64 -o" \
+	 QEMU="$(QEMU_X64)" START="$(CURDIR)/build/x86_64/start_sysv.o" \
+	 OUTDIR="$(CURDIR)/build/f32diff-x86_64" LABEL="x86-64" XFAIL=1 \
+	 sh tests/run-f32-diff.sh
+
+test-f32-diff-arm64: build/skj-cc-arm64 build/arm64/start_aapcs.o $(F32_DIFF_DEPS)
+	@CCBIN="$(CURDIR)/build/skj-cc-arm64" \
+	 ASM="$(A64_AS) -o" LD="$(A64_LD) -o" \
+	 QEMU="$(QEMU_A64)" START="$(CURDIR)/build/arm64/start_aapcs.o" \
+	 OUTDIR="$(CURDIR)/build/f32diff-arm64" LABEL="arm64" XFAIL=1 \
+	 sh tests/run-f32-diff.sh
+
+test-f32-diff-mips: build/skj-cc-mips build/mips/start.o $(F32_DIFF_DEPS)
+	@CCBIN="$(CURDIR)/build/skj-cc-mips" \
+	 ASM="$(MIPS_AS) -march=mips1 -EL -o" LD="$(MIPS_LD) -o" \
+	 QEMU="$(QEMU_MIPS)" START="$(CURDIR)/build/mips/start.o" \
+	 OUTDIR="$(CURDIR)/build/f32diff-mips" LABEL="mips" XFAIL=1 \
+	 sh tests/run-f32-diff.sh
+
+## ColdFire's FPU computes in a wider internal format and cannot hold a
+## bit-exact binary32 at all; like the other native-FPU backends it is not
+## a verified f32 sync peer, so its divergences are XFAIL.
+test-f32-diff-cf: build/skj-cc build/skj-as build/start.o $(F32_DIFF_DEPS)
+	@CCBIN="$(CURDIR)/build/skj-cc" \
+	 ASM="$(CURDIR)/build/skj-as -o" LD="$(M68K_LD) -o" \
+	 QEMU="$(QEMU)" START="$(CURDIR)/build/start.o" \
+	 OUTDIR="$(CURDIR)/build/f32diff-cf" LABEL="coldfire" XFAIL=1 \
+	 sh tests/run-f32-diff.sh
+
+## The full matrix.  RV is the reference and must pass; the others surface
+## whatever f32 divergences exist between them and the deterministic core.
+test-f32-diff: f32-golden-check test-f32-diff-rv test-f32-diff-x86-64 \
+               test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf
+	@echo "f32 differential matrix complete."
+
+## ---------------------------------------------------------------
 ## The strict-ColdFire tier: the same tests on the in-tree emulator
 ##
 ## `make check` cross-compiles the C runtime for generic m68k, which is
@@ -626,37 +755,51 @@ check-exc-rv-asm: build/skj-exc-rv | build/rv
 	echo "exc rv codegen: $$ok assembled, $$bad failed"; \
 	[ $$bad -eq 0 ]
 
+## Excelsior codegen on the 64-bit backends (compile + assemble every program,
+## no run).  This verifies the x86-64 / arm64 claim of full Excelsior parity at
+## the level where the risk lives, the front-end-to-backend path, since the
+## runtime C is shared and portable.  A run tier waits on a register-ABI crt
+## with the arena/continuation/coroutine helpers (see skj-exc-x86-64 above).
+## The skip set is EXC_RV_SKIP: those three are front-end limitations, not
+## backend ones, so every backend skips them alike.
+check-exc-x86-64-asm: build/skj-exc-x86-64 | build/x86_64
+	@ok=0; bad=0; \
+	for f in tests/exs_*.exs; do \
+	    n=$$(basename $$f .exs); \
+	    case " $(EXC_RV_SKIP) " in *" $$n "*) continue ;; esac; \
+	    case $$n in exs_err_*) continue ;; esac; \
+	    if ./build/skj-exc-x86-64 -o build/x86_64/$$n.s $$f 2>build/x86_64/$$n.err && \
+	       $(X64_ASM) -f elf64 -o build/x86_64/$$n.o build/x86_64/$$n.s 2>>build/x86_64/$$n.err; then \
+	        ok=$$((ok + 1)); \
+	    else \
+	        bad=$$((bad + 1)); echo "FAIL $$n"; sed 's/^/    /' build/x86_64/$$n.err; \
+	    fi; \
+	done; \
+	echo "exc x86-64 codegen: $$ok assembled, $$bad failed"; \
+	[ $$bad -eq 0 ]
+
+check-exc-arm64-asm: build/skj-exc-arm64 | build/arm64
+	@ok=0; bad=0; \
+	for f in tests/exs_*.exs; do \
+	    n=$$(basename $$f .exs); \
+	    case " $(EXC_RV_SKIP) " in *" $$n "*) continue ;; esac; \
+	    case $$n in exs_err_*) continue ;; esac; \
+	    if ./build/skj-exc-arm64 -o build/arm64/$$n.s $$f 2>build/arm64/$$n.err && \
+	       $(A64_AS) -o build/arm64/$$n.o build/arm64/$$n.s 2>>build/arm64/$$n.err; then \
+	        ok=$$((ok + 1)); \
+	    else \
+	        bad=$$((bad + 1)); echo "FAIL $$n"; sed 's/^/    /' build/arm64/$$n.err; \
+	    fi; \
+	done; \
+	echo "exc arm64 codegen: $$ok assembled, $$bad failed"; \
+	[ $$bad -eq 0 ]
+
 ## Every suite the in-tree emulator can run, no qemu involved.
 check-emu-all: check-emu check-rv-emu check-exc-emu test-exc-walker-emu test-rv-irq \
                test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp \
                check-rv32 \
                test-fpu-emu test-i64-emu test-ops-emu
 	@echo "All emulator test suites passed."
-
-## x86 per-test rules: tests/<name>.tc -> build/x86/<name>.s -> .o -> binary
-X86_TESTS := $(TESTS)
-X86_SCM_TESTS := $(SCM_TESTS)
-
-build/x86/%.s: tests/%.tc build/skj-tinc-x86 | build/x86
-	./build/skj-tinc-x86 -o $@ $<
-
-build/x86/scm_%.s: tests/scm_%.scm build/skj-sc-x86 | build/x86
-	./build/skj-sc-x86 -o $@ $<
-
-build/x86/%.o: build/x86/%.s
-	$(X86_ASM) -f elf32 -o $@ $<
-
-build/x86/start.o: runtime/start_x86.asm | build/x86
-	$(X86_ASM) -f elf32 -o $@ $<
-
-build/x86/%: build/x86/%.o build/x86/start.o
-	$(X86_LD) -m elf_i386 -o $@ build/x86/start.o $<
-
-build/x86:
-	mkdir -p build/x86
-
-check-x86: build/skj-tinc-x86 build/skj-sc-x86 $(X86_TESTS:tests/%.tc=build/x86/%) $(X86_SCM_TESTS:tests/%.scm=build/x86/%)
-	@sh tests/run-tests.sh "$(QEMU_X86)" build/x86
 
 ## arm64 per-test rules: tests/<name>.tc -> build/arm64/<name>.s -> .o -> binary
 A64_TESTS := $(TESTS)
@@ -727,8 +870,6 @@ SC_SRC_RV := scheme/lex.c scheme/parse.c scheme/print.c scheme/main.c scheme/gc.
              scheme/lower.c $(IR_SRC) $(BE_RV)
 SC_SRC_MIPS := scheme/lex.c scheme/parse.c scheme/print.c scheme/main.c scheme/gc.c \
                scheme/lower.c $(IR_SRC) $(BE_MIPS)
-SC_SRC_X86 := scheme/lex.c scheme/parse.c scheme/print.c scheme/main.c scheme/gc.c \
-              scheme/lower.c $(IR_SRC) $(BE_X86)
 SC_SRC_A64 := scheme/lex.c scheme/parse.c scheme/print.c scheme/main.c scheme/gc.c \
               scheme/lower.c $(IR_SRC) $(BE_A64)
 
@@ -740,9 +881,6 @@ build/skj-sc-rv: $(SC_SRC_RV) scheme/scheme.h scheme/gc.h ir/ir.h | build
 
 build/skj-sc-mips: $(SC_SRC_MIPS) scheme/scheme.h scheme/gc.h ir/ir.h | build
 	$(CC) $(CFLAGS) -Ischeme -Iir -o $@ $(SC_SRC_MIPS)
-
-build/skj-sc-x86: $(SC_SRC_X86) scheme/scheme.h scheme/gc.h ir/ir.h | build
-	$(CC) $(CFLAGS) -Ischeme -Iir -o $@ $(SC_SRC_X86)
 
 build/skj-sc-arm64: $(SC_SRC_A64) scheme/scheme.h scheme/gc.h ir/ir.h | build
 	$(CC) $(CFLAGS) -Ischeme -Iir -o $@ $(SC_SRC_A64)
@@ -1121,6 +1259,8 @@ EXC_FE     := excelsior/lex.c excelsior/parse.c excelsior/resolve.c \
               excelsior/typecheck.c excelsior/lower.c excelsior/main.c
 EXC_SRC_RV := $(EXC_FE) $(IR_SRC) $(BE_RV)
 EXC_SRC_MIPS := $(EXC_FE) $(IR_SRC) $(BE_MIPS)
+EXC_SRC_X64 := $(EXC_FE) $(IR_SRC) $(BE_X64_SEL)
+EXC_SRC_A64 := $(EXC_FE) $(IR_SRC) $(BE_A64)
 
 build/skj-exc: $(EXC_SRC) excelsior/excelsior.h ir/ir.h | build
 	$(CC) $(CFLAGS) -Iexcelsior -Iir -o $@ $(EXC_SRC)
@@ -1137,6 +1277,21 @@ build/skj-exc-rv: $(EXC_SRC_RV) excelsior/excelsior.h ir/ir.h | build
 ## skj-exc-rv): emits the o32 convention so a gcc-built guest runtime links.
 build/skj-exc-mips: $(EXC_SRC_MIPS) excelsior/excelsior.h ir/ir.h | build
 	$(CC) $(CFLAGS) -DCC_PSABI -Iexcelsior -Iir -o $@ $(EXC_SRC_MIPS)
+
+## Excelsior through the x86-64 and AArch64 backends, emitting the platform
+## register ABI (SysV / AAPCS64) so the compiler matches a gcc-built runtime,
+## the same flags skj-cc-x86-64 / skj-cc-arm64 use.  These drive the
+## codegen-only tiers (check-exc-x86-64-asm / -arm64-asm).  There is no
+## end-to-end tier on these two, by decision: the backends emit an ILP32
+## address model (4-byte pointers and struct fields) and the portable runtime
+## is gcc-built LP64, so the two disagree on the width of every shared struct
+## field, and the ILP32 host ABIs that would bridge it (x86 x32, arm64 ilp32)
+## are rejected by qemu-user.  See excelsior/status.md (Roadmap 2).
+build/skj-exc-x86-64: $(EXC_SRC_X64) excelsior/excelsior.h ir/ir.h backend/mc.h backend/mc_text.h backend/x86_select.h | build
+	$(CC) $(CFLAGS) -DX86_BITS=64 -DCC_LP64 -DCC_PSABI -DCC_STRUCT_ABI -Iexcelsior -Iir -Ibackend -o $@ $(EXC_SRC_X64)
+
+build/skj-exc-arm64: $(EXC_SRC_A64) excelsior/excelsior.h ir/ir.h | build
+	$(CC) $(CFLAGS) -DCC_LP64 -DCC_PSABI -DCC_ARM64 -Iexcelsior -Iir -o $@ $(EXC_SRC_A64)
 
 ## MooScript runtime objects (cross-compiled C)
 build/str.o: runtime/str.c | build
@@ -1188,46 +1343,41 @@ build/exc_native.o: runtime/exc_native.c runtime/libexc.h | build
 	$(M68K_CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<
 
 ## Excelsior on smolmoo (host-abi.md D8): the first VM-host binding.
-## Built with the smolmoo SDK convention (ColdFire V4e, gcc-driven link
-## against runtime/smolmoo.ld); runtime/soft64.c supplies the 64-bit
-## helpers start.S provides on the qemu tier, since the toolchain's
-## libgcc is 68020 code (no ColdFire multilib) and is deliberately not
-## linked: a missing helper is a link error, never silent 68020 code.
-## Link-only smoke in this tree: the ELF loads under the smolmoo
-## server, not qemu (its LINE_A hypercalls have no Linux meaning).
-## `make smolmoo-demo` proves the pipeline.
-SMOLMOO_CFLAGS := -mcpu=5475 -O2 -Wall -ffreestanding
-
+## smolmoo is a RISC-V RV32 machine (rv32.c, vm_rv.ld), so the verb ELF
+## is built through the RV32 psABI toolchain.  The C runtime (libexc, the
+## binding, utf8, soft64) is gcc-built -fno-pic -mno-relax, exactly like
+## check-exc-rv-skj, so skj-ld-rv can resolve it without a GOT or linker
+## relaxation.  The binding is crt-less: exc_smolmoo.c supplies _start and
+## the ecall hypercall stubs, the coroutine shim (smolmoo_rt_rv.S) and the
+## verb are assembled by skj-as-rv, and the whole program is linked by
+## skj-ld-rv over runtime/smolmoo_rv.ld (code at 0x400).  runtime/soft64.c
+## supplies the 64-bit helpers the toolchain's absent rv32 libgcc cannot.
+## Link-only smoke in this tree: the ELF runs under the smolmoo server,
+## whose ecall hypercalls have no Linux meaning, not qemu.  make
+## smolmoo-demo proves the pipeline; M0 in doc/smolmoo-v1.md runs it on a
+## real server.
 build/smolmoo:
 	mkdir -p build/smolmoo
 
-build/smolmoo/libexc.o: runtime/libexc.c runtime/libexc.h runtime/utf8.h | build/smolmoo
-	$(M68K_CC) -std=c99 $(SMOLMOO_CFLAGS) -c -o $@ $<
+build/smolmoo/%.o: runtime/%.c runtime/libexc.h | build/smolmoo
+	$(RV_CC) -std=c99 $(RV_SKJ_RT_CFLAGS) -c -o $@ $<
 
-build/smolmoo/utf8.o: runtime/utf8.c runtime/utf8.h | build/smolmoo
-	$(M68K_CC) -std=c99 $(SMOLMOO_CFLAGS) -c -o $@ $<
+build/smolmoo/smolmoo_rt_rv.o: runtime/smolmoo_rt_rv.S build/skj-as-rv | build/smolmoo
+	./build/skj-as-rv -o $@ $<
 
-build/smolmoo/exc_smolmoo.o: runtime/exc_smolmoo.c runtime/libexc.h | build/smolmoo
-	$(M68K_CC) -std=c99 $(SMOLMOO_CFLAGS) -c -o $@ $<
+build/smolmoo/demo.s: build/skj-exc-rv tests/exs_source_yield.exs | build/smolmoo
+	./build/skj-exc-rv -o $@ tests/exs_source_yield.exs
 
-build/smolmoo/smolmoo_rt.o: runtime/smolmoo_rt.S | build/smolmoo
-	$(M68K_CC) $(SMOLMOO_CFLAGS) -c -o $@ $<
-
-build/smolmoo/demo.s: build/skj-exc tests/exs_source_yield.exs | build/smolmoo
-	./build/skj-exc -o $@ tests/exs_source_yield.exs
-
-build/smolmoo/demo.o: build/smolmoo/demo.s
-	$(M68K_CC) $(SMOLMOO_CFLAGS) -c -o $@ $<
-
-build/smolmoo/soft64.o: runtime/soft64.c | build/smolmoo
-	$(M68K_CC) -std=c99 $(SMOLMOO_CFLAGS) -c -o $@ $<
+build/smolmoo/demo.o: build/smolmoo/demo.s build/skj-as-rv
+	./build/skj-as-rv -o $@ $<
 
 build/smolmoo/demo.elf: build/smolmoo/demo.o build/smolmoo/libexc.o \
-		build/smolmoo/exc_smolmoo.o build/smolmoo/smolmoo_rt.o \
-		build/smolmoo/soft64.o build/smolmoo/utf8.o runtime/smolmoo.ld
-	$(M68K_CC) -mcpu=5475 -nostdlib -static -T runtime/smolmoo.ld -o $@ \
+		build/smolmoo/exc_smolmoo.o build/smolmoo/smolmoo_rt_rv.o \
+		build/smolmoo/soft64.o build/smolmoo/utf8.o \
+		runtime/smolmoo_rv.ld build/skj-ld-rv
+	./build/skj-ld-rv -T runtime/smolmoo_rv.ld -o $@ \
 		build/smolmoo/demo.o build/smolmoo/libexc.o \
-		build/smolmoo/exc_smolmoo.o build/smolmoo/smolmoo_rt.o \
+		build/smolmoo/exc_smolmoo.o build/smolmoo/smolmoo_rt_rv.o \
 		build/smolmoo/soft64.o build/smolmoo/utf8.o
 
 smolmoo-demo: build/smolmoo/demo.elf
@@ -1456,65 +1606,6 @@ test-ops-x86-64: build/x86_64/ops_test
 	@echo "Running unsigned ops test under qemu-x86_64..."
 	@$(QEMU_X64) ./build/x86_64/ops_test && echo "PASS: ops_test (x86-64)" || (echo "FAIL: ops_test (x86-64)"; exit 1)
 
-## I64 integration test (IR builder → x86 asm → qemu-i386)
-I64_TEST_X86_SRC := tests/test_i64.c $(IR_SRC) $(BE_X86)
-
-build/test_i64_x86: $(I64_TEST_X86_SRC) ir/ir.h | build
-	$(CC) $(CFLAGS) -Iir -o $@ $(I64_TEST_X86_SRC)
-
-build/x86/i64_test.s: build/test_i64_x86 | build/x86
-	./build/test_i64_x86 -o $@
-
-build/x86/i64_test.o: build/x86/i64_test.s
-	$(X86_ASM) -f elf32 -o $@ $<
-
-build/x86/i64_test: build/x86/i64_test.o build/x86/start.o
-	$(X86_LD) -m elf_i386 -o $@ build/x86/start.o $<
-
-test-i64-x86: build/x86/i64_test
-	@echo "Running I64 test under qemu-i386..."
-	@$(QEMU_X86) ./build/x86/i64_test && echo "PASS: i64_test (x86)" || (echo "FAIL: i64_test (x86)"; exit 1)
-
-## Unsigned 32-bit ops integration test (IR builder → x86 asm → qemu-i386)
-OPS_TEST_X86_SRC := tests/test_ops.c $(IR_SRC) $(BE_X86)
-
-build/test_ops_x86: $(OPS_TEST_X86_SRC) ir/ir.h | build
-	$(CC) $(CFLAGS) -Iir -o $@ $(OPS_TEST_X86_SRC)
-
-build/x86/ops_test.s: build/test_ops_x86 | build/x86
-	./build/test_ops_x86 -o $@
-
-build/x86/ops_test.o: build/x86/ops_test.s
-	$(X86_ASM) -f elf32 -o $@ $<
-
-build/x86/ops_test: build/x86/ops_test.o build/x86/start.o
-	$(X86_LD) -m elf_i386 -o $@ build/x86/start.o $<
-
-test-ops-x86: build/x86/ops_test
-	@echo "Running unsigned ops test under qemu-i386..."
-	@$(QEMU_X86) ./build/x86/ops_test && echo "PASS: ops_test (x86)" || (echo "FAIL: ops_test (x86)"; exit 1)
-
-## FPU integration test (IR builder → x86 asm → qemu-i386)
-FPU_TEST_X86_SRC := tests/test_fpu.c $(IR_SRC) $(BE_X86)
-
-build/test_fpu_x86: $(FPU_TEST_X86_SRC) ir/ir.h | build
-	$(CC) $(CFLAGS) -Iir -o $@ $(FPU_TEST_X86_SRC)
-
-build/x86/fpu_test.s: build/test_fpu_x86 | build/x86
-	./build/test_fpu_x86 -o $@
-
-build/x86/fpu_test.o: build/x86/fpu_test.s
-	$(X86_ASM) -f elf32 -o $@ $<
-
-build/x86/half.o: runtime/half.c | build/x86
-	$(CC) -m32 -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<
-
-build/x86/fpu_test: build/x86/fpu_test.o build/x86/start.o build/x86/half.o
-	$(X86_LD) -m elf_i386 -o $@ build/x86/start.o build/x86/half.o $<
-
-test-fpu-x86: build/x86/fpu_test
-	@echo "Running FPU test under qemu-i386..."
-	@$(QEMU_X86) ./build/x86/fpu_test && echo "PASS: fpu_test (x86)" || (echo "FAIL: fpu_test (x86)"; exit 1)
 
 ## FPU integration test (IR builder → arm64 asm → qemu-aarch64).
 ## _Float16 FLH/FSH are native fcvt on AArch64, so no half.o helper is linked.
@@ -1582,20 +1673,7 @@ test-fpu-x86-64: build/x86_64/fpu_test
 	@echo "Running FPU test under qemu-x86_64..."
 	@$(QEMU_X64) ./build/x86_64/fpu_test && echo "PASS: fpu_test (x86-64)" || (echo "FAIL: fpu_test (x86-64)"; exit 1)
 
-## Native single-precision (IR_F32) integration test on x86-32 and x86-64
-F32_TEST_X86_SRC := tests/test_f32.c $(IR_SRC) $(BE_X86)
-build/test_f32_x86: $(F32_TEST_X86_SRC) ir/ir.h | build
-	$(CC) $(CFLAGS) -Iir -o $@ $(F32_TEST_X86_SRC)
-build/x86/f32_test.s: build/test_f32_x86 | build/x86
-	./build/test_f32_x86 -o $@
-build/x86/f32_test.o: build/x86/f32_test.s
-	$(X86_ASM) -f elf32 -o $@ $<
-build/x86/f32_test: build/x86/f32_test.o build/x86/start.o
-	$(X86_LD) -m elf_i386 -o $@ build/x86/start.o $<
-test-f32-x86: build/x86/f32_test
-	@echo "Running F32 test under qemu-i386..."
-	@$(QEMU_X86) ./build/x86/f32_test && echo "PASS: f32_test (x86)" || (echo "FAIL: f32_test (x86)"; exit 1)
-
+## Native single-precision (IR_F32) integration test on x86-64
 F32_TEST_X64_SRC := tests/test_f32.c $(IR_SRC) $(BE_X64)
 build/test_f32_x64: $(F32_TEST_X64_SRC) ir/ir.h | build
 	$(CC) $(CFLAGS) -DX86_BITS=64 -Iir -o $@ $(F32_TEST_X64_SRC)
@@ -1743,7 +1821,7 @@ check-cc-rv-skj: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv-skj/st
 	 sh tests/run-cc-tests.sh
 
 ## The psABI C suite end to end through the in-tree RV32 toolchain:
-## skj-cc-rv-psabi emits the standard RISC-V ILP32 convention, assembled by
+## skj-cc-rv emits the standard RISC-V ILP32 convention, assembled by
 ## skj-as-rv and linked by skj-ld-rv over the psABI crt, run under qemu-riscv32.
 ## The crt (start_rv_psabi_cc.o) is assembled by skj-as-rv.  varargs and
 ## by-value structs are still excluded: the RV backend implements the scalar
@@ -1752,8 +1830,8 @@ check-cc-rv-skj: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv-skj/st
 build/rv-skj/start_psabi_cc.o: runtime/start_rv_psabi_cc.S build/skj-as-rv | build/rv-skj
 	./build/skj-as-rv -o $@ $<
 
-check-cc-rv-psabi: build/skj-cc-rv-psabi build/skj-as-rv build/skj-ld-rv build/rv-skj/start_psabi_cc.o
-	@CCBIN="$(CURDIR)/build/skj-cc-rv-psabi" \
+check-cc-rv-psabi: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv-skj/start_psabi_cc.o
+	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
 	 ASM="$(CURDIR)/build/skj-as-rv -o" \
 	 LD="$(CURDIR)/build/skj-ld-rv -o" \
 	 QEMU="$(QEMU_RV)" \
@@ -1763,13 +1841,13 @@ check-cc-rv-psabi: build/skj-cc-rv-psabi build/skj-as-rv build/skj-ld-rv build/r
 	 EXCLUDE="$(NOPSABI_EXCLUDE)" \
 	 sh tests/run-cc-tests.sh
 
-## psABI interop proof: a skj-cc-rv-psabi main calls a gcc-built RV32 function
+## psABI interop proof: a skj-cc-rv main calls a gcc-built RV32 function
 ## (i64 and int arguments, i64 result) and the whole program is linked by
 ## skj-ld-rv.  This is the point of the psABI build, that its output follows
 ## the standard ABI a stock RISC-V toolchain emits.
-test-cc-rv-psabi-interop: build/skj-cc-rv-psabi build/skj-as-rv build/skj-ld-rv build/rv-skj/start_psabi_cc.o | build/rv-skj
+test-cc-rv-psabi-interop: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv-skj/start_psabi_cc.o | build/rv-skj
 	@$(RV_CC) $(RV_SKJ_RT_CFLAGS) -c -o build/rv-skj/interop_gcc.o tests/rv_psabi_interop_gcc.c
-	@./build/skj-cc-rv-psabi -o build/rv-skj/interop_main.s tests/rv_psabi_interop_main.c
+	@./build/skj-cc-rv -o build/rv-skj/interop_main.s tests/rv_psabi_interop_main.c
 	@./build/skj-as-rv -o build/rv-skj/interop_main.o build/rv-skj/interop_main.s
 	@./build/skj-ld-rv -o build/rv-skj/interop build/rv-skj/start_psabi_cc.o \
 	    build/rv-skj/interop_main.o build/rv-skj/interop_gcc.o
@@ -1782,9 +1860,9 @@ test-cc-rv-psabi-interop: build/skj-cc-rv-psabi build/skj-as-rv build/skj-ld-rv 
 ## static executable by skj-ld-rv, which synthesizes the GOT.  Proves the
 ## toolchain interlinks stock gcc objects, not only ones built -fno-pic
 ## -mno-relax.
-test-cc-rv-psabi-gcc-stock: build/skj-cc-rv-psabi build/skj-as-rv build/skj-ld-rv build/rv-skj/start_psabi_cc.o | build/rv-skj
+test-cc-rv-psabi-gcc-stock: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv-skj/start_psabi_cc.o | build/rv-skj
 	@$(RV_CC) $(RV_RT_CFLAGS) -c -o build/rv-skj/stock_lib.o tests/rv_gcc_stock_lib.c
-	@./build/skj-cc-rv-psabi -o build/rv-skj/stock_main.s tests/rv_gcc_stock_main.c
+	@./build/skj-cc-rv -o build/rv-skj/stock_main.s tests/rv_gcc_stock_main.c
 	@./build/skj-as-rv -o build/rv-skj/stock_main.o build/rv-skj/stock_main.s
 	@./build/skj-ld-rv -o build/rv-skj/stock build/rv-skj/start_psabi_cc.o \
 	    build/rv-skj/stock_main.o build/rv-skj/stock_lib.o
@@ -1795,14 +1873,14 @@ test-cc-rv-psabi-gcc-stock: build/skj-cc-rv-psabi build/skj-as-rv build/skj-ld-r
 ## Archive (.a) support: skj-ld-rv pulls the members that resolve undefined
 ## symbols (member A, and B transitively) and skips the unreferenced one (whose
 ## own undefined symbol would break the link if it were wrongly pulled).
-test-cc-rv-psabi-archive: build/skj-cc-rv-psabi build/skj-as-rv build/skj-ld-rv build/rv-skj/start_psabi_cc.o | build/rv-skj
+test-cc-rv-psabi-archive: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv-skj/start_psabi_cc.o | build/rv-skj
 	@$(RV_CC) $(RV_RT_CFLAGS) -c -o build/rv-skj/arch_a.o tests/rv_archive_a.c
 	@$(RV_CC) $(RV_RT_CFLAGS) -c -o build/rv-skj/arch_b.o tests/rv_archive_b.c
 	@$(RV_CC) $(RV_RT_CFLAGS) -c -o build/rv-skj/arch_unused.o tests/rv_archive_unused.c
 	@rm -f build/rv-skj/libarch.a
 	@$(RV_AR) rcs build/rv-skj/libarch.a build/rv-skj/arch_a.o build/rv-skj/arch_b.o \
 	    build/rv-skj/arch_unused.o
-	@./build/skj-cc-rv-psabi -o build/rv-skj/arch_main.s tests/rv_archive_main.c
+	@./build/skj-cc-rv -o build/rv-skj/arch_main.s tests/rv_archive_main.c
 	@./build/skj-as-rv -o build/rv-skj/arch_main.o build/rv-skj/arch_main.s
 	@./build/skj-ld-rv -o build/rv-skj/arch build/rv-skj/start_psabi_cc.o \
 	    build/rv-skj/arch_main.o build/rv-skj/libarch.a
@@ -2039,14 +2117,17 @@ check-rvas: build/skj-as-rv build/skj-ld-rv build/skj-run
 
 ## Full qemu matrix across every supported architecture: the per-language
 ## suites, plus the IR-builder integration tests (fpu / i64 / unsigned ops).
-## ColdFire (qemu-m68k), RISC-V (qemu-riscv32, hardware float), x86-32
-## (qemu-i386), AArch64 (qemu-aarch64).
+## ColdFire (qemu-m68k), RISC-V (qemu-riscv32, hardware float), x86-64
+## (qemu-x86_64), AArch64 (qemu-aarch64).
 check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc \
-           check-rv check-x86 check-x86-64 check-arm64 \
+           check-exc-x86-64-asm check-exc-arm64-asm \
+           check-rv check-x86-64 check-arm64 \
+           check-x86-oracle check-jit \
            test-gc test-exc-walker \
-           test-fpu test-fpu-rv test-fpu-x86 test-fpu-x86-64 test-fpu-arm64 \
-           test-i64 test-i64-rv test-i64-x86 test-i64-x86-64 test-i64-arm64 \
-           test-ops test-ops-rv test-ops-x86 test-ops-x86-64 test-ops-arm64 \
+           test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 \
+           test-f32-diff \
+           test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 \
+           test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 \
            check-rvas check-cc-rv-skj check-exc-rv-skj \
            check-cc-rv-psabi test-cc-rv-psabi-interop \
            test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive
@@ -2055,4 +2136,4 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp c
 clean:
 	rm -rf build
 
-.PHONY: all release-check check check-rv test-rv-irq test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-emu check-rv-emu check-exc-emu check-emu-all test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86 check-x86-64 check-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive check-mipsas check-cc-mips-skj check-smoke test-gc test-fpu test-fpu-rv test-fpu-x86 test-fpu-x86-64 test-fpu-arm64 test-f32-rv test-i64 test-i64-rv test-i64-x86 test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86 test-ops-x86-64 test-ops-arm64 test-parse clean FORCE
+.PHONY: all release-check check check-rv run-rv test-rv-irq test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-emu check-rv-emu check-exc-emu check-emu-all test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86-64 check-arm64 check-x86-oracle check-jit check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-exc-x86-64-asm check-exc-arm64-asm check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive check-mipsas check-cc-mips-skj check-smoke test-gc test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-parse clean FORCE

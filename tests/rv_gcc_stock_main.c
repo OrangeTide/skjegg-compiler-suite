@@ -1,4 +1,4 @@
-/* The skj-cc-rv-psabi half of the stock-gcc interlink test: it provides the
+/* The skj-cc-rv half of the stock-gcc interlink test: it provides the
  * global and the callee the stock gcc object reaches (through the GOT and a
  * PLT call), and calls into that object.  40 + 2 = 42. */
 

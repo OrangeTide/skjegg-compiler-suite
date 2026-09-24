@@ -1,4 +1,4 @@
-/* Compiled by skj-cc-rv-psabi; pulls member A (and transitively B) out of the
+/* Compiled by skj-cc-rv; pulls member A (and transitively B) out of the
  * archive.  40 + 1 + 1 = 42. */
 extern int arch_needed(int x);
 

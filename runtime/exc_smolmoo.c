@@ -1,30 +1,37 @@
 /* exc_smolmoo.c : the smolmoo host binding for libexc (host-abi.md
  * layer 2, the first VM-host binding).
  *
- * smolmoo (https://github.com/OrangeTide/smolmoo) runs each verb
- * invocation in a fresh, zeroed 128KB ColdFire VM: code loads at
- * 0x400, the host writes the parsed verb arguments to a fixed struct
- * at 0x380, enters _start, and routes fd 1 to the invoking player and
- * fd 2 to the server log. Hypercalls are LINE_A opwords (0xA000 | nr)
- * with the m68k gcc register convention: ints in d0..d3, pointers in
- * a0/a1, the result in d0. The stub shapes below mirror the smolmoo
- * SDK's own so the two stay recognizably one ABI.
+ * smolmoo (https://github.com/OrangeTide/smolmoo) is a RISC-V RV32
+ * machine (rv32.c, vm_rv.ld). It runs each verb invocation in a fresh,
+ * zeroed 128KB VM: code loads at 0x400, the host writes the parsed verb
+ * arguments to a fixed struct at 0x380 (the struct vm_args layout
+ * below), seeds sp at the top of guest RAM (0x20000) so C runs
+ * immediately, enters _start, and routes fd 1 to the invoking player
+ * and fd 2 to the server log.
+ *
+ * Hypercalls are RISC-V `ecall` under the ILP32 psABI: the syscall
+ * number in a7, arguments in a0..a5, the result in a0. The sys_* stubs
+ * below mirror the smolmoo SDK's own (verb_rt_rv.S) so the two stay
+ * recognizably one ABI. The C caller has placed the arguments in
+ * a0..a5; each stub only adds the number in a7.
  *
  * This binding implements the __exh_* services over those hypercalls,
  * provides the arena in C (there is no start.S here; the source
- * coroutine helpers come from smolmoo_rt.S), and owns the entry
+ * coroutine helpers come from smolmoo_rt_rv.S), and owns the entry
  * driver: _start spawns the bootstrap actor, resolves the invoked
  * verb's name against __exc_selnames so one Excelsior program can
- * carry several public verbs, sends it, and exits. Per-actor
- * persistence across invocations arrives with the freeze/thaw walker
- * (host-abi.md D7); until then each invocation is a fresh world, like
- * the native test host.
+ * carry several public verbs, thaws its fields from the host object,
+ * sends it, freezes back, and exits.
  *
- * Built with the smolmoo SDK convention: -mcpu=5475 -ffreestanding,
- * linked with runtime/smolmoo.ld. Link-only in this tree (the ELF runs
- * under the smolmoo server, not qemu).
+ * Everything above the sys_* stubs is arch-neutral C. The prior version
+ * of this file targeted ColdFire (LINE_A hypercalls); the retarget to
+ * RV32 ecall touched only the six stubs, the coroutine shim, and the
+ * linker script, per doc/smolmoo-v1.md.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
+ * Built with the smolmoo SDK convention: RV32 psABI, -ffreestanding,
+ * linked against runtime/smolmoo_rv.ld by skj-ld-rv (make smolmoo-demo).
+ * Link-only in this tree (the ELF runs under the smolmoo server, whose
+ * ecall hypercalls have no Linux meaning, not qemu).
  */
 
 #include "libexc.h"
@@ -67,72 +74,78 @@ vm_args(void)
 static __attribute__((noreturn)) void
 sys_exit(int status)
 {
-    register int d0 __asm__("d0") = status;
-    __asm__ volatile(".word 0xA000" :: "d"(d0) : "memory");
+    register int a0 __asm__("a0") = status;
+    register int a7 __asm__("a7") = SYS_EXIT;
+    __asm__ volatile("ecall" :: "r"(a0), "r"(a7) : "memory");
     __builtin_unreachable();
 }
 
 static int
 sys_write(int fd, const void *buf, int len)
 {
-    register int d0 __asm__("d0") = fd;
-    register const void *a0 __asm__("a0") = buf;
-    register int d1 __asm__("d1") = len;
-    __asm__ volatile(".word 0xA004"
-        : "+d"(d0)
-        : "a"(a0), "d"(d1)
+    register int a0 __asm__("a0") = fd;
+    register const void *a1 __asm__("a1") = buf;
+    register int a2 __asm__("a2") = len;
+    register int a7 __asm__("a7") = SYS_WRITE;
+    __asm__ volatile("ecall"
+        : "+r"(a0)
+        : "r"(a1), "r"(a2), "r"(a7)
         : "memory");
-    return d0;
+    return a0;
 }
 
 static int
 sys_broadcast(int room, const char *msg)
 {
-    register int d0 __asm__("d0") = room;
-    register const char *a0 __asm__("a0") = msg;
-    __asm__ volatile(".word 0xA006"
-        : "+d"(d0)
-        : "a"(a0)
+    register int a0 __asm__("a0") = room;
+    register const char *a1 __asm__("a1") = msg;
+    register int a7 __asm__("a7") = SYS_BROADCAST;
+    __asm__ volatile("ecall"
+        : "+r"(a0)
+        : "r"(a1), "r"(a7)
         : "memory");
-    return d0;
+    return a0;
 }
 
 static int
 sys_getprop(int obj, const char *name, char *buf, int bufsz)
 {
-    register int d0 __asm__("d0") = obj;
-    register const char *a0 __asm__("a0") = name;
-    register char *a1 __asm__("a1") = buf;
-    register int d1 __asm__("d1") = bufsz;
-    __asm__ volatile(".word 0xA007"
-        : "+d"(d0)
-        : "a"(a0), "a"(a1), "d"(d1)
+    register int a0 __asm__("a0") = obj;
+    register const char *a1 __asm__("a1") = name;
+    register char *a2 __asm__("a2") = buf;
+    register int a3 __asm__("a3") = bufsz;
+    register int a7 __asm__("a7") = SYS_GETPROP;
+    __asm__ volatile("ecall"
+        : "+r"(a0)
+        : "r"(a1), "r"(a2), "r"(a3), "r"(a7)
         : "memory");
-    return d0;
+    return a0;
 }
 
 static int
 sys_setprop(int obj, const char *name, const char *val)
 {
-    register int d0 __asm__("d0") = obj;
-    register const char *a0 __asm__("a0") = name;
-    register const char *a1 __asm__("a1") = val;
-    __asm__ volatile(".word 0xA008"
-        : "+d"(d0)
-        : "a"(a0), "a"(a1)
+    register int a0 __asm__("a0") = obj;
+    register const char *a1 __asm__("a1") = name;
+    register const char *a2 __asm__("a2") = val;
+    register int a7 __asm__("a7") = SYS_SETPROP;
+    __asm__ volatile("ecall"
+        : "+r"(a0)
+        : "r"(a1), "r"(a2), "r"(a7)
         : "memory");
-    return d0;
+    return a0;
 }
 
 static int
 sys_suspend(int delay_ms)
 {
-    register int d0 __asm__("d0") = delay_ms;
-    __asm__ volatile(".word 0xA00B"
-        : "+d"(d0)
-        ::
-        "memory");
-    return d0;
+    register int a0 __asm__("a0") = delay_ms;
+    register int a7 __asm__("a7") = SYS_SUSPEND;
+    __asm__ volatile("ecall"
+        : "+r"(a0)
+        : "r"(a7)
+        : "memory");
+    return a0;
 }
 
 /* ---- the arena (libexc.h's __moo_arena_alloc, in C: no start.S) ---- */

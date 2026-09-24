@@ -30,6 +30,7 @@ global __moo_arena_reset
 global __cont_capture
 global __cont_resume
 global __cont_mark_sp
+global __cont_arena_ptr
 
 _start:
     mov esp, stack_top         ; low-memory stack (zeroes the high half of rsp)

@@ -748,11 +748,24 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         fprintf(out, "\tmove.l %%a0, %d(%%fp)\n", off + 8);
         fprintf(out, "\tlea %d(%%fp), %%a0\n", off);
         fprintf(out, "\tmove.l %%a0, __cont_mark_sp\n");
+        /* stash the continuation-arena high-water mark (first entry only,
+         * before the re-entry label) for IR_CONT_UNWIND to restore */
+        fprintf(out, "\tmove.l __cont_arena_ptr, %%d0\n");
+        fprintf(out, "\tmove.l %%d0, %d(%%fp)\n", off + 12);
         fprintf(out, "\tmoveq #0, %%d0\n");
         fprintf(out, ".Lmark%d_%d:\n", label_prefix, i->label);
         if (strcmp(sd, "%d0") != 0)
             fprintf(out, "\tmove.l %%d0, %s\n", sd);
         wd(out, fn, i->dst, sd);
+        break;
+    }
+
+    case IR_CONT_UNWIND: {
+        /* restore the continuation arena to the mark-time high-water mark,
+         * reclaiming every buffer captured within the closing reset extent */
+        int off = slot_offset(fn, i->slot);
+        fprintf(out, "\tmove.l %d(%%fp), %%d0\n", off + 12);
+        fprintf(out, "\tmove.l %%d0, __cont_arena_ptr\n");
         break;
     }
 

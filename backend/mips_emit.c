@@ -80,11 +80,12 @@ static const char *fregs[] = {
 #define FP_ALLOC_FIRST 2
 #define FP_ALLOC_LAST  7
 
-#ifdef CC_PSABI
 /*
- * The o32 platform ABI.  Emitted for skj-exc-mips so a gcc-built guest
- * runtime (libexc and its host binding, o32 hard-float) can be linked and
- * called in both directions.  The rules used here:
+ * The o32 platform ABI.  This is the only convention the MIPS backend
+ * emits: the toolkit's old stack convention was retired in favour of the
+ * platform psABI for every external call, so a gcc-built guest runtime
+ * (libexc and its host binding, o32 hard-float) can be linked and called
+ * in both directions.  The rules used here:
  *
  *   - Arguments fill a conceptual "argument structure" one word at a time,
  *     the first four words ($a0-$a3) passed in registers with reserved home
@@ -108,7 +109,6 @@ static const char *fregs[] = {
  * of the lowering reads every parameter from its slot as before.
  */
 static const char *argreg[4] = { "$a0", "$a1", "$a2", "$a3" };
-#endif
 
 /****************************************************************
  * Frame layout helpers
@@ -649,7 +649,6 @@ emit_prologue(FILE *out, struct ir_func *fn)
         fprintf(out, "\ts.d %s, %d($sp)\n",
             fregs[used_fregs[k]], pad + NSAVED * 4 + k * 8);
 
-#ifdef CC_PSABI
     /* Spill the register parameters into their argument-structure homes (the
        words the caller reserved at $fp+8 upward), so every parameter is read
        from its slot afterwards and the rest of the lowering does not know the
@@ -664,7 +663,6 @@ emit_prologue(FILE *out, struct ir_func *fn)
         if (words == 2 && word + 1 < 4)
             fprintf(out, "\tsw %s, %d($fp)\n", argreg[word + 1], off + 4);
     }
-#endif
 }
 
 static void
@@ -695,7 +693,6 @@ emit_epilogue(FILE *out, struct ir_func *fn)
     fprintf(out, "\tjr $ra\n");
 }
 
-#ifdef CC_PSABI
 /*
  * The o32 call.  Arguments fill the argument structure (see the ABI note
  * above); the first four words go in $a0-$a3, the rest on the stack, a
@@ -712,7 +709,12 @@ emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
 
     wi = 0;
     for (k = 0; k < narg; k++) {
-        int w = (arg_is_i64[k] || (arg_is_float[k] && !arg_fw[k])) ? 2 : 1;
+        /* A float, single or double, takes an 8-byte, 8-aligned footprint in
+           the argument structure: the callee widens every float parameter's
+           slot to eight bytes and reads it there, so a single rides the low
+           word of a two-word slot (its value, high word unused).  An i64 is
+           two words for the same reason. */
+        int w = (arg_is_i64[k] || arg_is_float[k]) ? 2 : 1;
         if (w == 2)
             wi = (wi + 1) & ~1;
         loc[k].words = w;
@@ -742,9 +744,27 @@ emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
 
         if (arg_is_float[k]) {
             int f32 = arg_fw[k];
+            /* store the float to the home slot, then, if it lands in the
+               register region, load its word(s) into the a-register(s) */
+#ifdef MIPS_SOFTFLOAT
+            /* soft float: a single is one word from its int, a double two
+               from its i64, at the low end of the 8-byte slot */
+            if (f32) {
+                const char *sa = rs(out, fn, arg_temps[k], 0);
+                fprintf(out, "\tsw %s, %d($sp)\n", sa, boff);
+            } else {
+                const char *lo = i64_rs_lo(out, fn, arg_temps[k], 0);
+                fprintf(out, "\tsw %s, %d($sp)\n", lo, boff);
+                const char *hi = i64_rs_hi(out, fn, arg_temps[k], 0);
+                fprintf(out, "\tsw %s, %d($sp)\n", hi, boff + 4);
+            }
+            if (ir >= 0) {
+                fprintf(out, "\tlw %s, %d($sp)\n", argreg[ir], boff);
+                if (!f32)
+                    fprintf(out, "\tlw %s, %d($sp)\n", argreg[ir + 1], boff + 4);
+            }
+#else
             const char *sa = frs_w(out, fn, arg_temps[k], 0, f32);
-            /* store to the home slot; if it lands in the register region,
-               also load it into the a-register(s) */
             fprintf(out, "\t%s %s, %d($sp)\n", f32 ? "s.s" : "s.d", sa, boff);
             if (ir >= 0) {
                 fprintf(out, "\tlw %s, %d($sp)\n", argreg[ir], boff);
@@ -755,6 +775,7 @@ emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
             if (loc[k].fpreg >= 0)
                 fprintf(out, "\tmov.%s $f%d, %s\n", f32 ? "s" : "d",
                     loc[k].fpreg, sa);
+#endif
         } else if (arg_is_i64[k]) {
             const char *lo = i64_rs_lo(out, fn, arg_temps[k], 0);
             const char *hi = i64_rs_hi(out, fn, arg_temps[k], 1);
@@ -797,10 +818,18 @@ emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
             i64_wd_hi(out, fn, i->dst, dhi);
         } else if (retkind == RET_FLOAT) {
             int f32 = i->imm == FWIDTH_F32;
+#ifdef MIPS_SOFTFLOAT
+            /* a double comes back in $v0:$v1 (i64), a single in $v0 (int) */
+            if (f32)
+                sf_ret_w(out, fn, i->dst);
+            else
+                sf_ret_d(out, fn, i->dst);
+#else
             const char *sd = frd_w(fn, i->dst, 0);
             if (strcmp(sd, "$f0") != 0)
                 fprintf(out, "\tmov.%s %s, $f0\n", f32 ? "s" : "d", sd);
             fwd_f(out, fn, i->dst, sd, f32);
+#endif
         } else {
             const char *sd = rd(fn, i->dst, 0);
             if (strcmp(sd, "$v0") != 0)
@@ -811,146 +840,69 @@ emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
 }
 
 /*
- * A tail call under the o32 ABI.  A real tail call would place the arguments
- * over the frame being torn down, which the register/home layout makes
- * fiddly.  The fall-back is an ordinary call and a return: the result is left
- * in $v0/$f0 by the call and the epilogue does not disturb it.  Excelsior,
- * the only front end that targets this ABI, does not rely on tail-call
- * elimination, so the extra frame is harmless.
+ * A tail call under the o32 ABI.  When every argument fits in $a0-$a3 (the
+ * Scheme front end, the only source of tail calls, passes integer arguments
+ * only) it is a real tail call: the arguments are evaluated into the
+ * argument registers while $fp still addresses this frame, the frame is torn
+ * down, and control jumps to the callee, which spills $a0-$a3 into its own
+ * argument-structure homes.  $a0-$a3 and $t9 are caller-saved, so the
+ * epilogue restores the callee-saves without disturbing them.  This is what
+ * keeps a tail-recursive loop bounded in stack.
+ *
+ * With an argument that would spill to the outgoing stack block the frame
+ * cannot be torn down first (that block lives below it), so the fall-back is
+ * an ordinary call and a return: correct, but it keeps the frame.
  */
 static void
 emit_tailcall_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
                     int indirect)
 {
-    struct ir_insn call = *i;
+    int k, wi = 0, fits = 1;
 
-    call.dst = -1;
-    emit_call_flush(out, fn, &call, indirect, RET_INT);
-    emit_epilogue(out, fn);
-}
-#else
-static void
-emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
-                int indirect, int retkind)
-{
-    int k, push_bytes, off;
-
-    /* An 8-byte arg (a float, or an i64) is 8-aligned in the outgoing block,
-       mirroring slot_offset's param layout so the callee reads each param
-       where the caller wrote it.  The whole block rounds to 16 so the callee
-       is entered with a 16-aligned $sp. */
-    off = 0;
     for (k = 0; k < narg; k++) {
-        int eight = arg_is_float[k] || arg_is_i64[k];
-        if (eight)
-            off = (off + 7) & ~7;
-        off += eight ? 8 : 4;
+        int w = (arg_is_i64[k] || arg_is_float[k]) ? 2 : 1;
+        if (w == 2)
+            wi = (wi + 1) & ~1;
+        wi += w;
+        if (arg_is_float[k])
+            fits = 0;   /* a float rides the fall-back; tail calls are integer */
     }
-    push_bytes = (off + 15) & ~15;
+    if (wi > 4)
+        fits = 0;
 
-    if (push_bytes > 0)
-        fprintf(out, "\taddiu $sp, $sp, -%d\n", push_bytes);
-    off = 0;
+    if (!fits) {
+        struct ir_insn call = *i;
+
+        call.dst = -1;
+        emit_call_flush(out, fn, &call, indirect, RET_INT);
+        emit_epilogue(out, fn);
+        return;
+    }
+
+    /* register-only: move each argument into its $a-register.  $a0-$a3 are
+       not allocatable, so a later argument never reads a register an earlier
+       move already overwrote. */
+    wi = 0;
     for (k = 0; k < narg; k++) {
-        if (arg_is_float[k]) {
-            int f32 = arg_fw[k];
-            off = (off + 7) & ~7;
-#ifdef MIPS_SOFTFLOAT
-            /* A float rides the argument block in the same 8-byte, 8-aligned
-               footprint the callee's param layout expects.  A double is two
-               words from its i64; a single is one word from its int, at the
-               low end (the callee reads only that word). */
-            if (f32) {
-                const char *sa = rs(out, fn, arg_temps[k], 0);
-                fprintf(out, "\tsw %s, %d($sp)\n", sa, off);
-            } else {
-                const char *lo = i64_rs_lo(out, fn, arg_temps[k], 0);
-                fprintf(out, "\tsw %s, %d($sp)\n", lo, off);
-                const char *hi = i64_rs_hi(out, fn, arg_temps[k], 0);
-                fprintf(out, "\tsw %s, %d($sp)\n", hi, off + 4);
-            }
-#else
-            const char *sa = frs_w(out, fn, arg_temps[k], 0, f32);
-            fprintf(out, "\t%s %s, %d($sp)\n", f32 ? "s.s" : "s.d",
-                sa, off);
-#endif
-            off += 8;
-        } else if (arg_is_i64[k]) {
-            const char *lo, *hi;
-            off = (off + 7) & ~7;
-            lo = i64_rs_lo(out, fn, arg_temps[k], 0);
-            fprintf(out, "\tsw %s, %d($sp)\n", lo, off);
-            hi = i64_rs_hi(out, fn, arg_temps[k], 0);
-            fprintf(out, "\tsw %s, %d($sp)\n", hi, off + 4);
-            off += 8;
+        int w = (arg_is_i64[k] || arg_is_float[k]) ? 2 : 1;
+        if (w == 2)
+            wi = (wi + 1) & ~1;
+        if (arg_is_i64[k]) {
+            const char *lo = i64_rs_lo(out, fn, arg_temps[k], 0);
+            const char *hi = i64_rs_hi(out, fn, arg_temps[k], 1);
+            fprintf(out, "\tmove %s, %s\n", argreg[wi], lo);
+            fprintf(out, "\tmove %s, %s\n", argreg[wi + 1], hi);
         } else {
             const char *sa = rs(out, fn, arg_temps[k], 0);
-            fprintf(out, "\tsw %s, %d($sp)\n", sa, off);
-            off += 4;
+            if (strcmp(sa, argreg[wi]) != 0)
+                fprintf(out, "\tmove %s, %s\n", argreg[wi], sa);
         }
+        wi += w;
     }
     if (indirect) {
         const char *sa = rs(out, fn, i->a, 0);
         if (strcmp(sa, "$t9") != 0)
             fprintf(out, "\tmove $t9, %s\n", sa);
-        fprintf(out, "\tjalr $t9\n");
-    } else {
-        fprintf(out, "\tjal %s\n", i->sym);
-    }
-    if (push_bytes > 0)
-        fprintf(out, "\taddiu $sp, $sp, %d\n", push_bytes);
-    narg = 0;
-
-    if (i->dst >= 0) {
-        if (retkind == RET_I64) {
-            const char *dlo = i64_rd_lo(fn, i->dst, 0);
-            const char *dhi = i64_rd_hi(fn, i->dst, 1);
-            if (strcmp(dlo, "$v0") != 0)
-                fprintf(out, "\tmove %s, $v0\n", dlo);
-            if (strcmp(dhi, "$v1") != 0)
-                fprintf(out, "\tmove %s, $v1\n", dhi);
-            i64_wd_lo(out, fn, i->dst, dlo);
-            i64_wd_hi(out, fn, i->dst, dhi);
-        } else if (retkind == RET_FLOAT) {
-#ifdef MIPS_SOFTFLOAT
-            /* a double comes back in $v0:$v1 (i64), a single in $v0 (int) */
-            if (i->imm == FWIDTH_F32)
-                sf_ret_w(out, fn, i->dst);
-            else
-                sf_ret_d(out, fn, i->dst);
-#else
-            int f32 = i->imm == FWIDTH_F32;
-            const char *sd = frd_w(fn, i->dst, 0);
-            if (strcmp(sd, "$f0") != 0)
-                fprintf(out, "\tmov.%s %s, $f0\n", f32 ? "s" : "d", sd);
-            fwd_f(out, fn, i->dst, sd, f32);
-#endif
-        } else {
-            const char *sd = rd(fn, i->dst, 0);
-            if (strcmp(sd, "$v0") != 0)
-                fprintf(out, "\tmove %s, $v0\n", sd);
-            wd(out, fn, i->dst, sd);
-        }
-    }
-}
-
-static void
-emit_tailcall_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
-                    int indirect)
-{
-    int k;
-
-    /* Overwrite the incoming parameter area (which the successor reads at
-       its own $fp+8) with the new arguments, then tear the frame down and
-       jump.  $t9 is caller-saved, so it survives the epilogue.  Integer
-       arguments only (the tail-call callers are the Scheme front end). */
-    for (k = 0; k < narg; k++) {
-        const char *sa = rs(out, fn, arg_temps[k], 0);
-        fprintf(out, "\tsw %s, %d($fp)\n", sa, 8 + 4 * k);
-    }
-    if (indirect) {
-        const char *sa = rs(out, fn, i->a, 0);
-        fprintf(out, "\tmove $t9, %s\n", sa);
     }
     narg = 0;
     emit_epilogue_no_ret(out, fn);
@@ -959,7 +911,6 @@ emit_tailcall_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
     else
         fprintf(out, "\tj %s\n", i->sym);
 }
-#endif /* CC_PSABI */
 
 static void
 emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
@@ -1197,6 +1148,11 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         fprintf(out, "\taddiu $t0, $fp, %d\n", off);
         fprintf(out, "\tla $t1, __cont_mark_sp\n");
         fprintf(out, "\tsw $t0, 0($t1)\n");
+        /* stash the continuation-arena high-water mark (first entry only,
+         * before the re-entry label) for IR_CONT_UNWIND to restore */
+        fprintf(out, "\tla $t0, __cont_arena_ptr\n");
+        fprintf(out, "\tlw $t1, 0($t0)\n");
+        fprintf(out, "\tsw $t1, %d($fp)\n", off + 12);
         fprintf(out, "\tli $v0, 0\n");
         fprintf(out, ".Lmark%d_%d:\n", label_prefix, i->label);
         if (strcmp(sd, "$v0") != 0)
@@ -1219,6 +1175,16 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         if (strcmp(sd, "$v0") != 0)
             fprintf(out, "\tmove %s, $v0\n", sd);
         wd(out, fn, i->dst, sd);
+        break;
+    }
+
+    case IR_CONT_UNWIND: {
+        /* restore the continuation arena to the mark-time high-water mark,
+         * reclaiming every buffer captured within the closing reset extent */
+        int off = slot_offset(fn, i->slot);
+        fprintf(out, "\tlw $t0, %d($fp)\n", off + 12);
+        fprintf(out, "\tla $t1, __cont_arena_ptr\n");
+        fprintf(out, "\tsw $t0, 0($t1)\n");
         break;
     }
 

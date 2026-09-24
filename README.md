@@ -7,120 +7,156 @@ trading a small effort for a big payoff.
 
 ## Tools
 
-| Tool       | Description                | Status  |
-|------------|----------------------------|---------|
-| `skj-tinc` | TinC compiler (minimal C)  | Working |
-| `skj-sc`   | TinScheme compiler         | Working |
-| `skj-mooc` | MooScript compiler         | Working |
-| `skj-pc`   | Compact Pascal compiler    | Working |
-| `skj-cc`   | C compiler (C89+C99 subset)| Working |
-| `skj-cpp`  | C preprocessor             | Working |
-| `skj-as`   | ColdFire/m68k assembler    | Working |
-| `skj-ld`   | ColdFire/m68k static linker| Working |
-| `skj-run`  | Guest runner (ColdFire, RV32)| Working |
+| Tool         | Description                                  | Status      |
+|--------------|----------------------------------------------|-------------|
+| `skj-tinc`   | TinC compiler (minimal C)                    | Working     |
+| `skj-sc`     | TinScheme compiler                           | Working     |
+| `skj-mooc`   | MooScript compiler                           | Working     |
+| `skj-pc`     | Compact Pascal compiler                      | Working     |
+| `skj-cc`     | C compiler (C89 + C99 subset)                | Working     |
+| `skj-exc`    | Excelsior compiler (in-world scripting)      | In progress |
+| `skj-cpp`    | C preprocessor (library, also used by `cc`)  | Working     |
+| `skj-as`     | ColdFire/m68k assembler (GAS subset -> ELF32)| Working     |
+| `skj-ld`     | ColdFire/m68k static linker                  | Working     |
+| `skj-as-rv`  | RISC-V RV32 assembler                         | Working     |
+| `skj-ld-rv`  | RISC-V RV32 static linker                     | Working     |
+| `skj-as-mips`| MIPS I assembler                              | Working     |
+| `skj-ld-mips`| MIPS I linker (ELF and PlayStation PS-EXE)    | Working     |
+| `skj-ar`     | `ar(1)` archive tool (any ELF32 target)       | Working     |
+| `skj-run`    | Guest runner (ColdFire and RV32 cores)        | Working     |
+
+Most compilers exist in per-backend variants (for example `skj-cc-rv`,
+`skj-cc-x86-64`, `skj-exc-mips`).  The `skj-as`/`skj-ld` family is a
+binutils-free assembler and linker for the ColdFire, RISC-V, and MIPS
+targets, verified against GNU as and the qemu suites.
 
 ## Architecture
 
 ```
 front ends              shared IR              backends
 ──────────              ─────────              ────────
-tinc/    ──┐                               ┌── backend/cf_emit.c    (ColdFire/m68k)
-scheme/  ──┼──▶  ir/ir.h  ──▶  regalloc  ──┤
-moo/     ──┤       │                       └── backend/rv_emit.c    (RISC-V RV32IM)
-pascal/  ──┘       │
-                   └── ir/ir.c, ir/util.c
+tinc/    ──┐                               ┌── backend/cf_emit.c     (ColdFire/m68k)
+scheme/  ──┤                               │
+moo/     ──┼──▶  ir/ir.h  ──▶  regalloc  ──┼── backend/rv_emit.c     (RISC-V RV32IMFD+Zfh)
+pascal/  ──┤       │                       │
+cc/      ──┤       │                       ├── backend/x86_emit.c    (x86-32 and x86-64)
+excelsior/─┘       │                       │
+  ▲                └── ir/ir.c, ir/util.c  ├── backend/arm64_emit.c  (AArch64)
+  │                                        │
+cpp/  (preprocessor library)               └── backend/mips_emit.c   (MIPS I / R2000/R3000)
 ```
 
 Each front end lowers source to the same IR (defined in `ir/ir.h`).
-The IR feeds into a target-specific register allocator and code
-emitter.  Adding a new front end means writing `lex.c`, `parse.c`,
-`lower.c`, and `main.c` -- the IR and backend are reused unchanged.
-Adding a new backend means writing a regalloc + emitter pair and a
+The IR feeds a target-specific register allocator and code emitter.
+Adding a new front end means writing `lex.c`, `parse.c`, `lower.c`, and
+`main.c`; the IR and backends are reused unchanged.  Adding a new
+backend means writing a regalloc + emitter pair and a
 `runtime/start_*.S`.
+
+Not every front end targets every backend.  TinC and TinScheme run on
+every backend.  The C compiler runs on ColdFire, RISC-V, x86-64,
+AArch64, and MIPS (not x86-32).  MooScript and Compact Pascal are
+ColdFire only.  Excelsior runs end to end on ColdFire, RISC-V, and
+MIPS, and compiles (codegen only) on x86-64 and AArch64.  The x86-32
+and x86-64 targets share one backend, selected at compile time by
+`X86_BITS`.
 
 ## Layout
 
 ```
 ir/          portable IR library (types, opcodes, builder)
-backend/     target-specific code generation (ColdFire/m68k, RISC-V RV32IM)
-as/          ColdFire/m68k assembler (GAS syntax subset -> ELF32)
-ld/          ColdFire/m68k static linker (ELF32, ld script subset)
-emu/         ColdFire and RV32 emulators, and skj-run (doc/emulator.md)
-runtime/     target runtimes (start.S, pascal_rt.c, rope.c, list.c, 64-bit helpers)
+backend/     code generation: ColdFire, RISC-V RV32, x86-32/64, AArch64, MIPS I
+as/          ColdFire assembler, plus the RV32 and MIPS front ends over a shared skeleton
+ld/          ColdFire linker, plus the RV32 and MIPS front ends over a shared layout core
+ar/          target-neutral ar(1) archive tool
+cpp/         C preprocessor (library and standalone tool)
+emu/         ColdFire and RV32 emulator cores, and skj-run (doc/emulator.md)
+runtime/     target runtimes (start_*.S per target, pascal_rt.c, str.c, list.c, libexc.c, 64-bit helpers)
 tinc/        TinC front end (C-like)
-scheme/      TinScheme front end (Scheme subset with GC)
+scheme/      TinScheme front end (Scheme subset with GC; doc/closures.md)
 moo/         MooScript front end
-pascal/      Compact Pascal front end
-tests/       test programs and harness
+pascal/      Compact Pascal front end (doc/pascal.md)
+cc/          C front end (uses the cpp library)
+excelsior/   Excelsior front end and its design notes (excelsior/core.md, status.md)
+tests/       test programs and harnesses
+doc/         design and reference docs
 ```
 
 ## Prerequisites
 
 - A host C compiler (`cc`, C99).
-- `m68k-linux-gnu-gcc`
-  (Debian/Ubuntu: `gcc-m68k-linux-gnu`).
-  `m68k-linux-gnu-as` and `m68k-linux-gnu-ld` are optional --
+- `m68k-linux-gnu-gcc` (Debian/Ubuntu: `gcc-m68k-linux-gnu`).
+  `m68k-linux-gnu-as` and `m68k-linux-gnu-ld` are optional, since
   `skj-as` and `skj-ld` can replace them.
-- `riscv64-linux-gnu-as` and `riscv64-linux-gnu-ld`
-  (Debian/Ubuntu: `binutils-riscv64-linux-gnu`).
-- `qemu-m68k` and `qemu-riscv32` user-mode emulators
-  (Debian/Ubuntu: `qemu-user`).
+- `qemu-user` for the user-mode emulators (`qemu-m68k`, `qemu-riscv32`,
+  `qemu-i386`, `qemu-x86_64`, `qemu-aarch64`, `qemu-mipsel`).
+
+Per-target toolchains, needed only to build and test that target:
+
+- RISC-V: `binutils-riscv64-linux-gnu` (and `gcc-riscv64-linux-gnu` for
+  the Excelsior runtime).  `skj-as-rv`/`skj-ld-rv` can replace binutils.
+- AArch64: `gcc-aarch64-linux-gnu`, `binutils-aarch64-linux-gnu`.
+- MIPS: `binutils-mipsel-linux-gnu` (or a bare-metal `mipsel-none-elf`
+  cross).  `skj-as-mips`/`skj-ld-mips` can replace binutils.
+- x86: `nasm` and a host `ld`.
 
 ## Build and Run
 
 ```sh
-make              # build all tools (compilers + assembler + RISC-V variants)
-make check        # compile tests, assemble, link, run under qemu-m68k
-make check-rv     # same for RISC-V RV32IM under qemu-riscv32
-make check-as     # same as check, but using skj-as instead of m68k-linux-gnu-as
+make              # build all tools (every front end, backend, and toolchain)
+make check        # ColdFire suite: compile, assemble, link, run under qemu-m68k
+make check-rv     # RISC-V RV32 suite under qemu-riscv32
+make check-x86    # x86-32 suite under qemu-i386
+make check-x86-64 # x86-64 suite under qemu-x86_64
+make check-arm64  # AArch64 suite under qemu-aarch64
 make check-cc     # C compiler tests (skj-cc -> skj-as -> skj-ld -> qemu-m68k)
-make check-cpp    # C preprocessor tests (macro expansion, conditionals, etc.)
+make check-cpp    # C preprocessor tests
+make check-exc    # Excelsior end to end under qemu-m68k
+make check-rvas   # RV32 assembler/linker golden-master vs GNU as
+make check-all    # the whole qemu matrix across every backend
 make check-smoke  # full in-tree toolchain smoke test (no cross toolchain needed)
-make test-gc      # TinScheme GC unit tests (host-only)
-make test-fpu     # FPU integration test (IR builder -> ColdFire asm -> qemu-m68k)
-make test-i64     # 64-bit integer test on ColdFire (IR builder -> qemu-m68k)
-make test-i64-rv  # 64-bit integer test on RISC-V (IR builder -> qemu-riscv32)
-make test-ops     # unsigned 32-bit ops test on ColdFire (IR builder -> qemu-m68k)
-make test-ops-rv  # unsigned 32-bit ops test on RISC-V (IR builder -> qemu-riscv32)
 make clean        # remove build/
 ```
 
-`make check-smoke` exercises the full in-tree toolchain pipeline
-(front end -> `skj-as` -> `skj-ld` -> `qemu-m68k`) without requiring
-`m68k-linux-gnu-as` or `m68k-linux-gnu-ld`.
+The Makefile header lists the full target set (per-backend suites, the
+emulator tiers, the MIPS and PlayStation paths, and the integer/float
+integration tests).  `make check-smoke` exercises the full in-tree
+pipeline (front end -> `skj-as` -> `skj-ld` -> `qemu-m68k`) without
+requiring `m68k-linux-gnu-as` or `m68k-linux-gnu-ld`.
 
 ## Using the Tools Directly
 
 ```sh
-# TinC example (using skj-as)
+# TinC for ColdFire, using the in-tree assembler and linker
 ./build/skj-tinc -o out.s tests/bsearch.tc
 ./build/skj-as -o out.o out.s
 ./build/skj-as -o start.o runtime/start.S
-m68k-linux-gnu-ld -o prog start.o out.o
+./build/skj-ld -o prog start.o out.o
 qemu-m68k ./prog ; echo $?
 
-# Pascal example (using skj-as)
-./build/skj-pc -o out.s tests/pascal_t042_string_assign.pas
-./build/skj-as -o out.o out.s
-./build/skj-as -o start.o runtime/start.S
-m68k-linux-gnu-gcc -std=c99 -O2 -Wall -ffreestanding -c -o pascal_rt.o runtime/pascal_rt.c
-m68k-linux-gnu-ld -o prog start.o pascal_rt.o out.o
-qemu-m68k ./prog ; echo $?
+# C for RISC-V RV32, using the in-tree RV toolchain
+./build/skj-cc-rv -o out.s tests/cc_t001_return.c
+./build/skj-as-rv -o out.o out.s
+./build/skj-as-rv -o start.o runtime/start_rv.S
+./build/skj-ld-rv -o prog start.o out.o
+qemu-riscv32 ./prog ; echo $?
 ```
 
 ## Vendoring
 
 `vendor.sh` copies selected Skjegg components into another project.
-Pick backends (`coldfire`, `riscv`) and front ends (`tinc`, `scheme`,
-`moo`, `pascal`, `cc`) plus optional tools (`as`, `cpp`).  The IR
+Pick one or more backends and front ends, plus optional tools.  The IR
 core is always included.
 
 ```sh
-# Vendor TinC + Pascal compilers with ColdFire backend and assembler
+# Vendor TinC + Pascal with the ColdFire backend and assembler
 ./vendor.sh coldfire tinc pascal as
 
-# Vendor just the C compiler (pulls in cpp library automatically)
+# Vendor just the C compiler (pulls in the cpp library automatically)
 ./vendor.sh coldfire cc
+
+# Vendor the binutils-free RISC-V toolchain on its own
+./vendor.sh as-rv ld-rv
 
 # Vendor into a custom directory
 ./vendor.sh -d lib/skjegg coldfire tinc
@@ -128,36 +164,42 @@ core is always included.
 
 The script generates two files in the destination directory:
 
-- **`skjegg.mk`** -- includable Makefile fragment that builds exactly
+- **`skjegg.mk`**, an includable Makefile fragment that builds exactly
   the selected components.  Add `include skjegg/skjegg.mk` to your
   project's Makefile.
-- **`update-skjegg.sh`** -- a copy of `vendor.sh` with the selected
-  components baked in, so re-running `./skjegg/update-skjegg.sh`
-  updates without repeating arguments.
+- **`update-skjegg.sh`**, a copy of `vendor.sh` with the selection baked
+  in, so re-running `./skjegg/update-skjegg.sh` updates without
+  repeating arguments.
 
 The `ORIGIN` variable at the top of `vendor.sh` controls where sources
-are fetched from (defaults to the GitHub repository).  Edit it to
-point at a fork or local path.
+are fetched from (defaults to the GitHub repository).  Edit it to point
+at a fork or local path.
 
 ### Components
 
-| Name       | What it vendors                                        |
-|------------|--------------------------------------------------------|
-| `coldfire` | ColdFire/m68k backend + `runtime/start.S`              |
-| `riscv`    | RISC-V RV32IM backend + `runtime/start_rv.S`           |
-| `tinc`     | TinC front end                                         |
-| `scheme`   | TinScheme front end (with GC)                          |
-| `moo`      | MooScript front end + `runtime/rope.c`, `list.c`       |
-| `pascal`   | Compact Pascal front end + `runtime/pascal_rt.c`       |
-| `cc`       | C compiler front end (auto-includes cpp library)       |
-| `as`       | ColdFire/m68k assembler (library + standalone tool)    |
-| `ld`       | ColdFire/m68k static linker (library + standalone tool)|
-| `cpp`      | C preprocessor (library + standalone tool)             |
+| Name       | What it vendors                                          |
+|------------|----------------------------------------------------------|
+| `coldfire` | ColdFire/m68k backend + `runtime/start.S`                |
+| `riscv`    | RISC-V RV32 backend + `runtime/start_rv.S`               |
+| `x86`      | x86-32 / x86-64 backend + runtime                        |
+| `mips`     | MIPS I backend + runtime (incl. the soft-float path)     |
+| `tinc`     | TinC front end                                           |
+| `scheme`   | TinScheme front end (with GC)                            |
+| `moo`      | MooScript front end + `runtime/str.c`, `list.c`          |
+| `pascal`   | Compact Pascal front end + `runtime/pascal_rt.c`         |
+| `cc`       | C compiler front end (auto-includes the cpp library)     |
+| `as`, `ld` | ColdFire assembler and linker (library + standalone)     |
+| `as-rv`, `ld-rv`     | RISC-V RV32 assembler and linker               |
+| `as-mips`, `ld-mips` | MIPS assembler and linker (ld-mips writes PS-EXE) |
+| `ar`       | target-neutral `ar(1)` archive tool                      |
+| `cpp`      | C preprocessor (library + standalone tool)               |
+| `emu-cf`, `emu-rv`   | the ColdFire and RV32 emulator cores           |
 
-Front ends require at least one backend.  The `cc` component
-automatically pulls in the `cpp` library files.
+A front-end selection needs at least one backend.  The `cc` component
+pulls in the `cpp` library automatically.  The AArch64 backend and the
+Excelsior front end are not yet vendorable; they build only in-tree.
 
 ## Name
 
 Norwegian: *skjegg* (beard).  From the idiom *a sta med skjegget i
-postkassa* -- to get your beard stuck in the mailbox.
+postkassa*, to get your beard stuck in the mailbox.

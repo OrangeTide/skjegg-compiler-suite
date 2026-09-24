@@ -1,6 +1,6 @@
 /* start_rv_psabi_cc.S - RISC-V RV32 C runtime, standard ILP32 psABI.
  *
- * The C runtime for skj-cc-rv-psabi, the psABI build of the RISC-V C
+ * The C runtime for skj-cc-rv, the psABI build of the RISC-V C
  * compiler.  That build emits the standard RISC-V ILP32 register calling
  * convention (a0..a7), so its output interlinks with gcc-built objects.  The
  * only thing that changes from the stack-convention runtime (start_rv.S) is

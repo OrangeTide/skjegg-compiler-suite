@@ -10,8 +10,9 @@
  *   syscall to invoke
  *   return value in $v0
  *
- * Our calling convention passes all args on the stack (not in registers),
- * so the wrappers load from the stack before issuing the syscall.
+ * The backend emits the o32 platform psABI, so arguments arrive in
+ * $a0..$a3.  The syscall wrappers pass them straight through: write's
+ * (fd, buf, n) are already in $a0, $a1, $a2, which is the syscall order.
  *
  * _start drops argc/argv (tests take no arguments), calls main, then
  * passes main's return value to _exit.
@@ -26,6 +27,7 @@
 	.text
 	.globl _start
 	.globl write
+	.globl read
 	.globl exit
 	.globl _exit
 
@@ -40,17 +42,19 @@ _start:
 
 /* int write(int fd, const char *buf, int n); */
 write:
-	lw	$a0, 0($sp)
-	lw	$a1, 4($sp)
-	lw	$a2, 8($sp)
 	li	$v0, 4004		/* __NR_write */
+	syscall
+	jr	$ra
+
+/* int read(int fd, char *buf, int n); */
+read:
+	li	$v0, 4003		/* __NR_read */
 	syscall
 	jr	$ra
 
 /* void exit(int status); */
 exit:
 _exit:
-	lw	$a0, 0($sp)
 	li	$v0, 4001		/* __NR_exit */
 	syscall
 1:	b	1b
@@ -165,7 +169,6 @@ __lshrdi3:
  *   Bump allocator.  Aligns size up to 4 bytes.  Returns pointer in $v0. */
 	.globl __moo_arena_alloc
 __moo_arena_alloc:
-	lw	$a0, 0($sp)
 	addiu	$a0, $a0, 3
 	li	$t1, -4
 	and	$a0, $a0, $t1		/* round up to 4 (andi zero-extends) */
@@ -290,6 +293,7 @@ __cont_resume:
 	.globl __cont_mark_sp
 __cont_mark_sp:
 	.word	0
+	.globl	__cont_arena_ptr
 __cont_arena_ptr:
 	.word	__cont_arena
 __moo_arena_ptr:

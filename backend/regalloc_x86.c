@@ -41,21 +41,10 @@
 
 #include <stdlib.h>  /* qsort */
 
-#ifndef X86_BITS
-#define X86_BITS 32
-#endif
 
-#if X86_BITS == 64
 /* x86-64: rbx, r12-r15 (5 regs); i64 shares the int class (native, one reg) */
 #define INT_NUM_REGS  5
 #define INT_SPILL     8
-#else
-/* x86-32: ebx, esi, edi (3 regs); i64 uses register pairs */
-#define INT_NUM_REGS  3
-#define INT_SPILL     4
-#define I64_NUM_PAIRS  1
-#define I64_FIRST_PAIR 0
-#endif
 
 #define INT_FIRST_REG 0
 #define FP_NUM_REGS   7
@@ -282,7 +271,6 @@ regalloc(struct ir_func *fn)
     int *float_cross = arena_zalloc(fn->arena, ntemps * sizeof(int));
     int ncall = 0;
 
-#if X86_BITS == 64
     /* One integer class covers both i32 and i64 (one native register each);
      * an IR_ARG operand is consumed at the following call, not the ARG, so
      * pending arg operands have their live range extended to the call (the
@@ -338,53 +326,6 @@ regalloc(struct ir_func *fn)
                   is_int, INT_NUM_REGS, INT_FIRST_REG, INT_SPILL, NULL);
     fn->nfspills = linscan(fn, first_def, last_use,
                    is_float, FP_NUM_REGS, FP_FIRST_REG, 8, float_cross);
-#else
-    pos = 0;
-    for (i = fn->head; i; i = i->next, pos++) {
-        if (i->dst >= 0 && i->dst < ntemps) {
-            if (first_def[i->dst] < 0)
-                first_def[i->dst] = pos;
-            if (last_use[i->dst] < pos)
-                last_use[i->dst] = pos;
-            if (ir_op_is_float_def(i->op))
-                is_float[i->dst] = 1;
-            else if (ir_op_is_i64_def(i->op))
-                is_i64[i->dst] = 1;
-        }
-        if (i->a >= 0 && i->a < ntemps && last_use[i->a] < pos)
-            last_use[i->a] = pos;
-        if (i->b >= 0 && i->b < ntemps && last_use[i->b] < pos)
-            last_use[i->b] = pos;
-        if (i->op == IR_CALL || i->op == IR_CALLI ||
-            i->op == IR_CALL64 || i->op == IR_CALLI64 ||
-            i->op == IR_FCALL || i->op == IR_FCALLI ||
-            i->op == IR_CALL_AGG || i->op == IR_CALLI_AGG ||
-            i->op == IR_TAILCALL || i->op == IR_TAILCALLI)
-            call_pos[ncall++] = pos;
-    }
-
-    fn->ni64spills = linscan(fn, first_def, last_use,
-                 is_i64, I64_NUM_PAIRS, I64_FIRST_PAIR, 8, NULL);
-
-    max_pair = -1;
-    for (t = 0; t < ntemps; t++) {
-        if (is_i64[t] && fn->temp_reg[t] > max_pair)
-            max_pair = fn->temp_reg[t];
-    }
-    int_num_regs = INT_NUM_REGS - 2 * (max_pair + 1);
-    if (int_num_regs < 0)
-        int_num_regs = 0;
-
-    for (t = 0; t < ntemps; t++)
-        is_int[t] = !is_float[t] && !is_i64[t];
-
-    mark_float_cross(fn, first_def, last_use, is_float, call_pos, ncall,
-                     float_cross);
-    fn->nspills = linscan(fn, first_def, last_use,
-                  is_int, int_num_regs, INT_FIRST_REG, INT_SPILL, NULL);
-    fn->nfspills = linscan(fn, first_def, last_use,
-                   is_float, FP_NUM_REGS, FP_FIRST_REG, 8, float_cross);
-#endif
 
     arena_release(fn->arena, m);
 }

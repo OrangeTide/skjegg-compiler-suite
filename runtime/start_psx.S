@@ -56,17 +56,17 @@ _start:
 1:	b	1b
 
 /* int write(int fd, const char *buf, int n);
- * fd is ignored; each byte goes to the BIOS TTY via A0(3Ch).  Args arrive on
- * the stack (our calling convention); $s0-$s2 hold the loop state across the
- * BIOS call, which preserves the callee-saved registers. */
+ * fd is ignored; each byte goes to the BIOS TTY via A0(3Ch).  Args arrive in
+ * $a0-$a2 (the o32 psABI); $s0-$s2 hold the loop state across the BIOS call,
+ * which preserves the callee-saved registers. */
 write:
 	addiu	$sp, $sp, -20
 	sw	$ra, 0($sp)
 	sw	$s0, 4($sp)
 	sw	$s1, 8($sp)
 	sw	$s2, 12($sp)
-	lw	$s0, 24($sp)		/* buf (caller's 4($sp)) */
-	lw	$s1, 28($sp)		/* n   (caller's 8($sp)) */
+	move	$s0, $a1		/* buf */
+	move	$s1, $a2		/* n */
 	move	$s2, $zero		/* i = 0 */
 .Lwrite_loop:
 	bgeu	$s2, $s1, .Lwrite_done
@@ -90,8 +90,7 @@ write:
  * signals pcsx_exit (see _start) and then halts. */
 exit:
 _exit:
-	lw	$a0, 0($sp)		/* status (our stack convention) */
-	li	$t0, 0x1f802082
+	li	$t0, 0x1f802082		/* status arrives in $a0 (o32 psABI) */
 	sh	$a0, 0($t0)		/* pcsx_exit(status) */
 1:	b	1b
 
@@ -201,7 +200,6 @@ __lshrdi3:
 /* void *__moo_arena_alloc(int size);  bump allocator, 4-byte aligned. */
 	.globl __moo_arena_alloc
 __moo_arena_alloc:
-	lw	$a0, 0($sp)
 	addiu	$a0, $a0, 3
 	li	$t1, -4
 	and	$a0, $a0, $t1		/* round up to 4 */
@@ -299,6 +297,7 @@ __cont_resume:
 	.globl __cont_mark_sp
 __cont_mark_sp:
 	.word	0
+	.globl	__cont_arena_ptr
 __cont_arena_ptr:
 	.word	__cont_arena
 __moo_arena_ptr:

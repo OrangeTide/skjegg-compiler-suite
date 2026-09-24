@@ -21,7 +21,7 @@ void
 cond_pop(struct cpp *p)
 {
     if (!p->cond) {
-        warn("unmatched #endif");
+        cpp_error(p, "unmatched #endif");
         return;
     }
     struct cpp_cond *c = p->cond;

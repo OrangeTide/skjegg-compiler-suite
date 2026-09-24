@@ -123,6 +123,7 @@ struct gsym {
     char *name;
     int kind;
     int nparams;
+    int needs_closure;      /* referenced as a value: emit a static closure */
 };
 
 static struct gsym *gsyms;
@@ -141,6 +142,7 @@ add_gsym(const char *name, int kind, int nparams)
     gsyms[ngsyms].name = arena_strdup(lower_arena, name);
     gsyms[ngsyms].kind = kind;
     gsyms[ngsyms].nparams = nparams;
+    gsyms[ngsyms].needs_closure = 0;
     ngsyms++;
 }
 
@@ -702,7 +704,7 @@ lower_reset(val_t args)
     body_expr = gc_car(args);
     handler_expr = gc_car(gc_cdr(args));
 
-    slot = alloc_slot(12);
+    slot = alloc_slot(16);
     lelse = new_label();
     lend = new_label();
     tresult = new_temp();
@@ -753,6 +755,16 @@ lower_reset(val_t args)
 
     ins = emit(IR_LABEL);
     ins->label = lend;
+
+    /* The reset extent is over: every continuation captured within it is
+     * dead (resumed and run to completion, or dropped).  Restore the
+     * continuation arena to its mark-time high-water mark (saved by MARK
+     * in the mark slot), reclaiming those buffers.  This gives the arena
+     * stack discipline, so a program that resets repeatedly (a REPL, a
+     * MUD turn) does not grow it without bound. */
+    ins = emit(IR_CONT_UNWIND);
+    ins->slot = slot;
+
     return tresult;
 }
 
@@ -1228,13 +1240,19 @@ lower_expr(val_t expr, int tail)
         if (!gs)
             die("lower: undefined '%s'", name);
         if (gs->kind == GSYM_FUNC) {
-            int t_fn;
+            char cname[288];
 
+            /* A reference to a global function is a closure with no free
+             * variables, i.e. a constant { tag, code-ptr }.  Point at one
+             * static closure per function rather than bump-allocating an
+             * identical copy from __heap on every evaluation (which, inside
+             * a loop, leaks the closure heap turn by turn). */
+            gs->needs_closure = 1;
+            snprintf(cname, sizeof(cname), "__closure_%s", name);
             ins = emit(IR_LEA);
             ins->dst = new_temp();
-            ins->sym = arena_strdup(lower_arena, name);
-            t_fn = ins->dst;
-            return emit_closure(t_fn, NULL, 0);
+            ins->sym = arena_strdup(lower_arena, cname);
+            return ins->dst;
         }
         /* Global variable: LEA + LW */
         {
@@ -1640,6 +1658,45 @@ scm_lower(struct arena *a, struct gc_heap *h, val_t program)
         *ftail = fn;
         ftail = &fn->next;
         }
+
+    /* One static closure per global function referenced as a value:
+     * an 8-byte { type byte 3, pad, code pointer } image (matching
+     * emit_closure's layout), so a bare function reference is a constant
+     * address rather than a fresh __heap allocation. */
+    {
+        int gi;
+
+        for (gi = 0; gi < ngsyms; gi++) {
+            struct ir_global *g;
+            struct ir_init *tag, *fnp;
+            char cname[288];
+
+            if (gsyms[gi].kind != GSYM_FUNC || !gsyms[gi].needs_closure)
+                continue;
+
+            tag = arena_zalloc(lower_arena, sizeof(*tag));
+            tag->offset = 0;
+            tag->size = 1;
+            tag->ival = 3;                  /* OBJ_CLOSURE */
+
+            fnp = arena_zalloc(lower_arena, sizeof(*fnp));
+            fnp->offset = 4;
+            fnp->size = 4;
+            fnp->sym = arena_strdup(lower_arena, gsyms[gi].name);
+            tag->next = fnp;
+
+            snprintf(cname, sizeof(cname), "__closure_%s", gsyms[gi].name);
+            g = arena_zalloc(lower_arena, sizeof(*g));
+            g->name = arena_strdup(lower_arena, cname);
+            g->base_type = IR_I8;
+            g->arr_size = 8;
+            g->align = 4;
+            g->is_local = 1;
+            g->inits = tag;
+            g->next = prog->globals;
+            prog->globals = g;
+        }
+    }
 
     free(gsyms);
     gsyms = NULL;

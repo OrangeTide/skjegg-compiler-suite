@@ -683,6 +683,7 @@ __exc_src_yield:
     .globl __cont_mark_sp
 __cont_mark_sp:
     .long 0
+    .globl __cont_arena_ptr
 __cont_arena_ptr:
     .long __cont_arena
 __moo_arena_ptr:

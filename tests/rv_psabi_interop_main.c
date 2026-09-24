@@ -1,4 +1,4 @@
-/* The skj-cc-rv-psabi half of the interop test: compiled by the psABI RISC-V
+/* The skj-cc-rv half of the interop test: compiled by the psABI RISC-V
  * C compiler, it calls a gcc-built function through the standard ILP32 ABI,
  * passing a 64-bit and a 32-bit argument and using the 64-bit result.
  * 20 * 2 + 2 = 42. */

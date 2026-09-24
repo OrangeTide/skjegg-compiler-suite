@@ -48,6 +48,40 @@ for src in "$HERE"/cc_*.c; do
             printf 'SKIP  %s (excluded)\n' "$name"
             continue ;;
     esac
+    errfile="$HERE/$name.experror"
+    # A .experror test must NOT compile: skj-cc is expected to fail, and every
+    # non-comment line of the fixture must appear in stderr (the Excelsior
+    # convention). It needs no assembler, linker or qemu.
+    if [ -f "$errfile" ]; then
+        set +e
+        "$CCBIN" -o /dev/null "$src" >/dev/null 2>"$OUTDIR/$name.err"
+        rc=$?
+        set -e
+        ok=1
+        reason=
+        if [ "$rc" -eq 0 ]; then
+            ok=0
+            reason="compiled, expected an error"
+        else
+            while IFS= read -r want; do
+                case $want in '' | '#'*) continue ;; esac
+                if ! grep -qF -- "$want" "$OUTDIR/$name.err"; then
+                    ok=0
+                    reason="${reason:+$reason; }missing: $want"
+                fi
+            done < "$errfile"
+        fi
+        if [ "$ok" -eq 1 ]; then
+            printf 'PASS  %s (compile error)\n' "$name"
+            pass=$((pass + 1))
+        else
+            printf 'FAIL  %s: %s\n' "$name" "$reason"
+            sed 's/^/    /' "$OUTDIR/$name.err"
+            fail=$((fail + 1))
+        fi
+        continue
+    fi
+
     exitcode_file="$HERE/$name.exitcode"
     if [ ! -f "$exitcode_file" ]; then
         printf 'SKIP  %s (no .exitcode)\n' "$name"

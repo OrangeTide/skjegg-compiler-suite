@@ -1089,6 +1089,11 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         addimm(out, "x9", "x29", off);               /* x9 = &mark */
         fprintf(out, "\tldr x10, =__cont_mark_sp\n");
         fprintf(out, "\tstr w9, [x10]\n");           /* __cont_mark_sp = &mark */
+        /* stash the continuation-arena high-water mark (first entry only,
+         * before the re-entry label) for IR_CONT_UNWIND to restore */
+        fprintf(out, "\tldr x9, =__cont_arena_ptr\n");
+        fprintf(out, "\tldr w9, [x9]\n");
+        memop(out, 1, "w9", "x29", off + 12);        /* mark[3] = arena ptr */
         fprintf(out, "\tmov w0, #0\n");              /* first time: result = 0 */
         fprintf(out, ".Lmark%d_%d:\n", label_prefix, i->label);
         if (strcmp(sd, "w0") != 0)
@@ -1112,6 +1117,16 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         if (strcmp(sd, "w0") != 0)
             fprintf(out, "\tmov %s, w0\n", sd);      /* dst = buf, or value on resume */
         wd32(out, fn, i->dst, sd);
+        break;
+    }
+
+    case IR_CONT_UNWIND: {
+        /* restore the continuation arena to the mark-time high-water mark,
+         * reclaiming every buffer captured within the closing reset extent */
+        int off = slot_offset(fn, i->slot);
+        memop(out, 0, "w9", "x29", off + 12);        /* load saved arena ptr */
+        fprintf(out, "\tldr x10, =__cont_arena_ptr\n");
+        fprintf(out, "\tstr w9, [x10]\n");
         break;
     }
 

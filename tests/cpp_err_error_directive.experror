@@ -1,0 +1,3 @@
+# a #error aborts translation and carries its own message
+error:
+#error the build is misconfigured

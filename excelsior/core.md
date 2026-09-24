@@ -170,7 +170,7 @@ R1-R19 beginner/content-creator review the series answers, and the R-number on
 a note below marks which finding it settles.
 
 - `grammar.ebnf` — the surface grammar
-- `host-abi.md` (decided) — the two-layer compiler/libexc/host contract: dispatch, powers, freeze/thaw, the binding surface; grounded in the three target hosts, boris provisional
+- `host-abi.md` (v1) — the two-layer compiler/libexc/host contract: dispatch, powers, freeze/thaw, the binding surface; grounded in the three target hosts, boris provisional
 - `verbs.md` (study) — the verb/func boundary, dispatch, and the dot
 - `string-plan.md` (study) — string values, `${}` interpolation, the concat-chain lowering
 - `sequences.md` (study) — the quotation boundary (commas code, spaces data, newlines statements)
@@ -200,6 +200,7 @@ a note below marks which finding it settles.
 - `boolean-ops.md` (decided) — retiring `xor`, bitwise as compiler intrinsics (R18)
 - `quote.md` (decided) — `quote` leaves the base grammar for the meta layer (R19)
 - `backlog.md` (living) — the queue of pending design passes
+- `status.md` (living) — implementation status and roadmap: what is built, what runs on which backend, and what is next (the code-side counterpart to this design collection)
 - `records.md` (implemented) — value-semantic records (the data pole)
 - `data-model.md` (decided) — records / objects / `any`, retiring `prop`
 - `mixed-lists.md` (decided) — `list of any` with boxed elements
@@ -218,7 +219,7 @@ a note below marks which finding it settles.
 - `inline-for.md` (decided) — `for` unrolls over a compile-time mixed sequence
 - `list-ops.md` (implemented) — value-list composition, and `len` renamed `length`
 - `string-literals.md` (decided) — the `{...}` brace-delimited string for prose
-- `function-values.md` (decided) — `func` the primitive; named declaration and lambda are two surfaces over one macro-targetable core; comprehensions for map/filter; combinators (incl. `sort`) take func values
+- `function-values.md` (implemented) — `func` the primitive; named declaration and lambda are two surfaces over one macro-targetable core; comprehensions for map/filter; combinators (incl. `sort`) take func values
 - `memory.md` (decided) — no tracing GC: a per-turn arena for transients, a refcounted acyclic heap for escaped values, explicit `spawn`/`destroy` for actors, a fault-aborted turn (rollback retired by the cost pass), a quota fault
 - `typed-macros.md` (implemented) — the `_Generic` tier: a typed macro resolves at typecheck time, dispatches with `match typeof(x)`, splices types with `${T}`, monomorphizes per call; Meta-tier generics, no base-layer `<T>`
 - `blob.md` (decided) — the v1 binary-data type: a mutable, refcounted, bounded byte view (memory-safe yet aliasing); typed access is a decode/encode macro over literal width/sign/endian keywords, the matrix contained in the type

@@ -39,7 +39,7 @@ constants; they are not a distinct type for range checking.
 | `type` (alias, enum, record, array, set) | supported |
 | `procedure` / `function` | supported |
 | `forward` | supported |
-| nested procedures with static links | supported |
+| nested procedures (capture-argument passing) | supported |
 | typed constants (scalar, array, matrix, record, set) | supported |
 | `label` | **not implemented** |
 | `uses` / `unit` | **not implemented** |

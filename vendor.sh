@@ -9,7 +9,7 @@
 # Usage: vendor-skjegg.sh [-d DIR] [-r REF] [-u DIR] component ...
 #        update-skjegg.sh                      (re-vendor)
 #
-# Backends:  coldfire  riscv  x86  mips
+# Backends:  coldfire  riscv  mips
 # Frontends: tinc  scheme  moo  pascal  cc
 # Tools:     as  ld  cpp
 # Emulators: emu-cf  emu-rv
@@ -29,7 +29,7 @@ usage() {
 Usage: vendor-skjegg.sh [-d DIR] [-r REF] [-u DIR] component ...
        update-skjegg.sh                      (re-vendor)
 
-Backends:  coldfire  riscv  x86  mips
+Backends:  coldfire  riscv  mips
 Frontends: tinc  scheme  moo  pascal  cc
 Tools:     as  ld  as-rv  ld-rv  as-mips  ld-mips  ar  cpp
              (as-rv/ld-rv: the RISC-V RV32 toolchain; as-mips/ld-mips: the
@@ -69,7 +69,7 @@ fi
 
 # ---- parse and validate components ----
 
-has_cf=0 has_rv=0 has_x86=0 has_mips=0
+has_cf=0 has_rv=0 has_mips=0
 has_tinc=0 has_scheme=0 has_moo=0 has_pascal=0 has_cc=0
 has_as=0 has_ld=0 has_cpp=0
 has_as_rv=0 has_ld_rv=0
@@ -80,7 +80,6 @@ for comp in $COMPONENTS; do
     case "$comp" in
         coldfire) has_cf=1 ;;
         riscv)    has_rv=1 ;;
-        x86)      has_x86=1 ;;
         mips)     has_mips=1 ;;
         tinc)     has_tinc=1 ;;
         scheme)   has_scheme=1 ;;
@@ -102,7 +101,7 @@ for comp in $COMPONENTS; do
 done
 
 has_fe=$((has_tinc + has_scheme + has_moo + has_pascal + has_cc))
-has_be=$((has_cf + has_rv + has_x86 + has_mips))
+has_be=$((has_cf + has_rv + has_mips))
 
 if [ "$has_fe" -gt 0 ] && [ "$has_be" -eq 0 ]; then
     die "frontends require at least one backend"
@@ -151,11 +150,6 @@ if [ "$has_rv" -eq 1 ]; then
     mkdir -p "$DEST/backend" "$DEST/runtime"
     cp "$S/backend/rv_emit.c" "$S/backend/regalloc_rv.c" "$DEST/backend/"
     cp "$S/runtime/start_rv.S" "$DEST/runtime/"
-fi
-if [ "$has_x86" -eq 1 ]; then
-    mkdir -p "$DEST/backend" "$DEST/runtime"
-    cp "$S/backend/x86_emit.c" "$S/backend/regalloc_x86.c" "$DEST/backend/"
-    cp "$S/runtime/start_x86.asm" "$DEST/runtime/"
 fi
 if [ "$has_mips" -eq 1 ]; then
     # The Linux crt (start_mips.S), plus what MIPS I specifically needs: half.c
@@ -372,13 +366,6 @@ RV_AS ?= riscv64-linux-gnu-as
 RV_LD ?= riscv64-linux-gnu-ld
 MK
 fi
-if [ "$has_x86" -eq 1 ]; then
-    cat >> "$MK" <<'MK'
-
-X86_ASM ?= nasm
-X86_LD  ?= ld
-MK
-fi
 if [ "$has_mips" -eq 1 ]; then
     cat >> "$MK" <<'MK'
 
@@ -399,9 +386,6 @@ if [ "$has_cf" -eq 1 ]; then
 fi
 if [ "$has_rv" -eq 1 ]; then
     printf 'SKJ_RV := $(SKJEGG)backend/regalloc_rv.c $(SKJEGG)backend/rv_emit.c\n' >> "$MK"
-fi
-if [ "$has_x86" -eq 1 ]; then
-    printf 'SKJ_X86 := $(SKJEGG)backend/regalloc_x86.c $(SKJEGG)backend/x86_emit.c\n' >> "$MK"
 fi
 if [ "$has_mips" -eq 1 ]; then
     printf 'SKJ_MIPS := $(SKJEGG)backend/regalloc_mips.c $(SKJEGG)backend/mips_emit.c\n' >> "$MK"
@@ -496,9 +480,6 @@ fi
 if [ "$has_tinc" -eq 1 ] && [ "$has_rv" -eq 1 ]; then
     emit_compiler skj-tinc-rv SKJ_TINC SKJ_RV '-I$(SKJEGG)ir -I$(SKJEGG)tinc'
 fi
-if [ "$has_tinc" -eq 1 ] && [ "$has_x86" -eq 1 ]; then
-    emit_compiler skj-tinc-x86 SKJ_TINC SKJ_X86 '-I$(SKJEGG)ir -I$(SKJEGG)tinc'
-fi
 if [ "$has_tinc" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
     emit_compiler skj-tinc-mips SKJ_TINC SKJ_MIPS '-I$(SKJEGG)ir -I$(SKJEGG)tinc'
 fi
@@ -507,9 +488,6 @@ if [ "$has_scheme" -eq 1 ] && [ "$has_cf" -eq 1 ]; then
 fi
 if [ "$has_scheme" -eq 1 ] && [ "$has_rv" -eq 1 ]; then
     emit_compiler skj-sc-rv SKJ_SCHEME SKJ_RV '-I$(SKJEGG)scheme -I$(SKJEGG)ir'
-fi
-if [ "$has_scheme" -eq 1 ] && [ "$has_x86" -eq 1 ]; then
-    emit_compiler skj-sc-x86 SKJ_SCHEME SKJ_X86 '-I$(SKJEGG)scheme -I$(SKJEGG)ir'
 fi
 if [ "$has_scheme" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
     emit_compiler skj-sc-mips SKJ_SCHEME SKJ_MIPS '-I$(SKJEGG)scheme -I$(SKJEGG)ir'
@@ -520,9 +498,6 @@ fi
 if [ "$has_moo" -eq 1 ] && [ "$has_rv" -eq 1 ]; then
     emit_compiler skj-mooc-rv SKJ_MOO SKJ_RV '-I$(SKJEGG)moo -I$(SKJEGG)ir'
 fi
-if [ "$has_moo" -eq 1 ] && [ "$has_x86" -eq 1 ]; then
-    emit_compiler skj-mooc-x86 SKJ_MOO SKJ_X86 '-I$(SKJEGG)moo -I$(SKJEGG)ir'
-fi
 if [ "$has_moo" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
     emit_compiler skj-mooc-mips SKJ_MOO SKJ_MIPS '-I$(SKJEGG)moo -I$(SKJEGG)ir'
 fi
@@ -532,9 +507,6 @@ fi
 if [ "$has_pascal" -eq 1 ] && [ "$has_rv" -eq 1 ]; then
     emit_compiler skj-pc-rv SKJ_PASCAL SKJ_RV '-I$(SKJEGG)pascal -I$(SKJEGG)ir'
 fi
-if [ "$has_pascal" -eq 1 ] && [ "$has_x86" -eq 1 ]; then
-    emit_compiler skj-pc-x86 SKJ_PASCAL SKJ_X86 '-I$(SKJEGG)pascal -I$(SKJEGG)ir'
-fi
 if [ "$has_pascal" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
     emit_compiler skj-pc-mips SKJ_PASCAL SKJ_MIPS '-I$(SKJEGG)pascal -I$(SKJEGG)ir'
 fi
@@ -543,13 +515,11 @@ if [ "$has_cc" -eq 1 ] && [ "$has_cf" -eq 1 ]; then
         '-I$(SKJEGG)cc -I$(SKJEGG)cpp -I$(SKJEGG)ir' '$(SKJ_CPP_LIB)'
 fi
 if [ "$has_cc" -eq 1 ] && [ "$has_rv" -eq 1 ]; then
+    # The RISC-V C compiler emits the standard ILP32 psABI (a0..a7) so its
+    # output interlinks with gcc; it pairs with the standalone RV toolchain
+    # (as-rv/ld-rv) and runtime/start_rv_psabi_cc.S.
     emit_compiler skj-cc-rv SKJ_CC SKJ_RV \
         '-I$(SKJEGG)cc -I$(SKJEGG)cpp -I$(SKJEGG)ir' '$(SKJ_CPP_LIB)'
-    # The psABI build: same sources with -DCC_PSABI, emitting the standard
-    # RISC-V ILP32 convention so its output interlinks with gcc.  Pairs with
-    # the standalone RV toolchain (as-rv/ld-rv) and runtime/start_rv_psabi_cc.S.
-    emit_compiler skj-cc-rv-psabi SKJ_CC SKJ_RV \
-        '-DCC_PSABI -I$(SKJEGG)cc -I$(SKJEGG)cpp -I$(SKJEGG)ir' '$(SKJ_CPP_LIB)'
 fi
 if [ "$has_cc" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
     emit_compiler skj-cc-mips SKJ_CC SKJ_MIPS \
@@ -559,10 +529,6 @@ if [ "$has_cc" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
     # softfloat.c call, for the FPU-less R3051 (the PlayStation).
     emit_compiler skj-cc-mips-sf SKJ_CC SKJ_MIPS \
         '-DMIPS_SOFTFLOAT -I$(SKJEGG)cc -I$(SKJEGG)cpp -I$(SKJEGG)ir' '$(SKJ_CPP_LIB)'
-fi
-if [ "$has_cc" -eq 1 ] && [ "$has_x86" -eq 1 ]; then
-    emit_compiler skj-cc-x86 SKJ_CC SKJ_X86 \
-        '-I$(SKJEGG)cc -I$(SKJEGG)cpp -I$(SKJEGG)ir' '$(SKJ_CPP_LIB)'
 fi
 
 # tool binary rules
@@ -655,12 +621,6 @@ if [ "$has_rv" -eq 1 ]; then
     {
         printf '\n$(BUILD)/start_rv.o: $(SKJEGG)runtime/start_rv.S | $(BUILD)\n'
         printf '\t$(RV_AS) -march=rv32im -mabi=ilp32 -o $@ $<\n'
-    } >> "$MK"
-fi
-if [ "$has_x86" -eq 1 ]; then
-    {
-        printf '\n$(BUILD)/start_x86.o: $(SKJEGG)runtime/start_x86.asm | $(BUILD)\n'
-        printf '\t$(X86_ASM) -f elf32 -o $@ $<\n'
     } >> "$MK"
 fi
 if [ "$has_pascal" -eq 1 ] && [ "$has_cf" -eq 1 ]; then

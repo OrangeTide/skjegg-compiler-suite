@@ -51,15 +51,14 @@ static const char *fregs[] = {
 #define FP_ALLOC_FIRST 2
 #define FP_ALLOC_LAST  13
 
-#ifdef CC_PSABI
 /****************************************************************
  * The RISC-V ILP32 calling convention
  *
  * This is the platform ABI, so a function compiled here and one
- * compiled by gcc -mabi=ilp32 can call each other.  Without it the
- * backend uses the toolkit's own stack convention, which m68k's C ABI
- * happens to match and RISC-V's does not, so a gcc-built runtime is
- * unreachable there (doc/emulator.md).
+ * compiled by gcc -mabi=ilp32 can call each other.  It is the only
+ * convention the RISC-V backend emits: the toolkit's old stack
+ * convention was retired in favour of the platform psABI for every
+ * external call (doc/emulator.md).
  *
  * The rules, as gcc emits them:
  *
@@ -219,18 +218,12 @@ param_home(struct ir_func *fn)
     }
     return (h + 7) & ~7;
 }
-#endif /* CC_PSABI */
 
-/* Frame bytes reserved above the locals (0 under the stack convention). */
+/* Frame bytes reserved above the locals for register-parameter homes. */
 static int
 frame_reserve(struct ir_func *fn)
 {
-#ifdef CC_PSABI
     return param_home(fn);
-#else
-    (void)fn;
-    return 0;
-#endif
 }
 
 /****************************************************************
@@ -272,7 +265,6 @@ slot_offset(struct ir_func *fn, int slot)
     int i, off;
 
     if (slot < fn->nparams) {
-#ifdef CC_PSABI
         /* a register parameter reads from its home below s0, one the
            caller left on the stack from the incoming block: s0 is the
            entry sp minus 8, so the block starts at s0+8 */
@@ -283,18 +275,6 @@ slot_offset(struct ir_func *fn, int slot)
         if (p.nreg > 0)
             return home;
         return 8 + p.soff;
-#else
-        /* params sit above the frame from s0+8 upward */
-        off = 8;
-        for (i = 0; ; i++) {
-            int sz = slot_bytes(fn, i);
-            if (sz % 8 == 0)
-                off = (off + 7) & ~7;
-            if (i == slot)
-                return off;
-            off += sz;
-        }
-#endif
     }
     /* locals grow downward from s0, below the parameter homes */
     off = 0;
@@ -725,7 +705,6 @@ emit_prologue(FILE *out, struct ir_func *fn)
         fprintf(out, "\tfsd %s, %d(sp)\n",
             fregs[used_fregs[k]], pad + NSAVED * 4 + k * 8);
 
-#ifdef CC_PSABI
     /* Spill the register parameters into their homes, so every
        parameter is read from a slot afterwards and the rest of the
        lowering does not know the difference.  A split parameter's high
@@ -746,7 +725,6 @@ emit_prologue(FILE *out, struct ir_func *fn)
             fprintf(out, "\tsw t0, %d(s0)\n", home + 4);
         }
     }
-#endif
 }
 
 static void
@@ -775,7 +753,6 @@ emit_epilogue(FILE *out, struct ir_func *fn)
     fprintf(out, "\tret\n");
 }
 
-#ifdef CC_PSABI
 /*
  * Set up the arguments in a0-a7 and the outgoing block, call, and take
  * the result.  A double crosses in two integer registers and so has to
@@ -910,97 +887,16 @@ emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
     if (push_bytes > 0)
         fprintf(out, "\taddi sp, sp, %d\n", push_bytes);
 }
-#else
-static void
-emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
-                int indirect, int retkind)
-{
-    int k, push_bytes, off;
 
-    /* An 8-byte arg (a float, which cc pads to 8 with an F32 on the low 4,
-       or an i64) is 8-aligned in the outgoing block, mirroring slot_offset's
-       param layout so the callee reads each param where the caller wrote it.
-       The whole block rounds to 16 so the callee is entered with a 16-aligned
-       sp (keeping its s0 8-aligned). */
-    off = 0;
-    for (k = 0; k < narg; k++) {
-        int eight = arg_is_float[k] || arg_is_i64[k];
-        if (eight)
-            off = (off + 7) & ~7;
-        off += eight ? 8 : 4;
-    }
-    push_bytes = (off + 15) & ~15;
-
-    if (push_bytes > 0)
-        fprintf(out, "\taddi sp, sp, -%d\n", push_bytes);
-    off = 0;
-    for (k = 0; k < narg; k++) {
-        if (arg_is_float[k]) {
-            int f32 = arg_fw[k];
-            const char *sa;
-            off = (off + 7) & ~7;
-            sa = frs_w(out, fn, arg_temps[k], 0, f32);
-            fprintf(out, "\t%s %s, %d(sp)\n", f32 ? "fsw" : "fsd",
-                sa, off);
-            off += 8;
-        } else if (arg_is_i64[k]) {
-            const char *lo, *hi;
-            off = (off + 7) & ~7;
-            lo = i64_rs_lo(out, fn, arg_temps[k], 0);
-            fprintf(out, "\tsw %s, %d(sp)\n", lo, off);
-            hi = i64_rs_hi(out, fn, arg_temps[k], 0);
-            fprintf(out, "\tsw %s, %d(sp)\n", hi, off + 4);
-            off += 8;
-        } else {
-            const char *sa = rs(out, fn, arg_temps[k], 0);
-            fprintf(out, "\tsw %s, %d(sp)\n", sa, off);
-            off += 4;
-        }
-    }
-    if (indirect) {
-        const char *sa = rs(out, fn, i->a, 0);
-        fprintf(out, "\tjalr ra, %s, 0\n", sa);
-    } else {
-        fprintf(out, "\tjal ra, %s\n", i->sym);
-    }
-    if (push_bytes > 0)
-        fprintf(out, "\taddi sp, sp, %d\n", push_bytes);
-    narg = 0;
-
-    if (i->dst >= 0) {
-        if (retkind == RET_I64) {
-            const char *dlo = i64_rd_lo(fn, i->dst, 0);
-            const char *dhi = i64_rd_hi(fn, i->dst, 1);
-            if (strcmp(dlo, "a0") != 0)
-                fprintf(out, "\tmv %s, a0\n", dlo);
-            if (strcmp(dhi, "a1") != 0)
-                fprintf(out, "\tmv %s, a1\n", dhi);
-            i64_wd_lo(out, fn, i->dst, dlo);
-            i64_wd_hi(out, fn, i->dst, dhi);
-        } else if (retkind == RET_FLOAT) {
-            int f32 = i->imm == FWIDTH_F32;
-            const char *sd = frd_w(fn, i->dst, 0);
-            fprintf(out, "\tfmv.%s %s, fa0\n", f32 ? "s" : "d", sd);
-            fwd_f(out, fn, i->dst, sd, f32);
-        } else {
-            const char *sd = rd(fn, i->dst, 0);
-            if (strcmp(sd, "a0") != 0)
-                fprintf(out, "\tmv %s, a0\n", sd);
-            wd(out, fn, i->dst, sd);
-        }
-    }
-}
-#endif /* CC_PSABI */
-
-#ifdef CC_PSABI
 /*
  * A tail call under the platform ABI.  With every argument in a
  * register the frame can go before the jump, which is a real tail call.
  * With an argument in the outgoing block it cannot: that block lives
  * below the frame being torn down.  The fall-back is an ordinary call
  * and a return, which is correct but keeps the frame, so a tail-
- * recursive loop through it grows the stack.  Only the Scheme front end
- * relies on the tail property, and it does not target this ABI.
+ * recursive loop that spills arguments to the stack grows it.  The
+ * Scheme front end relies on the tail property, but only for calls
+ * whose arguments all fit in a0-a7, which is the real-tail-call path.
  */
 static void
 emit_tailcall_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
@@ -1062,29 +958,6 @@ emit_tailcall_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
     else
         fprintf(out, "\tj %s\n", i->sym);
 }
-#else
-static void
-emit_tailcall_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
-                    int indirect)
-{
-    int k;
-
-    for (k = 0; k < narg; k++) {
-        const char *sa = rs(out, fn, arg_temps[k], 0);
-        fprintf(out, "\tsw %s, %d(s0)\n", sa, 8 + 4 * k);
-    }
-    if (indirect) {
-        const char *sa = rs(out, fn, i->a, 0);
-        fprintf(out, "\tmv t2, %s\n", sa);
-    }
-    narg = 0;
-    emit_epilogue_no_ret(out, fn);
-    if (indirect)
-        fprintf(out, "\tjr t2\n");
-    else
-        fprintf(out, "\tj %s\n", i->sym);
-}
-#endif /* CC_PSABI */
 
 static void
 emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
@@ -1260,6 +1133,11 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         emit_addbig(out, "t0", "s0", off);
         fprintf(out, "\tla t1, __cont_mark_sp\n");
         fprintf(out, "\tsw t0, 0(t1)\n");
+        /* stash the continuation-arena high-water mark (first entry only,
+         * before the re-entry label) for IR_CONT_UNWIND to restore */
+        fprintf(out, "\tla t0, __cont_arena_ptr\n");
+        fprintf(out, "\tlw t1, 0(t0)\n");
+        emit_mem(out, "sw", "t1", off + 12, "s0");
         fprintf(out, "\tli a0, 0\n");
         fprintf(out, ".Lmark%d_%d:\n", label_prefix, i->label);
         if (strcmp(sd, "a0") != 0)
@@ -1282,6 +1160,16 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         if (strcmp(sd, "a0") != 0)
             fprintf(out, "\tmv %s, a0\n", sd);
         wd(out, fn, i->dst, sd);
+        break;
+    }
+
+    case IR_CONT_UNWIND: {
+        /* restore the continuation arena to the mark-time high-water mark,
+         * reclaiming every buffer captured within the closing reset extent */
+        int off = slot_offset(fn, i->slot);
+        emit_mem(out, "lw", "t0", off + 12, "s0");
+        fprintf(out, "\tla t1, __cont_arena_ptr\n");
+        fprintf(out, "\tsw t0, 0(t1)\n");
         break;
     }
 
@@ -1426,7 +1314,6 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_FRETV: {
         int f32 = i->imm == FWIDTH_F32;
         const char *sa = frs_w(out, fn, i->a, 0, f32);
-#ifdef CC_PSABI
         /* the soft-float ABI returns in a0 (and a1 for a double), which
            on RV32 a double can only reach through memory */
         if (f32) {
@@ -1438,10 +1325,6 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
             fprintf(out, "\tlw a1, 4(sp)\n");
             fprintf(out, "\taddi sp, sp, 8\n");
         }
-#else
-        if (strcmp(sa, "fa0") != 0)
-            fprintf(out, "\tfmv.%s fa0, %s\n", f32 ? "s" : "d", sa);
-#endif
         emit_epilogue(out, fn);
         break;
     }

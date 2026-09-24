@@ -182,6 +182,7 @@ __moo_arena_ptr:
 	.globl	__cont_mark_sp
 __cont_mark_sp:
 	.word	0
+	.globl	__cont_arena_ptr
 __cont_arena_ptr:
 	.word	__cont_arena
 

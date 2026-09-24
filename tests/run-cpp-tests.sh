@@ -21,6 +21,41 @@ pass=0
 for src in "$HERE"/cpp_*.c; do
     [ -f "$src" ] || continue
     name=$(basename "$src" .c)
+    errfile="$HERE/$name.experror"
+
+    # A .experror test must NOT preprocess cleanly: skj-cpp is expected to
+    # fail, and every non-comment line of the fixture must appear in stderr
+    # (the same convention as the Excelsior tier).
+    if [ -f "$errfile" ]; then
+        set +e
+        "$CPP" "$src" >/dev/null 2>"$ROOT/build/$name.err"
+        rc=$?
+        set -e
+        ok=1
+        reason=
+        if [ "$rc" -eq 0 ]; then
+            ok=0
+            reason="preprocessed, expected an error"
+        else
+            while IFS= read -r want; do
+                case $want in '' | '#'*) continue ;; esac
+                if ! grep -qF -- "$want" "$ROOT/build/$name.err"; then
+                    ok=0
+                    reason="${reason:+$reason; }missing: $want"
+                fi
+            done < "$errfile"
+        fi
+        if [ "$ok" -eq 1 ]; then
+            printf 'PASS  %s\n' "$name"
+            pass=$((pass + 1))
+        else
+            printf 'FAIL  %s: %s\n' "$name" "$reason"
+            sed 's/^/    /' "$ROOT/build/$name.err"
+            fail=$((fail + 1))
+        fi
+        continue
+    fi
+
     expected="$HERE/$name.expected"
     if [ ! -f "$expected" ]; then
         printf 'SKIP  %s (no .expected)\n' "$name"
