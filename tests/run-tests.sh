@@ -38,9 +38,9 @@ for bin in "$ROOT"/"$BUILDDIR"/*; do
     input_file="$HERE/$name.input"
     set +e
     if [ -f "$input_file" ]; then
-        "$QEMU" "$bin" <"$input_file" >"$ROOT/$BUILDDIR/$name.out" 2>&1
+        $QEMU "$bin" <"$input_file" >"$ROOT/$BUILDDIR/$name.out" 2>&1
     else
-        "$QEMU" "$bin" >"$ROOT/$BUILDDIR/$name.out" 2>&1
+        $QEMU "$bin" >"$ROOT/$BUILDDIR/$name.out" 2>&1
     fi
     rc=$?
     set -e

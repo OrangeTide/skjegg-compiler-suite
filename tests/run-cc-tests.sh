@@ -115,7 +115,7 @@ for src in "$HERE"/cc_*.c; do
         set -e
         continue
     fi
-    "$QEMU" "$bin"
+    $QEMU "$bin"
     rc=$?
     set -e
 

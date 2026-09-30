@@ -110,7 +110,7 @@ for name in $names; do
              2>>"$BDIR/$name.err"
     then
         set +e
-        "$QEMU" "$BDIR/$name" >"$BDIR/$name.out" 2>/dev/null
+        $QEMU "$BDIR/$name" >"$BDIR/$name.out" 2>/dev/null
         got=$?
         set -e
         ok=1
