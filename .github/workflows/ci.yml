@@ -36,6 +36,13 @@ jobs:
             gcc-mipsel-linux-gnu binutils-mipsel-linux-gnu \
             nasm qemu-user
 
+      # The RV32 JIT (skj-jit-rv) is cross-built for hosted rv32 with zig cc,
+      # which is not preinstalled on the runner.
+      - name: Install zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+
       - name: Build all tools
         run: make
 
@@ -45,8 +52,13 @@ jobs:
       # The full qemu matrix: every front end x backend suite, the IR-builder
       # integration tests (fpu / i64 / ops / f32-diff), the RV32 binutils-free
       # toolchain, and the Excelsior codegen tiers.
+      # The arm64 JIT tool (skj-jit-arm64) is a dynamically-linked aarch64 ELF
+      # run under qemu-aarch64; point qemu at the aarch64 loader that ships with
+      # gcc-aarch64-linux-gnu (the skj-produced test binaries are static and do
+      # not need it).  -L is a no-op for the static binaries of every other
+      # target.
       - name: Full test matrix
-        run: make check-all
+        run: make check-all QEMU_A64="qemu-aarch64 -L /usr/aarch64-linux-gnu"
 
       # The host-only emulator tests rebuilt with ASan+UBSan.  They run
       # natively with no qemu and cover the RV32 core, the guest allocator, and
