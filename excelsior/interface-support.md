@@ -14,8 +14,6 @@ writes them twice: `verb open() returns str` in `Openable`, and again in
 `Chest`, `Door`, and every other opener. A class should be able to say which
 interfaces it supports and take the signatures from them.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## Two things this must not become
 
 The obvious design is Java's `implements`, and two of its properties are wrong

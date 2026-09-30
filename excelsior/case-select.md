@@ -4,7 +4,6 @@ Status: design note (2026-07). The `case` statement and the `select`
 expression shipped separately and look nothing alike. The survey and
 proposal below unify them without ambiguous or lookahead-heavy grammar.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
 UPDATE (2026-07, after implementation): the construct was renamed from
 `case E of` to `match E` with `endmatch`. The head now names the
@@ -20,7 +19,6 @@ default arm and the value fallback operator from `else` to `otherwise`
 (fallback-words.md), so `else` means only a boolean branch; read the
 `else` defaults and the `A else B` operator below as `otherwise`. The
 analysis below predates all three decisions and uses the old spellings.
-
 
 ## What we have today
 

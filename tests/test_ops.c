@@ -1,5 +1,4 @@
 /* test_ops.c : IR-level integration test for unsigned 32-bit ops */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 #include "ir.h"
 

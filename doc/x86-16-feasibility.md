@@ -6,7 +6,6 @@ as, and ld.
 
 Date: 2026-05-10
 
-
 ## Background: x86-16 Real Mode
 
 Physical address = (segment << 4) + offset, yielding a 20-bit address space

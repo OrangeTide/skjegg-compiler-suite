@@ -62,7 +62,6 @@
  * (runtime/exc_native.c) bootstraps an actor of that class and sends it the
  * entry selector. Members are emitted as `Class__member`.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include "excelsior.h"
@@ -4162,6 +4161,34 @@ lower_stmt(struct node *n)
 
 static struct ir_func *lower_source_member(struct node *cls, struct node *m);
 
+/* Fill a function's psABI parameter classes so a register-ABI backend homes a
+ * float parameter from a floating-point register.  The 32-bit backends
+ * (ColdFire, RISC-V, MIPS) infer this elsewhere, but the AAPCS64 and SysV
+ * selectors read param_cls: class 1 marks a double parameter (Excelsior's
+ * float is always a double, so single precision, class 2, never arises), any
+ * other parameter (int, bool, decimal, enum, set, an obj handle, a record or
+ * shared pointer, a maybe box) stays an integer word, class 0.  Each parameter
+ * is one eightbyte (param_neb 1). */
+static void
+set_param_classes(struct ir_func *fn, struct node *params)
+{
+    int np = fn->nparams, i = 0;
+    struct node *p;
+
+    if (np <= 0)
+        return;
+    fn->param_neb = arena_alloc(la, (size_t)np * sizeof(signed char));
+    fn->param_cls = arena_alloc(la, (size_t)(4 * np) * sizeof(signed char));
+    for (p = params; p && i < np; p = p->next, i++) {
+        struct ex_type *pt = p->sym ? p->sym->type : p->type;
+        fn->param_neb[i] = 1;
+        fn->param_cls[4 * i] = (signed char)(is_ftype(pt) ? 1 : 0);
+        fn->param_cls[4 * i + 1] = -1;
+        fn->param_cls[4 * i + 2] = -1;
+        fn->param_cls[4 * i + 3] = -1;
+    }
+}
+
 static struct ir_func *
 lower_member(struct node *cls, struct node *m)
 {
@@ -4194,6 +4221,7 @@ lower_member(struct node *cls, struct node *m)
         nparams++;
     }
     fn->nparams = nparams;
+    set_param_classes(fn, m->a);
 
     ins = emit(IR_FUNC);
     ins->sym = arena_strdup(la, mangled);
@@ -4279,6 +4307,7 @@ lower_funclit_fn(struct node *lit)
         nparams++;
     }
     fn->nparams = nparams;
+    set_param_classes(fn, lit->a);
     ins = emit(IR_FUNC);
     ins->sym = arena_strdup(la, lit->name);
     ins->nargs = nparams;
@@ -4373,6 +4402,7 @@ lower_source_member(struct node *cls, struct node *m)
     for (struct node *p = m->a; p; p = p->next)
         bind_slot(p->sym, 4);
     ctor->nparams = nparams;
+    set_param_classes(ctor, m->a);
     ins = emit(IR_FUNC);
     ins->sym = arena_strdup(la, mangled);
     ins->nargs = nparams;

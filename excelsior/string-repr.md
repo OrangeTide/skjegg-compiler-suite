@@ -9,8 +9,6 @@ type-level owned/view distinction and any `char*` interop surface, stays
 paper until a foreign boundary needs it. Compact Pascal's part (D6) waits
 on Phase 6b. See the implementation notes at the end.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The idea
 
 A length-terminated string and a null-terminated string are not rivals.

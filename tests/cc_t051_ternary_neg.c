@@ -1,5 +1,4 @@
 /* cc_t051_ternary_neg.c : ternary with negation (tostr sign pattern) */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 int convert(int val)
 {

@@ -1,7 +1,6 @@
 // exs_fx_ov_trap.exs : a fixed multiply whose result is outside the
 // s15.16 range is an OVERFLOW fault, detected in the 64-bit host helper
 // (runtime-errors.md).
-// Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
 type
     class C

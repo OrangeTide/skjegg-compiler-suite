@@ -20,13 +20,10 @@ itself was replaced by base-10 `decimal` (0.1 * 3 == 0.3 exactly),
 literals became untyped decimal constants defaulting to it, and the
 `0f`/`fixed(num, den)` apparatus dissolved rather than being tiered.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 Overall verdict first: the design is coherent, and its principles
 (words over symbols, teaching errors, one `else` concept, the
 quotation boundary) serve the audience well. The findings below are
 where it falls short of its own objective, ranked within each section.
-
 
 ## Deviations from the objective
 

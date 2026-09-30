@@ -1,5 +1,4 @@
 /* elf_read.c : ELF32 big-endian relocatable object reader */
-/* made by a machine. PUBLIC DOMAIN */
 
 #include "ld.h"
 

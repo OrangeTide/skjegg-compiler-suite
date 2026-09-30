@@ -15,7 +15,6 @@
  * left unchecked in fmv.w.x, and the gate on the Zcb expander, which
  * lets 208 otherwise-illegal encodings decode.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include "rv32.h"

@@ -1,5 +1,4 @@
 /* cc_t047_predecrement.c : pre-decrement as array index (tostr pattern) */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 int main(void)
 {

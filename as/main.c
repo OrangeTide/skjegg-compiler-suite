@@ -1,5 +1,4 @@
 /* main.c : driver for skj-as ColdFire assembler */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 #include "as.h"
 #include "version.h"

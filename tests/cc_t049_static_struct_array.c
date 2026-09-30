@@ -1,5 +1,4 @@
 /* cc_t049_static_struct_array.c : static const array of structs with pointer members */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 struct entry {
     int code;

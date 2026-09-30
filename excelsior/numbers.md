@@ -11,9 +11,6 @@ top; review killed it (binary fixed breaks base-10 *arithmetic*, not
 just spelling, see below), and the note was reworked around base-10
 fixed-point.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
-
 ## The problem, remeasured
 
 R3 said inference steers beginners into float, the most second-class

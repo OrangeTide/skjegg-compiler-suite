@@ -17,8 +17,6 @@ code" and does not even lower. This note removes `quote` from the base
 surface, leaving `[...]` as the builder's only quoting face and reification as
 a meta-layer facility spelled when that layer's surface is designed.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## What exists today
 
 - **`quote primary`** (T_QUOTE, `quote_form` in the grammar, N_QUOTE) is

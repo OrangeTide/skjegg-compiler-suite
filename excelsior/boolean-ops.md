@@ -12,8 +12,6 @@ occupies a keyword and a precedence slot for a meaning an existing operator
 already carries. This note retires it, leaving `and` / `or` / `not` as the
 boolean set, which is exactly the trio the beginner precedents ship.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## What exists today
 
 `xor` is a keyword (T_XOR) parsed at the `or` precedence tier (parse.c

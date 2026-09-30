@@ -1,5 +1,4 @@
 /* cc_t054_float_basic.c : basic float arithmetic and conversions */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 double add(double a, double b)
 {

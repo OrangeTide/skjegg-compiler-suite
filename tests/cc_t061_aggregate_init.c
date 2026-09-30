@@ -1,5 +1,4 @@
 /* cc_t061_aggregate_init.c : initialized struct/union/array-of-struct globals */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 /* Exercises the aggregate byte-image builder: field offsets and padding, an
    8-byte double/long long field (aligned), a char field, an array of structs,

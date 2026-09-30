@@ -1,6 +1,5 @@
 /* cc_t020_sizeof.c : sizeof, checked with data-model-invariant relations so
    the test passes under both ILP32 and LP64. */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 int main(void)
 {

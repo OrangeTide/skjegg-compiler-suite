@@ -22,8 +22,6 @@ its real job is the teardown half of Icon-style fallibility: a guaranteed
 restore or release that survives the invisible exits a propagating fallible
 creates.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## Why `defer`, in this language
 
 In Go and Zig, `defer` most often frees memory or closes a handle on function

@@ -1,5 +1,4 @@
 /* cc_t053_nested_for.c : nested for with C99 decl and early break */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 int search(int *arr, int n, int target)
 {

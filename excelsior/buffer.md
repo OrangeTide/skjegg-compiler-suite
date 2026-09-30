@@ -15,8 +15,6 @@ the missing counterpart, a **mutable, growable** container with amortized O(1)
 append, that you build into and then **freeze** into an immutable value. It is
 the builder; the list and the string are what it produces.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The value / mutable duality
 
 The language's composite types are **values**: an int, a decimal, a str, a

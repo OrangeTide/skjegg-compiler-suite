@@ -11,13 +11,41 @@
  * Cross-compiled with the m68k toolchain (freestanding, no libc), like
  * pascal_rt.c, and linked with start.S.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include "libexc.h"
 #include "utf8.h"        /* vendored decoder for code-point string ops (R7) */
 
 void __exc_trap(const struct exc_trapdesc *why, int a, int b);
+
+/* A trap descriptor's name is a guest pointer (the compiler emits the
+ * common ones into guest memory). The two descriptors libexc builds itself,
+ * for a decimal overflow or divide, name a host string literal instead; in
+ * the EXC_GUEST32 build that literal is host rodata, which may sit above the
+ * 4GB the narrowed field can hold, so copy it into the low arena and store
+ * the guest pointer. In the ordinary build a pointer is already guest width,
+ * so the literal is used directly. */
+#ifdef EXC_GUEST32
+static exc_gptr
+exc_name(const char *lit)
+{
+    int n = 0, i;
+    char *buf;
+
+    while (lit[n])
+        n++;
+    buf = __moo_arena_alloc(n + 1);
+    for (i = 0; i <= n; i++)
+        buf[i] = lit[i];
+    return EXC_TOG(buf);
+}
+#define EXC_INTERNAL_TRAP(vn, kind, lit)                        \
+    struct exc_trapdesc vn = { (kind), 0, 0, 0 };               \
+    vn.name = exc_name(lit)
+#else
+#define EXC_INTERNAL_TRAP(vn, kind, lit)                        \
+    static const struct exc_trapdesc vn = { (kind), 0, 0, (lit) }
+#endif
 
 /* A source (sources.md D4): the continuation backing is a stackful
  * coroutine. The struct's layout is shared with the compiler (the
@@ -29,28 +57,54 @@ void __exc_trap(const struct exc_trapdesc *why, int a, int b);
 #define EXC_SRC_STACK 4096
 
 struct exc_src {
-    int state;                  /*  0: 0 new, 1 running, 2 done */
-    void *body;                 /*  4: the compiled body function */
-    char *body_sp;              /*  8: the suspended body's sp */
-    char *body_fp;              /* 12: the suspended body's fp */
-    char *pump_sp;              /* 16: the pump side, across a switch */
-    char *pump_fp;              /* 20 */
-    char *stack_top;            /* 24: the private stack's high end */
-    /* argument words follow (offset 28), then the private stack */
+    int state;                          /*  0: 0 new, 1 running, 2 done */
+    EXC_PTRFIELD(void *, body);         /*  4: the compiled body function */
+    EXC_PTRFIELD(char *, body_sp);      /*  8: the suspended body's sp */
+    EXC_PTRFIELD(char *, body_fp);      /* 12: the suspended body's fp */
+    EXC_PTRFIELD(char *, pump_sp);      /* 16: the pump side, across a switch */
+    EXC_PTRFIELD(char *, pump_fp);      /* 20 */
+    EXC_PTRFIELD(char *, stack_top);    /* 24: the private stack's high end */
+    /* argument words follow (offset 28), then the private stack. Every
+     * pointer field is one guest word, so the offsets hold in both builds
+     * (a 32-bit target's pointer is already four bytes; EXC_GUEST32 narrows
+     * the LP64 host's). */
 };
+
+/* An optional provider the runtime may install to allocate a coroutine's
+ * private stack from a guarded region rather than the arena. It returns the
+ * base (low end) of a stack of `size` bytes, or 0 to fall back to the arena.
+ * The RV32 emulator crt installs one that maps a guard-paged region, so a
+ * stack overrun faults instead of silently trampling the arena; every other
+ * target leaves this NULL and keeps the arena stack. */
+void *(*__exc_src_stack_provider)(int size);
 
 void *
 __exc_src_new(void *body, int argwords)
 {
     int hdr = (int)sizeof(struct exc_src);
-    int total = hdr + argwords * 4 + EXC_SRC_STACK;
-    struct exc_src *s = __moo_arena_alloc(total);
+    struct exc_src *s;
+    char *stack = 0;
 
-    if (!s)
-        return 0;
+    if (__exc_src_stack_provider)
+        stack = __exc_src_stack_provider(EXC_SRC_STACK);
+
+    if (stack) {
+        /* struct and argument words in the arena; the private stack is the
+         * separately mapped, guard-paged region. */
+        s = __moo_arena_alloc(hdr + argwords * 4);
+        if (!s)
+            return 0;
+        s->stack_top = EXC_TOG(stack + EXC_SRC_STACK);
+    } else {
+        /* struct, argument words, and stack in one arena block (no guard). */
+        int total = hdr + argwords * 4 + EXC_SRC_STACK;
+        s = __moo_arena_alloc(total);
+        if (!s)
+            return 0;
+        s->stack_top = EXC_TOG((char *)s + total);
+    }
     s->state = 0;
-    s->body = body;
-    s->stack_top = (char *)s + total;
+    s->body = EXC_TOG(body);
     return s;
 }
 
@@ -65,7 +119,7 @@ __exc_src_new(void *body, int argwords)
 
 /* The running actor handle. Compiled code reads it for `self`; the
  * binding sets it before entering a verb. */
-struct exc_obj *__exc_self;
+exc_selfref __exc_self;
 
 /* Call a verb with argc words from argv. Excelsior's calling convention
  * (args pushed right to left, caller pops, result in d0) matches the m68k
@@ -73,14 +127,23 @@ struct exc_obj *__exc_self;
 static word
 call_verb(void *code, long argc, word *argv)
 {
+    /* the code pointer arrives as a data pointer; a union carries it to the
+     * function type for each arity (ISO C does not define the direct cast) */
+    union {
+        void *o;
+        word (*f0)(void);
+        word (*f1)(word);
+        word (*f2)(word, word);
+        word (*f3)(word, word, word);
+        word (*f4)(word, word, word, word);
+    } u;
+    u.o = code;
     switch (argc) {
-    case 0: return ((word (*)(void))code)();
-    case 1: return ((word (*)(word))code)(argv[0]);
-    case 2: return ((word (*)(word, word))code)(argv[0], argv[1]);
-    case 3: return ((word (*)(word, word, word))code)(
-                       argv[0], argv[1], argv[2]);
-    case 4: return ((word (*)(word, word, word, word))code)(
-                       argv[0], argv[1], argv[2], argv[3]);
+    case 0: return u.f0();
+    case 1: return u.f1(argv[0]);
+    case 2: return u.f2(argv[0], argv[1]);
+    case 3: return u.f3(argv[0], argv[1], argv[2]);
+    case 4: return u.f4(argv[0], argv[1], argv[2], argv[3]);
     default: return 0;          /* the test host caps arity at 4 */
     }
 }
@@ -102,9 +165,9 @@ __exc_spawn(struct class_desc *cls)
     o = __moo_arena_alloc((int)(EXC_OBJ_HDR + cls->nwords * (long)sizeof(word)));
     if (!o)
         return 0;               /* out of arena: nil */
-    o->cls = cls;
+    o->cls = EXC_TOG(cls);
     for (i = 0; i < cls->nwords; i++)
-        o->fields[i] = cls->image ? cls->image[i] : 0;
+        o->fields[i] = EXC_IMAGE(cls) ? EXC_IMAGE(cls)[i] : 0;
     return o;
 }
 
@@ -116,19 +179,19 @@ __exc_send(struct exc_obj *recv, long selector, long argc, word *argv)
 
     if (!recv || !recv->cls)
         return 0;               /* nil receiver: no-op (host policy later) */
-    for (c = recv->cls; c; c = c->parent)
+    for (c = EXC_CLS(recv); c; c = EXC_PARENT(c))
         for (i = 0; i < c->nverbs; i++)
             if (c->verbs[2 * i] == selector) {
                 /* the receiver is the running actor for the duration of the
                  * verb: fields are per-instance, so `self.field` reads this
                  * object's segment. Saved and restored, since the sender
                  * resumes when the verb returns. */
-                struct exc_obj *caller = __exc_self;
+                struct exc_obj *caller = EXC_G(__exc_self, struct exc_obj *);
                 word r;
 
-                __exc_self = recv;
-                r = call_verb((void *)c->verbs[2 * i + 1], argc, argv);
-                __exc_self = caller;
+                __exc_self = EXC_TOG(recv);
+                r = call_verb(EXC_G(c->verbs[2 * i + 1], void *), argc, argv);
+                __exc_self = EXC_TOG(caller);
                 return r;
             }
     return 0;                   /* selector not understood */
@@ -162,8 +225,7 @@ __exc_decmul(word a, word b)
     r = (r >= 0) ? (r + DEC_SCALE / 2) / DEC_SCALE      /* half away */
                  : (r - DEC_SCALE / 2) / DEC_SCALE;
     if (r > 0x7fffffffLL || r < -0x80000000LL) {
-        static const struct exc_trapdesc why =
-            { EXC_TRAP_OVERFLOW, 0, 0, "decimal multiply" };
+        EXC_INTERNAL_TRAP(why, EXC_TRAP_OVERFLOW, "decimal multiply");
         __exc_trap(&why, 0, 0);
     }
     return (word)r;
@@ -175,8 +237,7 @@ __exc_decdiv(word a, word b)
     long long n, q, rem, ab;
 
     if (b == 0) {                   /* defensive: compiled code checks */
-        static const struct exc_trapdesc why =
-            { EXC_TRAP_DIV_ZERO, 0, 0, "decimal divide" };
+        EXC_INTERNAL_TRAP(why, EXC_TRAP_DIV_ZERO, "decimal divide");
         __exc_trap(&why, 0, 0);
     }
     n = (long long)a * DEC_SCALE;
@@ -188,8 +249,7 @@ __exc_decdiv(word a, word b)
     if (2 * rem >= ab)              /* round half away from zero */
         q += ((a < 0) != (b < 0)) ? -1 : 1;
     if (q > 0x7fffffffLL || q < -0x80000000LL) {
-        static const struct exc_trapdesc why =
-            { EXC_TRAP_OVERFLOW, 0, 0, "decimal divide" };
+        EXC_INTERNAL_TRAP(why, EXC_TRAP_OVERFLOW, "decimal divide");
         __exc_trap(&why, 0, 0);
     }
     return (word)q;
@@ -218,13 +278,13 @@ __exc_str_concat(struct exc_str *a, struct exc_str *b)
      * terminate. Only views (slices) stay length-only. */
     buf = __moo_arena_alloc(len + 1);
     for (i = 0; i < a->len; i++)
-        buf[i] = a->data[i];
+        buf[i] = EXC_SDATA(a)[i];
     for (i = 0; i < b->len; i++)
-        buf[a->len + i] = b->data[i];
+        buf[a->len + i] = EXC_SDATA(b)[i];
     buf[len] = '\0';
     r = __moo_arena_alloc(sizeof *r);
     r->len = len;
-    r->data = buf;
+    EXC_SETDATA(r, buf);
     return r;
 }
 
@@ -240,7 +300,7 @@ __exc_str_eq(struct exc_str *a, struct exc_str *b)
     if (a->len != b->len)
         return 0;
     for (i = 0; i < a->len; i++)
-        if (a->data[i] != b->data[i])
+        if (EXC_SDATA(a)[i] != EXC_SDATA(b)[i])
             return 0;
     return 1;
 }
@@ -260,8 +320,8 @@ __exc_str_cmp(struct exc_str *a, struct exc_str *b)
         return a->len ? 1 : 0;
     n = a->len < b->len ? a->len : b->len;
     for (i = 0; i < n; i++) {
-        unsigned char ca = (unsigned char)a->data[i];
-        unsigned char cb = (unsigned char)b->data[i];
+        unsigned char ca = (unsigned char)EXC_SDATA(a)[i];
+        unsigned char cb = (unsigned char)EXC_SDATA(b)[i];
         if (ca != cb)
             return ca < cb ? -1 : 1;
     }
@@ -287,7 +347,7 @@ __exc_str_len(struct exc_str *s)
     if (!s)
         return 0;
     while (i < s->len) {
-        int n = utf8_decode(&rune, (const unsigned char *)s->data + i,
+        int n = utf8_decode(&rune, (const unsigned char *)EXC_SDATA(s) + i,
                             (size_t)(s->len - i));
         if (n <= 0)
             n = 1;              /* defensive: never stall */
@@ -311,13 +371,13 @@ __exc_str_slice(struct exc_str *s, int lo, int hi)
 
     if (!s) {
         r->len = 0;
-        r->data = (const char *)0;
+        EXC_SETDATA(r, 0);
         return r;
     }
     if (lo < 1)
         lo = 1;
     while (i < s->len) {
-        int n = utf8_decode(&rune, (const unsigned char *)s->data + i,
+        int n = utf8_decode(&rune, (const unsigned char *)EXC_SDATA(s) + i,
                             (size_t)(s->len - i));
         if (n <= 0)
             n = 1;
@@ -330,11 +390,11 @@ __exc_str_slice(struct exc_str *s, int lo, int hi)
     }
     if (lo > k || lo > hi) {    /* start past the last code point, or reversed */
         r->len = 0;
-        r->data = s->data;
+        EXC_SETDATA(r, EXC_SDATA(s));
         return r;
     }
     r->len = endb - startb;     /* hi past the end clamps: endb is the last byte */
-    r->data = s->data + startb;
+    EXC_SETDATA(r, EXC_SDATA(s) + startb);
     return r;
 }
 
@@ -438,7 +498,7 @@ static void
 eploc(const struct exc_trapdesc *why)
 {
     if (why && why->file) {
-        eputs(why->file);
+        eputs(EXC_TRAPFILE(why));
         eputs(" line ");
         eputi(why->line);
         eputs(": ");
@@ -469,7 +529,7 @@ __exc_trap(const struct exc_trapdesc *why, int a, int b)
     case EXC_TRAP_UNCONSUMED:
         if (why->name) {
             eputs("`");
-            eputs(why->name);
+            eputs(EXC_TRAPNAME(why));
             eputs("` produced no value");
         } else {
             eputs("a fallible expression produced no value");
@@ -481,7 +541,7 @@ __exc_trap(const struct exc_trapdesc *why, int a, int b)
     case EXC_TRAP_DIV_ZERO:
         if (why->name) {
             eputs("`");
-            eputs(why->name);
+            eputs(EXC_TRAPNAME(why));
             eputs("`: ");
         }
         eputs("division by zero\n"
@@ -491,7 +551,7 @@ __exc_trap(const struct exc_trapdesc *why, int a, int b)
     case EXC_TRAP_OVERFLOW:
         if (why->name) {
             eputs("`");
-            eputs(why->name);
+            eputs(EXC_TRAPNAME(why));
             eputs("`: ");
         }
         eputs("arithmetic overflow: the result does not fit\n"
@@ -554,12 +614,12 @@ void
 __exc_trace_str(struct exc_str *s)
 {
     if (s && s->len)
-        __exh_emit(0, s->data, s->len);
+        __exh_emit(0, EXC_SDATA(s), s->len);
     __exh_emit(0, "\n", 1);
 }
 
 void
-__exc_trace_int(long v)
+__exc_trace_int(word v)
 {
     char buf[24];
     __exh_emit(0, buf, fmt_int(v, buf));
@@ -575,7 +635,7 @@ __exc_trace_float(double v)
 }
 
 void
-__exc_trace_dec(long v)
+__exc_trace_dec(word v)
 {
     char buf[24];
     __exh_emit(0, buf, fmt_dec(v, buf));
@@ -583,7 +643,7 @@ __exc_trace_dec(long v)
 }
 
 void
-__exc_trace_bool(long v)
+__exc_trace_bool(word v)
 {
     __exh_emit(0, v ? "true\n" : "false\n", v ? 5 : 6);
 }
@@ -602,12 +662,12 @@ make_str(const char *s, int n)
         buf[i] = s[i];
     buf[n] = '\0';                              /* owned buffers terminate */
     r->len = n;
-    r->data = buf;
+    EXC_SETDATA(r, buf);
     return r;
 }
 
 struct exc_str *
-__exc_str_from_int(long v)
+__exc_str_from_int(word v)
 {
     char buf[24];
     return make_str(buf, fmt_int(v, buf));
@@ -621,14 +681,14 @@ __exc_str_from_float(double v)
 }
 
 struct exc_str *
-__exc_str_from_dec(long v)
+__exc_str_from_dec(word v)
 {
     char buf[24];
     return make_str(buf, fmt_dec(v, buf));
 }
 
 struct exc_str *
-__exc_str_from_bool(long v)
+__exc_str_from_bool(word v)
 {
     return v ? make_str("true", 4) : make_str("false", 5);
 }
@@ -636,9 +696,9 @@ __exc_str_from_bool(long v)
 /* an enum prints its member name (enums.md D6): the ordinal indexes the
  * compiler-emitted per-enum name table of str descriptors */
 struct exc_str *
-__exc_str_from_enum(long ord, word *names)
+__exc_str_from_enum(word ord, word *names)
 {
-    return (struct exc_str *)names[ord];
+    return EXC_G(names[ord], struct exc_str *);
 }
 
 /* Lists. A list value is a pointer to { count, elem[count] }, count in word
@@ -647,7 +707,7 @@ __exc_str_from_enum(long ord, word *names)
  * element. Lists are immutable: append and set return a fresh list from the
  * arena. Ported from runtime/list.c (the MooScript list runtime). */
 struct exc_list {
-    long count;
+    word count;
     word elem[];
 };
 
@@ -804,10 +864,33 @@ __exc_list_concat(struct exc_list *a, struct exc_list *b)
  * ordinary function calls (not a baked `by` clause, which function-values.md
  * declines), and could move to a userland library once a module system lands.
  */
+
+/* A func value arrives as a data pointer; ISO C does not define the cast to a
+ * function pointer, so route it through a union (POSIX guarantees the round
+ * trip, and the guest arena keeps the address representable). */
+typedef word (*exc_fn1)(word);
+typedef word (*exc_fn2)(word, word);
+
+static exc_fn1
+as_fn1(void *p)
+{
+    union { void *o; exc_fn1 f; } u;
+    u.o = p;
+    return u.f;
+}
+
+static exc_fn2
+as_fn2(void *p)
+{
+    union { void *o; exc_fn2 f; } u;
+    u.o = p;
+    return u.f;
+}
+
 struct exc_list *
 __exc_list_map(struct exc_list *l, void *fp)
 {
-    word (*f)(word) = (word (*)(word))fp;
+    exc_fn1 f = as_fn1(fp);
     long i, c = l ? l->count : 0;
     struct exc_list *r = __moo_arena_alloc((int)(sizeof(long) +
                                                  c * sizeof(word)));
@@ -820,7 +903,7 @@ __exc_list_map(struct exc_list *l, void *fp)
 struct exc_list *
 __exc_list_filter(struct exc_list *l, void *fp)
 {
-    word (*keep)(word) = (word (*)(word))fp;
+    exc_fn1 keep = as_fn1(fp);
     long i, n = 0, c = l ? l->count : 0;
     /* over-allocate c words, fill the kept ones, then set the real count;
      * keep is called exactly once per element (no double-eval of a predicate
@@ -840,7 +923,7 @@ __exc_list_filter(struct exc_list *l, void *fp)
 word
 __exc_list_reduce(struct exc_list *l, word init, void *fp)
 {
-    word (*step)(word, word) = (word (*)(word, word))fp;
+    exc_fn2 step = as_fn2(fp);
     long i, c = l ? l->count : 0;
     word acc = init;
 
@@ -852,7 +935,7 @@ __exc_list_reduce(struct exc_list *l, word init, void *fp)
 struct exc_list *
 __exc_list_sort(struct exc_list *l, void *fp)
 {
-    word (*before)(word, word) = (word (*)(word, word))fp;
+    exc_fn2 before = as_fn2(fp);
     long i, j, c = l ? l->count : 0;
     struct exc_list *r = __moo_arena_alloc((int)(sizeof(long) +
                                                  c * sizeof(word)));
@@ -927,7 +1010,8 @@ __exc_rec_eq(word *a, word *b, long n, long strmask)
         return 0;
     for (i = 0; i < n; i++) {
         if (strmask & (1L << i)) {
-            if (!__exc_str_eq((struct exc_str *)a[i], (struct exc_str *)b[i]))
+            if (!__exc_str_eq(EXC_G(a[i], struct exc_str *),
+                              EXC_G(b[i], struct exc_str *)))
                 return 0;
         } else if (a[i] != b[i])
             return 0;
@@ -959,7 +1043,7 @@ __exc_list_contains_str(struct exc_list *l, struct exc_str *v)
     if (!l)
         return 0;
     for (i = 0; i < l->count; i++)
-        if (__exc_str_eq((struct exc_str *)l->elem[i], v))
+        if (__exc_str_eq(EXC_G(l->elem[i], struct exc_str *), v))
             return 1;
     return 0;
 }
@@ -975,7 +1059,7 @@ __exc_list_contains_rec(struct exc_list *l, word *v, long nwords, long strmask)
     if (!l)
         return 0;
     for (i = 0; i < l->count; i++)
-        if (__exc_rec_eq((word *)l->elem[i], v, nwords, strmask))
+        if (__exc_rec_eq(EXC_G(l->elem[i], word *), v, nwords, strmask))
             return 1;
     return 0;
 }
@@ -997,7 +1081,7 @@ __exc_str_find(struct exc_str *hay, struct exc_str *needle)
     for (i = 0; i <= hay->len - needle->len; i++) {
         long match = 1;
         for (j = 0; j < needle->len; j++)
-            if (hay->data[i + j] != needle->data[j]) {
+            if (EXC_SDATA(hay)[i + j] != EXC_SDATA(needle)[j]) {
                 match = 0;
                 break;
             }
@@ -1035,7 +1119,7 @@ exc_sel_by_name(const char *name)
     long n = __exc_selnames[0];
 
     for (long i = 0; i < n; i++)
-        if (ci_eq((const char *)__exc_selnames[1 + i], name))
+        if (ci_eq(EXC_G(__exc_selnames[1 + i], const char *), name))
             return i;
     return -1;
 }
@@ -1100,12 +1184,12 @@ exc_freeze(struct exc_obj *o, long host_obj)
 
     if (!o || !o->cls)
         return;
-    for (struct class_desc *c = o->cls; c; c = c->parent) {
-        const long *ft = c->verbs + 2 * c->nverbs;
+    for (struct class_desc *c = EXC_CLS(o); c; c = EXC_PARENT(c)) {
+        const word *ft = c->verbs + 2 * c->nverbs;
         long nf = ft[0];
 
         for (long i = 0; i < nf; i++) {
-            const char *name = (const char *)ft[1 + 3 * i];
+            const char *name = EXC_G(ft[1 + 3 * i], const char *);
             long off  = ft[2 + 3 * i];
             long kind = ft[3 + 3 * i];
             word v = o->fields[off];
@@ -1114,14 +1198,14 @@ exc_freeze(struct exc_obj *o, long host_obj)
                 val[fmt_int(v, val)] = 0;
                 __exh_prop_put(host_obj, field_key(name, key), val);
             } else if (kind == EXC_FK_STR) {
-                struct exc_str *s = (struct exc_str *)v;
+                struct exc_str *s = EXC_G(v, struct exc_str *);
                 int n;
 
                 if (!s)
                     continue;       /* no default, never assigned */
                 n = s->len < EXC_VALMAX - 1 ? s->len : EXC_VALMAX - 1;
                 for (int j = 0; j < n; j++)
-                    val[j] = s->data[j];
+                    val[j] = EXC_SDATA(s)[j];
                 val[n] = 0;
                 __exh_prop_put(host_obj, field_key(name, key), val);
             }
@@ -1137,12 +1221,12 @@ exc_thaw(struct exc_obj *o, long host_obj)
 
     if (!o || !o->cls)
         return;
-    for (struct class_desc *c = o->cls; c; c = c->parent) {
-        const long *ft = c->verbs + 2 * c->nverbs;
+    for (struct class_desc *c = EXC_CLS(o); c; c = EXC_PARENT(c)) {
+        const word *ft = c->verbs + 2 * c->nverbs;
         long nf = ft[0];
 
         for (long i = 0; i < nf; i++) {
-            const char *name = (const char *)ft[1 + 3 * i];
+            const char *name = EXC_G(ft[1 + 3 * i], const char *);
             long off  = ft[2 + 3 * i];
             long kind = ft[3 + 3 * i];
             long n = __exh_prop_get(host_obj, field_key(name, key),
@@ -1153,7 +1237,7 @@ exc_thaw(struct exc_obj *o, long host_obj)
             if (kind == EXC_FK_WORD)
                 o->fields[off] = parse_int(val, n);
             else if (kind == EXC_FK_STR)
-                o->fields[off] = (word)make_str(val, (int)n);
+                o->fields[off] = (word)(uintptr_t)make_str(val, (int)n);
         }
     }
 }

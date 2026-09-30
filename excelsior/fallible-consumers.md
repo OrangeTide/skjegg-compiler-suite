@@ -8,8 +8,6 @@ separates the two axes and replaces the `if validate(k)` consumer with an
 inline `on fail`. All seven decisions are confirmed and in the tree; see
 the implementation notes at the end.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The problem R14 half-solved
 
 R14 removed the *type* conflation: a `can fail` call no longer types as

@@ -11,8 +11,6 @@ lowers to its 0-based ordinal, qualified in value positions and bare as a match
 label, the enum match is checked exhaustive, and a hole prints the member name
 via a per-enum name table. The D7 friendliness and power adds remain deferred.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## What exists today
 
 - **Declaration** parses: `enum Color [red green blue]`, and the bracket

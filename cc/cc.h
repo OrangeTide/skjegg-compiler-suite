@@ -1,5 +1,4 @@
 /* cc.h : skj-cc C compiler front-end declarations */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 #ifndef CC_H
 #define CC_H

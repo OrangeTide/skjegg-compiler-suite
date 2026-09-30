@@ -1,5 +1,5 @@
 ; start_x86_64.asm - minimal x86-64 runtime for Linux user-mode (NASM syntax).
-; Made by a machine. PUBLIC DOMAIN (CC0-1.0)
+;
 ;
 ; Provides _start (ELF entry point), syscall wrappers for read/write/exit,
 ; and the bump arena.  No 64-bit arithmetic helpers: the x86-64 backend does

@@ -4,7 +4,6 @@
 // the handler; on failure run it (consuming the failure). Covers a bare
 // `can fail` call, index recovery on an assignment, the valueless loop
 // built from `while true` + `on fail break`, and the early-return guard.
-// Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 type
     class C
         private

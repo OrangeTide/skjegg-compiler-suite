@@ -13,8 +13,6 @@ spelling: a bare name, `is`, and an inline slice. That makes it the only
 declaration in the language with no keyword and no terminator, which costs more
 than it saves.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## What the current form costs
 
 Every other type declaration opens with a word that says what is being declared

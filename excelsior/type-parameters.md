@@ -11,8 +11,6 @@ holdover is the angle-bracket generic `list<T>` (and, following it, buffer.md's
 `buffer<T>`), carried in from C++ / Java / Rust. This pass replaces it with the
 word `of`, so `list<T>` becomes **`list of T`**.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## Why `<T>` is the wrong fit
 
 Three reasons, each on its own enough:

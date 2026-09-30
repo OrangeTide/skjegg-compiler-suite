@@ -3,8 +3,6 @@
  * Every float opcode carries FWIDTH_F32 in its imm, so the backend selects the
  * single-precision SSE form (addss, ucomiss, cvtsi2ss, ...).  Also exercises
  * the cross-width conversions IR_F32TOF64 / IR_F64TOF32.
- *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include "ir.h"

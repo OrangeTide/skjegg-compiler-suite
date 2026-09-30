@@ -19,8 +19,6 @@ Two things this backlog is deliberately not:
 - **The approachability findings.** R1 to R19 are all settled and decided
   (R7, text-encoding.md, was the last confirmed); they await code, not a pass.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The data-model cluster (dependency spine)
 
 The largest thread, and ordered: each pass depends on the one before it.

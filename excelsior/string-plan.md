@@ -6,9 +6,6 @@ what already exists, the representation and runtime decisions, and a slicing
 into landable increments, so the implementation choices are made on paper
 first.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
-
 ## 1. What already exists (so scope is small)
 
 - **The type checker is complete for `str`.** `check_binop` already accepts

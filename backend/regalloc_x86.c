@@ -1,5 +1,4 @@
 /* regalloc_x86.c : linear-scan register allocator for i686 (IA-32) */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 /*
  * Poletto & Sarkar (1999) linear-scan register allocation.
  *

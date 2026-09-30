@@ -1,5 +1,4 @@
 /* cc_t070_float_across_call.c : a float temp live across an xmm-clobbering call */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 /* g uses several xmm registers, so it clobbers the caller's live float temp */
 int g(int c) {
     double t0=c+0.5, t1=c+1.5, t2=c+2.5, t3=c+3.5, t4=c+4.5, t5=c+5.5, t6=c+6.5;

@@ -1,7 +1,7 @@
 /* cc_t073_many_args.c : many scalar arguments, exercising register overflow
    to the stack (SysV: 6 int / 8 sse; AAPCS64: 8 int / 8 fp) and the stack
    convention on the other targets.  Runs on every cc target.
-   Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
+*/
 
 int
 isum10(int a, int b, int c, int d, int e,

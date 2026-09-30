@@ -1,5 +1,4 @@
 /* cc_t057_float_single.c : float vs double, sizeof, function calls */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 int ftoi_f(float x)
 {

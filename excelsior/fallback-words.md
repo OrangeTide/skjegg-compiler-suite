@@ -10,8 +10,6 @@ fallible-consumers.md, which introduced the statement `on fail` handler.
 All five decisions are confirmed and in the tree; see the implementation
 note at the end.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The problem
 
 `else` carries two unrelated jobs: the boolean branch (the statement

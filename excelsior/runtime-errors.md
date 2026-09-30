@@ -8,9 +8,6 @@ tree (per-site descriptors, fallible divide/modulo, the divide-overflow
 and decimal-helper OVERFLOW faults, the message catalog in the test host,
 and the -t no-match trace event).
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
-
 ## The problem
 
 "Errors teach" is a design principle, but it stops at compile time. The

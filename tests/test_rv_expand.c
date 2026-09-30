@@ -16,7 +16,6 @@
  * to with a real assembler, so this checks the expander against the
  * architecture rather than against itself.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include "rv32.h"

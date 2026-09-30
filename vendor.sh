@@ -1,6 +1,5 @@
 #!/bin/sh
 # vendor-skjegg.sh — vendor selected skjegg compiler components
-# Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 #
 # Copy this script into your project and edit ORIGIN below if needed.
 # Running it generates update-skjegg.sh with your component selection
@@ -148,7 +147,9 @@ if [ "$has_cf" -eq 1 ]; then
 fi
 if [ "$has_rv" -eq 1 ]; then
     mkdir -p "$DEST/backend" "$DEST/runtime"
-    cp "$S/backend/rv_emit.c" "$S/backend/regalloc_rv.c" "$DEST/backend/"
+    cp "$S/backend/rv_select.c" "$S/backend/rv_mc_text.c" \
+       "$S/backend/rv_mc.h" "$S/backend/rv_select.h" "$S/backend/rv_mc_text.h" \
+       "$S/backend/regalloc_rv.c" "$DEST/backend/"
     cp "$S/runtime/start_rv.S" "$DEST/runtime/"
 fi
 if [ "$has_mips" -eq 1 ]; then
@@ -385,7 +386,7 @@ if [ "$has_cf" -eq 1 ]; then
     printf 'SKJ_CF := $(SKJEGG)backend/regalloc_cf.c $(SKJEGG)backend/cf_emit.c\n' >> "$MK"
 fi
 if [ "$has_rv" -eq 1 ]; then
-    printf 'SKJ_RV := $(SKJEGG)backend/regalloc_rv.c $(SKJEGG)backend/rv_emit.c\n' >> "$MK"
+    printf 'SKJ_RV := $(SKJEGG)backend/regalloc_rv.c $(SKJEGG)backend/rv_select.c $(SKJEGG)backend/rv_mc_text.c\n' >> "$MK"
 fi
 if [ "$has_mips" -eq 1 ]; then
     printf 'SKJ_MIPS := $(SKJEGG)backend/regalloc_mips.c $(SKJEGG)backend/mips_emit.c\n' >> "$MK"

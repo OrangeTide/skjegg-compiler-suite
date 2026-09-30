@@ -17,8 +17,6 @@ itself (choosers.md, decided, its implementation pending), which is where
 the greedy-comma guard goes with it. The note is kept for the reasoning
 and the record.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The problem
 
 Two ambiguities are acknowledged in grammar.ebnf. Each is small, but the

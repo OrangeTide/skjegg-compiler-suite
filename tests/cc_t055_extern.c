@@ -1,5 +1,4 @@
 /* cc_t055_extern.c : extern declarations and static functions */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 /* extern function declaration (forward) */
 extern int add(int a, int b);

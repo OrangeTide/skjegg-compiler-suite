@@ -20,7 +20,6 @@
  * no method in the rig at all, so this is also the first thing to run
  * them.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include "rv32.h"

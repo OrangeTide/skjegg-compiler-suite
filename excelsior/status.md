@@ -28,13 +28,18 @@ resolver, and type checker cover the whole language surface.
     with a `double`, `skj-run` runs the rest (see `../doc/emulator.md`).
   - **MIPS I o32**, platform ABI (`skj-exc-mips`, `make check-exc-mips`,
     qemu-mipsel).
-- **Codegen only** (compile and assemble, no run): **x86-64** and **AArch64**
-  (`skj-exc-x86-64` / `skj-exc-arm64`, `make check-exc-x86-64-asm` /
-  `check-exc-arm64-asm`). These verify the full-parity claim for the two 64-bit
-  backends at the level where the risk lives, the front-end-to-backend path,
-  since the runtime C is shared and portable. Both assemble all 89 programs.
-  There is no run tier on these two, and that is a decision, not a gap (see
-  the note under Roadmap 2).
+- **In-process JIT**, platform ABI: **AArch64** (`skj-exc-jit-arm64`,
+  `make check-exc-jit-arm64`, run under qemu-aarch64). The exc front end lowers
+  to IR, the `jit/` library JITs it to AArch64, and the entry verb runs
+  in-process over `libexc.c` built `EXC_GUEST32` (see Roadmap 2). All 87
+  end-to-end programs pass, including the source coroutine (its stack switch is
+  `jit/exc_coro_arm64.S`).
+- **Codegen only** (compile and assemble, no run): **x86-64** and the **AArch64
+  static AOT link** (`skj-exc-x86-64` / `skj-exc-arm64`,
+  `make check-exc-x86-64-asm` / `check-exc-arm64-asm`). These verify the
+  full-parity claim for the two 64-bit backends at the front-end-to-backend
+  path. Both assemble all 89 programs. The static AOT link has no run tier (see
+  Roadmap 2); on AArch64 the JIT provides one instead.
 - **Not yet**: x86-32 (there is no `skj-exc-x86`).
 
 **Tests.** The 174-test suite (`make check-exc`) runs on every end-to-end
@@ -114,37 +119,43 @@ The near-term "Still pending" set from `CLAUDE.md`, in rough priority:
 
 ### 2. Backend reach
 
-- **Excelsior end-to-end on x86-64 and AArch64 is not pursued, by decision.**
-  A crt was the expected blocker, but the real one is deeper and structural.
-  The two 64-bit backends emit an ILP32 address model (4-byte pointers, 4-byte
-  struct fields, the `dd` class descriptors the C compiler's 64-bit targets
-  also use), while the portable runtime (`libexc.c`, `exc_native.c`) is
-  gcc-built LP64: `typedef long word` is eight bytes and every shared struct
-  (`class_desc`, `exc_obj`, the str and list descriptors) has eight-byte
-  pointer and `long` fields. libexc is written assuming
-  `sizeof(word) == sizeof(void *)`. The two sides disagree on the width of
-  every field they exchange, so `__exc_send` reads a verb's code pointer at the
-  wrong offset, gets zero, and `call 0` faults at NULL on the first send. This
-  is why RV32 and MIPS work and x86-64 does not: those gcc runtimes are ILP32
-  (32-bit target, `long` and pointer both four bytes), matching the codegen; on
-  a 64-bit host the runtime would need `sizeof(void *) == 4`.
-  - The stock ABIs that give a 64-bit host 32-bit pointers, x86 x32 (`-mx32`)
-    and AArch64 ilp32 (`-mabi=ilp32`), both compile, but `qemu-x86_64` and
-    `qemu-aarch64` user mode reject the resulting ELF ("Invalid ELF image for
-    this architecture"): qemu-user does not emulate the x32 or ilp32 syscall
-    ABI. So the clean toolchain path does not run under the emulators the suite
-    uses.
-  - The only remaining route is to fork libexc/exc_native into a narrow variant
-    (`word` an `int32_t`, every shared pointer field a `uint32_t` handle
-    dereferenced through `(T *)(uintptr_t)h`) that runs LP64 but lays memory out
-    ILP32. That touches nearly all of the 1150-line portable runtime and forks
-    the layer host-abi.md keeps shared verbatim, for a host that is not a
-    deployment target (all three Excelsior hosts are 32-bit ColdFire VMs).
-  - The value does not pay for the fork. Codegen parity is the claim that
-    mattered for these two backends, and the `-asm` tiers prove it (89/89 each).
-    The run tier stays where the risk does not: on the 32-bit end-to-end
-    backends. This mirrors the RISC-V double decision (`../doc/emulator.md`):
-    a split by design, not a missing feature.
+- **Excelsior end-to-end on AArch64 runs through the in-process JIT
+  (`skj-exc-jit-arm64`).** The two 64-bit backends emit an ILP32 address model
+  (4-byte pointers, 4-byte struct fields, the `dd` class descriptors the C
+  compiler's 64-bit targets also use), while the portable runtime is naturally
+  LP64 on a 64-bit host: `typedef long word` is eight bytes and every shared
+  struct (`class_desc`, `exc_obj`, the str and list descriptors) has eight-byte
+  pointer and `long` fields. The two sides then disagree on the width of every
+  field they exchange, so `__exc_send` reads a verb's code pointer at the wrong
+  offset. This is why RV32 and MIPS work directly: those gcc runtimes are ILP32
+  (32-bit target, `long` and pointer both four bytes), matching the codegen.
+  - **The static AOT link cannot bridge it under qemu-user.** The stock ABIs
+    that give a 64-bit host 32-bit pointers, x86 x32 (`-mx32`) and AArch64 ilp32
+    (`-mabi=ilp32`), both compile, but `qemu-x86_64` and `qemu-aarch64` user mode
+    reject the resulting ELF ("Invalid ELF image for this architecture"):
+    qemu-user does not emulate the x32 or ilp32 syscall ABI. So a statically
+    linked 64-bit exc binary has no run tier, and `check-exc-{x86-64,arm64}-asm`
+    stay codegen-only.
+  - **The JIT bridges it a different way.** `skj-exc-jit-arm64` is an ordinary
+    LP64 AArch64 binary (qemu runs it fine) that JITs the guest to native code in
+    a low-memory (< 4GB) mapping and links `libexc.c` compiled `EXC_GUEST32`.
+    That mode is not a fork: it is the same source under a compile-time switch
+    that narrows `word` to `int32_t`, holds each shared pointer field at guest
+    width, and routes every guest deref through one accessor macro
+    (`EXC_G` / `EXC_TOG` in `libexc.h`). Because the guest arena is below 4GB, a
+    guest 32-bit pointer zero-extends to a valid host pointer, so the LP64 host
+    code reads and writes the guest's 4-byte object model correctly. The driver
+    is non-PIE (so host libexc's `__exc_self` and code sit below 4GB, the guest's
+    reach) and `-rdynamic` (so the guest's runtime imports resolve by name
+    through `dlsym`). A `source of T` coroutine switches stacks through
+    `jit/exc_coro_arm64.S`, the AArch64 counterpart of the RISC-V pair in
+    `start_rv.S`. Verified by `make test-libexc-guest32` (the guest-32 data
+    model on the host) and `make check-exc-jit-arm64` (all 87 end to end).
+  - Landing the run tier surfaced one real lowering gap the codegen-only tiers
+    could not: exc did not populate `ir_func.param_cls`, so the AAPCS64/SysV
+    selectors homed a float parameter from an integer register. `set_param_classes`
+    in `lower.c` now fills it (the 32-bit backends infer float parameters
+    elsewhere, so they were unaffected).
 - **x86-32 Excelsior** (`skj-exc-x86`), if there is demand.
 
 ### 3. Design decided, awaiting code
@@ -163,4 +174,3 @@ binary-data type), `string-literals.md` (the `{...}` prose string),
   on a real smolmoo server (`../doc/smolmoo-v1.md`).
 - **boris**: firm up the provisional binding.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)

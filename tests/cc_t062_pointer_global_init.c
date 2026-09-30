@@ -1,5 +1,4 @@
 /* cc_t062_pointer_global_init.c : pointer globals initialized to an address */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 /* A pointer global initialized to an address constant becomes a symbol
    relocation: &var, an array name (decays), a string literal (a pointer to a

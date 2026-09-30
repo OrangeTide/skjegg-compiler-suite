@@ -1,5 +1,4 @@
 /* cc_t052_struct_ptr_member.c : struct with pointer member, alloc and access */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 struct str {
     int len;

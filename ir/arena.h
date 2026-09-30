@@ -1,5 +1,4 @@
 /* arena.h : bump allocator with mark/release */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 #ifndef ARENA_H
 #define ARENA_H

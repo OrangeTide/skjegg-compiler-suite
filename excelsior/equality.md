@@ -14,8 +14,6 @@ value-equality records want (records.md D5).
 spirit, and a doubled symbol reads as noise in a language that spends its whole
 design moving structure onto words.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## Not `is`: that is already the type word
 
 The tempting readable answer, `pos is target`, is wrong, because **`is` is

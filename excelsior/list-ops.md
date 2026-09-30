@@ -20,8 +20,6 @@ the line between the value list (immutable composition, value-returning) and the
 buffer (mutation-heavy stack and queue work, buffer.md), so each operation lands
 where it belongs.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The shape of the answer: two containers, one line between them
 
 Every list operation is either a **value composition** (produce a new list from

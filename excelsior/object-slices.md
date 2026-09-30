@@ -15,8 +15,6 @@ close)` names not a narrower chest but *anything that opens and closes*, which
 is the type the language has been missing between `obj` (anything at all) and a
 class name (exactly one implementation).
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## Why this slice is structural when the record slice is not
 
 record-slicing.md D2 is emphatic that a record slice is **same-type only**: two

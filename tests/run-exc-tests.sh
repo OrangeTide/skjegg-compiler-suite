@@ -24,7 +24,6 @@
 # Requires: build/skj-exc build/skj-as build/skj-ld build/start.o
 #           build/libexc.o build/exc_native.o
 #
-# Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
 set -eu
 
@@ -57,6 +56,13 @@ names=$(ls "$HERE"/exs_*.exitcode "$HERE"/exs_*.expected \
         sed -e 's#.*/##' -e 's/\.exitcode$//' -e 's/\.expected$//' \
             -e 's/\.experror$//' |
         sort -u)
+
+# ONLY (optional, space-separated names): restrict the run to these tests.
+# A second tier that only a subset can serve (the skj-run emulator, whose
+# RV32 core has no double float) names the tests it can run.
+if [ -n "${ONLY:-}" ]; then
+    names=$ONLY
+fi
 
 for name in $names; do
     src="$HERE/$name.exs"

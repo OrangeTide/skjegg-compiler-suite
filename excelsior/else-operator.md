@@ -14,9 +14,6 @@ as `A otherwise B`. The sources/continuation-pump sketch that closed
 this note has been extracted to sources.md and decided there; nothing
 of it is implemented yet.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
-
 ## The idea
 
 `A else B` yields `A` when `A` produced a value, otherwise `B`. It reads as a

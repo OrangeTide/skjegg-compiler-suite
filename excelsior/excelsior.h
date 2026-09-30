@@ -4,7 +4,6 @@
  * language. This header covers the reader (lexer + parser + AST); see
  * grammar.ebnf for the surface and core.md for the design.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 #ifndef EXCELSIOR_H
 #define EXCELSIOR_H

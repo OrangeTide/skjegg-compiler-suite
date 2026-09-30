@@ -12,8 +12,6 @@ feature declares its tier. The five decisions are confirmed; stamping the
 back-catalog with tier lines and writing the tutorial outline are the
 follow-up.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The problem
 
 A flat surface is a hazard for the beginner audience specifically. A

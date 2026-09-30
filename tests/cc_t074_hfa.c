@@ -3,7 +3,7 @@
    these in registers.  No >16-byte struct, so it needs neither the SysV stack
    copy nor the arm64 x8 path; it runs on x86-64 and arm64, excluded on the
    stack-convention targets (ColdFire, RISC-V).
-   Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
+*/
 
 struct P { int x; int y; };            /* 8 bytes: one integer register */
 struct TS { long a; long b; };         /* 16 bytes: two integer registers */

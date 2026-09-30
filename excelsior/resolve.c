@@ -24,7 +24,6 @@
  * an unresolved reference as an error. Errors it does raise: duplicate
  * declarations in one scope, and `self` used outside a method.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include "excelsior.h"

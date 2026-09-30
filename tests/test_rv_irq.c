@@ -5,7 +5,6 @@
  * instructions in a flat array, which keeps the whole machine (memory,
  * the interrupt lines, the CSRs) under the test's hand.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include "rv32.h"

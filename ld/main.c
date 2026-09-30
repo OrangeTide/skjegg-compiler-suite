@@ -1,5 +1,4 @@
 /* main.c : skj-ld linker driver */
-/* made by a machine. PUBLIC DOMAIN */
 
 #include "ld.h"
 #include "version.h"

@@ -2,7 +2,6 @@
 // (fallback-words.md). `else` is only the boolean branch; `otherwise`
 // supplies a backup value when a fallible expression yields none, and it
 // chains right-associatively as a cascade, first success wins.
-// Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 type
     class C
         public

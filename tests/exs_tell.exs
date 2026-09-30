@@ -4,7 +4,6 @@
 // rides the flat argv. Formatting is ${} interpolation at the sender.
 // trace and /// are the author channel: compiled only under -t, so
 // they are no-ops here and stdout matches .expected exactly.
-// Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
 type
     class C

@@ -1,5 +1,4 @@
 /* cc_t050_string_literal.c : string literal access and char comparison */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 int main(void)
 {

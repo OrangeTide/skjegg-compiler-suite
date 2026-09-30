@@ -1,5 +1,4 @@
 /* elf_write.c : ELF32 big-endian executable writer */
-/* made by a machine. PUBLIC DOMAIN */
 
 #include "ld.h"
 

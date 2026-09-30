@@ -84,6 +84,67 @@ driver knows which vector fired. `TRAP #0` is serviced and returns
 through the exception frame; anything else is reported as the signal a
 kernel would have raised. RV32 uses the core's `ecall` callback.
 
+The ELF loader has an in-memory form beside the path form. `elf32_load`
+now slurps the file and delegates to `elf32_load_mem`, which walks the
+program headers over a caller-owned buffer and does no file I/O;
+`elf32_symbol` and `elf32_load_raw` are the same split. This is what lets
+a host load a guest from an image it already holds in memory (a vendored
+verb, a downloaded module) rather than only from a path. Every emulator
+suite exercises the `_mem` body through the path wrappers.
+
+## The RV32 interpreter loop
+
+`rv_run(cpu, budget, retired)` runs up to `budget` instructions and
+returns **why** it stopped, an `enum rv_run_reason`:
+
+| Reason | Meaning |
+|---|---|
+| `RV_RUN_BUDGET` | ran the full count; still runnable |
+| `RV_RUN_HALT`   | halted: a clean exit or a double fault |
+| `RV_RUN_TRAP`   | a trap was taken; `cpu->mcause` names the cause |
+| `RV_RUN_YIELD`  | the hart is parked (`cpu->waiting`): `wfi`, still runnable |
+
+`*retired`, when non-NULL, receives the count. The loop stops the moment
+the machine halts, a trap is taken, or the hart parks on `wfi`, rather
+than spinning the rest of the batch through a vector with no handler
+installed. Halt outranks a trap (a double fault sets both, and the host
+wants the halt); a parked hart reports as a yield, not a stop, because it
+is still runnable once the host clears `cpu->waiting` or an interrupt
+does. This is the cooperative-yield boundary a scheduler builds
+coroutine-style tasks on, and it is the contract a JIT backend would
+return through as well. `rv_step` is one instruction over the same loop,
+for a host that drives the machine itself; it discards the reason and
+reports only halt.
+
+The dispatch is a single threaded loop over the major opcode, not a
+call per instruction. The exceptional exits (misaligned PC, fetch and
+bus faults, illegal encodings, the interrupt path, the per-instruction
+stop test) are marked `RV_UNLIKELY` so the compiler keeps the cold trap
+trampolines out of the straight-line fetch and dispatch path. That is a
+code-layout aid, not a prediction fix: profiling shows every one of
+those branches is already predicted near-perfectly, and the measurable
+win (about 7% on a mixed-workload guest, best-of-runs) comes entirely
+from tightening the hot path's instruction footprint. The two branches
+that actually mispredict, the compressed-versus-32-bit discriminator
+(near 50/50) and the dispatch switch itself (an indirect branch), are
+inherent and cannot be hinted.
+
+A **decoded-instruction cache** (`rv_dec_enable`) speeds re-execution: a
+direct-mapped table keyed by guest PC holding the expanded 32-bit form
+and length, so a re-executed PC skips the fetch-and-expand. It is a
+hint, so a miss only costs the work it was meant to save. `skj-run`
+enables it on every process; a host that does not want it simply leaves
+`cpu->dec` NULL and the slow decode runs every instruction, which is
+what the coverage build does (see `RV_ICOV`). `fence.i` invalidates the
+whole cache: without that a guest that rewrites an instruction and then
+runs `fence.i` (self-modifying code, a guest-side JIT) would keep
+running the stale decode. Because it is a hint it must change no result,
+and `make test-rv-decode-cache` pins exactly that: it runs a program
+with the cache on and off in lockstep and compares the architectural
+state after every instruction. One of its programs rewrites an
+instruction it already ran, runs `fence.i`, and runs it again, so a
+missed invalidation shows as a divergence between the two cores.
+
 ## The two test tiers
 
 `make check` cross-compiles the C runtime for generic m68k, which is
@@ -242,8 +303,8 @@ Lockstep contributes no unique line and no unique instruction, so on
 coverage it is redundant; mutation testing says it kills four mutants
 nothing else kills. Coverage measures *reach*: did control flow arrive
 here. Mutation measures *sensitivity*: if the answer here were wrong,
-would anything notice. The fuzzer adds almost no coverage and is the
-only method that has ever found a real bug in this core, because its
+would anything notice. The fuzzer adds almost no coverage and was for a
+long time the only method to find a real bug in this core, because its
 value is in the values flowing through a line rather than in reaching
 it. Lockstep adds no coverage and supplies the only oracle written by
 strangers; everything else compares against expectations written by the
@@ -258,6 +319,59 @@ because no user-mode reference model has machine mode in it at all.
 `gcov` had been reporting that line as uncovered the whole time, inside
 a list nobody read, and the first article had excused it by name as
 "defensive". It was not defensive; it had simply never been run.
+
+A sanitizer pass (`make check-emu-san`, ASan and UBSan over the
+host-only tests) later found a defect none of the value methods could
+see: the S/B/J immediate decoders sign-extended by shifting a negative
+value left, which is undefined behavior. It produced the right bits on
+two's-complement hardware, so every value method, the fuzzer and
+lockstep included, ran straight over it, and the coverage audit reported
+those lines as reached the whole time. Reach and sensitivity both ask
+whether the answer is right; the sanitizer asks whether the code that
+produced it is defined, an axis the value methods have no view of.
+
+## Verification gaps and future work
+
+The peripheral layers added since the core, the guest allocator
+(`emu/guest.c`) and the process scheduler (`emu/rv_user.c`), do not have
+the core's verification depth, and a run of reviews found several bugs in
+them: `fence.i` not flushing the decode cache, a 32-bit wrap in
+`gm_mmap`/`gm_munmap`, `do_spawn` leaving the parent's `mem.fault` set,
+and `proc_slice` never clearing `cpu->waiting`. Each of those now has a
+regression test, and `make check-emu-san` rebuilds the host-only tests
+with ASan and UBSan (it found an undefined left-shift in the S/B/J
+immediate decoders on its first run). Three follow-on items would close
+the rest of the gap. They follow the same lesson the audit above teaches:
+sensitivity, not reach.
+
+1. **A differential for every internal optimization, seeded with its
+   adversarial case.** The decode cache is transparent to a guest, so
+   qemu is not its oracle; cache-on versus cache-off in one process is
+   (`make test-rv-decode-cache`). The `fence.i` bug was the invalidation
+   trigger, not the steady state, so the rule is that a cache or hint's
+   differential must exercise every invalidation trigger, not just
+   re-execution of the same code. A targeted fuzz mode that emits
+   store-to-text plus `fence.i` sequences and compares cache-on against
+   cache-off would be cheaper and more sensitive for that class than a
+   qemu lockstep, which cannot see the cache at all.
+
+2. **A boundary-value table for guest address and size arithmetic.**
+   `gm_mmap` and `gm_munmap` compute near the 32-bit boundary, which is
+   where the wrap bug hid. Every size or address entry point should be
+   driven with a standing table of values around the edges (0, 1, one
+   below a page, a page, one page below 4GB, 4GB, and 4GB plus a guard),
+   rather than the specific overflow cases now sitting in
+   `tests/test_guest_mmap.c` that were added once the bug was known.
+
+3. **Scheduler state invariants and a stress guest.** Both `rv_user.c`
+   bugs were shared state left set across a lifecycle boundary. A
+   debug-build invariant checked between quanta (a runnable process has
+   `mem.fault == 0`, and `cpu->waiting` matches the reason its last
+   `rv_run` returned) would turn that class into an immediate abort
+   instead of a misbehavior found by reading. The one sandbox demo is a
+   happy path; a stress guest that spawns many children, exhausts the
+   per-child and aggregate memory budgets, and mixes `wfi` park and wake
+   would drive the transitions those two bugs lived in.
 
 ## Conformance: riscv-arch-test
 
@@ -347,6 +461,94 @@ with hand-encoded guest programs, so it needs neither a cross toolchain
 nor qemu. It covers delivery, both mask gates, priority, vectored mode
 for interrupts and exceptions alike, `wfi`, and level re-entry.
 
+## Guest mmap and guarded stacks (RV32)
+
+A guest can ask the emulator for a fresh, guarded region at run time.
+`gm_mmap(m, size, flags)` maps `size` bytes (page-rounded) at an
+emulator-chosen address in a dynamic area above the image, heap and
+stack, returns the base, and with `GM_MAP_GUARD_LO` places an unmapped
+guard page just below it. A guard page is simply a region with
+protection 0, so any access to it faults with the reason "stack
+overflow" and sets `fault_guard`. `gm_munmap(m, base, size)` releases
+the region and its guard. There is also an aggregate commit budget
+(`struct gm_pool`, shared across guests), though nothing wires it up
+yet.
+
+`gm_mmap` computes the whole extent (an optional guard page, the
+mapping, and a trailing gap) in 64-bit and refuses anything that would
+leave the 32-bit space, so a near-4GB request cannot wrap the cursor and
+hand back a low address that overlaps the image, heap, or an earlier
+mapping. It reserves the region-table slots up front, so a full table
+never leaves a guard page mapped with no mapping behind it. `gm_munmap`
+likewise ignores a range whose base plus size wraps past 4GB rather than
+walking a bad page count. These bounds are guest self-corruption
+concerns, not host escapes: a guest address is never a host address, it
+is translated through the per-process page tables to a host page.
+
+The guest reaches this through an **emulator-private ecall**, not a
+Linux syscall: `a7 = 0x000f0001` (`RV_SYS_MAP`, `a0` size, `a1` flags,
+returns base in `a0`), `a7 = 0x000f0002` (`RV_SYS_MUNMAP`), and `a7 =
+0x000f0003` (`RV_SYS_SPAWN`, below). Those numbers sit far above the
+Linux RISC-V syscall space, so a real kernel or `qemu-user` answers
+`-ENOSYS` and a guest that wanted a guarded region falls back to
+whatever it does without one.
+
+That fallback is exactly how the Excelsior source coroutines work on
+both runners from one binary. `libexc` calls an optional
+`__exc_src_stack_provider` hook for a coroutine's private stack;
+`start_rv_psabi.S` installs `__exc_map_stack`, which issues the
+`RV_SYS_MAP` ecall with the guard flag. On `skj-run` that returns a
+guarded region, so a coroutine stack overrun faults on the guard page
+instead of silently corrupting the arena. On `qemu-user` the ecall
+returns `-ENOSYS`, the provider returns 0, and `libexc` falls back to an
+arena block. `make check-exc-rv-emu` runs the coroutine tier through the
+guarded path on `skj-run`; the full `qemu-riscv32` suites cover the
+arena fallback.
+
+Two host-side tests pin these primitives directly, needing no cross
+toolchain and no qemu. `make test-guest-mmap` drives `emu/guest.c` with
+no CPU: it checks the guard page faults on an overrun, `gm_munmap`
+releases the region and its guard, the `gm_pool` aggregate budget caps a
+commit, `gm_read_out` copies a range out, and the overflow bounds hold
+(a near-4GB mmap is refused with no dangling guard, a wrapping munmap is
+a no-op). `make test-rv-run` pins the
+`rv_run` batch contract (the reason it returns and the early stop on a
+trap, a park, or a halt).
+
+## The RV32 process sandbox
+
+`skj-run` runs one root process, and a guest may spawn children. Each
+process has its own CPU, guest memory, and heap and stack, so a child
+shares no memory with its parent. A round-robin scheduler runs the live
+processes a `QUANTUM` of instructions at a time; the batched `rv_run`
+returns after each slice with the reason it stopped, so the scheduler
+reaps a process that exited, halted, or faulted, and reschedules one that
+merely spent its slice. This is the consumer the `rv_run` reason contract
+was built for.
+
+`RV_SYS_SPAWN` (a7 `0x000f0003`, `a0` an image pointer, `a1` its length,
+returns a handle) loads a child from an image the guest holds in its own
+memory: the host reads the bytes out with `gm_read_out` and loads them
+with the in-memory ELF loader into a fresh process. A returned handle is
+a slot plus a generation, so a handle held past a child's death does not
+match a later child that reuses the slot.
+
+The `--total-mem` cap is an aggregate `gm_pool` budget shared across every
+process, so many children cannot together exhaust host memory even though
+each keeps its own per-process `--mem` limit. `--child-max-insns` budgets
+a spawned child so a runaway child is killed alone rather than stalling
+the run.
+
+`make test-rv-sandbox` is the end-to-end demo. A parent guest, built by
+the in-tree skj toolchain (`skj-cc-rv` + `skj-as-rv` + `skj-ld-rv`), spawns
+a child embedded in its own data and does a guarded map and release; the
+child maps a large region and touches every page. Under a generous
+`--total-mem` both finish; under a tight one the child exhausts the shared
+pool and faults while the parent, isolated from it, still finishes and the
+run exits on the root's status. That one demo exercises spawn, the guarded
+map and release, the shared budget, and the scheduler resuming a child
+across many slices.
+
 ## Double precision is a non-goal (decided 2026-08-04)
 
 `check-exc-rv` runs under qemu, not `skj-run`, because the RV32 core
@@ -379,12 +581,18 @@ anything with a double in it, `skj-run` for everything else. The same
 gap covers `_Float16`, which the core also lacks (`fmt` must be S), so
 a `_Float16` guest is qemu's too.
 
-One of the seven is not really a float program: `exs_source_yield` has
-no doubles and fails because `start_rv_psabi.S` spills fs0-fs11 with
-`fsd` on every source switch. A coroutine switch has to preserve those
-registers, and the backend allocates them as doubles, so the honest
-fixes are a build variant or nothing. It is left as a known wart rather
-than a reason to reopen D.
+One of the seven was not really a float program: `exs_source_yield` has
+no doubles and used to fail because `start_rv_psabi.S` spills fs0-fs11
+with `fsd` on every source switch, and the F-only core cannot execute
+`fsd`. A coroutine switch has to preserve those registers, and the
+backend allocates them as doubles, so the honest fixes were a build
+variant or nothing. The build variant now exists: `make check-exc-rv-emu`
+runs the coroutine tier on `skj-run` with a soft-ctx crt, a mechanical
+`fsd`->`fsw` / `fld`->`flw` rewrite of `start_rv_psabi.S` (the Makefile
+generates it with `sed`). That is correct on this core precisely because
+it runs no double, so the saved float slots only ever hold 32-bit values.
+See "Guest mmap and guarded stacks" below for the private stack those
+coroutines run on.
 
 ## Single-precision determinism across backends
 

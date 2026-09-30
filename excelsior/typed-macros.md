@@ -29,8 +29,6 @@ static types and emits the matching monomorphic code. Genericity is a Meta-tier
 facility, not a base-layer feature, which keeps the base type system small and
 pushes generics to library authors (tiers.md).
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The ordering problem, and the phase that solves it
 
 A typed macro needs a contradiction resolved: **macros expand before

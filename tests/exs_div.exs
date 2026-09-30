@@ -1,7 +1,6 @@
 // exs_div.exs : divide and modulo are fallible producers
 // (runtime-errors.md). A zero divisor fails Icon-style: `otherwise`
 // supplies the default, `if var` branches, and a fallible func propagates.
-// Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
 type
     class C

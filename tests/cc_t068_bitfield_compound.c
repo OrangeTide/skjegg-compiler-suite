@@ -1,5 +1,4 @@
 /* cc_t068_bitfield_compound.c : compound assignment and ++/-- on bit-fields */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 struct T { unsigned a : 4; unsigned b : 6; int s : 5; };
 int main(void) {
     struct T t;

@@ -18,8 +18,6 @@ type and no runtime form. This pass gives it one: a mixed list is `list<any>`
 of boxed values, opt-in so homogeneous lists stay fast, narrowed by `match`
 and `is`.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The design
 
 ### A mixed list is `list<any>` of boxed values

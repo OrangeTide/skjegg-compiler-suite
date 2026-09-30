@@ -16,9 +16,6 @@ this note was later renamed to `otherwise` (fallback-words.md), so `else`
 means only a boolean branch. Read every `A else B` / `xs[i] else d` below
 as `A otherwise B` / `xs[i] otherwise d`; the semantics are unchanged.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
-
 ## The model
 
 A fallible expression either produces its value or fails. In expression

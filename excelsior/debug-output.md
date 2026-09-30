@@ -17,8 +17,6 @@ interpolation), and folds `trace expr` into it. The result is one author
 channel, `///`, and the sharpened rule **`tell` talks to players, `///` talks
 to the trace channel**.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## What exists today
 
 - **`trace expr`** (T_TRACE / N_TRACE): a statement compiled only under `-t`

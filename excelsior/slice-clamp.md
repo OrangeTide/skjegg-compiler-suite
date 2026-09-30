@@ -9,8 +9,6 @@ decisions are confirmed; the follow-up is D2 (the fallible.md framing
 sentence) and D3 (the slice-aware teaching error), both small. D1 keeps
 the runtime unchanged.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The problem
 
 Indexing and slicing disagree about the ends. `xs[i]` and `s[i]` are

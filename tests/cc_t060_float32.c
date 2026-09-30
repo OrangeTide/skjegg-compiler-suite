@@ -1,7 +1,6 @@
 /* cc_t060_float32.c : native single-precision float and float<->double,
  * int<->float conversions (IR_F32).  All checks are integer-valued so the
  * result is stable on ColdFire's compute-wide FPU. */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 float add_f(float a, float b)
 {

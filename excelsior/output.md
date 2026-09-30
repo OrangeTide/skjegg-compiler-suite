@@ -15,9 +15,6 @@ makes `///` default-on and host-routed rather than `-t`-gated. The
 implementation in the tree is still this note's v1; read
 debug-output.md for the decided end state.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
-
 ## The problem
 
 The language has no `print`, `log()` is a provisional test affordance

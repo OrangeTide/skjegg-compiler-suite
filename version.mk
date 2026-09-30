@@ -1,5 +1,4 @@
 # version.mk — the single source of truth for the Skjegg version.
-# Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 #
 # Bump this, then tag the release commit as v$(SKJ_VERSION).
 # `make release-check` verifies the two agree.
@@ -8,4 +7,4 @@
 # Vendored and tarball builds use it verbatim, so a consumer never sees
 # their own project's tags reported as a Skjegg version.
 
-SKJ_VERSION := 0.6.0
+SKJ_VERSION := 0.7.0

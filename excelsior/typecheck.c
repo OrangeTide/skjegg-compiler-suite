@@ -23,7 +23,6 @@
  * checker never reports a false error against a name it cannot yet model.
  * When those layers are modeled, ET_ANY narrows and the checks tighten.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include "excelsior.h"

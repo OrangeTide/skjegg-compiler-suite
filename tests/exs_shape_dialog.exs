@@ -4,7 +4,6 @@
 // passes the type checker. Shapes are static-only (D4): the literal does
 // not lower, so this is a checker sample (skj-exc <file>), not run
 // end-to-end.
-// Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
 type
     shape dialog

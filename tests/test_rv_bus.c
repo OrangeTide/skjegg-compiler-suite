@@ -18,7 +18,6 @@
  * So this test counts callbacks rather than checking values, which is
  * the only way the distinction is visible.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include "rv32.h"

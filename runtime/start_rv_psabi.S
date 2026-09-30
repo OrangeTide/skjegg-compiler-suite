@@ -11,7 +11,6 @@
  * ordinary C, so runtime/soft64.c supplies them (the cross toolchain
  * ships no rv32 libgcc to take them from).
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 	.text
@@ -24,6 +23,7 @@
 	.globl __moo_arena_reset
 	.globl __exc_src_next
 	.globl __exc_src_yield
+	.globl __exc_map_stack
 
 /* Linux/RISC-V syscall numbers: read 63, write 64, exit 93 */
 
@@ -32,6 +32,12 @@ _start:
 					   kernel's is one page and the deeper
 					   tests overflow it */
 	andi	sp, sp, -16
+	/* Install the guarded-stack provider for coroutine stacks.  On skj-run
+	   the RV_SYS_MAP ecall maps a guard-paged region; on qemu-user it is
+	   an unknown syscall, so the provider returns 0 and the arena is used. */
+	la	t0, __exc_src_stack_provider
+	la	t1, __exc_map_stack
+	sw	t1, 0(t0)
 	jal	ra, main
 
 	li	a7, 93
@@ -73,6 +79,22 @@ __moo_arena_reset:
 	la	t0, __moo_arena_ptr
 	la	t1, __moo_arena
 	sw	t1, 0(t0)
+	ret
+
+/* char *__exc_map_stack(int size);
+ *   Ask the emulator for a fresh region of `size` bytes with a guard page just
+ *   below it, for use as a private coroutine stack.  Returns the region base,
+ *   or 0 when the facility is absent: qemu-user answers the unknown ecall with
+ *   -ENOSYS (a small negative), which is caught here so the caller falls back
+ *   to the arena. */
+__exc_map_stack:
+	li	a1, 1			/* GM_MAP_GUARD_LO */
+	li	a7, 0x000f0001		/* RV_SYS_MAP: a0=size, a1=flags */
+	ecall				/* a0 = base, 0, or -errno */
+	li	t0, -4096		/* 0xfffff000: -errno lands in [-4096, -1] */
+	bgeu	a0, t0, 1f
+	ret
+1:	li	a0, 0
 	ret
 
 /****************************************************************

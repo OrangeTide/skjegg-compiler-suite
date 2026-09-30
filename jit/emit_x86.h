@@ -11,6 +11,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "code.h"
+
 /* Hardware register numbers, as they appear in ModRM/REX encodings. */
 enum x_reg {
     X_RAX = 0, X_RCX = 1, X_RDX = 2, X_RBX = 3,
@@ -32,20 +34,6 @@ enum x_cc {
     X_S = 0x8, X_NS = 0x9, X_P = 0xA, X_NP = 0xB,
     X_L = 0xC, X_GE = 0xD, X_LE = 0xE, X_G = 0xF,
 };
-
-/* A growable byte buffer that the encoders append into. Backed by malloc;
-   the JIT copies the finished bytes into an executable mapping. */
-struct code {
-    uint8_t *buf;
-    size_t len;
-    size_t cap;
-};
-
-void code_init(struct code *c);
-void code_free(struct code *c);
-void emit8(struct code *c, uint8_t b);
-void emit32(struct code *c, uint32_t v);
-void emit64(struct code *c, uint64_t v);
 
 /* Data movement. The _ri32 form is a 32-bit load that zero-extends to 64
    bits (the natural encoding for a Kobold i32 constant); _ri64 loads a full

@@ -16,7 +16,7 @@
 | 4 body fn, 8 body sp, 12 body fp, 16 pump sp, 20 pump fp,
 | 24 stack top, 28.. argument words.
 |
-| Made by a machine. PUBLIC DOMAIN (CC0-1.0)
+|
 
     .text
 

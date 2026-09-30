@@ -6,8 +6,6 @@
  * onto the other rather than carrying a second ELF reader. Keeping the
  * shape identical is what lets every file in this directory stay byte
  * for byte what the articles describe, so a later re-sync is a copy.
- *
- * made by a machine. PUBLIC DOMAIN
  */
 
 #ifndef ELF_LOADER_H

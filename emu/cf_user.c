@@ -1,5 +1,4 @@
 /* cf_user.c : Linux user-mode machine for the ColdFire emulator */
-/* made by a machine. PUBLIC DOMAIN */
 
 #include "coldfire.h"
 #include "elf32.h"

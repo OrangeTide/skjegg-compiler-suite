@@ -6,7 +6,6 @@
  * or across an explicit trailing "\". Consecutive newlines fold.
  * Keywords are matched case-insensitively (ASCII fold).
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include <ctype.h>

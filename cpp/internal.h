@@ -1,5 +1,4 @@
 /* internal.h : C preprocessor library — private data structures */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 #ifndef CPP_INTERNAL_H
 #define CPP_INTERNAL_H

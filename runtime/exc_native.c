@@ -11,7 +11,6 @@
  * Cross-compiled with the m68k toolchain (freestanding, no libc) and
  * linked with start.S, which calls this main().
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include "libexc.h"

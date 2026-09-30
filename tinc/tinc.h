@@ -1,5 +1,4 @@
 /* tinc.h : TinC front-end declarations
- * Made by a machine.  PUBLIC DOMAIN (CC0-1.0)
  */
 
 #ifndef TINC_H

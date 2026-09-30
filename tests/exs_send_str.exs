@@ -2,7 +2,6 @@
 // one-word values, so they ride the flat argv of __exc_send unchanged:
 // a checked send on a spawned class-typed receiver passes a str and a
 // fixed argument and returns each type back.
-// Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
 type
     class Speaker

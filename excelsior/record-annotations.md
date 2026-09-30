@@ -16,8 +16,6 @@ grammar and its Lisp-style macros. The metadata is a list of **tags** attached
 to a field with a `tags [...]` clause, and each tag is a symbol followed by its
 own atoms, so a macro walks the list and dispatches on the leading symbol.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## A field line is a comma list of entries
 
 The field syntax extends from "one field per line" to "a comma list of entries,

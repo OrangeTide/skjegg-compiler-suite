@@ -9,8 +9,6 @@ pointer or reference type. All seven decisions are confirmed; the
 implementation waits on per-instance field storage for the self-field
 case (a `shared` local works before it).
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The problem
 
 "Hold an indirect reference, like a C or Pascal pointer" bundles several

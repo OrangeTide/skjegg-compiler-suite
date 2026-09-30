@@ -1,5 +1,5 @@
 /* va_aarch64.c - AAPCS64 va_arg helper for cc-arm64 (P4-P2 varargs).
-   Made by a machine. PUBLIC DOMAIN (CC0-1.0)
+
 
    cc lowers va_arg to a call to __va_arg, which returns a pointer to the next
    argument slot and advances the va_list.  The AArch64 va_list has separate

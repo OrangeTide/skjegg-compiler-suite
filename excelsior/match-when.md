@@ -20,8 +20,6 @@ the newline-as-crutch this review targets, and it is the direct cause of the
 one arm-steal misparse the language has to teach around. This pass gives every
 arm an explicit opener, `when`, so the boundary is a word.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## Where match leans on the newline
 
 Two boundaries in match are set by the newline rather than a keyword:

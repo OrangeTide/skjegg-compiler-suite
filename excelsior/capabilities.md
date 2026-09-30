@@ -19,8 +19,6 @@ and the boundary that a capability is reuse and not a type. (The earlier notes
 call this a "mixin"; the concept is the same, and this pass fixes the readable
 name, with the older mentions migrating as touched.)
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The word: `capability`
 
 The construct is spelled **`capability`**. The choice is deliberate, because the

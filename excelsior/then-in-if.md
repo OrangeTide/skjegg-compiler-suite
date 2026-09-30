@@ -29,7 +29,6 @@ ones, and it splits the one idea "test a condition" into two shapes. The fix is
 to close a condition with `then` on `if` and `elseif`, matching the
 if-expression and the Algol/Pascal/BASIC surface the audience reads.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
 ## What the missing `then` costs
 

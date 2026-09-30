@@ -1,5 +1,4 @@
 /* cc_t056_longlong.c : long long arithmetic, casts, and function calls */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 long long add64(long long a, long long b)
 {

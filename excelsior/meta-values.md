@@ -16,8 +16,6 @@ answered: what is a meta value? Today the answer is an accident of which
 cases `meta_eval` happens to handle, and the accident is visible as an
 asymmetry between numbers, text, and bools.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The gap, and the asymmetry that shows it is unintentional
 
 A string literal is already a meta value, and a bool literal is too. Both

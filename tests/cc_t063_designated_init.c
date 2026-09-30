@@ -1,5 +1,4 @@
 /* cc_t063_designated_init.c : designated initializers (.field / [index]) */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 /* Exercises designated initializers through the aggregate byte-image builder:
    out-of-order struct field designators, a designator followed by positional

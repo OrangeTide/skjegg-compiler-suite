@@ -4,18 +4,54 @@
  * driver; libexc implements everything the compiler emits calls to.
  * The native binding is runtime/exc_native.c.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 #ifndef LIBEXC_H
 #define LIBEXC_H
 
+/* Two builds of this runtime.
+ *
+ * The ordinary build targets a 32-bit guest directly (ColdFire, RISC-V
+ * RV32): the toolchain's `long` is already four bytes, a pointer is four
+ * bytes, and the shared object model, `word` values and pointer fields all
+ * match the guest with no help.
+ *
+ * The EXC_GUEST32 build runs this same runtime as LP64 *host* code over a
+ * 32-bit guest object model (the in-process JIT, jit/exc_main.c). There a
+ * guest value is four bytes and a guest pointer is a 32-bit address in the
+ * host's low memory. Every shared-struct field is held at guest width, and
+ * a stored pointer is recovered by zero-extension because the guest arena
+ * lives below 4GB. EXC_G() reads a guest pointer field into a host pointer,
+ * EXC_TOG() narrows a host pointer into a guest field, and EXC_PTRFIELD()
+ * declares a pointer field at guest width. All three are identities in the
+ * ordinary build, so its layout and code are byte-for-byte unchanged. */
+#ifdef EXC_GUEST32
+#include <stdint.h>
+typedef int32_t word;
+typedef uint32_t exc_gptr;
+#define EXC_G(w, T)          ((T)(uintptr_t)(uint32_t)(w))
+#define EXC_TOG(p)           ((exc_gptr)(uintptr_t)(p))
+#define EXC_PTRFIELD(T, nm)  exc_gptr nm
+#else
 typedef long word;
+typedef void *exc_gptr;
+#define EXC_G(w, T)          ((T)(w))
+#define EXC_TOG(p)           (p)
+#define EXC_PTRFIELD(T, nm)  T nm
+#endif
+
+/* Field-access helpers for the shared structs, so a site reads the same in
+ * both builds. */
+#define EXC_SDATA(s)         EXC_G((s)->data, const char *)
+#define EXC_SETDATA(r, p)    ((r)->data = EXC_TOG(p))
+#define EXC_CLS(o)           EXC_G((o)->cls, struct class_desc *)
+#define EXC_PARENT(c)        EXC_G((c)->parent, struct class_desc *)
+#define EXC_IMAGE(c)         EXC_G((c)->image, const word *)
 
 /* A string value: a pointer to one of these descriptors (UTF-8 bytes,
  * byte length; text-encoding.md). */
 struct exc_str {
     int len;
-    const char *data;
+    EXC_PTRFIELD(const char *, data);
 };
 
 /* The compiler emits one descriptor per class:
@@ -26,11 +62,11 @@ struct exc_str {
  * inherited ones) is the freeze/thaw walker's map (host-abi.md D7):
  * reach it at verbs + 2 * nverbs. */
 struct class_desc {
-    struct class_desc *parent;
-    long nverbs;
-    long nwords;
-    const word *image;
-    long verbs[];               /* (selector, code) pairs, then the
+    EXC_PTRFIELD(struct class_desc *, parent);
+    word nverbs;
+    word nwords;
+    EXC_PTRFIELD(const word *, image);
+    word verbs[];               /* (selector, code) pairs, then the
                                  * field table */
 };
 
@@ -51,7 +87,7 @@ struct class_desc {
 
 /* An object: its class then its own field segment (host-abi.md D3). */
 struct exc_obj {
-    struct class_desc *cls;
+    EXC_PTRFIELD(struct class_desc *, cls);
     word fields[];
 };
 
@@ -68,16 +104,30 @@ struct exc_obj {
 struct exc_trapdesc {
     int kind;
     int line;
-    const char *file;           /* NUL-terminated, or 0 (host-detected) */
-    const char *name;           /* the failing callee etc., or 0 */
+    EXC_PTRFIELD(const char *, file);   /* NUL-terminated, or 0 (host-detected) */
+    EXC_PTRFIELD(const char *, name);   /* the failing callee etc., or 0 */
 };
 
-/* Reserved globals and the compiler's entry symbols. */
-extern struct exc_obj *__exc_self;
-extern struct class_desc *__exc_entry_class;
-extern long __exc_entry_selector;
-extern long __exc_entry_argc;
-extern long __exc_selnames[];   /* { count, &name... }, names in id order */
+/* file/name read as host pointers (0 stays 0). */
+#define EXC_TRAPFILE(w)  EXC_G((w)->file, const char *)
+#define EXC_TRAPNAME(w)  EXC_G((w)->name, const char *)
+
+/* Reserved globals and the compiler's entry symbols. __exc_self is shared
+ * with the guest (it reads it for `self`), so it is held at guest width; in
+ * the EXC_GUEST32 build the runtime stores it with EXC_TOG and reads it with
+ * EXC_G. */
+#ifdef EXC_GUEST32
+typedef exc_gptr exc_selfref;
+typedef exc_gptr exc_classref;
+#else
+typedef struct exc_obj *exc_selfref;
+typedef struct class_desc *exc_classref;
+#endif
+extern exc_selfref __exc_self;
+extern exc_classref __exc_entry_class;
+extern word __exc_entry_selector;
+extern word __exc_entry_argc;
+extern word __exc_selnames[];   /* { count, &name... }, names in id order */
 
 /* The arena (runtime/start.S). */
 extern void *__moo_arena_alloc(int size);

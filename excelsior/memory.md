@@ -22,8 +22,6 @@ allocator needs: the **escape boundary** between a turn's transient scratch and 
 actor's persistent state. Memory management is naming the regions that boundary
 implies and the cheapest mechanism each needs.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The forces
 
 - **The author cannot manage memory.** No `free`, no ownership annotations, no

@@ -1,7 +1,6 @@
 // exs_div_ov_trap.exs : INT_MIN / -1 has no representable result and is
 // an OVERFLOW fault (runtime-errors.md), never consumable: the `otherwise`
 // must NOT catch it.
-// Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
 type
     class C

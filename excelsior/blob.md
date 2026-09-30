@@ -19,8 +19,6 @@ memory-safe by construction (refcounted backing, bounded access) yet mutable and
 aliasing, so it does the systems work the immutable value world cannot, without
 the immutable value world's copies.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The v1 job: manipulate binary, both directions
 
 Blob exists to read and to build binary:

@@ -19,7 +19,6 @@
  * here: a deterministic f32 Excelsior has no double, and the F-only core
  * cannot serve as its oracle anyway.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #ifndef F32_VECTORS_H

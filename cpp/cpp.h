@@ -1,5 +1,4 @@
 /* cpp.h : C preprocessor library — public API */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 #ifndef CPP_H
 #define CPP_H

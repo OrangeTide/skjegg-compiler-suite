@@ -2,7 +2,6 @@
    the pointer/long size invariant.  Written data-model-invariant so it holds
    under both ILP32 and LP64 (this exercises the address lowering that becomes
    64-bit under LP64). */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 int arr[5] = { 10, 20, 30, 40, 50 };
 struct S { char c; long l; int *p; };

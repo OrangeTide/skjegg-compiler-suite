@@ -96,7 +96,7 @@ main(int argc, char **argv)
 
     printf("loaded %s, entry 0x%08x\n\n", argv[1], entry);
 
-    steps = rv_run(&cpu, MAX_STEPS);
+    rv_run(&cpu, MAX_STEPS, &steps);
 
     printf("\n");
     if (!m.exited) {

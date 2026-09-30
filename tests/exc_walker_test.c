@@ -12,7 +12,6 @@
  * Cross-compiled with the m68k toolchain and run under qemu-m68k by
  * `make test-exc-walker`.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include "../runtime/libexc.h"

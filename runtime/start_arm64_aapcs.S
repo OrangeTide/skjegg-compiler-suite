@@ -8,7 +8,6 @@
  * to a low-memory stack (matching the runtime's arena placement) and calls
  * main, then passes main's return value to exit_group.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 	.text
 	.globl _start

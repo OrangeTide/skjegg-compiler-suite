@@ -1,5 +1,4 @@
 /* cond.c : conditional directives and #if expression evaluator */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 #include "internal.h"
 #include <string.h>

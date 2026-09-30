@@ -1,5 +1,4 @@
 /* cc_t066_bitfields.c : bit-field packing, read/write, signed extension */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 struct flags {
     unsigned a : 3;   /* 0..7 */
     unsigned b : 5;   /* 0..31 */

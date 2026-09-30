@@ -15,8 +15,6 @@ per element** with the loop variable bound to that element's concrete type. This
 is Zig's `inline for` and D's `static foreach`, and it is the shared engine
 under `fieldsof` iteration and mixed-data processing.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The problem: a fixed sequence with no single type
 
 Given `[1 "two" 3.0]`, what is the type of `x` in `for x in ...`? There is none:

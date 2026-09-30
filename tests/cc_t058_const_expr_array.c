@@ -1,5 +1,4 @@
 /* cc_t058_const_expr_array.c : constant expressions in array sizes */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 #define WIDTH  8
 #define HEIGHT 4

@@ -1,5 +1,4 @@
 /* util.c : diagnostics, allocation helpers, and error recovery */
-/* made by a machine. PUBLIC DOMAIN */
 
 #include "util.h"
 

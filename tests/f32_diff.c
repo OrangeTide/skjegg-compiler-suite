@@ -20,7 +20,6 @@
  * and any backend whose runtime enables flush-to-zero (the subnormal
  * vectors turn to zero).
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include "f32_golden.inc"

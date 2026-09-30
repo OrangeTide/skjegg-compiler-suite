@@ -2,7 +2,7 @@
    The struct copy half works on every target; passing/returning a small
    struct in a register is the x86-64 psABI (P3), so this test is x86-64 only
    (excluded elsewhere, like cc_t071).
-   Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
+*/
 
 struct P { int x; int y; };            /* 8 bytes, one INTEGER eightbyte */
 struct S { char a; short b; int c; };  /* 8 bytes, mixed field widths */

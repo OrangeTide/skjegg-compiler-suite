@@ -1,5 +1,4 @@
 /* script.c : GNU ld linker script subset parser */
-/* made by a machine. PUBLIC DOMAIN */
 
 #include "ld.h"
 

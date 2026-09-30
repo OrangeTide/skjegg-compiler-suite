@@ -8,7 +8,6 @@
  * string ${..} holes, and section-level error resynchronisation.
  * Errors currently stop at the first offence.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include <stdarg.h>

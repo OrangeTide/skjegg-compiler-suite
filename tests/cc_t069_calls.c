@@ -1,5 +1,4 @@
 /* cc_t069_calls.c : many args (register overflow), mixed int/float, returns */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 /* 8 int args: under SysV the first 6 go in registers, the last 2 on the stack */
 int sum8(int a, int b, int c, int d, int e, int f, int g, int h)

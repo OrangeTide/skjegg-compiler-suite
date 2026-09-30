@@ -16,7 +16,6 @@
  *                        pattern (low 16 bits), rounded to nearest, ties to
  *                        even, overflow to infinity, underflow to zero.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 /* binary16 -> binary32. Widening is always exact, so there is no rounding. */

@@ -12,8 +12,6 @@ behavior (types `any`, does not lower). The surface D6 left open settled
 during implementation to a bracketed body (`Kind [ slots ]`); see the
 implementation notes at the end.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The problem, restated
 
 Dialog trees are the flagship content-creator artifact and the story

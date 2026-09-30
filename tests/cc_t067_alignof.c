@@ -1,5 +1,4 @@
 /* cc_t067_alignof.c : _Alignof operator and _Alignas on a global */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 struct S { char c; double d; };
 _Alignas(16) char buf[32];
 int main(void) {

@@ -47,3 +47,10 @@ jobs:
       # toolchain, and the Excelsior codegen tiers.
       - name: Full test matrix
         run: make check-all
+
+      # The host-only emulator tests rebuilt with ASan+UBSan.  They run
+      # natively with no qemu and cover the RV32 core, the guest allocator, and
+      # the process scheduler, catching memory and undefined-behavior bugs the
+      # value-checking suites miss.
+      - name: Emulator sanitizer pass
+        run: make check-emu-san

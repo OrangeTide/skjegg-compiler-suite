@@ -1,5 +1,5 @@
 ; start_x86_64_sysv.asm - x86-64 runtime for cc under the SysV AMD64 ABI.
-; Made by a machine. PUBLIC DOMAIN (CC0-1.0)
+;
 ;
 ; cc-x86-64 (built -DCC_PSABI) emits System V AMD64 calls: args in
 ; rdi,rsi,rdx,rcx,r8,r9 / xmm0..7, return in rax/xmm0.  So the syscall wrappers

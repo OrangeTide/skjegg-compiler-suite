@@ -38,8 +38,6 @@ primitive value, a named function is readable sugar over a uniform binding core
 function taking a `func`, and the only other sugar is a comprehension that lowers
 to a loop.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## Why the naive lambda does not fit
 
 The obvious lambda, a brace-delimited block with an arrow binder, cannot be

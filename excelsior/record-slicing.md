@@ -15,8 +15,6 @@ access to only some fields. The design keeps it cheap by making the field subset
 so the compiler emits exactly the operations the subset allows, with no runtime
 mask and no copy.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The word is `with`
 
 A record slice is spelled **`p with (x, y)`**. `with` is the word Pascal already

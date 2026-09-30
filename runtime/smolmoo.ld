@@ -5,7 +5,6 @@
  * host growing down from 0x20000. The binding's _start sits in
  * .text.entry so it lands first.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 OUTPUT_FORMAT("elf32-m68k")

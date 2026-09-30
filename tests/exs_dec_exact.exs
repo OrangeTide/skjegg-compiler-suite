@@ -4,7 +4,6 @@
 // exactly 1, and printing is exact with trailing zeros stripped.
 // Inference lands on decimal (whole numbers are int, decimals are
 // decimal, float is asked for by name).
-// Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
 type
     class C

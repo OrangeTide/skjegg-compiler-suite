@@ -1,5 +1,4 @@
 /* main.c : skj-cpp preprocessor CLI */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 #include "cpp.h"
 #include "util.h"

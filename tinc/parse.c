@@ -1,5 +1,4 @@
 /* parse.c : recursive-descent parser for TinC
- * Made by a machine.  PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include "tinc.h"

@@ -10,8 +10,6 @@ The redesign was informed by research into the S-Lang scripting
 language (jedsoft.org), particularly its stack-based parameter
 model and multiple return values.
 
-Made by a machine.  PUBLIC DOMAIN (CC0-1.0)
-
 ---
 
 ## Design Goals

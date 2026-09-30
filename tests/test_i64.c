@@ -1,5 +1,4 @@
 /* test_i64.c : IR-level integration test for 64-bit integer codegen */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 #include "ir.h"
 

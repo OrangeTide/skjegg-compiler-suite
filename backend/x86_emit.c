@@ -1,5 +1,4 @@
 /* x86_emit.c : x86 back-end, emits NASM-syntax assembly */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 /*
  * x86-64, Linux ELF64, ILP32-style, emitting the toolkit stack calling
  * convention (the SysV register convention is backend/x86_select.c).  Every

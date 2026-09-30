@@ -22,8 +22,6 @@ exactly the unpredictable bit-twiddling boolean-ops.md kept off the surface. A
 exposing them as first-class **named** flags, not bit positions. This is
 Pascal's `set of`, brought forward for the audience.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## What a set is
 
 **`set of E` is a value type: a fixed-size bitmask over a small element

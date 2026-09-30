@@ -23,7 +23,6 @@
  * Division by zero returns 0: libexc's callers check the divisor first
  * (runtime-errors.md's DIV_ZERO fault fires above this level).
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 typedef unsigned int u32;

@@ -9,9 +9,6 @@ else, and each confusion below comes from letting it be less. Inputs: the
 Compact Pascal review (receiver methods, explicit interface conformance)
 and the de-arrow principle (symbols do math, words do structure).
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
-
 ## Do we need verbs at all?
 
 Asked before deciding the surface, answered from the game brief

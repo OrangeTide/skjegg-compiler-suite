@@ -18,8 +18,6 @@ these are meta-layer primitives a procedural macro calls over the builder-stack
 record layout. This pass settles the last open piece, the concrete spelling of
 the primitives and how they thread through a macro body.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## Why introspection at all
 
 A macro that writes a serializer (freeze/thaw), a pretty-printer, a

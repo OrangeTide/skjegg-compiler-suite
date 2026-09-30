@@ -10,9 +10,6 @@ decisions were confirmed (2026-07): enum word lists and data-literal holes
 are adopted, and the newline policy is option A, with the continuation set
 published as CONT_TOKEN in grammar.ebnf.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
-
 ## Inventory
 
 Every sequence in the language today:

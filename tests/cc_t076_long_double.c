@@ -3,7 +3,7 @@
    (sizeof, a pointer).  Actually operating on a long double value is a compile
    error (no 80-bit/128-bit float in the backend); that is checked by hand, not
    here, since the cc runner has no compile-error fixture.
-   Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
+*/
 
 /* a prototype referencing long double must parse (headers rely on this) */
 long double declared_but_unused(long double);

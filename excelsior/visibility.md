@@ -15,8 +15,6 @@ writes the fact twice and earns a teaching error when the two copies
 disagree. This note removes the redundancy by making visibility a per-member
 property stated exactly once, and retires the section headers.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## What exists today
 
 The class body is a sequence of `public` / `private` sections; each member

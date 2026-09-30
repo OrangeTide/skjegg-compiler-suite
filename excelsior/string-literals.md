@@ -15,8 +15,6 @@ makes an author escape every quotation mark, the punctuation their writing needs
 most. This pass adds a second delimiter for exactly that text, and folds the
 multi-line case into it, while keeping `"..."` as the everyday default.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The problem is the delimiter, not the string
 
 A string literal has two jobs, mark where the text starts and stops, and let a

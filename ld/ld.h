@@ -1,5 +1,4 @@
 /* ld.h : static linker for ELF32 big-endian (ColdFire/m68k) — shared types */
-/* made by a machine. PUBLIC DOMAIN */
 
 #ifndef LD_H
 #define LD_H

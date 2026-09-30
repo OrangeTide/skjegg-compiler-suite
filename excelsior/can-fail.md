@@ -8,8 +8,6 @@ consumers were removed in favor of an inline `on fail` statement handler,
 and `if` / `while` are now bool-only. See that note and the
 implementation notes at the end.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The problem
 
 A `can fail` func is a valueless fallible action (fallible.md): it either

@@ -21,8 +21,6 @@ the one thing left open, the concrete surface a library author writes a macro
 in, so the deferred facilities have a place to land. core.md's sections stay
 the deep reference; this note is the authoritative meta-layer surface.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The settled model, in brief
 
 - **Two layers, one syntax of forms** (core.md). The runtime layer is the

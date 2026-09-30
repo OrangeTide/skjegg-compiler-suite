@@ -18,7 +18,6 @@ loops and never involve a source value. Tier: Mechanics (a builder
 writes `for x in xs` and never sees a source; declaring one is a systems
 author's job); tiers.md.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
 ## The idea
 

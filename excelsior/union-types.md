@@ -14,8 +14,6 @@ possibilities the reader sees in full and the checker can match exhaustively.
 The fully-open `any` stays, but only as the checker's internal leniency type
 (`ET_ANY`), never a type a builder writes.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## Why closed, not open
 
 An open `any` is a hole in the reader's model: it says "some value, could be

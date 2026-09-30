@@ -27,8 +27,6 @@ Records are declared-but-dead-ending, exactly where enums were before
 enums.md. This note settles what a record value is so the construct becomes
 first-class.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## What a record is
 
 **A record is plain data: a fixed set of named, typed fields, with value

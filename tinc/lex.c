@@ -1,5 +1,4 @@
 /* lex.c : hand-written lexer for TinC
- * Made by a machine.  PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include "tinc.h"

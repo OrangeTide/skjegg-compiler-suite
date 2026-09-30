@@ -19,8 +19,6 @@ objects, and "prop" was never a third kind. It was a single overloaded word
 straddling two unrelated roles, and this pass separates them, retiring the
 word.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## What exists, and the tangle
 
 - **Records** (records.md): plain data, value semantics, named fields,

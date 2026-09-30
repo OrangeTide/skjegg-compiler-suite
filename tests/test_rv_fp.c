@@ -16,7 +16,6 @@
  * eight additions, so this checks the core against another
  * implementation rather than against its author's reading.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include "rv32.h"

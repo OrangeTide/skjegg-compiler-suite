@@ -3,7 +3,6 @@
  * The type checker and IR lowering are a later phase; this driver
  * exercises the reader only.
  *
- * Made by a machine. PUBLIC DOMAIN (CC0-1.0)
  */
 
 #include "excelsior.h"

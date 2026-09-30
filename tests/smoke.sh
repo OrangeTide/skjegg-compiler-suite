@@ -7,7 +7,6 @@
 # Usage: tests/smoke.sh [qemu-binary]
 # Requires: build/skj-tinc build/skj-sc build/skj-mooc build/skj-cc build/skj-as build/skj-ld
 #
-# Made by a machine. PUBLIC DOMAIN (CC0-1.0)
 
 set -eu
 

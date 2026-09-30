@@ -9,8 +9,6 @@ which is the "which chooser when" map R13 asked for. The five decisions are
 confirmed; the removal (lexer hint, dropping `parse_select`/`N_SELECT` and
 the Trap-2 guard, migrating `exs_select`) is the follow-up.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The problem
 
 Excelsior has four ways to pick a value, and a beginner meets all four with

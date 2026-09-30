@@ -63,12 +63,40 @@ static long long h_moddi3(long long a, long long b) { return a % b; }
 static unsigned long long h_udivdi3(unsigned long long a, unsigned long long b) { return a / b; }
 static unsigned long long h_umoddi3(unsigned long long a, unsigned long long b) { return a % b; }
 
-/* SysV va_arg helper (the __va_arg cc lowers each __builtin_va_arg to).  The
-   guest is ILP32, so its va_list has 4-byte pointers and the four fields sit at
-   byte offsets 0/4/8/12: gp_offset, fp_offset, overflow_arg_area,
+/* va_arg helper (the __va_arg cc lowers each __builtin_va_arg to).  Returns a
+   pointer to the next argument slot and advances the va_list.  The layout is the
+   target's psABI va_list, since the JIT guest follows the same ABI the AOT tools
+   emit. */
+#if defined(__aarch64__)
+/* AAPCS64: separate GP and VR register save areas plus an overflow stack, with
+   8-byte pointers (the guest stores them with strx even under the ILP32 address
+   model).  Mirrors runtime/va_aarch64.c. */
+struct h_va_list {
+    void *stack;
+    void *gr_top;
+    void *vr_top;
+    int gr_offs;
+    int vr_offs;
+};
+static void *
+h_va_arg(void *ap, int is_fp)
+{
+    struct h_va_list *v = ap;
+    void *p;
+    if (is_fp) {
+        if (v->vr_offs < 0) { p = (char *)v->vr_top + v->vr_offs; v->vr_offs += 16; }
+        else                { p = v->stack; v->stack = (char *)p + 8; }
+    } else {
+        if (v->gr_offs < 0) { p = (char *)v->gr_top + v->gr_offs; v->gr_offs += 8; }
+        else                { p = v->stack; v->stack = (char *)p + 8; }
+    }
+    return p;
+}
+#else
+/* SysV: the guest is ILP32, so its va_list has 4-byte pointers and the four
+   fields sit at byte offsets 0/4/8/12: gp_offset, fp_offset, overflow_arg_area,
    reg_save_area, the last two 32-bit low-memory addresses.  Read as raw words,
-   mirroring runtime/va_x86_64.c.  Returns a pointer to the next argument slot
-   and advances the va_list. */
+   mirroring runtime/va_x86_64.c. */
 static void *
 h_va_arg(void *ap, int is_fp)
 {
@@ -83,6 +111,20 @@ h_va_arg(void *ap, int is_fp)
     }
     return (void *)(unsigned long)p;
 }
+#endif
+
+#if defined(__riscv)
+/* RV32 is a register-pair target, so unlike x86-64/arm64 the backend lowers a
+   64-bit multiply and the shift family to calls into stack-ABI helpers (the
+   operands on the stack, the result in a0:a1).  These live in jit/rv_jit_i64.S
+   under skj_jit_* names; the guest reaches them by their __*di3 names, bound
+   below.  (__divdi3 / __moddi3 stay a normal register-ABI call the front end
+   lowers, so the h_* bindings above serve them as on the other targets.) */
+extern void skj_jit_muldi3(void);
+extern void skj_jit_ashldi3(void);
+extern void skj_jit_ashrdi3(void);
+extern void skj_jit_lshrdi3(void);
+#endif
 
 /* A binding's address is a code pointer.  ISO C does not define a direct
    function-pointer-to-void* cast, so route it through a union, which keeps the
@@ -122,6 +164,7 @@ int
 main(int argc, char **argv)
 {
     const char *inpath;
+    const char *volatile dumppath = NULL;   /* read after setjmp; volatile avoids -Wclobbered */
     struct cpp *pp;
     char ppbuf[65536];
     int pplen;
@@ -151,6 +194,12 @@ main(int argc, char **argv)
     bind("__udivdi3", (void (*)(void))h_udivdi3);
     bind("__umoddi3", (void (*)(void))h_umoddi3);
     bind("__va_arg", (void (*)(void))h_va_arg);
+#if defined(__riscv)
+    bind("__muldi3", skj_jit_muldi3);
+    bind("__ashldi3", skj_jit_ashldi3);
+    bind("__ashrdi3", skj_jit_ashrdi3);
+    bind("__lshrdi3", skj_jit_lshrdi3);
+#endif
 
     arena_init(&a);
     pp = cpp_new();
@@ -173,6 +222,10 @@ main(int argc, char **argv)
             } else {
                 cpp_define(pp, def, "1");
             }
+        } else if (strcmp(argv[i], "-d") == 0) {
+            /* dump the compiled code region to a file and exit, for the
+               disassembler-validation test (tests/run-jit-disasm.sh) */
+            dumppath = argv[++i];
         } else if (strcmp(argv[i], "-V") == 0) {
             printf("skj-jit %s\n", SKJ_VERSION);
             cpp_free(pp);
@@ -216,6 +269,19 @@ main(int argc, char **argv)
     /* JIT the whole program (kp_jit runs the register allocator itself) */
     if (kp_jit(&j, prog, binds, nbinds, err, sizeof err) != 0)
         die("jit: %s", err);
+
+    /* -d: write the compiled code region for the disassembler check, then stop
+       (do not run the program). */
+    if (dumppath) {
+        FILE *df = fopen(dumppath, "wb");
+        if (!df)
+            die("cannot open '%s'", dumppath);
+        fwrite(j.code, 1, j.code_len, df);
+        fclose(df);
+        kp_jit_free(&j);
+        util_cleanup_run();
+        return 0;
+    }
 
     entry = kp_jit_entry(&j, "main");
     if (!entry)

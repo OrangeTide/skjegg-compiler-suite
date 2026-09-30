@@ -1,5 +1,4 @@
 /* cc_t071_varargs.c : SysV varargs (x86-64 only; excluded on other targets) */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 typedef __builtin_va_list va_list;
 

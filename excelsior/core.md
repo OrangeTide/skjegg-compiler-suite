@@ -813,4 +813,3 @@ act.
 
 ---
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)

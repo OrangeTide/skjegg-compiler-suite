@@ -16,8 +16,6 @@ regex engine is a sandbox hazard. This pass takes the backlog's real driver, the
 **compile-time versus runtime string distinction**, and builds a readable
 pattern that is checked and compiled ahead of time and matched fallibly.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## Why not raw regex
 
 Two reasons the primary surface is not `^(\w+)\s+(\d+)$`:

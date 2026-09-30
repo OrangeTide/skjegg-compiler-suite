@@ -1,5 +1,4 @@
 /* util.h : diagnostics, memory helpers, and error recovery */
-/* made by a machine. PUBLIC DOMAIN */
 
 #ifndef UTIL_H
 #define UTIL_H

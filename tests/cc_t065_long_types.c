@@ -1,6 +1,5 @@
 /* cc_t065_long_types.c : integer-literal typing and size_t/ptrdiff_t, checked
    with data-model-invariant relations so it holds under both ILP32 and LP64. */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 typedef unsigned long size_t;
 typedef long ptrdiff_t;

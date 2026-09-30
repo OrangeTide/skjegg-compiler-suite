@@ -1,5 +1,4 @@
 /* link.c : section merge, symbol resolution, relocation application */
-/* made by a machine. PUBLIC DOMAIN */
 
 #include "ld.h"
 

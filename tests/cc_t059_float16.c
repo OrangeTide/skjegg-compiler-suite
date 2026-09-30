@@ -1,5 +1,4 @@
 /* cc_t059_float16.c : _Float16 storage type, arithmetic promoted to double */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 int ftoi_h(_Float16 x)
 {

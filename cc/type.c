@@ -1,5 +1,4 @@
 /* type.c : C type system helpers */
-/* Made by a machine. PUBLIC DOMAIN (CC0-1.0) */
 
 #include "cc.h"
 

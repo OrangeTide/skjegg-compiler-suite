@@ -7,8 +7,6 @@ the vendored `runtime/utf8.c` decoder, code-point `len`/`s[i]`/`s[lo to hi]`/`fo
 c in s` and the code-point index bound, and the `bytes` accessor for str and
 list; see `tests/exs_utf8_r7.exs`.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The problem
 
 An Excelsior string is a `{ len, data }` descriptor where `length` is a

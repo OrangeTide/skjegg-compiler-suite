@@ -6,8 +6,6 @@ end were confirmed and are in the tree: the two-word design is kept, the
 `nothing`-into-a-ref soundness hole is closed, and both mix-up directions
 now report a teaching error at the six value-to-slot boundaries.
 
-Made by a machine. PUBLIC DOMAIN (CC0-1.0)
-
 ## The problem
 
 Excelsior has two words for absence. `nothing` is "no result", the

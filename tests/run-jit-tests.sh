@@ -4,7 +4,10 @@
 # run-cc-tests.sh: no assembler, linker, or qemu, since skj-jit runs the
 # compiled program in its own process.
 #
-#   JIT    - the jit driver (default build/skj-jit)
+#   JIT     - the jit driver (default build/skj-jit)
+#   RUNNER  - a command prefix to run it under (e.g. qemu-aarch64 for a
+#             cross-built arm64 driver); empty for a native driver
+#   EXCLUDE - space-separated test names to skip (overrides the default set)
 #
 # The JIT covers the integer, float (single and double), control-flow, call
 # (register and stack arguments, small-struct by value, varargs), global,
@@ -17,6 +20,7 @@ set -eu
 HERE=$(dirname "$0")
 ROOT=$(cd "$HERE/.." && pwd)
 JIT="${JIT:-$ROOT/build/skj-jit}"
+RUNNER="${RUNNER:-}"
 
 if [ ! -x "$JIT" ]; then
     echo "ERROR: $JIT not found"
@@ -33,13 +37,17 @@ fi
 #   is nearly all one can write today).  That is a large, self-contained piece:
 #   if built, it should be build-time optional (default off) so the JIT stays
 #   lean for the common case of C that never writes asm.
-EXCLUDE="cc_t077_inline_asm"
+DEFAULT_EXCLUDE="cc_t077_inline_asm"
 #   _Float16 (IR_FLH / IR_FSH): deliberately deferred.  The encoding work is
 #   small (bind the half.c softfloat helpers as imports, like __va_arg), but
 #   there are several common 16-bit float formats (IEEE binary16, bfloat16),
 #   so what a _Float16 should mean here is a design question to settle when a
 #   real consumer needs it, not today.
-EXCLUDE="$EXCLUDE cc_t059_float16"
+DEFAULT_EXCLUDE="$DEFAULT_EXCLUDE cc_t059_float16"
+
+# The default excludes apply unless the caller supplied its own EXCLUDE (the
+# arm64 JIT, for instance, supports _Float16 natively and excludes only asm).
+EXCLUDE="${EXCLUDE-$DEFAULT_EXCLUDE}"
 
 fail=0
 pass=0
@@ -64,7 +72,7 @@ for src in "$HERE"/cc_*.c; do
     expect_rc=$(cat "$exitcode_file")
 
     set +e
-    "$JIT" "$src" >/dev/null 2>"$ROOT/build/$name.jiterr"
+    $RUNNER "$JIT" "$src" >/dev/null 2>"$ROOT/build/$name.jiterr"
     rc=$?
     set -e
 

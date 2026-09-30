@@ -1,5 +1,5 @@
 /* va_x86_64.c - SysV AMD64 va_arg helper for cc-x86-64 (P2 varargs).
-   Made by a machine. PUBLIC DOMAIN (CC0-1.0)
+
 
    cc lowers va_arg to a call to __va_arg, which returns a pointer to the next
    argument slot and advances the va_list.  The register save area holds the
