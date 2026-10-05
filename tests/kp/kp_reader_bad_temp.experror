@@ -1,0 +1,4 @@
+# An instruction naming a temp index past the function's declared `temps`
+# count must be rejected by the reader, not passed to regalloc (which sizes
+# temp_reg[]/temp_spill[] by that count).
+line 3: temp index out of range

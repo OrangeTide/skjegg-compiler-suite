@@ -1,0 +1,485 @@
+/* map.c : the guest-owned string-keyed associative array (map of T), shared by the hosted VM
+   and the freestanding sandbox through rt_glue.h. See map.h for the object model.
+
+   The table is open-addressed with linear probing. A key slot holds a retained string handle,
+   or 0 for empty or 1 for a tombstone (a deleted slot that probing must skip but insertion may
+   reuse); both sentinels are impossible for a real string handle, an even heap address. The
+   load factor counts live entries and tombstones together, so the table grows (and sheds its
+   tombstones) before probing can run long. */
+
+#include "map.h"
+#include "str.h"
+
+struct kp_map {
+    uint32_t refcount;
+    uint32_t kind;      /* KP_OBJ_MAP */
+    int32_t  count;     /* live entries */
+    int32_t  tombs;     /* tombstone slots */
+    int32_t  cap;       /* slot capacity, a power of two, 0 when empty */
+    int32_t  elemsize;  /* value width in bytes */
+    uint32_t layout;    /* guest address of the value's handle-field map, 0 when none */
+    uint32_t keys;      /* guest block of cap key handles (0 empty, 1 tombstone) */
+    uint32_t vals;      /* guest block of cap * elemsize value bytes */
+    uint32_t modcount;  /* bumped on every insert or delete, for iterator invalidation */
+};
+
+struct kp_mapiter {
+    uint32_t refcount;
+    uint32_t kind;      /* KP_OBJ_MAPITER */
+    uint32_t map;       /* the map being iterated, retained */
+    int32_t  pos;       /* next slot index to scan */
+    uint32_t modcount;  /* the map's modcount when the iterator was made */
+};
+
+#define KEY_EMPTY 0u
+#define KEY_TOMB  1u
+#define MAP_INIT_CAP 8
+
+static struct kp_map *
+map_ptr(KP_VM_P uint32_t a)
+{
+    return a ? (struct kp_map *)RT_PTR(a) : (struct kp_map *)0;
+}
+
+static struct kp_mapiter *
+iter_ptr(KP_VM_P uint32_t a)
+{
+    return (struct kp_mapiter *)RT_PTR(a);
+}
+
+/* Read/write the key handle at slot i (the key block may be unaligned after translation). */
+static uint32_t
+key_at(KP_VM_P struct kp_map *m, int32_t i)
+{
+    uint32_t v;
+    memcpy(&v, (char *)RT_PTR(m->keys) + (unsigned long)i * 4, 4);
+    return v;
+}
+
+static void
+set_key_at(KP_VM_P struct kp_map *m, int32_t i, uint32_t k)
+{
+    memcpy((char *)RT_PTR(m->keys) + (unsigned long)i * 4, &k, 4);
+}
+
+/* The real address of slot i's value storage. */
+static void *
+val_at(KP_VM_P struct kp_map *m, int32_t i)
+{
+    return (char *)RT_PTR(m->vals) + (unsigned long)i * (unsigned long)m->elemsize;
+}
+
+/* Read the int32 at word index idx of a layout blob (an i8 global, so possibly unaligned). */
+static int32_t
+layout_i32(KP_VM_P uint32_t layout, int32_t idx)
+{
+    int32_t v;
+    memcpy(&v, (char *)RT_PTR(layout) + (unsigned long)idx * 4, 4);
+    return v;
+}
+
+/* The FNV-1a hash of a key's bytes, read host-side. Computed before any allocation so the
+   byte pointer stays valid. */
+static uint32_t
+hash_key(KP_VM_P uint32_t key)
+{
+    const char *b = kp_str_bytes(KP_VM_A key);
+    int32_t n = kp_str_len(KP_VM_A key), i;
+    uint32_t h = 2166136261u;
+
+    for (i = 0; i < n; i++) {
+        h ^= (uint32_t)(unsigned char)b[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static int
+key_eq(KP_VM_P uint32_t a, uint32_t b)
+{
+    return a == b || kp_str_cmp(KP_VM_A a, b) == 0;
+}
+
+/* Retain the value's managed handles in slot i, per the layout map. Used when a value is
+   copied out (tryget, iterator) or a map is cloned: the copy takes its own references. */
+static void
+retain_val(KP_VM_P struct kp_map *m, int32_t i)
+{
+    int32_t nf, j;
+    char *e;
+    uint32_t h;
+
+    if (m->layout == 0)
+        return;
+    nf = layout_i32(KP_VM_A m->layout, 0);
+    e = (char *)val_at(KP_VM_A m, i);
+    for (j = 0; j < nf; j++) {
+        memcpy(&h, e + layout_i32(KP_VM_A m->layout, 1 + j), 4);
+        RT_RETAIN(h);
+    }
+}
+
+/* Release the value's managed handles in slot i, per the layout map. */
+static void
+release_val(KP_VM_P struct kp_map *m, int32_t i)
+{
+    int32_t nf, j;
+    char *e;
+    uint32_t h;
+
+    if (m->layout == 0)
+        return;
+    nf = layout_i32(KP_VM_A m->layout, 0);
+    e = (char *)val_at(KP_VM_A m, i);
+    for (j = 0; j < nf; j++) {
+        memcpy(&h, e + layout_i32(KP_VM_A m->layout, 1 + j), 4);
+        RT_RELEASE(h);
+    }
+}
+
+/* Release the managed handles of a value held at an arbitrary guest address, per a layout
+   map. Used to drop the previous contents of a destination slot before a value is copied in. */
+static void
+release_slot_at(KP_VM_P uint32_t addr, uint32_t layout)
+{
+    int32_t nf, j;
+    uint32_t h;
+
+    if (layout == 0)
+        return;
+    nf = layout_i32(KP_VM_A layout, 0);
+    for (j = 0; j < nf; j++) {
+        memcpy(&h, (char *)RT_PTR(addr) + layout_i32(KP_VM_A layout, 1 + j), 4);
+        RT_RELEASE(h);
+    }
+}
+
+static void map_finalize(KP_VM_P uint32_t a);
+static void mapiter_finalize(KP_VM_P uint32_t a);
+
+uint32_t
+kp_map_new(KP_VM_P int32_t elemsize, uint32_t layout)
+{
+    uint32_t a;
+    struct kp_map *m;
+
+    RT_REGISTER(KP_OBJ_MAP, map_finalize);   /* idempotent */
+    a = RT_ALLOC((uint32_t)sizeof(struct kp_map));
+    m = map_ptr(KP_VM_A a);
+    m->refcount = 1;
+    m->kind = KP_OBJ_MAP;
+    m->count = 0;
+    m->tombs = 0;
+    m->cap = 0;
+    m->elemsize = elemsize;
+    m->layout = layout;
+    m->keys = 0;
+    m->vals = 0;
+    m->modcount = 0;
+    return a;
+}
+
+/* Grow (or first-allocate) the table to newcap slots and rehash the live entries into it,
+   dropping tombstones. The descriptor address is stable; only the key and value blocks move. */
+static void
+map_grow(KP_VM_P uint32_t a, int32_t newcap)
+{
+    struct kp_map *m = map_ptr(KP_VM_A a);
+    uint32_t oldkeys = m->keys, oldvals = m->vals, nk, nv;
+    int32_t oldcap = m->cap, es = m->elemsize, i, j, mask = newcap - 1;
+    uint32_t k;
+
+    nk = RT_ALLOC((uint32_t)newcap * 4);
+    memset(RT_PTR(nk), 0, (unsigned long)newcap * 4);     /* every slot empty */
+    nv = RT_ALLOC((uint32_t)newcap * (uint32_t)es);
+    m = map_ptr(KP_VM_A a);                               /* re-translate after allocations */
+    m->keys = nk;
+    m->vals = nv;
+    m->cap = newcap;
+    m->tombs = 0;
+    for (i = 0; i < oldcap; i++) {
+        memcpy(&k, (char *)RT_PTR(oldkeys) + (unsigned long)i * 4, 4);
+        if (k == KEY_EMPTY || k == KEY_TOMB)
+            continue;
+        j = (int32_t)(hash_key(KP_VM_A k) & (uint32_t)mask);
+        while (key_at(KP_VM_A m, j) != KEY_EMPTY)
+            j = (j + 1) & mask;
+        set_key_at(KP_VM_A m, j, k);
+        memcpy(val_at(KP_VM_A m, j),
+               (char *)RT_PTR(oldvals) + (unsigned long)i * (unsigned long)es,
+               (unsigned long)es);
+    }
+    if (oldkeys)
+        RT_FREE(oldkeys);
+    if (oldvals)
+        RT_FREE(oldvals);
+}
+
+/* Find the slot holding key, or -1 when absent. */
+static int32_t
+map_find(KP_VM_P struct kp_map *m, uint32_t key)
+{
+    int32_t mask, i;
+    uint32_t k, h;
+
+    if (m->cap == 0)
+        return -1;
+    mask = m->cap - 1;
+    h = hash_key(KP_VM_A key);
+    i = (int32_t)(h & (uint32_t)mask);
+    for (;;) {
+        k = key_at(KP_VM_A m, i);
+        if (k == KEY_EMPTY)
+            return -1;
+        if (k != KEY_TOMB && key_eq(KP_VM_A k, key))
+            return i;
+        i = (i + 1) & mask;
+    }
+}
+
+uint32_t
+kp_map_reserve(KP_VM_P uint32_t a, uint32_t key, int32_t elemsize, uint32_t layout)
+{
+    struct kp_map *m;
+    int32_t mask, i, slot, tomb;
+    uint32_t k;
+
+    if (a == 0)
+        a = kp_map_new(KP_VM_A elemsize, layout);
+    else {
+        /* Value semantics keeps each map unique (assignment clones), so a reserve mutates in
+           place and returns an owned reference the caller stores back. The one time a map is
+           shared is while an iterator holds it; a structural change then is caught by the
+           iterator's modcount guard rather than silently forked. */
+        m = map_ptr(KP_VM_A a);
+        m->refcount++;
+    }
+    m = map_ptr(KP_VM_A a);
+    if (m->cap == 0)
+        map_grow(KP_VM_A a, MAP_INIT_CAP);
+    else if ((m->count + m->tombs + 1) * 4 >= m->cap * 3)
+        map_grow(KP_VM_A a, m->cap * 2);
+    m = map_ptr(KP_VM_A a);
+    mask = m->cap - 1;
+    i = (int32_t)(hash_key(KP_VM_A key) & (uint32_t)mask);
+    tomb = -1;
+    for (;;) {
+        k = key_at(KP_VM_A m, i);
+        if (k == KEY_EMPTY) {
+            slot = tomb >= 0 ? tomb : i;
+            RT_RETAIN(key);
+            set_key_at(KP_VM_A m, slot, key);
+            memset(val_at(KP_VM_A m, slot), 0, (unsigned long)m->elemsize);
+            m->count++;
+            if (slot == tomb)
+                m->tombs--;
+            m->modcount++;
+            return a;
+        }
+        if (k == KEY_TOMB) {
+            if (tomb < 0)
+                tomb = i;
+        }
+        else if (key_eq(KP_VM_A k, key))
+            return a;   /* already present: its value slot is reused in place */
+        i = (i + 1) & mask;
+    }
+}
+
+uint32_t
+kp_map_get(KP_VM_P uint32_t a, uint32_t key)
+{
+    struct kp_map *m = map_ptr(KP_VM_A a);
+    int32_t i = a ? map_find(KP_VM_A m, key) : -1;
+
+    if (i < 0) {
+        RT_TRAP_KEY();
+        return 0;
+    }
+    return m->vals + (uint32_t)i * (uint32_t)m->elemsize;
+}
+
+int32_t
+kp_map_tryget(KP_VM_P uint32_t a, uint32_t key, uint32_t vaddr)
+{
+    struct kp_map *m = map_ptr(KP_VM_A a);
+    int32_t i = a ? map_find(KP_VM_A m, key) : -1;
+
+    if (i < 0)
+        return 0;
+    retain_val(KP_VM_A m, i);               /* the copy takes its own references */
+    release_slot_at(KP_VM_A vaddr, m->layout);  /* drop the destination's previous value */
+    memcpy(RT_PTR(vaddr), val_at(KP_VM_A m, i), (unsigned long)m->elemsize);
+    return 1;
+}
+
+int32_t
+kp_map_has(KP_VM_P uint32_t a, uint32_t key)
+{
+    struct kp_map *m = map_ptr(KP_VM_A a);
+
+    return (a && map_find(KP_VM_A m, key) >= 0) ? 1 : 0;
+}
+
+static void
+map_del_inplace(KP_VM_P uint32_t a, uint32_t key)
+{
+    struct kp_map *m = map_ptr(KP_VM_A a);
+    int32_t i = map_find(KP_VM_A m, key);
+
+    if (i < 0)
+        return;
+    release_val(KP_VM_A m, i);
+    RT_RELEASE(key_at(KP_VM_A m, i));
+    set_key_at(KP_VM_A m, i, KEY_TOMB);
+    m->count--;
+    m->tombs++;
+    m->modcount++;
+}
+
+uint32_t
+kp_map_del(KP_VM_P uint32_t a, uint32_t key)
+{
+    struct kp_map *m;
+
+    if (a == 0)
+        return 0;
+    map_del_inplace(KP_VM_A a, key);   /* in place, like kp_map_reserve: the map is unique */
+    m = map_ptr(KP_VM_A a);
+    m->refcount++;
+    return a;
+}
+
+int32_t
+kp_map_len(KP_VM_P uint32_t a)
+{
+    struct kp_map *m = map_ptr(KP_VM_A a);
+
+    return m ? m->count : 0;
+}
+
+uint32_t
+kp_map_clone(KP_VM_P uint32_t a)
+{
+    struct kp_map *m, *cm;
+    uint32_t c, nk, nv;
+    int32_t cap, es, i;
+    uint32_t k;
+
+    if (a == 0)
+        return 0;
+    m = map_ptr(KP_VM_A a);
+    c = kp_map_new(KP_VM_A m->elemsize, m->layout);
+    cap = m->cap;
+    es = m->elemsize;
+    if (cap > 0) {
+        nk = RT_ALLOC((uint32_t)cap * 4);
+        nv = RT_ALLOC((uint32_t)cap * (uint32_t)es);
+        m = map_ptr(KP_VM_A a);
+        cm = map_ptr(KP_VM_A c);
+        memcpy(RT_PTR(nk), RT_PTR(m->keys), (unsigned long)cap * 4);
+        memcpy(RT_PTR(nv), RT_PTR(m->vals), (unsigned long)cap * (unsigned long)es);
+        cm->keys = nk;
+        cm->vals = nv;
+        cm->cap = cap;
+        cm->count = m->count;
+        cm->tombs = m->tombs;
+        for (i = 0; i < cap; i++) {
+            k = key_at(KP_VM_A cm, i);
+            if (k != KEY_EMPTY && k != KEY_TOMB) {
+                RT_RETAIN(k);
+                retain_val(KP_VM_A cm, i);
+            }
+        }
+    }
+    return c;
+}
+
+static void
+map_finalize(KP_VM_P uint32_t a)
+{
+    struct kp_map *m = map_ptr(KP_VM_A a);
+    int32_t i;
+    uint32_t k;
+
+    for (i = 0; i < m->cap; i++) {
+        k = key_at(KP_VM_A m, i);
+        if (k != KEY_EMPTY && k != KEY_TOMB) {
+            release_val(KP_VM_A m, i);
+            RT_RELEASE(k);
+        }
+    }
+    if (m->keys)
+        RT_FREE(m->keys);
+    if (m->vals)
+        RT_FREE(m->vals);
+    RT_FREE(a);
+}
+
+uint32_t
+kp_mapiter_new(KP_VM_P uint32_t map)
+{
+    uint32_t a;
+    struct kp_mapiter *it;
+
+    RT_REGISTER(KP_OBJ_MAPITER, mapiter_finalize);   /* idempotent */
+    a = RT_ALLOC((uint32_t)sizeof(struct kp_mapiter));
+    it = iter_ptr(KP_VM_A a);
+    it->refcount = 1;
+    it->kind = KP_OBJ_MAPITER;
+    it->map = map;
+    it->pos = 0;
+    if (map) {
+        RT_RETAIN(map);
+        it->modcount = map_ptr(KP_VM_A map)->modcount;
+    }
+    else
+        it->modcount = 0;
+    return a;
+}
+
+int32_t
+kp_mapiter_next(KP_VM_P uint32_t a, uint32_t kaddr, uint32_t vaddr)
+{
+    struct kp_mapiter *it = iter_ptr(KP_VM_A a);
+    uint32_t mid = it->map;
+    struct kp_map *m;
+    int32_t i;
+    uint32_t k, old;
+
+    if (mid == 0)
+        return 0;
+    m = map_ptr(KP_VM_A mid);
+    if (m->modcount != it->modcount) {
+        RT_TRAP_CONCMOD();
+        return 0;
+    }
+    while (it->pos < m->cap) {
+        i = it->pos++;
+        k = key_at(KP_VM_A m, i);
+        if (k == KEY_EMPTY || k == KEY_TOMB)
+            continue;
+        /* write an owned key handle to *kaddr (retain the new one before releasing the old,
+           so the same handle cannot drop to zero in between) */
+        memcpy(&old, RT_PTR(kaddr), 4);
+        RT_RETAIN(k);
+        memcpy(RT_PTR(kaddr), &k, 4);
+        RT_RELEASE(old);
+        /* write an owned copy of the value to *vaddr */
+        retain_val(KP_VM_A m, i);
+        release_slot_at(KP_VM_A vaddr, m->layout);
+        memcpy(RT_PTR(vaddr), val_at(KP_VM_A m, i), (unsigned long)m->elemsize);
+        return 1;
+    }
+    return 0;
+}
+
+static void
+mapiter_finalize(KP_VM_P uint32_t a)
+{
+    struct kp_mapiter *it = iter_ptr(KP_VM_A a);
+
+    if (it->map)
+        RT_RELEASE(it->map);
+    RT_FREE(a);
+}

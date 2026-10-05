@@ -931,7 +931,7 @@ enc_li(struct rv_asm *a, struct rv_operand *ops, int nops, int emit)
     }
 
     hi = (imm + 0x800) >> 12;
-    lo = imm - (hi << 12);              /* sign-extended low 12 bits */
+    lo = imm - (int32_t)((uint32_t)hi << 12);   /* sign-extended low 12 bits */
     if (lo == 0) {
         if (emit)
             emit_word(a, enc_u(0x37, ops[0].reg, hi));         /* lui rd, hi */

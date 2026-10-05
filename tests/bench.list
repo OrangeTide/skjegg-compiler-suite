@@ -1,0 +1,25 @@
+# Instruction-count benchmark corpus.
+#
+# One guest per line: a path under build/, then free-form notes.  Each is a
+# program already built and validated by check-emu (build/cf, ColdFire) or
+# check-rv-emu (build/rv, RISC-V), reused here for its instruction count
+# rather than its output.  The set spans both emulator cores and a range of
+# workloads from a few thousand to a few million instructions, so a codegen
+# or core change that moves work shows up somewhere.
+#
+# Keep entries deterministic and self-contained (no stdin, clean exit).
+# After adding or removing one, run: make bench-accept
+
+# ColdFire (m68k) guests
+cf/moo_func                     Moo: function calls and locals
+cf/exc_walker_test              Excelsior: tree walk
+cf/pascal_t052_set_basic        Pascal: set operations
+cf/pascal_t135_prime_sieve      Pascal: sieve of Eratosthenes
+cf/pascal_t177_deep_recursion   Pascal: deep recursion
+cf/pascal_t127_fibonacci        Pascal: recursive fibonacci
+
+# RISC-V (rv32) guests
+rv/loop                         tinc: loop
+rv/fib                          tinc: recursive fibonacci
+rv/scm_reset_heap               Scheme: heap churn
+rv/scm_reset_reclaim            Scheme: heap churn with reclaim

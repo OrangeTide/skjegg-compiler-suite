@@ -40,6 +40,14 @@ static const int fargreg[8] = { MC_XMM0, MC_XMM1, MC_XMM2, MC_XMM3,
 #define FSC1 MC_XMM8     /* float scratch B */
 #define SAVED 40        /* bytes of pushed callee-saved registers (5 * 8) */
 
+/* Per-temp float storage format: 1 when a float temp holds f32 (single) format in
+   its xmm, 0 when f64.  The C front end keeps `float` as f32 in registers while the
+   Kobold front end keeps every float as f64, so a single value crossing a call
+   (FARG/FCALL/FRETV with FWIDTH_F32) is converted only when the temp's format
+   differs from the f32 wire width.  Set per function in x86_select_func. */
+static const unsigned char *g_f32;
+static int src_is_f32(int t) { return g_f32 && t >= 0 && g_f32[t]; }
+
 /* Per-function frame geometry, all measured downward from rbp. */
 struct frame {
     int *slot_off;      /* slot k's low byte sits at rbp - (SAVED + slot_off[k]) */
@@ -224,27 +232,41 @@ marshal(struct mc *m, struct ir_func *fn, struct frame *fr,
         int *pend_temp, char *pend_isf, char *pend_fw, int *pend_msize,
         int npending)
 {
-    int gi = 0, fi = 0, stack_bytes = 0, space, off;
+    int gi = 0, fi = 0, stack_bytes = 0, nfreg = 0, stage, stagebase, space, off, fj;
 
     /* SysV passes the first six integer arguments in registers and the first
        eight float arguments in xmm registers; the rest go on the stack, in
        source order, the leftmost at the lowest address.  A MEMORY-class struct
        argument (pend_msize > 0) is always a stack copy, occupying its rounded
        byte size.  Count the stack bytes and reserve a 16-aligned block so rsp
-       stays 16-aligned at the call (the body already runs with rsp 16-aligned). */
+       stays 16-aligned at the call (the body already runs with rsp 16-aligned).
+
+       Float register arguments need care: their source temps live in xmm1-7,
+       which overlap the xmm0-7 argument registers, so loading them one at a time
+       would clobber a source a later argument has not yet consumed.  With two or
+       more float register arguments they are staged through a private scratch
+       region just above the ABI stack-argument area: every float source is read
+       into FSC1 (xmm8, neither an argument register nor a temp home) and stored
+       before any xmm0-7 register is written, then reloaded into the argument
+       registers.  Integer argument registers never overlap the integer temp
+       homes, and a single float register argument cannot clobber anything, so
+       both load directly. */
     for (int i = 0; i < npending; i++) {
         if (pend_msize[i] > 0)      stack_bytes += (pend_msize[i] + 7) & ~7;
-        else if (pend_isf[i])     { if (fi++ >= 8) stack_bytes += 8; }
+        else if (pend_isf[i])     { if (fi++ >= 8) stack_bytes += 8; else nfreg++; }
         else                      { if (gi++ >= 6) stack_bytes += 8; }
     }
-    space = (stack_bytes + 15) & ~15;
+    stage = nfreg >= 2;
+    stagebase = stack_bytes;             /* staging sits above the ABI args */
+    space = (stack_bytes + (stage ? nfreg * 8 : 0) + 15) & ~15;
     if (space)
         mc_sub_ri32(m, MC_RSP, space);
 
-    /* Place the stack arguments first, through scratch registers that are not
-       argument registers (r10, and xmm8 for floats), so loading the register
-       arguments next cannot clobber a value already parked on the stack. */
-    gi = fi = off = 0;
+    /* 1. Place the ABI stack arguments (structs, overflow ints, overflow floats)
+          and, when staging, each float register argument into the staging region.
+          All float sources are read (into FSC1) before any xmm0-7 argument
+          register is written in pass 3. */
+    gi = fi = off = fj = 0;
     for (int i = 0; i < npending; i++) {
         if (pend_msize[i] > 0) {
             /* copy the struct's bytes to [rsp+off]; the address is in the temp */
@@ -271,15 +293,28 @@ marshal(struct mc *m, struct ir_func *fn, struct frame *fr,
             }
             off += (pend_msize[i] + 7) & ~7;
         } else if (pend_isf[i]) {
+            /* a single is narrowed to f32 (movss); a double keeps its 8-byte store */
+            /* a single wire width narrows an f64-format source to f32; a source
+               already in f32 format (the C front end) moves as-is */
+            int narrow = pend_fw[i] && !src_is_f32(pend_temp[i]);
             if (fi >= 8) {
                 matf(m, fn, fr, pend_temp[i], FSC1);
-                /* the value is already f32 in its register for a single arg, so
-                   just store its natural width (4 bytes single, 8 double) */
+                if (narrow)
+                    mc_cvtsd2ss_rr(m, FSC1, FSC1);
                 if (pend_fw[i])
                     mc_movss_store(m, MC_RSP, off, FSC1);
                 else
                     mc_movsd_store(m, MC_RSP, off, FSC1);
                 off += 8;
+            } else if (stage) {
+                matf(m, fn, fr, pend_temp[i], FSC1);
+                if (narrow)
+                    mc_cvtsd2ss_rr(m, FSC1, FSC1);
+                if (pend_fw[i])
+                    mc_movss_store(m, MC_RSP, stagebase + 8 * fj, FSC1);
+                else
+                    mc_movsd_store(m, MC_RSP, stagebase + 8 * fj, FSC1);
+                fj++;
             }
             fi++;
         } else {
@@ -292,25 +327,38 @@ marshal(struct mc *m, struct ir_func *fn, struct frame *fr,
         }
     }
 
-    /* Then load the register arguments.  Their sources are callee-saved
-       registers or spill slots, never an argument register, so filling
-       rdi..r9 / xmm0..7 in order does not clobber a not-yet-read source.  A
-       MEMORY struct consumes no register, so it is skipped here. */
-    gi = fi = 0;
+    /* 2. Integer register arguments (rdi..r9 never overlap the integer temp
+          homes rbx,r12-r15, so these load directly). */
+    gi = 0;
     for (int i = 0; i < npending; i++) {
-        if (pend_msize[i] > 0)
+        if (pend_msize[i] > 0 || pend_isf[i])
             continue;
-        if (pend_isf[i]) {
-            if (fi < 8)
-                /* the value already holds f32 for a single arg, so a plain move
-                   into the argument xmm suffices (no narrowing) */
+        if (gi < 6)
+            mat(m, fn, fr, pend_temp[i], argreg[gi]);
+        gi++;
+    }
+
+    /* 3. Float register arguments: from the staging region when staged (no source
+          is an xmm0-7 argument register now), else loaded directly.  A single is
+          narrowed to f32. */
+    fi = fj = 0;
+    for (int i = 0; i < npending; i++) {
+        if (pend_msize[i] > 0 || !pend_isf[i])
+            continue;
+        if (fi < 8) {
+            if (stage) {
+                if (pend_fw[i])
+                    mc_movss_load(m, fargreg[fi], MC_RSP, stagebase + 8 * fj);
+                else
+                    mc_movsd_load(m, fargreg[fi], MC_RSP, stagebase + 8 * fj);
+                fj++;
+            } else {
                 matf(m, fn, fr, pend_temp[i], fargreg[fi]);
-            fi++;
-        } else {
-            if (gi < 6)
-                mat(m, fn, fr, pend_temp[i], argreg[gi]);
-            gi++;
+                if (pend_fw[i] && !src_is_f32(pend_temp[i]))
+                    mc_cvtsd2ss_rr(m, fargreg[fi], fargreg[fi]);
+            }
         }
+        fi++;
     }
     /* al = number of SSE registers used, which a variadic callee reads.  Set
        last so no later arg load clobbers it; a module (rel32) or indirect (r11)
@@ -442,6 +490,7 @@ x86_select_func(struct mc *m, struct ir_func *fn, int tp,
     char pend_fw[32];
     int pend_msize[32];
     char *is_float;
+    unsigned char *f32fmt;
     int off, rc = 0;
 
     /* frame geometry */
@@ -478,9 +527,12 @@ x86_select_func(struct mc *m, struct ir_func *fn, int tp,
     /* classify each temp exactly as the allocator did, so temp_reg is read
        against the right register file */
     is_float = calloc((size_t)(fn->ntemps > 0 ? fn->ntemps : 1), 1);
+    f32fmt = calloc((size_t)(fn->ntemps > 0 ? fn->ntemps : 1), 1);
     for (struct ir_insn *in = fn->head; in; in = in->next)
         if (in->dst >= 0 && in->dst < fn->ntemps)
             is_float[in->dst] = (char)ir_op_is_float_def(in->op);
+    ir_classify_f32(fn, f32fmt);
+    g_f32 = f32fmt;
 
     lbl = malloc((size_t)(fn->nlabels > 0 ? fn->nlabels : 1) * sizeof(int));
     for (int k = 0; k < fn->nlabels; k++)
@@ -860,12 +912,16 @@ x86_select_func(struct mc *m, struct ir_func *fn, int tp,
             if (space)
                 mc_add_ri32(m, MC_RSP, space);   /* pop the stack arguments */
             if (in->dst >= 0) {
-                if (in->op == IR_FCALL)
-                    /* the result is in xmm0 at its natural width (f32 for a
-                       single, f64 for a double), matching the register model */
+                if (in->op == IR_FCALL) {
+                    /* a single result comes back as f32 in xmm0; widen it when the
+                       destination temp holds f64 format (the Kobold front end),
+                       and leave it f32 when the temp stays single (the C one) */
+                    if (in->imm == FWIDTH_F32 && !src_is_f32(in->dst))
+                        mc_cvtss2sd_rr(m, MC_XMM0, MC_XMM0);
                     wbf(m, fn, &fr, in->dst, MC_XMM0);
-                else
+                } else {
                     wb(m, fn, &fr, in->dst, MC_RAX);
+                }
             }
             break;
         }
@@ -879,11 +935,35 @@ x86_select_func(struct mc *m, struct ir_func *fn, int tp,
             if (space)
                 mc_add_ri32(m, MC_RSP, space);   /* pop the stack arguments */
             if (in->dst >= 0) {
-                if (in->op == IR_FCALLI)
+                if (in->op == IR_FCALLI) {
+                    if (in->imm == FWIDTH_F32 && !src_is_f32(in->dst))
+                        mc_cvtss2sd_rr(m, MC_XMM0, MC_XMM0);
                     wbf(m, fn, &fr, in->dst, MC_XMM0);
-                else
+                } else {
                     wb(m, fn, &fr, in->dst, MC_RAX);
+                }
             }
+            break;
+        }
+        case IR_CALL2: case IR_CALLI2: {
+            /* failable call (see ir.h): the value comes back in RAX (-> dst), the
+               error in RDX (-> the error slot).  RDX is also the third argument
+               register, so the call overwrites whatever marshal put there; the
+               error is read only after the call returns. */
+            int space = marshal(m, fn, &fr, pend_temp, pend_isf, pend_fw,
+                                pend_msize, npending);
+            npending = 0;
+            if (in->op == IR_CALLI2) {
+                mat(m, fn, &fr, in->a, SC1);   /* pointer: not an argument reg */
+                mc_call_reg(m, SC1);
+            } else {
+                mc_call_sym(m, in->sym);
+            }
+            if (space)
+                mc_add_ri32(m, MC_RSP, space);   /* pop the stack arguments */
+            mc_store32(m, MC_RBP, slot_disp(&fr, in->slot), MC_RDX);
+            if (in->dst >= 0)
+                wb(m, fn, &fr, in->dst, MC_RAX);
             break;
         }
         case IR_CALL_AGG: case IR_CALLI_AGG: {
@@ -1116,9 +1196,12 @@ x86_select_func(struct mc *m, struct ir_func *fn, int tp,
             mc_asm(m, in->sym);
             break;
         case IR_FRETV:
-            /* the value already holds f32 for a single result, so it lands in
-               xmm0 at its natural width; no conversion */
+            /* a single result is narrowed to f32 in xmm0 before the return when its
+               temp holds f64 format (Kobold); a temp already in f32 format (C) is
+               returned as-is */
             matf(m, fn, &fr, in->a, MC_XMM0);
+            if (in->imm == FWIDTH_F32 && !src_is_f32(in->a))
+                mc_cvtsd2ss_rr(m, MC_XMM0, MC_XMM0);
             epilogue(m, &fr);
             break;
         case IR_VA_START: {
@@ -1169,6 +1252,14 @@ x86_select_func(struct mc *m, struct ir_func *fn, int tp,
             break;
         case IR_RETV: case IR_RETV64:
             mat(m, fn, &fr, in->a, MC_RAX);
+            epilogue(m, &fr);
+            break;
+        case IR_RETV2:
+            /* failable return (see ir.h): the value in RAX, the error in RDX.
+               No temp lives in either return register, so loading the error
+               second cannot clobber the value. */
+            mat(m, fn, &fr, in->a, MC_RAX);
+            mat(m, fn, &fr, in->b, MC_RDX);
             epilogue(m, &fr);
             break;
         case IR_RETV_AGG: {
@@ -1228,5 +1319,7 @@ x86_select_func(struct mc *m, struct ir_func *fn, int tp,
     free(fr.slot_off);
     free(lbl);
     free(is_float);
+    g_f32 = NULL;
+    free(f32fmt);
     return rc;
 }

@@ -389,6 +389,98 @@ kp_jit_entry(struct kp_jit *j, const char *name)
     return NULL;
 }
 
+/****************************************************************
+ * Cross-module call stubs (see jit_common.h)
+ ****************************************************************/
+
+static size_t
+round_page(size_t n, long pagesz)
+{
+    return ((n + (size_t)pagesz - 1) / (size_t)pagesz) * (size_t)pagesz;
+}
+
+int
+kp_stubs_init(struct kp_stubs *s, int capacity, char *err, size_t errlen)
+{
+    long pagesz = sysconf(_SC_PAGESIZE);
+
+    memset(s, 0, sizeof *s);
+    if (capacity < 1)
+        capacity = 1;
+    s->cap = capacity;
+
+    /* The slots are a low-memory, read-write pointer table (anonymous pages come
+       back zeroed, so every slot starts NULL). */
+    s->slots_map = round_page((size_t)capacity * sizeof(void *), pagesz);
+    s->slots = kp_map_low(s->slots_map);
+    if (s->slots == MAP_FAILED) {
+        s->slots = NULL;
+        snprintf(err, errlen, "mmap for stub slots failed");
+        return -1;
+    }
+
+    /* The stubs' code region, read-write while being emitted, read-execute after
+       kp_stubs_finalize. */
+    s->code_map = round_page((size_t)capacity * KP_STUB_STRIDE, pagesz);
+    s->code = kp_map_low(s->code_map);
+    if (s->code == MAP_FAILED) {
+        s->code = NULL;
+        munmap(s->slots, s->slots_map);
+        s->slots = NULL;
+        snprintf(err, errlen, "mmap for stub code failed");
+        return -1;
+    }
+    return 0;
+}
+
+void *
+kp_stub_add(struct kp_stubs *s, int *index)
+{
+    uint8_t *dst;
+    int i;
+
+    if (s->n >= s->cap)
+        return NULL;
+    i = s->n++;
+    dst = s->code + (size_t)i * KP_STUB_STRIDE;
+    kp_target.emit_stub(dst, (uintptr_t)dst, (uintptr_t)&s->slots[i]);
+    if (index)
+        *index = i;
+    return dst;
+}
+
+void
+kp_stub_set(struct kp_stubs *s, int index, void *target)
+{
+    if (index >= 0 && index < s->n)
+        s->slots[index] = target;
+}
+
+int
+kp_stubs_finalize(struct kp_stubs *s, char *err, size_t errlen)
+{
+    if (!s->code)
+        return 0;
+    /* The stubs are freshly written code; flush the instruction cache (a no-op on
+       x86, required on arm64 and rv) before marking the region executable. */
+    __builtin___clear_cache((char *)s->code, (char *)s->code + s->code_map);
+    if (mprotect(s->code, s->code_map, PROT_READ | PROT_EXEC) != 0) {
+        snprintf(err, errlen, "mprotect read-exec for stubs failed");
+        return -1;
+    }
+    return 0;
+}
+
+void
+kp_stubs_free(struct kp_stubs *s)
+{
+    if (s->code)
+        munmap(s->code, s->code_map);
+    if (s->slots)
+        munmap(s->slots, s->slots_map);
+    memset(s, 0, sizeof *s);
+}
+
 void
 kp_jit_free(struct kp_jit *j)
 {

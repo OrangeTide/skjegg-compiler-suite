@@ -205,6 +205,7 @@ void rv_mc_srai(struct rv_mc *m, int rd, int rs, int shamt) { rv_srai(m->c, rd, 
 void rv_mc_add(struct rv_mc *m, int rd, int rs1, int rs2) { rv_add(m->c, rd, rs1, rs2); }
 void rv_mc_sub(struct rv_mc *m, int rd, int rs1, int rs2) { rv_sub(m->c, rd, rs1, rs2); }
 void rv_mc_mul(struct rv_mc *m, int rd, int rs1, int rs2) { rv_mul(m->c, rd, rs1, rs2); }
+void rv_mc_mulh(struct rv_mc *m, int rd, int rs1, int rs2) { rv_mulh(m->c, rd, rs1, rs2); }
 void rv_mc_and(struct rv_mc *m, int rd, int rs1, int rs2) { rv_and(m->c, rd, rs1, rs2); }
 void rv_mc_or(struct rv_mc *m, int rd, int rs1, int rs2) { rv_or(m->c, rd, rs1, rs2); }
 void rv_mc_xor(struct rv_mc *m, int rd, int rs1, int rs2) { rv_xor(m->c, rd, rs1, rs2); }
@@ -274,6 +275,8 @@ void rv_mc_fneg(struct rv_mc *m, int f32, int fd, int fs)
 { if (f32) rv_fsgnjn_s(m->c, fd, fs, fs); else rv_fsgnjn_d(m->c, fd, fs, fs); }
 void rv_mc_fabs(struct rv_mc *m, int f32, int fd, int fs)
 { if (f32) rv_fsgnjx_s(m->c, fd, fs, fs); else rv_fsgnjx_d(m->c, fd, fs, fs); }
+void rv_mc_fsqrt(struct rv_mc *m, int f32, int fd, int fs)
+{ if (f32) rv_fsqrt_s(m->c, fd, fs); else rv_fsqrt_d(m->c, fd, fs); }
 
 void rv_mc_feq(struct rv_mc *m, int f32, int rd, int fs1, int fs2)
 { if (f32) rv_feq_s(m->c, rd, fs1, fs2); else rv_feq_d(m->c, rd, fs1, fs2); }
@@ -286,6 +289,8 @@ void rv_mc_fcvt_f_w(struct rv_mc *m, int f32, int fd, int rs)
 { if (f32) rv_fcvt_s_w(m->c, fd, rs, RV_RM_DYN); else rv_fcvt_d_w(m->c, fd, rs, RV_RM_RNE); }
 void rv_mc_fcvt_w_f(struct rv_mc *m, int f32, int rd, int fs)
 { if (f32) rv_fcvt_w_s(m->c, rd, fs, RV_RM_RTZ); else rv_fcvt_w_d(m->c, rd, fs, RV_RM_RTZ); }
+void rv_mc_fround(struct rv_mc *m, int f32, int rd, int fs)
+{ if (f32) rv_fcvt_w_s(m->c, rd, fs, RV_RM_RNE); else rv_fcvt_w_d(m->c, rd, fs, RV_RM_RNE); }
 void rv_mc_fcvt_d_s(struct rv_mc *m, int fd, int fs) { rv_fcvt_d_s(m->c, fd, fs, RV_RM_RNE); }
 void rv_mc_fcvt_s_d(struct rv_mc *m, int fd, int fs) { rv_fcvt_s_d(m->c, fd, fs, RV_RM_DYN); }
 void rv_mc_fcvt_d_h(struct rv_mc *m, int fd, int fs) { rv_fcvt_d_h(m->c, fd, fs, RV_RM_RNE); }
@@ -383,10 +388,34 @@ rv_apply_abs_reloc(uint8_t *code, size_t site, uint64_t addr)
     memcpy(code + site + 4, &w1, 4);
 }
 
+/* An export stub: build the slot's 32-bit address in t1 (a caller-saved temporary,
+   dead at a call boundary), load the target through it, and jump.  Only t1 is
+   touched, so the guest's argument registers (a0-a7) and return address (ra) pass
+   straight through to the real entry. */
+static size_t
+rv_emit_stub(uint8_t *dst, uintptr_t dst_addr, uintptr_t slot_addr)
+{
+    uint32_t v = (uint32_t)slot_addr;
+    int32_t val = (int32_t)v;
+    int32_t hi = (val + 0x800) >> 12;
+    int32_t lo = val - (hi << 12);
+    uint32_t w[4];
+
+    (void)dst_addr;
+    w[0] = (((uint32_t)hi & 0xfffffu) << 12) | (6u << 7) | 0x37u; /* lui  t1, hi      */
+    w[1] = (((uint32_t)lo & 0xfffu) << 20) | (6u << 15)
+           | (6u << 7) | 0x13u;                                  /* addi t1, t1, lo  */
+    w[2] = (6u << 15) | (2u << 12) | (6u << 7) | 0x03u;          /* lw   t1, 0(t1)   */
+    w[3] = (6u << 15) | 0x67u;                                   /* jalr x0, 0(t1)   */
+    memcpy(dst, w, sizeof w);
+    return sizeof w;
+}
+
 const struct jit_target kp_target = {
     emit_func,
     rv_apply_call_reloc,
     rv_apply_abs_reloc,
+    rv_emit_stub,
 };
 
 /****************************************************************

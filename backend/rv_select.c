@@ -66,6 +66,24 @@ static const int freg[] = {
 static const int argreg[] = { 10, 11, 12, 13, 14, 15, 16, 17 };
 #define NARGREG 8
 
+/* Per-temp width classification for the function being emitted: g_is_i64[t] is 1
+   when temp t is an i64 (register pair), else it is an i32 (single register) or a
+   float.  The temp readers consult this so a width-crossing access, where the IR
+   reads a temp at a different width than it was defined (the coroutine seed path
+   does: it stores an i32 into an 8-byte slot with ST64 and loads it back with
+   LD64 then passes it with a plain i32 ARG), picks the right register.  On x86 and
+   AArch64 this never arises because i32 and i64 share a register.  Set over each
+   function in rv_select_func and cleared after. */
+static const int *g_is_i64;
+static int t_is_i64(int t) { return g_is_i64 && t >= 0 && g_is_i64[t]; }
+
+/* Per-temp float storage format (1 = f32/single, 0 = f64).  The C front end keeps
+   `float` as f32 in registers while Kobold keeps every float as f64, so a single
+   value crossing a call is converted only when the temp's format differs from the
+   f32 wire width.  Set per function in rv_select_func (see ir_classify_f32). */
+static const unsigned char *g_f32;
+static int src_is_f32(int t) { return g_f32 && t >= 0 && g_f32[t]; }
+
 /****************************************************************
  * The RISC-V ILP32 calling convention (pure computation, ported verbatim)
  ****************************************************************/
@@ -325,8 +343,11 @@ fwd_f(struct rv_mc *m, struct ir_func *fn, int t, int r, int f32)
  * Integer temp -> register materialisation
  ****************************************************************/
 
+static int i64_rs_lo(struct rv_mc *m, struct ir_func *fn, int t, int scratch);
+
+/* Read temp t as an i32 (single register), the storage an i32-classed temp uses. */
 static int
-rs(struct rv_mc *m, struct ir_func *fn, int t, int scratch)
+rs_i32(struct rv_mc *m, struct ir_func *fn, int t, int scratch)
 {
     int r = fn->temp_reg[t];
 
@@ -334,6 +355,16 @@ rs(struct rv_mc *m, struct ir_func *fn, int t, int scratch)
         return reg[r];
     rv_mc_lw(m, reg[scratch], FP, spill_byte_offset(fn, t));
     return reg[scratch];
+}
+
+/* Read temp t as an i32 value.  An i64 temp is narrowed to its low word, which is
+   where an i32 consumer (a plain ARG, an i32 op) expects the value. */
+static int
+rs(struct rv_mc *m, struct ir_func *fn, int t, int scratch)
+{
+    if (t_is_i64(t))
+        return i64_rs_lo(m, fn, t, scratch);
+    return rs_i32(m, fn, t, scratch);
 }
 
 static int
@@ -362,7 +393,12 @@ static int i64_hi_idx(int pair) { return 12 - 2 * pair; }
 static int
 i64_rs_lo(struct rv_mc *m, struct ir_func *fn, int t, int scratch)
 {
-    int pair = fn->temp_reg[t];
+    int pair;
+    /* An i32-classed temp read as an i64 (the coroutine seed store) supplies its
+       single register as the low word. */
+    if (!t_is_i64(t))
+        return rs_i32(m, fn, t, scratch);
+    pair = fn->temp_reg[t];
     if (pair >= 0)
         return reg[i64_lo_idx(pair)];
     rv_mc_lw(m, reg[scratch], FP, i64spill_byte_offset(fn, t));
@@ -372,7 +408,14 @@ i64_rs_lo(struct rv_mc *m, struct ir_func *fn, int t, int scratch)
 static int
 i64_rs_hi(struct rv_mc *m, struct ir_func *fn, int t, int scratch)
 {
-    int pair = fn->temp_reg[t];
+    int pair;
+    /* The high word of an i32-classed temp read as an i64 is its sign extension. */
+    if (!t_is_i64(t)) {
+        int lo = rs_i32(m, fn, t, scratch);
+        rv_mc_srai(m, reg[scratch], lo, 31);
+        return reg[scratch];
+    }
+    pair = fn->temp_reg[t];
     if (pair >= 0)
         return reg[i64_hi_idx(pair)];
     rv_mc_lw(m, reg[scratch], FP, i64spill_byte_offset(fn, t) + 4);
@@ -430,6 +473,52 @@ emit_binop(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, rrr_fn op)
     int sb = rs(m, fn, i->b, 1);
     int sd = rd(fn, i->dst, 0);
     op(m, sd, sa, sb);
+    wd(m, fn, i->dst, sd);
+}
+
+/* Overflow-checked 32-bit signed arithmetic (IR_ADDO/SUBO/MULO).  RV32 has no
+   hardware overflow flag, so the result's validity is tested directly and a
+   failure calls kp_trap_overflow.  For add/sub the sign bits decide it; for
+   multiply the signed high half (mulh) must be the sign extension of the low
+   half.  T2 and T6 are named scratch outside the allocator's register pool, so
+   the source registers (sa, sb) are only ever read and the result (sd) is
+   written last, which stays correct even when sd aliases sa or sb. */
+static void
+emit_overflow(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i)
+{
+    int sa = rs(m, fn, i->a, 0);
+    int sb = rs(m, fn, i->b, 1);
+    int sd = rd(fn, i->dst, 0);
+    int ok = rv_mc_new_label(m);
+    int flag;
+
+    if (i->op == IR_MULO) {
+        rv_mc_mulh(m, T2, sa, sb);       /* signed high 32 of the product */
+        rv_mc_mul(m, sd, sa, sb);        /* low 32 = the result (sa, sb last read) */
+        rv_mc_srai(m, T6, sd, 31);       /* the sign extension the high must equal */
+        rv_mc_xor(m, T2, T2, T6);        /* 0 when they agree (no overflow) */
+        flag = T2;
+    } else if (i->op == IR_ADDO) {
+        rv_mc_add(m, T2, sa, sb);        /* sum (scratch) */
+        rv_mc_xor(m, T6, sa, T2);        /* a ^ sum */
+        rv_mc_xor(m, T2, sb, T2);        /* b ^ sum */
+        rv_mc_and(m, T6, T6, T2);        /* sign set iff the sum overflowed */
+        rv_mc_srai(m, T6, T6, 31);       /* -1 on overflow, 0 otherwise */
+        rv_mc_add(m, sd, sa, sb);        /* the result (sa, sb last read) */
+        flag = T6;
+    } else { /* IR_SUBO */
+        rv_mc_sub(m, T2, sa, sb);        /* difference (scratch) */
+        rv_mc_xor(m, T6, sa, sb);        /* a ^ b */
+        rv_mc_xor(m, T2, sa, T2);        /* a ^ diff */
+        rv_mc_and(m, T6, T6, T2);        /* sign set iff the subtraction overflowed */
+        rv_mc_srai(m, T6, T6, 31);
+        rv_mc_sub(m, sd, sa, sb);        /* the result (sa, sb last read) */
+        flag = T6;
+    }
+
+    rv_mc_beqz(m, flag, ok);             /* no overflow: skip the trap */
+    rv_mc_call(m, "kp_trap_overflow");
+    rv_mc_label(m, ok);
     wd(m, fn, i->dst, sd);
 }
 
@@ -536,6 +625,7 @@ emit_store(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, ldst_fn op)
 #define RET_INT   0
 #define RET_I64   1
 #define RET_FLOAT 2
+#define RET_FAIL  3     /* failable call: value in a0, error in a1 -> error slot */
 
 #define RV_MAX_ARGS 32
 
@@ -692,12 +782,21 @@ emit_call_flush(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i,
                 rv_mc_sw(m, T0, SP, p->soff + (p->nreg == 1 ? 0 : 4));
             }
         } else if (arg_is_float[k]) {
-            /* single: one integer register's worth of bits */
-            int sa = frs_w(m, fn, arg_temps[k], 0, 1);
-            if (p->nreg == 1) {
-                rv_mc_fmv_x_w(m, argreg[p->ireg], sa);
+            /* single: move the f32 bits into an integer register.  An f64-format
+               temp (Kobold) narrows to f32 (ft1) first; an already-f32 temp (C)
+               supplies its bits directly. */
+            int sbits;
+            if (src_is_f32(arg_temps[k])) {
+                sbits = frs_w(m, fn, arg_temps[k], 0, 1);
             } else {
-                rv_mc_fmv_x_w(m, T0, sa);
+                int sa = frs_w(m, fn, arg_temps[k], 0, 0);
+                rv_mc_fcvt_s_d(m, 1, sa);
+                sbits = 1;
+            }
+            if (p->nreg == 1) {
+                rv_mc_fmv_x_w(m, argreg[p->ireg], sbits);
+            } else {
+                rv_mc_fmv_x_w(m, T0, sbits);
                 rv_mc_sw(m, T0, SP, p->soff);
             }
         } else if (arg_is_i64[k]) {
@@ -734,6 +833,12 @@ emit_call_flush(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i,
     }
     narg = 0;
 
+    /* A failable call returns its error in the second integer register (a1),
+       which the front end expects spilled to the call's error slot.  The value
+       in a0 is then handled as a plain integer result below. */
+    if (retkind == RET_FAIL)
+        rv_mc_sw(m, A1, FP, slot_offset(fn, i->slot));
+
     if (i->dst >= 0) {
         if (retkind == RET_I64) {
             int dlo = i64_rd_lo(fn, i->dst, 0);
@@ -745,16 +850,24 @@ emit_call_flush(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i,
             i64_wd_lo(m, fn, i->dst, dlo);
             i64_wd_hi(m, fn, i->dst, dhi);
         } else if (retkind == RET_FLOAT) {
-            int f32 = i->imm == FWIDTH_F32;
             int sd = frd_w(fn, i->dst, 0);
-            if (f32) {
+            /* a single result arrives as f32 bits in a0.  Widen it to f64 when the
+               destination temp holds f64 format (Kobold); keep it f32 when the temp
+               stays single (C).  A double arrives as its two words in a0:a1. */
+            if (i->imm == FWIDTH_F32) {
                 rv_mc_fmv_w_x(m, sd, A0);
+                if (!src_is_f32(i->dst)) {
+                    rv_mc_fcvt_d_s(m, sd, sd);
+                    fwd_f(m, fn, i->dst, sd, 0);
+                } else {
+                    fwd_f(m, fn, i->dst, sd, 1);
+                }
             } else {
                 rv_mc_sw(m, A0, SP, stage);
                 rv_mc_sw(m, A1, SP, stage + 4);
                 rv_mc_fld(m, sd, SP, stage);
+                fwd_f(m, fn, i->dst, sd, 0);
             }
-            fwd_f(m, fn, i->dst, sd, f32);
         } else {
             int sd = rd(fn, i->dst, 0);
             if (sd != A0)
@@ -884,6 +997,7 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
     case IR_ADD:  emit_binop(m, fn, i, rv_mc_add);  break;
     case IR_SUB:  emit_binop(m, fn, i, rv_mc_sub);  break;
     case IR_MUL:  emit_binop(m, fn, i, rv_mc_mul);  break;
+    case IR_ADDO: case IR_SUBO: case IR_MULO: emit_overflow(m, fn, i); break;
     case IR_AND:  emit_binop(m, fn, i, rv_mc_and);  break;
     case IR_OR:   emit_binop(m, fn, i, rv_mc_or);   break;
     case IR_XOR:  emit_binop(m, fn, i, rv_mc_xor);  break;
@@ -982,6 +1096,12 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
     case IR_CALLI:
         emit_call_flush(m, fn, i, 1, RET_INT);
         break;
+    case IR_CALL2:
+        emit_call_flush(m, fn, i, 0, RET_FAIL);
+        break;
+    case IR_CALLI2:
+        emit_call_flush(m, fn, i, 1, RET_FAIL);
+        break;
     case IR_TAILCALL:
         emit_tailcall_flush(m, fn, i, 0);
         break;
@@ -996,6 +1116,19 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
         int sa = rs(m, fn, i->a, 0);
         if (sa != A0)
             rv_mc_mv(m, A0, sa);
+        emit_epilogue(m, fn);
+        break;
+    }
+    case IR_RETV2: {
+        /* failable return: value in a0, error in a1.  Materialise through
+           distinct scratch slots so the second load cannot clobber the first;
+           neither reg[] slot is a0/a1, so the moves are independent. */
+        int sa = rs(m, fn, i->a, 0);
+        int sb = rs(m, fn, i->b, 1);
+        if (sa != A0)
+            rv_mc_mv(m, A0, sa);
+        if (sb != A1)
+            rv_mc_mv(m, A1, sb);
         emit_epilogue(m, fn);
         break;
     }
@@ -1071,6 +1204,7 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
     case IR_FDIV: emit_fbinop(m, fn, i, rv_mc_fdiv); break;
     case IR_FNEG: emit_funop(m, fn, i, rv_mc_fneg); break;
     case IR_FABS: emit_funop(m, fn, i, rv_mc_fabs); break;
+    case IR_FSQRT: emit_funop(m, fn, i, rv_mc_fsqrt); break;
 
     case IR_FCMPEQ: case IR_FCMPLT: case IR_FCMPLE: {
         int f32 = i->imm == FWIDTH_F32;
@@ -1101,6 +1235,15 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
         int sa = frs_w(m, fn, i->a, 0, f32);
         int sd = rd(fn, i->dst, 0);
         rv_mc_fcvt_w_f(m, f32, sd, sa);
+        wd(m, fn, i->dst, sd);
+        break;
+    }
+
+    case IR_FROUND: {       /* float -> i32, round to nearest */
+        int f32 = i->imm == FWIDTH_F32;
+        int sa = frs_w(m, fn, i->a, 0, f32);
+        int sd = rd(fn, i->dst, 0);
+        rv_mc_fround(m, f32, sd, sa);
         wd(m, fn, i->dst, sd);
         break;
     }
@@ -1200,11 +1343,21 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
     }
 
     case IR_FRETV: {
-        int f32 = i->imm == FWIDTH_F32;
-        int sa = frs_w(m, fn, i->a, 0, f32);
-        if (f32) {
-            rv_mc_fmv_x_w(m, A0, sa);
+        /* a single result returns its f32 bits in a0: narrowed from an f64-format
+           temp (Kobold), or taken directly from an f32 temp (C).  A double returns
+           as its two words in a0:a1. */
+        if (i->imm == FWIDTH_F32) {
+            int sbits;
+            if (src_is_f32(i->a)) {
+                sbits = frs_w(m, fn, i->a, 0, 1);
+            } else {
+                int sa = frs_w(m, fn, i->a, 0, 0);
+                rv_mc_fcvt_s_d(m, 1, sa);
+                sbits = 1;
+            }
+            rv_mc_fmv_x_w(m, A0, sbits);
         } else {
+            int sa = frs_w(m, fn, i->a, 0, 0);
             rv_mc_addi(m, SP, SP, -8);
             rv_mc_fsd(m, sa, SP, 0);
             rv_mc_lw(m, A0, SP, 0);
@@ -1292,6 +1445,35 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
         rv_mc_sw(m, i64_rs_hi(m, fn, i->b, 1), SP, 4);
         rv_mc_call(m, "__muldi3");
         rv_mc_addi(m, SP, SP, 16);
+        dlo = i64_rd_lo(fn, i->dst, 0);
+        dhi = i64_rd_hi(fn, i->dst, 1);
+        if (dlo != A0)
+            rv_mc_mv(m, dlo, A0);
+        if (dhi != A1)
+            rv_mc_mv(m, dhi, A1);
+        i64_wd_lo(m, fn, i->dst, dlo);
+        i64_wd_hi(m, fn, i->dst, dhi);
+        break;
+    }
+
+    case IR_DIVS64: case IR_DIVU64: case IR_MODS64: case IR_MODU64: {
+        /* RV32 has no 64-bit divide; call the register-ABI helper (a and b in the
+           a0:a1 and a2:a3 pairs, the result in a0:a1), the same helpers the host
+           binds for the JIT.  Sources are callee-saved or scratch, never a0-a3, so
+           the argument pairs load without clobbering one another. */
+        const char *sym = i->op == IR_DIVS64 ? "__divdi3" :
+                          i->op == IR_DIVU64 ? "__udivdi3" :
+                          i->op == IR_MODS64 ? "__moddi3" : "__umoddi3";
+        int alo = i64_rs_lo(m, fn, i->a, 0);
+        int ahi = i64_rs_hi(m, fn, i->a, 1);
+        int blo, bhi, dlo, dhi;
+        rv_mc_mv(m, A0, alo);
+        rv_mc_mv(m, A1, ahi);
+        blo = i64_rs_lo(m, fn, i->b, 0);
+        bhi = i64_rs_hi(m, fn, i->b, 1);
+        rv_mc_mv(m, argreg[2], blo);     /* a2 */
+        rv_mc_mv(m, argreg[3], bhi);     /* a3 */
+        rv_mc_call(m, sym);
         dlo = i64_rd_lo(fn, i->dst, 0);
         dhi = i64_rd_hi(fn, i->dst, 1);
         if (dlo != A0)
@@ -1615,6 +1797,8 @@ rv_select_func(struct rv_mc *m, struct ir_func *fn, char *err, size_t errlen)
     struct ir_insn *i;
     struct ir_insn *last = NULL;
     int *lbl;
+    int *is_i64;
+    unsigned char *f32fmt;
     int k;
 
     narg = 0;
@@ -1628,10 +1812,40 @@ rv_select_func(struct rv_mc *m, struct ir_func *fn, char *err, size_t errlen)
     for (k = 0; k < fn->nlabels; k++)
         lbl[k] = -1;
 
+    /* Classify each temp's storage width (i64 pair vs single register), matching
+       regalloc_rv, so the temp readers resolve a width-crossing access correctly. */
+    is_i64 = calloc((size_t)(fn->ntemps > 0 ? fn->ntemps : 1), sizeof(int));
+    if (!is_i64) {
+        free(lbl);
+        snprintf(err, errlen, "rv_select: out of memory");
+        return -1;
+    }
+    for (i = fn->head; i; i = i->next)
+        if (i->dst >= 0 && i->dst < fn->ntemps && ir_op_is_i64_def(i->op))
+            is_i64[i->dst] = 1;
+    g_is_i64 = is_i64;
+
+    /* Classify each float temp's register format (single vs double), so a single
+       value crossing a call is converted only when the temp format differs. */
+    f32fmt = calloc((size_t)(fn->ntemps > 0 ? fn->ntemps : 1), 1);
+    if (!f32fmt) {
+        g_is_i64 = NULL;
+        free(is_i64);
+        free(lbl);
+        snprintf(err, errlen, "rv_select: out of memory");
+        return -1;
+    }
+    ir_classify_f32(fn, f32fmt);
+    g_f32 = f32fmt;
+
     emit_prologue(m, fn);
 
     for (i = fn->head; i; i = i->next) {
         if (emit_insn(m, fn, i, lbl, err, errlen) != 0) {
+            g_is_i64 = NULL;
+            g_f32 = NULL;
+            free(f32fmt);
+            free(is_i64);
             free(lbl);
             return -1;
         }
@@ -1644,6 +1858,10 @@ rv_select_func(struct rv_mc *m, struct ir_func *fn, char *err, size_t errlen)
         last->op != IR_TAILCALL && last->op != IR_TAILCALLI))
         emit_epilogue(m, fn);
 
+    g_is_i64 = NULL;
+    g_f32 = NULL;
+    free(f32fmt);
+    free(is_i64);
     free(lbl);
     return 0;
 }

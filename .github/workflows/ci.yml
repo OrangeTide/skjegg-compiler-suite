@@ -66,3 +66,10 @@ jobs:
       # value-checking suites miss.
       - name: Emulator sanitizer pass
         run: make check-emu-san
+
+      # The core ColdFire toolchain (skj-cpp/cc/as/ld) rebuilt with ASan+UBSan
+      # and re-run over the cpp, cc, and Excelsior corpora, so the code
+      # generators and assembler/linker get the same sanitizer coverage the
+      # emulator already has.
+      - name: Toolchain sanitizer slice
+        run: make check-san-tools QEMU="qemu-m68k"

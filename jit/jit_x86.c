@@ -216,7 +216,15 @@ mc_lea_sym(struct mc *m, int reg, const char *name)
         x_mov_ri64(m->c, reg, 0);
         kp_add_absreloc(m->e, m->c->len - 8, name);
     } else {
-        m->errsym = name;
+        /* Not defined in this module: another module's exported global or
+           function, whose mapped address was supplied as a binding (the link phase
+           feeds an already-compiled module's exports to the next).  This is what
+           lets a unit take the address of another unit's global. */
+        void *a = kp_import_addr(m->e, name);
+        if (a)
+            x_mov_ri64(m->c, reg, (uint64_t)(uintptr_t)a);
+        else
+            m->errsym = name;
     }
 }
 
@@ -311,10 +319,24 @@ x86_apply_abs_reloc(uint8_t *code, size_t site, uint64_t addr)
     memcpy(code + site, &addr, sizeof(addr));
 }
 
+/* An export stub: jmp qword [rip + disp32], an indirect tail-jump through the slot.
+   rip-relative reaches the low-mapped slot without a register, so the guest's
+   argument registers and return address pass through untouched. */
+static size_t
+x86_emit_stub(uint8_t *dst, uintptr_t dst_addr, uintptr_t slot_addr)
+{
+    int32_t disp = (int32_t)((intptr_t)slot_addr - (intptr_t)(dst_addr + 6));
+    dst[0] = 0xFF;
+    dst[1] = 0x25;              /* jmp r/m64, ModRM = rip-relative disp32 */
+    memcpy(dst + 2, &disp, 4);
+    return 6;
+}
+
 const struct jit_target kp_target = {
     emit_func,
     x86_apply_call_reloc,
     x86_apply_abs_reloc,
+    x86_emit_stub,
 };
 
 /****************************************************************

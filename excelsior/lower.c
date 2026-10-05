@@ -4263,7 +4263,8 @@ lower_member(struct node *cls, struct node *m)
 
     fn->nslots = nslots;
     fn->slot_size = arena_alloc(la, (nslots ? nslots : 1) * sizeof(int));
-    memcpy(fn->slot_size, slot_sizes, nslots * sizeof(int));
+    if (nslots)
+        memcpy(fn->slot_size, slot_sizes, nslots * sizeof(int));
     return fn;
 }
 
@@ -4329,7 +4330,8 @@ lower_funclit_fn(struct node *lit)
     emit(IR_ENDF);
     fn->nslots = nslots;
     fn->slot_size = arena_alloc(la, (nslots ? nslots : 1) * sizeof(int));
-    memcpy(fn->slot_size, slot_sizes, nslots * sizeof(int));
+    if (nslots)
+        memcpy(fn->slot_size, slot_sizes, nslots * sizeof(int));
     return fn;
 }
 

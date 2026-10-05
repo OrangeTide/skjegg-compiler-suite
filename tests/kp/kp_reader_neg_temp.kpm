@@ -1,0 +1,5 @@
+.kpm 1
+.func main params 0 slots 0 temps 1 labels 0
+LIC dst=-3 imm=0
+RET
+.endfunc

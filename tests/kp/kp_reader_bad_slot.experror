@@ -1,0 +1,3 @@
+# A local-slot index past the function's declared `slots` count must be
+# rejected: it indexes the slot table.
+line 3: slot index out of range

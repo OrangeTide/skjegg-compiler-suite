@@ -56,7 +56,7 @@ emit_init_image(FILE *out, struct ir_global *g)
             cur = it->offset;
         }
         if (it->sym)
-            fprintf(out, "\t%s %s\n", it->size == 8 ? "dq" : "dd", it->sym);
+            fprintf(out, "\t%s %s\n", it->size == 8 ? "dq" : "dd", nasm_sym(it->sym));
         else if (it->size == 8) {
             uint64_t b = (uint64_t)it->ival;
             fprintf(out, "\tdd 0x%08x\n", (unsigned)(b & 0xFFFFFFFF));
@@ -99,8 +99,8 @@ emit_globals(FILE *out, struct ir_program *prog)
             fprintf(out, "align %d\n", alb);
         }
         if (!g->is_local)
-            fprintf(out, "global %s\n", g->name);
-        fprintf(out, "%s:\n", g->name);
+            fprintf(out, "global %s\n", nasm_sym(g->name));
+        fprintf(out, "%s:\n", nasm_sym(g->name));
         if (g->inits) {
             emit_init_image(out, g);
         } else if (g->init_string) {
@@ -110,7 +110,7 @@ emit_globals(FILE *out, struct ir_program *prog)
             for (k = 0; k < g->init_count; k++) {
                 if (g->init_syms && g->init_syms[k])
                     fprintf(out, "\t%s %s\n",
-                        elsz == 8 ? "dq" : "dd", g->init_syms[k]);
+                        elsz == 8 ? "dq" : "dd", nasm_sym(g->init_syms[k]));
                 else if (g->base_type == IR_F64 || g->base_type == IR_I64) {
                     uint64_t bits = (uint64_t)g->init_ivals[k];
                     fprintf(out, "\tdd 0x%08x\n", (unsigned)(bits & 0xFFFFFFFF));
@@ -161,7 +161,7 @@ emit_extern_once(FILE *out, const char **seen, int *nseen, const char *sym)
             return;
     if (*nseen < 256)
         seen[(*nseen)++] = sym;
-    fprintf(out, "extern %s\n", sym);
+    fprintf(out, "extern %s\n", nasm_sym(sym));
 }
 
 static void
@@ -177,11 +177,12 @@ emit_externs(FILE *out, struct ir_program *prog)
             if (i->sym &&
                 (i->op == IR_CALL || i->op == IR_TAILCALL ||
                  i->op == IR_FCALL || i->op == IR_CALL64 ||
-                 i->op == IR_CALL_AGG ||
+                 i->op == IR_CALL_AGG || i->op == IR_CALL2 ||
                  i->op == IR_LEA || i->op == IR_LEA64)) {
                 /* a symbol-address load (IR_LEA/LEA64) can reference an external
                    data symbol, which NASM needs declared extern; is_defined
-                   filters out the program's own globals and functions */
+                   filters out the program's own globals and functions.  IR_CALL2 is
+                   the failable call, so a cross-unit `fails` routine is covered too */
                 if (!is_defined(prog, i->sym))
                     emit_extern_once(out, seen, &nseen, i->sym);
             }
@@ -210,6 +211,15 @@ emit_externs(FILE *out, struct ir_program *prog)
             }
         }
     }
+
+    /* Under the guarded policy the selector emits a divide guard and a checked
+       arithmetic overflow branch that call these trap helpers directly (sink
+       helpers, not IR calls, so the scan above does not reach them).  NASM needs
+       them declared; an unused extern is harmless. */
+    if (target_aot_trap_guarded) {
+        emit_extern_once(out, seen, &nseen, "kp_trap_overflow");
+        emit_extern_once(out, seen, &nseen, "kp_trap_div_zero");
+    }
 }
 
 /****************************************************************
@@ -237,11 +247,13 @@ target_emit(FILE *out, struct ir_program *prog)
 
         fputs("\nsection .text\n", out);
         if (!fn->is_local)
-            fprintf(out, "global %s\n", fn->name);
-        fprintf(out, "%s:\n", fn->name);
+            fprintf(out, "global %s\n", nasm_sym(fn->name));
+        fprintf(out, "%s:\n", nasm_sym(fn->name));
 
         mct_begin_func(m, ++serial);
-        rc = x86_select_func(m, fn, TRAP_HARDWARE, err, sizeof err);
+        rc = x86_select_func(m, fn,
+                             target_aot_trap_guarded ? TRAP_GUARDED : TRAP_HARDWARE,
+                             err, sizeof err);
         if (rc != 0) {
             fprintf(stderr, "x86_aot: %s\n", err);
             exit(1);

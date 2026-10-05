@@ -186,6 +186,20 @@ enum ir_op {
        value; a backend that tracks debug info records the current output
        position against the line.  Not yet emitted or lowered. */
     IR_LOC,
+
+    /* two-integer return: the value plus a second result (an error signal) in a
+       second return register, the ABI for a failable routine (see the Kobold
+       front end, doc/kp-errors.md).  RETV2 puts operand a in the first return
+       register (the value) and operand b in the second (the error), then
+       returns.  CALL2 and CALLI2 make the call, leave the value in dst as an
+       ordinary single def, and store the second return register to local slot
+       `slot` (the error).  Keeping the error in a slot rather than a second
+       temp means the register allocator still sees one def per call.  Integer
+       or pointer value and error only.  Appended after IR_LOC so the existing
+       opcode numbers are undisturbed; the KPM1 reader maps by mnemonic, so the
+       value is internal. */
+    IR_RETV2,
+    IR_CALL2, IR_CALLI2,
 };
 
 /****************************************************************
@@ -196,7 +210,8 @@ struct ir_insn {
     int op;
     int dst;
     int a, b;
-    long imm;
+    int64_t imm;        /* 64-bit: holds a LIC64 value or an f64's bits, which do
+                           not fit a 32-bit long on an ILP32 host (rv32) */
     char *sym;
     int slot;
     int label;
@@ -207,6 +222,10 @@ struct ir_insn {
 struct ir_func {
     struct arena *arena;
     char *name;
+    char *from_unit;    /* non-null: this definition was absorbed from that unit into a
+                           self-contained bundle, so the linker folds it against another
+                           copy of the same symbol (identical, or a link error). NULL for a
+                           module's own definition, which is unique. */
     int is_local;
     int nparams;
     int nslots;
@@ -262,12 +281,15 @@ struct ir_init {
 
 struct ir_global {
     char *name;
+    char *from_unit;    /* non-null: absorbed from that unit into a bundle (see ir_func). */
     int base_type;
     int arr_size;
     int align;          /* required byte alignment; 0 = base_type default */
     struct ir_init *inits;  /* non-null: aggregate byte image (see ir_init) */
     int is_ptr;
     int is_local;
+    int is_export;      /* a unit's exported var: visible to other modules at link */
+    int is_rodata;      /* an immutable global (string literal, real pool, const): read-only */
     int64_t *init_ivals;
     char **init_syms;
     int init_count;
@@ -292,6 +314,11 @@ struct ir_insn *ir_emit(struct ir_func *fn, int op);
 int ir_op_is_float_def(int op);
 int ir_op_is_i64_def(int op);
 
+/* Write each float temp's register storage format into out[0..fn->ntemps): 1 for
+   f32 (single) format, 0 for f64.  See the definition for how the two front ends'
+   float models are told apart. */
+void ir_classify_f32(struct ir_func *fn, unsigned char *out);
+
 /****************************************************************
  * Register allocation
  ****************************************************************/
@@ -308,5 +335,15 @@ void regalloc(struct ir_func *fn);
  ****************************************************************/
 
 void target_emit(FILE *out, struct ir_program *prog);
+
+/* The overflow-trap policy of an AOT target_emit.  0 (the default) is the hardware
+   policy the C compiler wants: a divide relies on the CPU fault and a checked
+   arithmetic op, which C never emits, is left to wrap.  A front end whose semantics
+   trap on overflow (Kobold) sets this to 1 before target_emit so the checked ops
+   call the trap helper instead, matching that language's JIT.  It is a mode, not
+   per-call data, so it rides a flag rather than a wider target_emit signature; the
+   backends that have a hardware mode (x86-64, arm64) read it, and rv always guards.
+   Defined in ir.c so every driver links one copy. */
+extern int target_aot_trap_guarded;
 
 #endif /* IR_H */

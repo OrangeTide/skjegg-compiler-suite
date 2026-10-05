@@ -147,6 +147,7 @@ r3(struct rv_mc *m, const char *mnem, int rd, int rs1, int rs2)
 void rv_mc_add(struct rv_mc *m, int rd, int rs1, int rs2) { r3(m, "add", rd, rs1, rs2); }
 void rv_mc_sub(struct rv_mc *m, int rd, int rs1, int rs2) { r3(m, "sub", rd, rs1, rs2); }
 void rv_mc_mul(struct rv_mc *m, int rd, int rs1, int rs2) { r3(m, "mul", rd, rs1, rs2); }
+void rv_mc_mulh(struct rv_mc *m, int rd, int rs1, int rs2) { r3(m, "mulh", rd, rs1, rs2); }
 void rv_mc_and(struct rv_mc *m, int rd, int rs1, int rs2) { r3(m, "and", rd, rs1, rs2); }
 void rv_mc_or(struct rv_mc *m, int rd, int rs1, int rs2) { r3(m, "or", rd, rs1, rs2); }
 void rv_mc_xor(struct rv_mc *m, int rd, int rs1, int rs2) { r3(m, "xor", rd, rs1, rs2); }
@@ -202,6 +203,8 @@ void rv_mc_fneg(struct rv_mc *m, int f32, int fd, int fs)
 { fprintf(m->out, "\tfneg.%s %s, %s\n", f32 ? "s" : "d", fnn(fd), fnn(fs)); }
 void rv_mc_fabs(struct rv_mc *m, int f32, int fd, int fs)
 { fprintf(m->out, "\tfabs.%s %s, %s\n", f32 ? "s" : "d", fnn(fd), fnn(fs)); }
+void rv_mc_fsqrt(struct rv_mc *m, int f32, int fd, int fs)
+{ fprintf(m->out, "\tfsqrt.%s %s, %s\n", f32 ? "s" : "d", fnn(fd), fnn(fs)); }
 
 void rv_mc_feq(struct rv_mc *m, int f32, int rd, int fs1, int fs2)
 { fprintf(m->out, "\tfeq.%s %s, %s, %s\n", f32 ? "s" : "d", xn(rd), fnn(fs1), fnn(fs2)); }
@@ -214,6 +217,8 @@ void rv_mc_fcvt_f_w(struct rv_mc *m, int f32, int fd, int rs)
 { fprintf(m->out, "\tfcvt.%s.w %s, %s\n", f32 ? "s" : "d", fnn(fd), xn(rs)); }
 void rv_mc_fcvt_w_f(struct rv_mc *m, int f32, int rd, int fs)
 { fprintf(m->out, "\tfcvt.w.%s %s, %s, rtz\n", f32 ? "s" : "d", xn(rd), fnn(fs)); }
+void rv_mc_fround(struct rv_mc *m, int f32, int rd, int fs)
+{ fprintf(m->out, "\tfcvt.w.%s %s, %s, rne\n", f32 ? "s" : "d", xn(rd), fnn(fs)); }
 void rv_mc_fcvt_d_s(struct rv_mc *m, int fd, int fs) { fprintf(m->out, "\tfcvt.d.s %s, %s\n", fnn(fd), fnn(fs)); }
 void rv_mc_fcvt_s_d(struct rv_mc *m, int fd, int fs) { fprintf(m->out, "\tfcvt.s.d %s, %s\n", fnn(fd), fnn(fs)); }
 void rv_mc_fcvt_d_h(struct rv_mc *m, int fd, int fs) { fprintf(m->out, "\tfcvt.d.h %s, %s\n", fnn(fd), fnn(fs)); }

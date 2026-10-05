@@ -8,7 +8,7 @@ set -eu
 
 HERE=$(dirname "$0")
 ROOT=$(cd "$HERE/.." && pwd)
-CPP="$ROOT/build/skj-cpp"
+CPP="${CPP:-$ROOT/build/skj-cpp}"
 
 if [ ! -x "$CPP" ]; then
     echo "ERROR: $CPP not found — run 'make build/skj-cpp' first"

@@ -3273,7 +3273,8 @@ lower_function(struct cc_node *fndef)
 
     fn->nslots = nslots;
     fn->slot_size = arena_alloc(lower_arena, nslots * sizeof(int));
-    memcpy(fn->slot_size, slot_sizes, nslots * sizeof(int));
+    if (nslots)
+        memcpy(fn->slot_size, slot_sizes, nslots * sizeof(int));
     ldouble_recover_active = 0;
     return fn;
 }

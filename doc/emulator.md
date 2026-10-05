@@ -172,6 +172,40 @@ included: it rejects `mov3q` and the remainder instructions.
 `make check-emu-all` runs every suite the emulator covers, with no qemu
 involved.
 
+## The instruction-count benchmark
+
+The interpreter counts retired instructions with no timing input, so the
+count for a given guest is identical on every host. That is what makes it
+a benchmark metric where wall-clock time is not: two machines, or the same
+machine before and after an unrelated change, report the same number, so a
+difference means the work changed, not that the host was busier.
+
+`make bench` runs the corpus in `tests/bench.list` under `skj-run --stats`
+and compares each retired-instruction count against the committed baseline
+`tests/bench.expected`. The corpus reuses guests that `check-emu` and
+`check-rv-emu` already build and validate, chosen to span both cores and a
+range from a few thousand to a few million instructions. A count that moves
+in either direction fails the gate: on a deterministic interpreter nothing
+else moves it but a change in the generated code, so each change is meant to
+be read. Once it is understood and intended, `make bench-accept` records the
+new numbers.
+
+```
+make bench            # gate both cores against the baseline
+make bench-cf         # gate the ColdFire corpus only (one toolchain)
+make bench-rv         # gate the RV32 corpus only
+make bench-accept     # rebaseline after an intended change
+```
+
+`make check-emu-all` runs `bench` with the rest of the emulator suites,
+since that umbrella already requires both cross toolchains. The lighter
+`make check` leaves it out: it is a signal to read rather than a pass/fail
+property of a release. A guest whose binary is absent is skipped, not failed, so
+`bench-cf` or `bench-rv` gates its own half on a machine that has only one
+toolchain. The counts are guest-instruction counts; for tuning the
+interpreter itself, callgrind host-instruction counts are the companion
+metric, with the guest count held fixed as a behavior-preservation check.
+
 ## Excelsior on RV32, and the platform ABI
 
 `make check-exc-rv` runs the whole Excelsior suite on RISC-V: 174 of

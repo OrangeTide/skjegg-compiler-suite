@@ -231,6 +231,14 @@ regalloc(struct ir_func *fn)
         last_use[t] = -1;
     }
 
+    /* An IR_ARG operand is consumed at the following call, not at the ARG itself
+     * (emit_call_flush moves the pending args into the argument registers only
+     * when it reaches the call).  So extend each pending arg temp's live range to
+     * the call; otherwise a temp defined between the ARG and the call can reuse the
+     * argument's register and corrupt it.  Mirrors the x86 backend. */
+    int pending[16];
+    int npending = 0;
+
     pos = 0;
     for (i = fn->head; i; i = i->next, pos++) {
         if (i->dst >= 0 && i->dst < ntemps) {
@@ -247,6 +255,22 @@ regalloc(struct ir_func *fn)
             last_use[i->a] = pos;
         if (i->b >= 0 && i->b < ntemps && last_use[i->b] < pos)
             last_use[i->b] = pos;
+
+        if (i->op == IR_ARG || i->op == IR_ARG64 || i->op == IR_FARG) {
+            if (npending < 16)
+                pending[npending++] = i->a;
+        } else if (i->op == IR_CALL || i->op == IR_CALLI ||
+                   i->op == IR_CALL2 || i->op == IR_CALLI2 ||
+                   i->op == IR_CALL64 || i->op == IR_CALLI64 ||
+                   i->op == IR_FCALL || i->op == IR_FCALLI ||
+                   i->op == IR_TAILCALL || i->op == IR_TAILCALLI) {
+            int k;
+            for (k = 0; k < npending; k++)
+                if (pending[k] >= 0 && pending[k] < ntemps &&
+                    last_use[pending[k]] < pos)
+                    last_use[pending[k]] = pos;
+            npending = 0;
+        }
     }
 
     fn->ni64spills = linscan(fn, first_def, last_use,

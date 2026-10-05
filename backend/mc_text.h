@@ -25,4 +25,9 @@ void mct_begin_func(struct mc *m, int serial);
    resolution is the linker's job), kept for parity with the byte sink. */
 const char *mct_errsym(struct mc *m);
 
+/* Escape a symbol name for NASM: prefixes a `$` when the bare word would be read
+   as a reserved word, which the assembler strips from the object symbol.  Returns
+   one of a few rotating buffers, so use the result before the next few calls. */
+const char *nasm_sym(const char *name);
+
 #endif /* MC_TEXT_H */

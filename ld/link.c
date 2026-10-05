@@ -172,10 +172,12 @@ outsec_append(struct ld_output_sec *os, const uint8_t *data,
         memset(os->data + os->size, 0, pad);
     os->size += pad;
 
-    if (data)
-        memcpy(os->data + os->size, data, size);
-    else
-        memset(os->data + os->size, 0, size);
+    if (size > 0) {
+        if (data)
+            memcpy(os->data + os->size, data, size);
+        else
+            memset(os->data + os->size, 0, size);
+    }
     os->size += size;
 }
 

@@ -38,6 +38,13 @@ static const int freg[] = { 0, 1, 8, 9, 10, 11, 12, 13, 14, 15 };
 #define FSC0 0                  /* float scratch A (d0/s0) */
 #define FSC1 1                  /* float scratch B (d1/s1) */
 
+/* Per-temp float storage format (1 = f32/single, 0 = f64): the C front end keeps
+   `float` as f32 in registers while Kobold keeps every float as f64, so a single
+   value crossing a call is converted only when the temp's format differs from the
+   f32 wire width.  Set per function in arm64_select_func (see ir_classify_f32). */
+static const unsigned char *g_f32;
+static int src_is_f32(int t) { return g_f32 && t >= 0 && g_f32[t]; }
+
 /****************************************************************
  * Frame geometry (ported verbatim from arm64_emit.c; pure computation)
  ****************************************************************/
@@ -384,7 +391,9 @@ epilogue(struct mc64 *m, struct ir_func *fn)
  * Call marshalling (AAPCS64)
  ****************************************************************/
 
-enum { RET_I32, RET_I64, RET_FLOAT };
+enum { RET_I32, RET_I64, RET_FLOAT, RET_FAIL };
+/* RET_FAIL: a failable call returns its value in x0 and its error in x1, which is
+   spilled to the call's error slot; the value is then taken as a plain i32 result. */
 
 /* Place the pending arguments per AAPCS64, make the call, restore the stack, and
    deliver the result.  Register targets (x0..x7 / d0..d7) are disjoint from the
@@ -433,8 +442,19 @@ emit_call(struct mc64 *m, struct ir_func *fn, struct ir_insn *in,
                 mc64_strw(m, SC1, MC64_SP, off + o);
             }
         } else if (aisf[k]) {
-            mc64_str_fp(m, af32[k] ? 2 : 3, frs(m, fn, at[k], FSC0, af32[k]),
-                        MC64_SP, off);
+            /* a single arg is stored as f32: narrowed from an f64-format temp
+               (Kobold), or stored directly when the temp is already f32 (C). */
+            if (af32[k] && src_is_f32(at[k])) {
+                int s = frs(m, fn, at[k], FSC0, 1);
+                mc64_str_fp(m, 2, s, MC64_SP, off);
+            } else if (af32[k]) {
+                int s = frs(m, fn, at[k], FSC0, 0);
+                mc64_fcvt(m, 2, 3, FSC0, s);
+                mc64_str_fp(m, 2, FSC0, MC64_SP, off);
+            } else {
+                int s = frs(m, fn, at[k], FSC0, 0);
+                mc64_str_fp(m, 3, s, MC64_SP, off);
+            }
         } else if (ai64[k]) {
             mc64_strx(m, rsx(m, fn, at[k], SC0), MC64_SP, off);
         } else {
@@ -450,11 +470,20 @@ emit_call(struct mc64 *m, struct ir_func *fn, struct ir_insn *in,
             continue;
         r = fn->temp_reg[t];
         if (aisf[k]) {
-            int sz = af32[k] ? 2 : 3;
-            if (r >= 0)
-                mc64_fmov(m, sz, treg[k], freg[r]);
-            else
-                mc64_ldr_fp(m, sz, treg[k], MC64_FP, fspill_off(fn, t));
+            /* a single arg narrows an f64-format temp to f32 (Kobold); a temp
+               already f32 (C) moves as single, and a double moves as f64. */
+            int narrow = af32[k] && !src_is_f32(t);
+            int rw = (af32[k] && src_is_f32(t)) ? 2 : 3;
+            if (r >= 0) {
+                if (narrow)
+                    mc64_fcvt(m, 2, 3, treg[k], freg[r]);
+                else
+                    mc64_fmov(m, rw, treg[k], freg[r]);
+            } else {
+                mc64_ldr_fp(m, rw, treg[k], MC64_FP, fspill_off(fn, t));
+                if (narrow)
+                    mc64_fcvt(m, 2, 3, treg[k], treg[k]);
+            }
         } else if (ai64[k]) {
             if (r >= 0)
                 mc64_mov(m, 1, treg[k], xreg[r]);
@@ -487,9 +516,20 @@ emit_call(struct mc64 *m, struct ir_func *fn, struct ir_insn *in,
     if (stkb > 0)
         mc64_addimm(m, MC64_SP, MC64_SP, stkb);
 
+    /* A failable call's error register (x1) goes to the error slot regardless of
+       whether the value result is used; the value (x0) is then an i32 result. */
+    if (retkind == RET_FAIL)
+        mc64_strx(m, 1, MC64_FP, slot_offset(fn, in->slot));
+
     if (in->dst >= 0) {
         if (retkind == RET_FLOAT) {
-            int sd = frd(fn, in->dst, FSC0);
+            int sd;
+            /* a single result comes back as f32 in d0; widen it to f64 only when
+               the destination temp holds f64 format (Kobold), not when it stays
+               single (C) */
+            if (in->imm == FWIDTH_F32 && !src_is_f32(in->dst))
+                mc64_fcvt(m, 3, 2, 0, 0);
+            sd = frd(fn, in->dst, FSC0);
             if (sd != 0)
                 mc64_fmov(m, 3, sd, 0);
             fwd(m, fn, in->dst, sd, 0);
@@ -539,12 +579,16 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
     int at[ARM64_MAX_ARGS], amem[ARM64_MAX_ARGS], narg = 0, x8_temp = -1;
     char aisf[ARM64_MAX_ARGS], ai64[ARM64_MAX_ARGS], af32[ARM64_MAX_ARGS];
     char *is_float;
+    unsigned char *f32fmt;
     int rc = 0;
 
     is_float = calloc((size_t)(fn->ntemps > 0 ? fn->ntemps : 1), 1);
+    f32fmt = calloc((size_t)(fn->ntemps > 0 ? fn->ntemps : 1), 1);
     for (struct ir_insn *in = fn->head; in; in = in->next)
         if (in->dst >= 0 && in->dst < fn->ntemps)
             is_float[in->dst] = (char)ir_op_is_float_def(in->op);
+    ir_classify_f32(fn, f32fmt);
+    g_f32 = f32fmt;
 
     lbl = malloc((size_t)(fn->nlabels > 0 ? fn->nlabels : 1) * sizeof(int));
     for (int k = 0; k < fn->nlabels; k++)
@@ -680,6 +724,37 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
             if (w64) wd64(m, fn, in->dst, sd); else wd32(m, fn, in->dst, sd);
             break;
         }
+        case IR_ADDO: case IR_SUBO: case IR_MULO: {
+            /* Overflow-checked 32-bit signed arithmetic.  AArch64 exposes no
+               flag-setting add/sub in this encoder, and multiply has no overflow
+               flag at all, so the operands are sign-extended to 64 bits and the
+               operation runs 64-bit (exact for any i32 inputs).  The i32 result
+               overflows exactly when it differs from its own low-32 sign
+               extension.  Under TRAP_HARDWARE the check is dropped (the C front
+               end never emits these), leaving the bare arithmetic. */
+            int sa = rs(m, fn, in->a, SC0);
+            int sb = rs(m, fn, in->b, SC1);
+            int sd = rd(fn, in->dst, SC0);
+            mc64_sxtw(m, SC0, sa);
+            mc64_sxtw(m, SC1, sb);
+            switch (in->op) {
+            case IR_ADDO: mc64_add(m, 1, SC0, SC0, SC1); break;
+            case IR_SUBO: mc64_sub(m, 1, SC0, SC0, SC1); break;
+            case IR_MULO: mc64_mul(m, 1, SC0, SC0, SC1); break;
+            }
+            if (tp == ARM64_TRAP_GUARDED) {
+                int ok = mc64_new_label(m);
+                mc64_sxtw(m, SCQ, SC0);          /* sign-extend low 32 of result */
+                mc64_cmp(m, 1, SC0, SCQ);
+                mc64_cset(m, 0, SCQ, MC64_NE);   /* SCQ = 1 on overflow */
+                mc64_cbz(m, 0, SCQ, ok);         /* no overflow: skip the trap */
+                mc64_trap_overflow(m);
+                mc64_label(m, ok);
+            }
+            mc64_mov(m, 0, sd, SC0);
+            wd32(m, fn, in->dst, sd);
+            break;
+        }
         case IR_SHL: case IR_SHRS: case IR_SHRU:
         case IR_SHL64: case IR_SHRS64: case IR_SHRU64: {
             int w64 = in->op == IR_SHL64 || in->op == IR_SHRS64 || in->op == IR_SHRU64;
@@ -795,6 +870,14 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
             break;
         case IR_CALLI:
             emit_call(m, fn, in, at, aisf, ai64, af32, amem, narg, x8_temp, 1, RET_I32);
+            narg = 0; x8_temp = -1;
+            break;
+        case IR_CALL2:
+            emit_call(m, fn, in, at, aisf, ai64, af32, amem, narg, x8_temp, 0, RET_FAIL);
+            narg = 0; x8_temp = -1;
+            break;
+        case IR_CALLI2:
+            emit_call(m, fn, in, at, aisf, ai64, af32, amem, narg, x8_temp, 1, RET_FAIL);
             narg = 0; x8_temp = -1;
             break;
         case IR_CALLI64:
@@ -966,6 +1049,19 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
             epilogue(m, fn);
             break;
         }
+        case IR_RETV2: {
+            /* failable return: value in x0, error in x1.  Materialise each through a
+               distinct scratch so the second load cannot clobber the first; neither
+               scratch is x0/x1, so the two moves are independent. */
+            int sa = rs(m, fn, in->a, SC0);
+            int sb = rs(m, fn, in->b, SC1);
+            if (sa != 0)
+                mc64_mov(m, 0, 0, sa);
+            if (sb != 1)
+                mc64_mov(m, 0, 1, sb);
+            epilogue(m, fn);
+            break;
+        }
         case IR_RETV64: {
             int sa = rsx(m, fn, in->a, SC0);
             if (sa != 0)
@@ -977,6 +1073,10 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
             int sa = frs(m, fn, in->a, FSC0, 0);
             if (sa != 0)
                 mc64_fmov(m, 3, 0, sa);
+            /* a single result is narrowed to f32 in d0 only when its temp holds
+               f64 format (Kobold); a temp already in f32 format (C) returns as-is */
+            if (in->imm == FWIDTH_F32 && !src_is_f32(in->a))
+                mc64_fcvt(m, 2, 3, 0, 0);
             epilogue(m, fn);
             break;
         }
@@ -1029,5 +1129,7 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
 
     free(lbl);
     free(is_float);
+    g_f32 = NULL;
+    free(f32fmt);
     return rc;
 }

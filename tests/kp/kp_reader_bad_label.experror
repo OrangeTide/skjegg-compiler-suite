@@ -1,0 +1,3 @@
+# A branch target past the function's declared `labels` count must be
+# rejected: the backend indexes its label table by this value.
+line 3: label index out of range

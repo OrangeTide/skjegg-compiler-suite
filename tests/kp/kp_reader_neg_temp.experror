@@ -1,0 +1,2 @@
+# A negative temp index is as out of range as one past the count.
+line 3: temp index out of range

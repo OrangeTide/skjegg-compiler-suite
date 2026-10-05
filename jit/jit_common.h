@@ -115,9 +115,47 @@ struct jit_target {
     int (*apply_call_reloc)(struct code *c, size_t site, size_t target);
     /* Patch an absolute reference at `site` in the mapped code to hold addr. */
     void (*apply_abs_reloc)(uint8_t *code, size_t site, uint64_t addr);
+    /* Emit, at the executable address `dst_addr` (buffer `dst`), a stub that tail-
+       jumps through the writable pointer at `slot_addr`: it loads *(void **)slot_addr
+       and jumps there, touching only a scratch register the call ABI lets a callee
+       clobber, so arguments and the return address pass straight through.  Returns
+       the stub's byte length (at most KP_STUB_STRIDE). */
+    size_t (*emit_stub)(uint8_t *dst, uintptr_t dst_addr, uintptr_t slot_addr);
 };
 
 extern const struct jit_target kp_target;
+
+/****************************************************************
+ * Cross-module call stubs (Phase 4 Step B)
+ ****************************************************************/
+
+/* Each exported routine gets a stub at a stable executable address that jumps
+   indirectly through a writable slot.  A cross-module call is linked to the stub
+   (its address is fixed before any module is compiled, so linking is independent of
+   compile order), and the slot is pointed at the real entry once that is known.
+   Because the stub reads the target from the slot, redirection is a plain pointer
+   store: the stub code is written once and never patched, so it needs no W^X dance,
+   and a later step can point a slot at a lazy compiler instead of a finished entry. */
+#define KP_STUB_STRIDE 16   /* bytes reserved per stub; fits every target's sequence */
+
+struct kp_stubs {
+    void **slots;           /* writable target slots (low memory), one per stub */
+    size_t slots_map;
+    uint8_t *code;          /* the stubs' executable region (low memory) */
+    size_t code_map;
+    int n, cap;
+};
+
+/* Reserve room for `capacity` stubs.  Returns 0, or -1 with a reason in err. */
+int kp_stubs_init(struct kp_stubs *s, int capacity, char *err, size_t errlen);
+/* Add one stub; returns its stable address (the cross-module call target) and, in
+   *index, the slot index.  The slot starts NULL.  Returns NULL on overflow. */
+void *kp_stub_add(struct kp_stubs *s, int *index);
+/* Point stub `index`'s slot at `target` (a compiled entry, say). */
+void kp_stub_set(struct kp_stubs *s, int index, void *target);
+/* Make the stub code read-execute once every stub has been emitted. */
+int kp_stubs_finalize(struct kp_stubs *s, char *err, size_t errlen);
+void kp_stubs_free(struct kp_stubs *s);
 
 /** Compile every function in `prog` to native code (see the file comment). */
 int kp_jit(struct kp_jit *j, struct ir_program *prog,

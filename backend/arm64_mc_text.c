@@ -388,7 +388,10 @@ target_emit(FILE *out, struct ir_program *prog)
         fprintf(out, "%s:\n", fn->name);
 
         mct64_begin_func(m, ++serial);
-        if (arm64_select_func(m, fn, ARM64_TRAP_HARDWARE, err, sizeof err) != 0) {
+        if (arm64_select_func(m, fn,
+                              target_aot_trap_guarded ? ARM64_TRAP_GUARDED
+                                                      : ARM64_TRAP_HARDWARE,
+                              err, sizeof err) != 0) {
             fprintf(stderr, "arm64_mc_text: %s\n", err);
             exit(1);
         }

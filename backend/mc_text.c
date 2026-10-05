@@ -217,13 +217,46 @@ void mc_nop(struct mc *m) { fputs("\tnop\n", m->out); }
 void mc_call_reg(struct mc *m, int r) { fprintf(m->out, "\tcall %s\n", reg64[r]); }
 void mc_jmp_reg(struct mc *m, int r) { fprintf(m->out, "\tjmp %s\n", reg64[r]); }
 
+/* NASM reserves many words (the SEG and WRT operators, the size specifiers, every
+   instruction mnemonic), so a guest symbol that happens to match one breaks
+   assembly.  A `$` prefix forces NASM to read the word as an identifier and is
+   stripped from the emitted object symbol, so it is always safe to apply.  A local
+   label (leading '.') is never a reserved word and is left untouched.  Several
+   buffers rotate so a single statement can format more than one symbol. */
+const char *
+nasm_sym(const char *name)
+{
+    static char pool[4][256];
+    static int which = 0;
+    char *buf;
+    size_t i, j = 0;
+
+    if (!name)
+        return name;
+    which = (which + 1) & 3;
+    buf = pool[which];
+
+    /* A `$` at the start escapes a reserved word and is stripped from the object
+       symbol.  A `.` anywhere makes NASM read a local label, so map every `.` to a
+       `$`, a plain identifier character it keeps: a leading one then doubles as the
+       escape.  A name such as ".coentry.1" (a compiler-generated routine, leading
+       dot and all) becomes the global symbol "coentry$1"; a runtime name with no
+       dots keeps its spelling after the escape is stripped. */
+    if (name[0] != '.')
+        buf[j++] = '$';
+    for (i = 0; name[i] && j + 1 < sizeof pool[0]; i++)
+        buf[j++] = (name[i] == '.') ? '$' : name[i];
+    buf[j] = '\0';
+    return buf;
+}
+
 /* ---- Symbolic call and address.  The linker resolves the name, so a local and
    an external symbol are the same `call name` / `mov reg, name`; the driver
    declares the externs NASM needs. */
 void mc_call_sym(struct mc *m, const char *name)
-{ fprintf(m->out, "\tcall %s\n", name); }
+{ fprintf(m->out, "\tcall %s\n", nasm_sym(name)); }
 void mc_lea_sym(struct mc *m, int reg, const char *name)
-{ fprintf(m->out, "\tmov %s, %s\n", reg64[reg], name); }
+{ fprintf(m->out, "\tmov %s, %s\n", reg64[reg], nasm_sym(name)); }
 
 /* ---- Traps.  Under the AOT (TRAP_HARDWARE) trap policy the selector never
    emits these, so they are unreachable in text output; keep the sink complete

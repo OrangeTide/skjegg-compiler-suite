@@ -335,10 +335,31 @@ arm64_apply_abs_reloc(uint8_t *code, size_t site, uint64_t addr)
     memcpy(code + site + 4, &w1, 4);
 }
 
+/* An export stub: materialize the slot address in x16 (the IP0 scratch a callee may
+   clobber), load the target through it, and branch.  The slot is low (<4GB), so a
+   movz/movk pair suffices; x16 is the only register touched, so the guest's argument
+   registers and link register pass through to the real entry untouched. */
+static size_t
+arm64_emit_stub(uint8_t *dst, uintptr_t dst_addr, uintptr_t slot_addr)
+{
+    uint32_t lo = (uint32_t)(slot_addr & 0xffff);
+    uint32_t hi = (uint32_t)((slot_addr >> 16) & 0xffff);
+    uint32_t w[4];
+
+    (void)dst_addr;
+    w[0] = 0xD2800010u | (lo << 5);   /* movz x16, #lo            */
+    w[1] = 0xF2A00010u | (hi << 5);   /* movk x16, #hi, lsl 16    */
+    w[2] = 0xF9400210u;               /* ldr  x16, [x16]          */
+    w[3] = 0xD61F0200u;               /* br   x16                 */
+    memcpy(dst, w, sizeof w);
+    return sizeof w;
+}
+
 const struct jit_target kp_target = {
     emit_func,
     arm64_apply_call_reloc,
     arm64_apply_abs_reloc,
+    arm64_emit_stub,
 };
 
 /****************************************************************
