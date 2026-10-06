@@ -79,10 +79,11 @@ struct h_va_list {
     int vr_offs;
 };
 static void *
-h_va_arg(void *ap, int is_fp)
+h_va_arg(void *ap, int kind)
 {
     struct h_va_list *v = ap;
     void *p;
+    int is_fp = (kind == 1);     /* 0 int/ptr, 1 double, 2 i64: GP for 0 and 2 */
     if (is_fp) {
         if (v->vr_offs < 0) { p = (char *)v->vr_top + v->vr_offs; v->vr_offs += 16; }
         else                { p = v->stack; v->stack = (char *)p + 8; }
@@ -92,16 +93,33 @@ h_va_arg(void *ap, int is_fp)
     }
     return p;
 }
+#elif defined(__riscv)
+/* RV32: skjegg routes every unnamed argument onto the caller's stack (see the
+   backend's rv_abi_assign first_vararg), so the va_list uses only
+   overflow_arg_area (field @8); gp_offset/fp_offset/reg_save_area are zero.
+   Read the cursor, 8-aligning it for a 64-bit slot, and advance.  Mirrors
+   runtime/va_rv.c. */
+static void *
+h_va_arg(void *ap, int kind)
+{
+    unsigned *f = ap;
+    unsigned p = f[2];
+    if (kind != 0)              /* a two-word argument is 8-aligned */
+        p = (p + 7u) & ~7u;
+    f[2] = p + (kind == 0 ? 4u : 8u);
+    return (void *)(unsigned long)p;
+}
 #else
 /* SysV: the guest is ILP32, so its va_list has 4-byte pointers and the four
    fields sit at byte offsets 0/4/8/12: gp_offset, fp_offset, overflow_arg_area,
    reg_save_area, the last two 32-bit low-memory addresses.  Read as raw words,
    mirroring runtime/va_x86_64.c. */
 static void *
-h_va_arg(void *ap, int is_fp)
+h_va_arg(void *ap, int kind)
 {
     unsigned *f = ap;
     unsigned p;
+    int is_fp = (kind == 1);     /* 0 int/ptr, 1 double, 2 i64: GP for 0 and 2 */
     if (is_fp) {
         if (f[1] < 176) { p = f[3] + f[1]; f[1] += 16; }
         else            { p = f[2]; f[2] += 8; }
@@ -239,6 +257,18 @@ main(int argc, char **argv)
 
     if (!inpath)
         die("usage: skj-jit [-V] [-I path] [-D name[=val]] input.c");
+
+    /* Default search path for skj-provided headers (<stdarg.h>), added after
+       any -I so user paths win; SKJ_CC_INCLUDE overrides it at run time. */
+    {
+        const char *inc = getenv("SKJ_CC_INCLUDE");
+#ifdef SKJ_INCLUDE_DIR
+        if (!inc || !*inc)
+            inc = SKJ_INCLUDE_DIR;
+#endif
+        if (inc && *inc)
+            cpp_add_include_path(pp, inc);
+    }
 
     if (setjmp(util_die_env) != 0)
         return 1;

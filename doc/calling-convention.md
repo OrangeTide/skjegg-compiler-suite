@@ -39,13 +39,34 @@ big ABI item after LP64 (`doc/lp64.md`).
      `va_arg` calls a runtime `__va_arg` helper (`runtime/va_x86_64.c`) that
      walks the save area then the overflow stack, cc loading the typed value.
      `__builtin_va_list` is a built-in type; the builtins are
-     `__builtin_va_start` / `__builtin_va_end` and the typed accessors
-     `__builtin_va_arg_int` / `_long` / `_dbl` (a standard `__builtin_va_arg(ap,
-     type)` with a type argument is a later refinement for header stdarg.h).
+     `__builtin_va_start` / `__builtin_va_end`, the typed accessors
+     `__builtin_va_arg_int` / `_long` / `_dbl`, and the generic
+     `__builtin_va_arg(ap, type)` (the parser reads a type name as its second
+     operand and classifies it).  A real `<stdarg.h>` ships in `include/` (on
+     the default search path baked into every cc front end) and maps
+     `va_start` / `va_arg` / `va_end` / `va_copy` to those builtins.  `__va_arg`
+     takes a `kind` (0 = 32-bit int/pointer, 1 = double, 2 = 64-bit integer)
+     rather than a bare `is_fp`, so the ILP32 stack ABIs can tell a 4-byte slot
+     from an 8-byte one; on SysV and AAPCS64 `is_fp = (kind == 1)`.
      The caller side (placing args + `al`) was already done in P1. Green:
      `cc_t071` (int with register overflow, float in the SSE regs, 64-bit long),
-     x86-64 only (excluded on the other cc targets, which have no register save
-     area yet).
+     x86-64 only (it uses the x86-specific `__builtin_va_arg_*` accessors).
+     Varargs now work on **every** cc target through the portable `<stdarg.h>`
+     path (`cc_t081_varargs_stdarg`): ColdFire needs no register save area (the
+     toolkit convention already stacks every argument); MIPS o32 homes `a0`-`a3`
+     for a variadic callee so the argument structure is contiguous; and RISC-V
+     uses a self-consistent convention in which the **caller** routes every
+     unnamed argument onto its outgoing stack block (`rv_abi_assign`'s
+     `first_vararg` forces registers exhausted from the first unnamed argument),
+     so the callee's `va_list` walks the unnamed arguments contiguously from
+     `fp+8` with no register save area at all.  `IR_VA_START` on RISC-V just
+     points `overflow_arg_area` past the named stack arguments; `runtime/va_rv.c`
+     reads only that cursor, 8-aligning it for a 64-bit slot.  This is correct
+     for skj -> skj but **not** the standard RISC-V variadic ABI (which passes
+     unnamed arguments in `a0`-`a7` with a GPR save area), so a skj variadic
+     function does not interoperate with a gcc caller; that is an accepted
+     limitation while the standard library is skj's own.  The runtime helpers
+     are `runtime/va_cf.c`, `runtime/va_mips.c`, and `runtime/va_rv.c`.
    - **P3** struct-by-value: the SysV eightbyte classification for register
      structs (1-2 eightbytes, INTEGER and SSE). Two foundations plus the
      classification. First, a pre-existing gap: aggregate **value-semantic

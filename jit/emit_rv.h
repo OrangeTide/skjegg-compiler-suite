@@ -175,5 +175,6 @@ void rv_fcvt_h_d(struct code *c, int fd, int fs1, int rm);
 int rv_patch_b(struct code *c, size_t site, int32_t disp);
 /* Patch a J-type jal (at `site`) to reach `target`; -1 if beyond +/-1MB. */
 int rv_patch_j(struct code *c, size_t site, int32_t disp);
+int rv_patch_call(struct code *c, size_t site, int32_t disp);
 
 #endif /* EMIT_RV_H */

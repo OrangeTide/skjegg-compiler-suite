@@ -103,9 +103,23 @@ fspill_disp(struct frame *fr, struct ir_func *fn, int t)
 
 /* Load temp t (its full 64-bit home, which holds a value in the low 32 bits
    or a native address) into physical register `into`. */
+/* The operand helpers below index fn->temp_reg[t] / fn->temp_spill[t] by a temp
+   number. The toolkit's own front ends only ever pass a real temp, but the KPM
+   reader is an untrusted boundary: an instruction that omits a temp operand the
+   opcode uses leaves it at ir_emit's -1 default, which would index one slot
+   before the table. The reader bounds every temp to < ntemps; the remaining
+   case is this -1 "none" sentinel (the one the backend already tolerates for a
+   discarded dst). Each helper treats t < 0 as that sentinel: a read yields a
+   harmless value (stack memory at [rbp], never computed into anything a valid
+   program observes) and a write-back is skipped, so a malformed module compiles
+   to safe, meaningless code rather than driving an out-of-bounds access. */
 static void
 mat(struct mc *m, struct ir_func *fn, struct frame *fr, int t, int into)
 {
+    if (t < 0) {
+        mc_load64(m, into, MC_RBP, 0);
+        return;
+    }
     if (fn->temp_reg[t] >= 0) {
         int src = intreg[fn->temp_reg[t]];
         if (src != into)
@@ -119,6 +133,8 @@ mat(struct mc *m, struct ir_func *fn, struct frame *fr, int t, int into)
 static void
 wb(struct mc *m, struct ir_func *fn, struct frame *fr, int t, int from)
 {
+    if (t < 0)
+        return;
     if (fn->temp_reg[t] >= 0) {
         int dst = intreg[fn->temp_reg[t]];
         if (dst != from)
@@ -133,6 +149,10 @@ wb(struct mc *m, struct ir_func *fn, struct frame *fr, int t, int from)
 static void
 matf(struct mc *m, struct ir_func *fn, struct frame *fr, int t, int into)
 {
+    if (t < 0) {
+        mc_movsd_load(m, into, MC_RBP, 0);
+        return;
+    }
     if (fn->temp_reg[t] >= 0) {
         int src = fpreg[fn->temp_reg[t]];
         if (src != into)
@@ -145,6 +165,8 @@ matf(struct mc *m, struct ir_func *fn, struct frame *fr, int t, int into)
 static void
 wbf(struct mc *m, struct ir_func *fn, struct frame *fr, int t, int from)
 {
+    if (t < 0)
+        return;
     if (fn->temp_reg[t] >= 0) {
         int dst = fpreg[fn->temp_reg[t]];
         if (dst != from)
@@ -176,6 +198,10 @@ wbf(struct mc *m, struct ir_func *fn, struct frame *fr, int t, int from)
 static int
 rs(struct mc *m, struct ir_func *fn, struct frame *fr, int t, int scr)
 {
+    if (t < 0) {
+        mc_load64(m, scr, MC_RBP, 0);
+        return scr;
+    }
     if (fn->temp_reg[t] >= 0)
         return intreg[fn->temp_reg[t]];
     mc_load64(m, scr, MC_RBP, spill_disp(fr, fn, t));
@@ -187,6 +213,8 @@ rs(struct mc *m, struct ir_func *fn, struct frame *fr, int t, int scr)
 static int
 rd(struct ir_func *fn, int t, int scr)
 {
+    if (t < 0)
+        return scr;
     return fn->temp_reg[t] >= 0 ? intreg[fn->temp_reg[t]] : scr;
 }
 
@@ -195,6 +223,8 @@ rd(struct ir_func *fn, int t, int scr)
 static void
 wd(struct mc *m, struct ir_func *fn, struct frame *fr, int t, int reg)
 {
+    if (t < 0)
+        return;
     if (fn->temp_reg[t] < 0)
         mc_store64(m, MC_RBP, spill_disp(fr, fn, t), reg);
 }
@@ -203,6 +233,10 @@ wd(struct mc *m, struct ir_func *fn, struct frame *fr, int t, int reg)
 static int
 frs(struct mc *m, struct ir_func *fn, struct frame *fr, int t, int scr)
 {
+    if (t < 0) {
+        mc_movsd_load(m, scr, MC_RBP, 0);
+        return scr;
+    }
     if (fn->temp_reg[t] >= 0)
         return fpreg[fn->temp_reg[t]];
     mc_movsd_load(m, scr, MC_RBP, fspill_disp(fr, fn, t));
@@ -212,12 +246,16 @@ frs(struct mc *m, struct ir_func *fn, struct frame *fr, int t, int scr)
 static int
 frd(struct ir_func *fn, int t, int scr)
 {
+    if (t < 0)
+        return scr;
     return fn->temp_reg[t] >= 0 ? fpreg[fn->temp_reg[t]] : scr;
 }
 
 static void
 fwd(struct mc *m, struct ir_func *fn, struct frame *fr, int t, int reg)
 {
+    if (t < 0)
+        return;
     if (fn->temp_reg[t] < 0)
         mc_movsd_store(m, MC_RBP, fspill_disp(fr, fn, t), reg);
 }

@@ -154,6 +154,14 @@ slurp(const char *path)
         fclose(f);
         die("cannot read %s", path);
     }
+    /* ftell on a directory or a special file can report a wild size (a
+       #include naming a directory is the common way in); cap it so the size is
+       never trusted into an absurd allocation. A real source file is far under
+       this, and a directory/device then fails cleanly here or on the read. */
+    if (n > (1L << 30)) {
+        fclose(f);
+        die("file too large: %s", path);
+    }
     rewind(f);
     buf = malloc((size_t)n + 1);
     if (!buf) {

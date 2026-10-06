@@ -1022,6 +1022,10 @@ then_has_else(void)
     for (;;) {
         int k = lex_peek().kind;
 
+        if (k == T_EOF)
+            break;                  /* end of input always ends the scan, even
+                                       inside an unbalanced group (otherwise
+                                       lex_next stays parked at EOF: a hang) */
         if (k == T_LPAREN || k == T_LBRACK) {
             depth++;
         } else if (k == T_RPAREN || k == T_RBRACK) {
@@ -1032,7 +1036,7 @@ then_has_else(void)
                 found = 1;
                 break;
             }
-            if (k == T_NL || k == T_EOF || k == T_THEN || k == T_DO)
+            if (k == T_NL || k == T_THEN || k == T_DO)
                 break;
             switch (k) {            /* a structural keyword bounds the scan */
             case T_IF: case T_ELSEIF: case T_ENDIF:

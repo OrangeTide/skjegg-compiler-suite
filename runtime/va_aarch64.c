@@ -16,10 +16,14 @@ struct __va_list {
     int __vr_offs;
 };
 
+/* The second argument classifies the slot: 0 = 32-bit int/pointer, 1 =
+   double, 2 = 64-bit integer.  On AAPCS64 a gp slot is 8 bytes, so int and
+   long long share the GP path; only a double uses the VR path. */
 void *
-__va_arg(struct __va_list *ap, int is_fp)
+__va_arg(struct __va_list *ap, int kind)
 {
     void *p;
+    int is_fp = (kind == 1);
 
     if (is_fp) {
         if (ap->__vr_offs < 0) {

@@ -449,8 +449,12 @@ main(int argc, char **argv)
         if (outfile)
             fclose(out);
         }
+
+        /* Run the cleanup list while the arena 'a' registered above is still
+           in scope; running it after this block closes would free an
+           out-of-scope stack object. */
+        util_cleanup_run();
     }
 
-    util_cleanup_run();
     return 0;
 }

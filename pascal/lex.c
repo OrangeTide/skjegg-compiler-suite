@@ -402,7 +402,8 @@ lex_one(void)
     struct token t;
     const char *start;
     int c;
-    long n;
+    unsigned long n;        /* accumulate unsigned so an over-long literal
+                               wraps (defined) instead of overflowing a long */
 
     skip_ws();
     t = make(T_EOF);
@@ -474,7 +475,7 @@ lex_one(void)
             }
         }
         t = make(T_NUMBER);
-        t.nval = n;
+        t.nval = (long)n;
         return t;
     }
 
@@ -495,7 +496,7 @@ lex_one(void)
             p++;
         }
         t = make(T_NUMBER);
-        t.nval = n;
+        t.nval = (long)n;
         return t;
     }
 

@@ -663,6 +663,14 @@ emit_prologue(FILE *out, struct ir_func *fn)
         if (words == 2 && word + 1 < 4)
             fprintf(out, "\tsw %s, %d($fp)\n", argreg[word + 1], off + 4);
     }
+
+    /* A variadic function also homes the argument registers past its named
+       parameters, into the caller-reserved 16-byte home ($fp+8 .. $fp+20), so
+       __va_arg can walk the whole argument structure as one contiguous run.
+       The caller always reserves the home, so these words are safe to write. */
+    if (fn->is_variadic)
+        for (k = 0; k < 4; k++)
+            fprintf(out, "\tsw %s, %d($fp)\n", argreg[k], 8 + k * 4);
 }
 
 static void
@@ -1890,6 +1898,31 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         if (strcmp(sd, alo) != 0)
             fprintf(out, "\tmove %s, %s\n", sd, alo);
         wd(out, fn, i->dst, sd);
+        break;
+    }
+
+    case IR_VA_START: {
+        /* Initialize the va_list at [temp a].  o32 lays every argument in one
+           "argument structure" from $fp+8 upward (the a0-a3 homes, which a
+           variadic prologue fills, then the stack overflow), so the varargs
+           are contiguous just past the named parameters.  Compute that byte
+           offset with the same 8-alignment slot_offset uses, point
+           overflow_arg_area (field @8 of the SysV __va_list_tag) at $fp+off,
+           and zero the unused register-area fields; runtime/va_mips.c reads
+           only overflow_arg_area (8-aligning it for a 64-bit slot). */
+        const char *sa = rs(out, fn, i->a, 1);   /* va_list struct address */
+        int off = 8, k;
+        for (k = 0; k < fn->nparams; k++) {
+            int sz = slot_bytes(fn, k);
+            if (sz % 8 == 0)
+                off = (off + 7) & ~7;
+            off += sz;
+        }
+        fprintf(out, "\taddiu $t0, $fp, %d\n", off);
+        fprintf(out, "\tsw $t0, 8(%s)\n", sa);      /* overflow_arg_area */
+        fprintf(out, "\tsw $zero, 0(%s)\n", sa);     /* gp_offset    = 0 */
+        fprintf(out, "\tsw $zero, 4(%s)\n", sa);     /* fp_offset    = 0 */
+        fprintf(out, "\tsw $zero, 12(%s)\n", sa);    /* reg_save_area = 0 */
         break;
     }
 

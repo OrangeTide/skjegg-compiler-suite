@@ -1,0 +1,7 @@
+.kpm 1
+.func main params 0 slots 1 temps 2 labels 1
+LIC dst=0 imm=7
+ARG a=0
+CALL2 dst=-1 slot=0 sym=sink nargs=1
+RET
+.endfunc

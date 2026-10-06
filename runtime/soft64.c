@@ -35,6 +35,13 @@ u64 __umoddi3(u64 n, u64 d);
 s64 __divdi3(s64 n, s64 d);
 s64 __moddi3(s64 n, s64 d);
 
+/* The multiply and the variable shifts are guarded so a consumer that supplies
+ * them from elsewhere can drop them and keep only the divide family.  The RISC-V
+ * backend emits a stack-ABI __muldi3 and shift family (served by a separate alias
+ * into jit/rv_jit_i64.S), so the freestanding Kobold archive builds this file with
+ * -DSOFT64_NO_MULSHIFT and takes only the register-ABI __divdi3 family here.  No
+ * consumer defines it by default, so every other build is unchanged. */
+#ifndef SOFT64_NO_MULSHIFT
 /* 32x32 -> 64 via 16-bit limb products: ColdFire mulu.l keeps only the
  * low 32 bits, so the wide product is assembled from four narrow ones */
 static u64
@@ -69,6 +76,7 @@ __muldi3(u64 a, u64 b)
     hi += al * bh + ah * bl;        /* truncated cross products */
     return ((u64)hi << 32) | (u32)r;
 }
+#endif /* SOFT64_NO_MULSHIFT */
 
 /* shift-subtract long division: 64 steps of constant-width shifts and
  * a compare, nothing gcc turns back into a division libcall */
@@ -134,6 +142,7 @@ __moddi3(s64 n, s64 d)
     return neg ? -(s64)r : (s64)r;  /* the sign follows the dividend */
 }
 
+#ifndef SOFT64_NO_MULSHIFT
 /* The variable shifts. gcc emits a call for a 64-bit shift by a
  * variable amount; the constant-amount cases it expands inline. Written
  * branch-free of any 64-bit shift operator, so the file stays free of
@@ -178,3 +187,4 @@ __ashrdi3(s64 a, int b)
     return ((s64)(hi >> b) << 32) |
            (u32)((lo >> b) | ((u32)hi << (32 - b)));
 }
+#endif /* SOFT64_NO_MULSHIFT */

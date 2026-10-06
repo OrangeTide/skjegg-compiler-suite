@@ -246,13 +246,27 @@ handle_include(struct cpp *p, const char *line)
             name[i++] = *s++;
         name[i] = '\0';
     } else {
-        /* macro-expanded include — expand and retry */
+        /* macro-expanded include — expand once and retry. macro_expand fully
+           expands the token stream, so if the result is still not a <...> or
+           "..." form it is a malformed include, not something to expand again:
+           recursing unconditionally here spins forever on input like
+           `#include foo` where foo is undefined (it detokenizes back to `foo`).
+           Retry only when the expansion produced a bracketed form, which the
+           branches above consume and terminate. */
         struct pp_token *tokens = pp_tokenize(s, (int)strlen(s));
         struct pp_token *expanded = macro_expand(p, tokens);
         char buf[4096];
+        const char *t;
         pp_detokenize(expanded, buf, sizeof buf);
         pp_free_tokens(expanded);
-        handle_include(p, buf);
+        t = skip_ws(buf);
+        if (*t == '<' || *t == '"') {
+            handle_include(p, buf);
+        } else {
+            cpp_error(p, "%s:%d: invalid #include",
+                      p->file ? p->file->path : "<unknown>",
+                      p->file ? p->file->line : 0);
+        }
         return;
     }
 

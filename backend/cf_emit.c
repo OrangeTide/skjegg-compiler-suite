@@ -1427,6 +1427,27 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
     }
 
+    case IR_VA_START: {
+        /* Initialize the va_list at [temp a].  The toolkit convention pushes
+           every argument on the caller's stack (caller pops), so there is no
+           register save area: all varargs live contiguously just past the
+           named parameters, at %fp + 8 + sum(named param slot bytes).  Fill
+           overflow_arg_area (field @8 of the SysV __va_list_tag) with that
+           address and zero the unused register-area fields; runtime/va_cf.c
+           reads only overflow_arg_area. */
+        const char *sa = rs(out, fn, i->a, 0);   /* va_list struct address */
+        int nb = 8, k;
+        for (k = 0; k < fn->nparams; k++)
+            nb += (fn->slot_size[k] + 3) & ~3;
+        fprintf(out, "\tmove.l %s, %%a0\n", sa);
+        fprintf(out, "\tlea %d(%%fp), %%a1\n", nb);
+        fprintf(out, "\tmove.l %%a1, 8(%%a0)\n");   /* overflow_arg_area */
+        fprintf(out, "\tclr.l (%%a0)\n");           /* gp_offset    = 0 */
+        fprintf(out, "\tclr.l 4(%%a0)\n");          /* fp_offset    = 0 */
+        fprintf(out, "\tclr.l 12(%%a0)\n");         /* reg_save_area = 0 */
+        break;
+    }
+
     default:
         die("cf_emit: unhandled op %d", i->op);
     }

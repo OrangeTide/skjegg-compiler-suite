@@ -216,6 +216,10 @@ struct ir_insn {
     int slot;
     int label;
     int nargs;
+    int vararg;         /* on an IR_ARG/IR_ARG64/IR_FARG: this is an unnamed
+                           argument of a variadic call.  Only the RISC-V backend
+                           reads it (to place unnamed args on the stack); the
+                           other backends keep their psABI placement. */
     struct ir_insn *next;
 };
 

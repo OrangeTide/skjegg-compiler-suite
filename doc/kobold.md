@@ -1,40 +1,148 @@
-# Kobold-Pascal front end (`kp/`)
+# Kobold-Pascal front end (`kobold/`)
 
 Kobold-Pascal reaches the shared IR through a different seam from the other
-front ends. Its compiler, `kpcom`, is a separate self-hosting Pascal program
-that lives upstream in the Kobold tree, so skjegg has no `lex.c`/`parse.c`/
-`lower.c` for it. The bridge into this tree is the **KPM1 text module** that
-`kpcom` emits: `kp/kpm.c` reads a KPM1 image into an `ir_program`, and from
-there the same selector and sinks the C compiler uses emit the code. Every
-other front end is a source-to-IR pipeline in `backend/`'s sense; Kobold is an
-IR-in-a-text-format reader in front of the same backend.
+front ends. Its compiler, `kpcom`, is a self-hosting Pascal program whose source
+is in this tree (`kobold/kpcom.pas`); skjegg is its home, not a consumer of some
+other Kobold tree. Because `kpcom` is written in Pascal and compiles itself, the
+tree has no `lex.c`/`parse.c`/`lower.c` for it in `backend/`'s sense. The bridge
+into the rest of the toolkit is the **KPM1 text module** that `kpcom` emits:
+`kobold/kpm.c` reads a KPM1 image into an `ir_program`, and from there the same
+selector and sinks the C compiler uses emit the code. Every other front end is a
+source-to-IR pipeline; Kobold is a self-hosting Pascal compiler whose output is
+read back through an IR-in-a-text-format reader in front of the same backend.
 
-The authoritative design log for the port (`doc/port-to-skjegg.md`) and the
-authoritative KPM1 format spec (`kp-module-format.md`) are in the Kobold tree,
-not here. This file is the in-tree reference for what skjegg consumes and how
-it runs it; `kp/kpm.c` is the practical source of truth for the format.
+`kobold/kpm.c` is the practical source of truth for the KPM1 format, and this
+file is the in-tree reference for how the front end is built, bootstrapped, and
+run.
+
+## The bootstrap seed (`prebuild/`)
+
+`kpcom` is written in its own language, so the tree cannot compile `kobold/kpcom.pas`
+with a C front end: it needs an existing Kobold compiler. That stage0 compiler is
+a committed, generated artifact under `prebuild/`:
+
+- `kpcom.kpm` — the seed (stage0): the KPM1 module (serialized shared IR) that
+  `kpcom` emits when it compiles its own source. It is a verified self-host fixed
+  point (`make update-kpcom`: the stage-1 module and the stage-2 module re-emitted
+  from it are byte-identical). It is the only prebuilt artifact in the Kobold path;
+  everything else is source. It is what the Kobold tools JIT and AOT-compile.
+- `kpcom.manifest` — a source-based staleness fingerprint plus integrity data.
+  `fingerprint` is the SHA-256 over the emit inputs in order (`kpcom.pas`,
+  `version.inc`, `stdlib.inc`); `emit-flags` are the `kpcom` arguments that wrote
+  the seed (`--emit-kpm`); `kpm-sha256`/`kpm-bytes` are the seed's integrity.
+
+The front-end source itself lives in `kobold/`, beside the runtime and reader:
+
+- `kobold/kpcom.pas` — the whole front end (lexer, parser, semantics, IR, KPM1
+  writer), one Pascal file.
+- `kobold/version.inc`, `kobold/stdlib.inc` — the two `{$I ...}` includes
+  `kpcom.pas` pulls in (`KP_VERSION`, `KP_STDLIB`). Their bytes are compiled into
+  the IR as string constants (the stdlib path in particular), so the seed
+  reproduces byte-identically only when regenerated against these same includes.
+
+Bootstrap policy: the seed is trusted and the standing regeneration path is a
+self-host fixed point through `skj-kp-jit` (it consumes the prior seed). An `fpc`
+build of `kobold/kpcom.pas` is a deep-recovery fallback only, used to re-mint a
+lost or distrusted seed. See `PLAN.md`.
+
+### Regenerating and guarding the seed
+
+Three Makefile targets manage the committed seed.
+
+- `make update-kpcom` is the **only** writer of `prebuild/kpcom.kpm`. It
+  regenerates the seed by the self-host fixed point: stage 1 compiles
+  `kobold/kpcom.pas` with the committed seed as the front end
+  (`KPCOM_KPM=prebuild/kpcom.kpm skj-kp-jit --emit-kpm`), stage 2 compiles the
+  same source with stage 1 as the front end, and the two modules must be byte
+  identical (the self-host bootstrap check). Only then does stage 1 become
+  the new seed and the manifest is rewritten. If the fixed point breaks the
+  target fails and writes nothing. `kpcom` resolves `{$I}` relative to the source
+  file, so `version.inc` and `stdlib.inc` sit beside `kpcom.pas` in `kobold/`.
+- `make check-kpcom` is a source-based staleness guard. It recomputes the
+  fingerprint over the emit inputs and compares it to the manifest. A match
+  passes. A mismatch on an x86-64 host (one that can run the regeneration JIT)
+  runs `update-kpcom`, so `check-all` gates on a seed that still regenerates
+  through the fixed point. A mismatch on a host that cannot regenerate warns and
+  falls back to the committed seed.
+- `make bootstrap-fpc` is the deep-recovery fallback. It builds `kobold/kpcom.pas`
+  with `fpc` (a toolchain independent of skjegg itself) and emits a seed to
+  `build/kpcom.kpm.fpc`. It does not touch `prebuild/`; to adopt its output, copy
+  it over `prebuild/kpcom.kpm` and run `update-kpcom` to re-establish the fixed
+  point. It is unexercised in CI.
+
+### Vendoring
+
+`vendor.sh kobold` ships the Kobold AOT path as one selection: the front-end
+source, the KPM1 reader and runtime (`kobold/`), the x86-64 selector the host
+tools build on, the `jit/` call trampoline `libkpaot.a` links, and the generated
+stage0 seed (`prebuild/kpcom.kpm` plus its manifest). It generates the
+`skjegg.mk` rules for `skj-kp` (the KPM1 compiler), `skj-kpc` (the native front
+end), and `libkpaot.a`. Adding `riscv` also generates `skj-kp-rv` (the KPM1 to
+RV32 compiler). The hosted RV32 runtime (`libkpaot-rv.a`) and the freestanding
+runtime tier arrive with later steps. The selection carries its own x86-64
+backend, so it needs no separate backend selection; it needs `nasm` to assemble
+the seed, as the rest of the x86 path already does.
 
 ## Tools
 
-All built by `make all`; none is in `check-all` except the reader regression
-(see Testing).
+All built by `make all`. The reader regression and the source fixtures are in
+`check-all` (see Testing).
 
-- **`skj-kp-jit`** (`kp/jit_main.c`): the in-process JIT. Reads a KPM1 module,
-  JITs it over the byte sink, and runs it in the current process. Maps a
-  low-memory guest heap (the ILP32 address model), searches the program
+- **`skj-kp-jit`** (`kobold/jit_main.c`): the in-process JIT. Reads a KPM1 module or
+  a `.pas` source (which it compiles with the embedded front end, see Source
+  compilation), JITs it over the byte sink, and runs it in the current process.
+  Maps a low-memory guest heap (the ILP32 address model), searches the program
   directory, `KOBOLD_UNITS`, and a stdlib path for `uses` dependencies, and
-  passes guest `argv` through. `skj-kp-jit-rv` and `skj-kp-jit-arm64` are the
-  cross-arch counterparts over the same driver and runtime.
-- **`skj-kp`** (`kp/aot_main.c`): the ahead-of-time compiler. Emits native
+  passes guest `argv` through. `--emit-kpm` stops after the module, writing it to
+  stdout or, with `-o outfile`, to a file (options precede the source).
+  `skj-kp-jit-rv` and `skj-kp-jit-arm64` are the cross-arch counterparts over the
+  same driver and runtime.
+- **`skj-kpc`** (the seed AOT-compiled to native code, linked against
+  `libkpaot.a`): the native front end, `kpcom` running with no JIT. Reads a
+  `.pas` source and writes its KPM1 module (`--emit-kpm`, to stdout or `-o
+  outfile`; options precede the source). It runs on the host, so it is the front
+  end for a cross AOT build too: the host `skj-kpc` emits the module and a cross
+  `skj-kp-*` compiles it. `skj-kpc-rv` and `skj-kpc-arm64` are the proof the front
+  end itself AOT-compiles and runs on each backend (under qemu); all three emit
+  byte-identical KPM1.
+- **`skj-kp`** (`kobold/aot_main.c`): the ahead-of-time compiler. Emits native
   assembly over the text sink for a C start file to assemble and link.
   `skj-kp-rv` and `skj-kp-arm64` emit GNU-as assembly for those targets.
-- **`skj-kp-patrol`** (`kp/patrol_main.c`): a sample embedding host that
+- **`skj-kp-patrol`** (`kobold/patrol_main.c`): a sample embedding host that
   registers an opaque handle type of its own beside the standard runtime, the
   counterpart of the C JIT's embedding sample.
 
-The JIT and AOT paths are kept at byte-identical-stdout parity with Kobold's
-own `kprun` across the upstream runcheck corpus, on x86-64, arm64, and rv32,
+The JIT and AOT paths are kept at byte-identical-stdout parity with the
+reference `kprun` across the behavioral corpus, on x86-64, arm64, and rv32,
 for single-module and multi-unit programs, overflow traps included.
+
+## Source compilation
+
+The front end (`kpcom`) is a Kobold program, carried as the committed seed (see
+The bootstrap seed). A tool runs it to turn `.pas` source into a KPM1 module, and
+there are two ways to run it.
+
+The **JIT path** carries the seed inside the binary. `build/kpcom_kpm.c` is the
+seed as a C byte array (generated from `prebuild/kpcom.kpm` by `kobold/bin2c.c`) and
+is linked into the three `skj-kp-jit*` tools. When one is handed a `.pas` input,
+`kobold/frontend.c:kp_compile_pas` JITs that embedded seed in-process, binds the
+runtime, calls its `compile` export with the source name and text, and reads back
+the produced module. So `skj-kp-jit foo.pas` compiles and runs source in one
+process, and `skj-kp-jit --emit-kpm foo.pas` stops after writing the module. The
+`KPCOM_KPM` environment variable overrides the embedded seed with a module on
+disk, which is how `update-kpcom` drives the self-host fixed point.
+
+The **AOT path** is the seed compiled to a native front-end binary. `skj-kpc` is
+`prebuild/kpcom.kpm` AOT-compiled by `skj-kp` and linked against `libkpaot.a`, so
+it runs the front end with no JIT: `skj-kpc --emit-kpm foo.pas` reads source and
+writes a module. The front end always runs on the host, so a cross AOT build is
+two steps: the host `skj-kpc` emits the module, then the cross backend
+(`skj-kp-rv` / `skj-kp-arm64`) compiles it for the target. `skj-kpc-rv` and
+`skj-kpc-arm64` exist only to prove the seed AOT-compiles and runs on each
+backend; the build uses the host `skj-kpc`.
+
+The seed is arch-neutral IR: its `.target` line is a hint, so one committed seed
+drives every backend's JIT and AOT front end.
 
 ## The KPM1 text module format
 
@@ -91,12 +199,12 @@ array; `align <a>` sets the alignment; `ptr`, `export`, `rodata`, `local`, and
 ```
 
 `<OP>` is an `ir_op` mnemonic without the `IR_` prefix (e.g. `ADD`, `LW`,
-`FCALL`; the full table is `op_table` in `kp/kpm.c`). The operand keys are:
+`FCALL`; the full table is `op_table` in `kobold/kpm.c`). The operand keys are:
 
 | key     | meaning                                             |
 |---------|-----------------------------------------------------|
-| `dst`   | destination temp index (`0 <= dst < temps`)         |
-| `a`,`b` | operand temp indices (`0 <= a,b < temps`)           |
+| `dst`   | destination temp index (`0 <= dst < temps`, or `-1` for none) |
+| `a`,`b` | operand temp indices (`0 <= a,b < temps`, or `-1` for none)   |
 | `imm`   | 64-bit immediate (a `LIC64` value, an f64's bits)   |
 | `slot`  | local-slot index (`0 <= slot < slots`)              |
 | `label` | label index (`0 <= label < labels`)                 |
@@ -121,9 +229,9 @@ downstream. A field a line does not provide is left at its default and not
 checked, so a legitimate instruction that uses no temp (a `JMP` in a function
 with `temps 0`) still reads. This path is exercised by `make check-kp`.
 
-## The guest runtime (`kp/`)
+## The guest runtime (`kobold/`)
 
-The runtime is the ported Kobold runtime, compiled freestanding with f64
+The runtime is the Kobold guest runtime, compiled freestanding with f64
 reals. It is shared between the JIT (bound as host symbols) and the AOT path
 (resolved by the linker).
 
@@ -165,6 +273,74 @@ differently.
   as tail-jumps into the runtime's `skj_jit_*` routines, since the rv backend
   writes those names directly rather than as call symbols `remap_sym` can see.
 
+## The freestanding tier
+
+A downstream host (boris and the like) runs a Kobold guest with no host OS: its
+seam to the guest is only `write`, `read`, and `exit`, and it hands the guest its
+heap at entry rather than letting the runtime map memory. `libkpaot-rv-free.a` is
+the re-bottoming of the hosted `libkpaot-rv.a` for that seam. It is a
+re-bottoming, not a rewrite: the compute runtime (`str_core.c`, `dynarr.c`,
+`map.c`) is the same source, built with `KP_FREESTANDING`; only the platform
+underneath changes.
+
+- `kobold/rt_free.c` is the platform, the freestanding `rt_host.c`. The guest heap is
+  the same binned allocator over a flat region, but the region is handed in by
+  `kp_rt_init(base, size)` rather than mapped; a block address is a real pointer,
+  so the host places the region below 4 GB. It also holds the reference counter,
+  the finalizer registry, the `mem*` primitives, and the traps, which write a
+  one-line diagnostic and `exit(70)`.
+- `kobold/io_free.c` is the console and the integer `Str`/`Val`, the freestanding
+  `kp_host.c`. Output goes straight to the `write` syscall (no stdio), input
+  through `read`; the integer formatting and parsing are hand-rolled with no libc
+  (the hosted `str_fmt.c` uses `snprintf`/`strtod`, which this tier cannot). It
+  also carries `ParamCount`/`ParamStr` over the entry argument vector.
+- `kobold/kp_crt_rv.S` is the skjegg test crt: `_start` runs on the entry stack, hands
+  the runtime a reserved bss heap region and the argument vector, enters
+  `kp_guest_entry`, and exits 0 on return (a program ends nonzero only through
+  `Halt`). A real host supplies its own crt and memory region and calls
+  `kp_rt_init` with them; nothing in `rt_free.c` or `io_free.c` depends on a
+  syscall but the `exit` the trap makes.
+
+The entry seam (`kp_set_raw_args`, `kp_rt_init`, `kp_guest_entry`, `kp_sys_exit`)
+is a published ABI a downstream host links against, so it is versioned
+(`kobold/kp_abi.h`, `KP_GUEST_ABI_VERSION`). `rt_free.c` defines the symbol
+`kp_guest_abi_v<N>` and the plain value `kp_guest_abi_version`, and the crt
+references `kp_guest_abi_v<N>`; an archive of one version linked against a crt of
+another leaves that symbol undefined, so the mismatch is a link error rather than
+a silent seam skew. A host that writes its own crt carries the same reference, and
+a bump of the entry seam bumps the version here, in `rt_free.c`, and in the crt
+together.
+
+The 64-bit integer helpers are the hosted archive's: the backend's stack-ABI
+`__muldi3` and shift family resolve through `rv_i64_aot_alias.S` into
+`jit/rv_jit_i64.S`, and the register-ABI `__divdi3` family comes from
+`runtime/soft64.c` built `-DSOFT64_NO_MULSHIFT` (so its own stack-ABI-incompatible
+multiply and shifts are dropped and do not clash with the alias).
+
+`kobold/co_free.c` is the coroutine runtime, the freestanding counterpart of the
+hosted `co.c` + `co_shim.c`. A coroutine is an ordinary gheap object (kind
+`KP_OBJ_CORO`), counted by `rt_free.c` like any other value; its private stack is
+a gheap block rather than a guarded mapping (no mmap, so no guard page, the
+accepted trade). The context switch is `co_switch_rv.S`, whose 160-byte saved
+block the file seeds; the entry and value ABI match what `skj-kp-rv` emits
+(`kp_co_new(entry, argsp, nargs)`, 8-byte argument cells, a 32-bit resume/yield
+value). Reals are covered too: `io_free.c` has a `%g`-matching double formatter
+(six significant digits, trailing zeros stripped, validated against the C library)
+behind `io_write_real`, a `double` parse behind `kp_str_val_real`, and the rv
+soft-float bit bridge (`brv_write_real`/`brv_read_real`/`brv_val_real`). The
+transcendentals (`sin`, `cos`, `exp`, `ln`, `arctan`) are in `kobold/math_free.c`,
+computed in hardware double with range reduction and series since the tier has no
+libm; they are accurate to well under the `%g` six-digit output, so they
+reproduce the hosted (libm) results exactly, checked against the C library over a
+wide range. The tier is now at full parity with the hosted one.
+
+`make check-kp-free` is the end-to-end proof: each `tests/kp-src` fixture goes
+`skj-kpc --emit-kpm` -> `skj-kp-rv` -> `skj-as-rv` -> `skj-ld-rv` into a static
+rv32 ELF linked against the crt and `libkpaot-rv-free.a`, run under qemu-riscv32,
+stdout compared to `.expected`. It is in `check-emu-all`. The portable
+`tests/kp-src` set it runs covers integers, strings, int64, parameters, reals
+(`realfmt`), and coroutines (`coro`).
+
 ## Multi-unit linking
 
 A program that `uses` units links across modules.
@@ -178,7 +354,7 @@ A program that `uses` units links across modules.
 - **AOT**: `aot_main.c` gives every name in the module's `.export` list
   external linkage before emitting, so the system linker resolves it; a private
   symbol a unit does not export stays local, so two units' same-named private
-  globals do not collide. `kp/aot-run.sh` follows the main module's `.uses`
+  globals do not collide. `kobold/aot-run.sh` follows the main module's `.uses`
   transitively, compiles each dependency unit (resolving `<dir>/<name>.kpm`
   then `KOBOLD_UNITS`, as `kprun` does), and links the whole set, the system
   linker standing in for the JIT's in-memory link.
@@ -196,18 +372,83 @@ raises it, and the checked ops never appear in C.
 
 ## Testing
 
-- **In-tree**: `make check-kp` runs `tests/kp/` through `skj-kp`, exercising the
-  KPM1 reader's input validation (malformed modules rejected with a pinned,
-  line-numbered message; a well-formed module compiles). It needs no external
-  repo, qemu, assembler, or linker. The shared JIT the Kobold tools drive is
-  also covered by `make check-jit` / `check-jit-arm64` / `check-jit-rv` through
-  the C suite.
-- **Upstream**: the behavioral runcheck (byte-identical stdout against the
-  reference `kprun`, 74-to-76 cases, single-module and multi-unit) lives in the
-  Kobold tree. `kp/aot-check.sh` runs skjegg's AOT path against it, and
-  `kp/aot-run.sh` stands in for `kprun` in the upstream runcheck, when `KPDIR`
-  and `KPRUN` point at that tree. Neither is wired into skjegg CI, since the
-  corpus is not in this tree.
+- **In-tree, reader**: `make check-kp` runs `tests/kp/` through `skj-kp`,
+  exercising the KPM1 reader's input validation (malformed modules rejected with
+  a pinned, line-numbered message; a well-formed module compiles). It needs no
+  external repo, qemu, assembler, or linker. The shared JIT the Kobold tools
+  drive is also covered by `make check-jit` / `check-jit-arm64` / `check-jit-rv`
+  through the C suite.
+- **In-tree, reader fuzz**: `make test-kpm-fuzz` drives the whole untrusted
+  reader path (`kpm_read` -> `regalloc` -> `target_emit`) under ASan plus UBSan,
+  mutating copies of the reader fixtures and real front-end-emitted corpus
+  modules with a deterministic PRNG. A clean exit means no input, valid or
+  hostile, drove undefined behavior through the pipeline. The harness
+  (`kobold/kpm_fuzz.c`) also reads one module from stdin without `--mutate`, the
+  entry an external fuzzer (AFL++) or byte loop drives for a longer campaign. It
+  is wired into `check-san`.
+- **In-tree, source**: `tests/kp-src/<name>.pas` paired with `<name>.expected`
+  (stdout) are compiled and run end to end by `tests/run-kp-src-tests.sh` in
+  three modes. `make check-kp-frontend` is a host smoke of the embedded front end
+  (`--emit-kpm` yields a `.kpm 1` module). `make check-kp-jit` compiles and runs
+  each fixture in one process; `make check-kp-aot` emits a module with the native
+  `skj-kpc`, AOT-compiles and links it, and runs it. The three x86 targets are in
+  `check-all`; the cross runs `check-kp-jit-rv`, `check-kp-jit-arm64`,
+  `check-kp-aot-rv`, and `check-kp-aot-arm64` run under qemu in `check-emu-all`.
+  `tests/kp-src` is the portable set: every mode, including the freestanding one,
+  runs it, so it stays to integer, string, int64, and parameters.
+- **In-tree, behavioral corpus**: `tests/kp-corpus` is the broader behavioral set,
+  63 real Kobold programs. Each `<name>.expected` is the program's stdout as
+  produced by the **independent** reference VM `kprun`, not by a skjegg tool, so
+  the corpus is an oracle, not a self-comparison. It covers arithmetic, records,
+  arrays, maps, dynamic arrays, strings, enums, sets, coroutines, reals and
+  transcendentals, int64, casts, var parameters, and control flow. One
+  `.expected` pins the result across the x86-64 JIT and the x86-64, rv32, and
+  arm64 AOT paths at once, so it also checks that every backend agrees.
+  `make check-kp-corpus` runs the x86 JIT and AOT (in `check-all`);
+  `check-kp-corpus-rv` and `check-kp-corpus-arm64` run the AOT path under qemu (in
+  `check-emu-all`). The corpus is 63 programs, the failable two-return (`CALL2`)
+  cases `failforms`/`failmethod` among them (see the reader note below).
+- **In-tree, multi-unit corpus**: `tests/kp-multi` is the cross-module set, the
+  one behavioral surface the single-module corpus cannot reach. A fixture is told
+  apart by its first keyword: `program NAME;` is a test (paired with
+  `NAME.expected`, again `kprun`'s stdout), `unit NAME;` is a dependency with no
+  `.expected`. `tests/run-kp-multi-tests.sh` compiles every unit to its own module
+  first, then runs the programs against the set: the JIT links the unit modules in
+  memory, the AOT path links their objects (`aot-run.sh`), so one `.expected` also
+  checks the two links agree. The five programs exercise cross-unit calls, a unit
+  const, a unit's mutable global and `shared var`, an exported enum and record
+  type, qualified `as`, and a transitive `uses` chain. `make check-kp-multi` runs
+  the x86 JIT and AOT (in `check-all`); `check-kp-multi-rv` and
+  `check-kp-multi-arm64` run the AOT path under qemu (in `check-emu-all`).
+- **In-tree, input-dependent corpus**: `tests/kp-io` is the set that reads input,
+  the one surface the other corpora omit (they run with no stdin and no
+  arguments). A fixture may carry a `<name>.input` file (fed as the program's
+  stdin) and a `<name>.args` file (one line, whitespace-separated, passed as its
+  command line, so `ParamStr`/`ParamCount` see it); the `.expected` is the
+  reference `kprun`'s output under the same stdin and arguments. `make check-kp-io`
+  runs the x86 JIT and AOT (in `check-all`); `check-kp-io-rv`, `check-kp-io-arm64`,
+  and `check-kp-io-free` run the AOT and freestanding paths under qemu (in
+  `check-emu-all`), so the entry argument vector and the `read` seam are exercised
+  on the no-libc tier too.
+- **In-tree, include-file corpus**: `tests/kp-inc` covers the `{$I ...}` include
+  directive. The directive splices the named file's text at the point it appears,
+  resolved at compile time against the source directory, so a `<name>.inc` beside
+  the program is found with no harness plumbing. One fixture splices expressions
+  (a string and a number constant), one a whole procedure declaration; the
+  `.expected` is the reference `kprun`'s output. `make check-kp-inc` runs the x86
+  JIT and AOT (in `check-all`); `check-kp-inc-rv`, `check-kp-inc-arm64`, and
+  `check-kp-inc-free` run the AOT and freestanding paths under qemu (in
+  `check-emu-all`). The include is resolved by the host front end in every case,
+  so the freestanding module carries the spliced text before codegen.
+- **In-tree, seed**: `make check-kpcom` guards the committed seed against its
+  source (see Regenerating and guarding the seed); it is in `check-all`.
+- **Optional external cross-check**: a reference `kprun` build, when one is
+  available, can run a wider byte-identical-stdout comparison (the full
+  74-to-76-case set, including input-dependent programs) than the in-tree
+  corpora. `kobold/aot-check.sh` runs skjegg's AOT path against it and
+  `kobold/aot-run.sh` stands in for `kprun`, when `KPDIR` and `KPRUN` point at
+  such a tree. Neither is wired into skjegg CI; the in-tree corpora are the
+  committed oracle.
 
 ## See also
 

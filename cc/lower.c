@@ -46,7 +46,7 @@ lower_const(long v)
 }
 
 static int
-lower_const64(long v)
+lower_const64(long long v)
 {
     struct ir_insn *ins = emit(IR_LIC64);
     ins->dst = new_temp();
@@ -1355,6 +1355,12 @@ lvalue_type(struct cc_node *n)
         return n->type ? n->type : cc_type_int();
     case ND_INTLIT:
         return n->type ? n->type : cc_type_int();
+    case ND_STRLIT:
+        /* char[len+1] (the parser's type); sizeof measures the array and an
+           index scales by the char element.  It decays to char* in value
+           contexts through the ordinary TY_ARRAY handling. */
+        return n->type ? n->type
+                       : cc_type_array(lower_arena, cc_type_char(), n->slen + 1);
     case ND_UNOP:
         return lvalue_type(n->a);
     case ND_BINOP: {
@@ -1366,12 +1372,32 @@ lvalue_type(struct cc_node *n)
             return is_double_type(lt) || is_double_type(rt)
                    ? &ty_double : &ty_float;
         }
-        if (is_i64_type(lt) || is_i64_type(rt))
-            return cc_type_long_long();
-        return lt;
+        /* a comparison yields int whatever the operand types */
+        switch (n->op) {
+        case TOK_EQ: case TOK_NE:
+        case TOK_LT: case TOK_LE: case TOK_GT: case TOK_GE:
+            return cc_type_int();
+        default:
+            break;
+        }
+        /* pointer arithmetic keeps the pointer type (ptr +/- int, and the
+           prior result for ptr - ptr) */
+        if (cc_type_is_ptr(lt))
+            return lt;
+        if (cc_type_is_ptr(rt))
+            return rt;
+        /* a shift's result is the promoted left operand; every other integer
+           operator takes the usual arithmetic conversions (this subsumes the
+           old "either operand i64 -> long long", and now carries the right
+           signedness, e.g. long long + unsigned int stays signed) */
+        if (n->op == TOK_SHL || n->op == TOK_SHR)
+            return cc_type_promote(lt);
+        return cc_type_usual_arith(lt, rt);
     }
     case ND_CALL: {
         if (n->a->kind == ND_VAR) {
+            if (strcmp(n->a->name, "__builtin_va_arg") == 0 && n->decl_type)
+                return n->decl_type;        /* generic va_arg types as its type */
             struct global *gl = find_global(n->a->name);
             if (gl && gl->type && gl->type->kind == TY_FUNC && gl->type->base)
                 return gl->type->base;
@@ -1860,7 +1886,13 @@ lower_expr(struct cc_node *n)
                 ins->a = rhs;
                 rhs = ins->dst;
             }
-            int is_uns = (lt && lt->is_unsigned) || (rt && rt->is_unsigned);
+            /* signedness of the operation: a shift follows the promoted left
+               operand only (the right is just the count); every other operator
+               follows the common type of the usual arithmetic conversions, so
+               "either operand unsigned" is not enough once the ranks differ. */
+            int is_uns = is_shift
+                         ? cc_type_promote(lt)->is_unsigned
+                         : cc_type_usual_arith(lt, rt)->is_unsigned;
             int ir_op;
             switch (n->op) {
             case TOK_PLUS:    ir_op = IR_ADD64; break;
@@ -1908,24 +1940,31 @@ lower_expr(struct cc_node *n)
             return ins->dst;
         }
 
+        /* signedness of the operation: a shift follows the promoted left
+           operand only (the right is just the count); every other operator
+           follows the common type of the usual arithmetic conversions, so
+           "either operand unsigned" is not enough once the ranks differ. */
+        int is_uns = is_shift
+                     ? cc_type_promote(lt)->is_unsigned
+                     : cc_type_usual_arith(lt, rt)->is_unsigned;
         int ir_op;
         switch (n->op) {
         case TOK_PLUS:    ir_op = IR_ADD; break;
         case TOK_MINUS:   ir_op = IR_SUB; break;
         case TOK_STAR:    ir_op = IR_MUL; break;
-        case TOK_SLASH:   ir_op = IR_DIVS; break;
-        case TOK_PERCENT: ir_op = IR_MODS; break;
+        case TOK_SLASH:   ir_op = is_uns ? IR_DIVU : IR_DIVS; break;
+        case TOK_PERCENT: ir_op = is_uns ? IR_MODU : IR_MODS; break;
         case TOK_AMP:     ir_op = IR_AND; break;
         case TOK_PIPE:    ir_op = IR_OR; break;
         case TOK_CARET:   ir_op = IR_XOR; break;
         case TOK_SHL:     ir_op = IR_SHL; break;
-        case TOK_SHR:     ir_op = IR_SHRS; break;
+        case TOK_SHR:     ir_op = is_uns ? IR_SHRU : IR_SHRS; break;
         case TOK_EQ:      ir_op = IR_CMPEQ; break;
         case TOK_NE:      ir_op = IR_CMPNE; break;
-        case TOK_LT:      ir_op = IR_CMPLTS; break;
-        case TOK_LE:      ir_op = IR_CMPLES; break;
-        case TOK_GT:      ir_op = IR_CMPGTS; break;
-        case TOK_GE:      ir_op = IR_CMPGES; break;
+        case TOK_LT:      ir_op = is_uns ? IR_CMPLTU : IR_CMPLTS; break;
+        case TOK_LE:      ir_op = is_uns ? IR_CMPLEU : IR_CMPLES; break;
+        case TOK_GT:      ir_op = is_uns ? IR_CMPGTU : IR_CMPGTS; break;
+        case TOK_GE:      ir_op = is_uns ? IR_CMPGEU : IR_CMPGES; break;
         default:
             die("lower:%d: unknown binop %d", n->line, n->op);
             return -1;
@@ -2348,28 +2387,46 @@ lower_expr(struct cc_node *n)
             }
             if (strcmp(bn, "__builtin_va_end") == 0)
                 return lower_const(0);        /* no-op on SysV */
-            int va_fp = strcmp(bn, "__builtin_va_arg_dbl") == 0;
-            int va_gp = strcmp(bn, "__builtin_va_arg_int") == 0 ||
-                        strcmp(bn, "__builtin_va_arg_long") == 0;
-            if (va_fp || va_gp) {
+            /* va_arg: the three typed spellings and the generic
+               __builtin_va_arg(ap, type) the real <stdarg.h> uses.  Each
+               lowers to __va_arg(ap, kind), which returns a pointer to the
+               next argument slot and advances the va_list, then a typed load.
+               kind classifies the slot for the per-ABI __va_arg (notably the
+               ILP32 stack ABIs, where int advances 4 bytes and a 64-bit value
+               8): 0 = 32-bit int/pointer (LW), 1 = double (FLD), 2 = 64-bit
+               integer (LD64). */
+            int va_generic = strcmp(bn, "__builtin_va_arg") == 0 && n->decl_type;
+            int va_kind = -1;
+            if (strcmp(bn, "__builtin_va_arg_int") == 0)
+                va_kind = 0;
+            else if (strcmp(bn, "__builtin_va_arg_dbl") == 0)
+                va_kind = 1;
+            else if (strcmp(bn, "__builtin_va_arg_long") == 0)
+                va_kind = 2;
+            else if (va_generic) {
+                struct cc_type *vt = n->decl_type;
+                va_kind = is_float_type(vt) ? 1 : is_i64_type(vt) ? 2 : 0;
+            }
+            if (va_kind >= 0) {
                 int ap = lower_expr(n->b);
-                int fpc = lower_const(va_fp ? 1 : 0);
-                ins = emit(IR_ARG64); ins->a = ap; ins->imm = 0;
-                ins = emit(IR_ARG); ins->a = fpc; ins->imm = 1;
-                ins = emit(IR_CALL64);      /* returns a pointer to the slot */
+                int kc = lower_const(va_kind);
+                /* ap and the returned slot pointer are address-width: 8 bytes
+                   under LP64 (ARG64/CALL64), 4 under ILP32 (ARG/CALL). */
+                ins = emit(ADDR64 ? IR_ARG64 : IR_ARG); ins->a = ap; ins->imm = 0;
+                ins = emit(IR_ARG); ins->a = kc; ins->imm = 1;
+                ins = emit(ADDR64 ? IR_CALL64 : IR_CALL);
                 ins->dst = new_temp();
                 ins->sym = arena_strdup(lower_arena, "__va_arg");
                 ins->nargs = 2;
                 int ptr = ins->dst;
-                if (va_fp) {
+                if (va_kind == 1) {
                     ins = emit(IR_FLD);
                     ins->dst = new_temp();
                     ins->a = ptr;
                     ins->imm = 0;            /* double */
                     return ins->dst;
                 }
-                /* int loads the low 4 bytes; long loads all 8 */
-                if (strcmp(bn, "__builtin_va_arg_long") == 0) {
+                if (va_kind == 2) {
                     ins = emit(IR_LD64);
                     ins->dst = new_temp();
                     ins->a = ptr;
@@ -2404,6 +2461,7 @@ lower_expr(struct cc_node *n)
                                    4 x8 result pointer (AAPCS64) */
         int arg_fw[32];
         int arg_msize[32] = {0}; /* byte size for a kind-3 MEMORY struct arg */
+        int arg_vararg[32] = {0}; /* 1 if this is an unnamed (variadic) arg */
         int nargs = 0;
         /* a memory-class struct return: hand the callee a pointer to a result
            slot.  SysV passes it as the first integer argument; AAPCS64 passes
@@ -2438,6 +2496,11 @@ lower_expr(struct cc_node *n)
         for (struct cc_node *a = n->b; a; a = a->next) {
             if (nargs >= 32)
                 die("lower:%d: too many arguments", n->line);
+            /* an unnamed argument: a variadic callee with no more fixed
+               params.  The RISC-V backend reads this to route unnamed args to
+               the stack; other backends ignore it. */
+            int this_vararg = callee_type && callee_type->kind == TY_FUNC &&
+                              callee_type->is_variadic && pp == NULL;
             int cls[4], neb;
             struct cc_type *at = pp ? pp->type : lvalue_type(a);
             reject_ldouble(at, n->line);
@@ -2454,6 +2517,7 @@ lower_expr(struct cc_node *n)
                     arg_kind[nargs] = 3;
                     arg_fw[nargs] = 0;
                     arg_msize[nargs] = cc_type_size(at);
+                    arg_vararg[nargs] = this_vararg;
                     if (pp)
                         pp = pp->next;
                     nargs++;
@@ -2489,6 +2553,7 @@ lower_expr(struct cc_node *n)
                         arg_kind[nargs] = 2;
                         arg_fw[nargs] = 0;
                     }
+                    arg_vararg[nargs] = this_vararg;
                     nargs++;
                 }
                 if (pp)
@@ -2506,6 +2571,7 @@ lower_expr(struct cc_node *n)
                 args[nargs] = emit_addr_slot(cslot);
                 arg_kind[nargs] = 2;    /* the pointer rides a gp reg */
                 arg_fw[nargs] = 0;
+                arg_vararg[nargs] = this_vararg;
                 if (iu < abi_nint)
                     iu++;               /* the pointer consumes an x-register */
                 if (pp)
@@ -2519,6 +2585,7 @@ lower_expr(struct cc_node *n)
                 arg_kind[nargs] = 3;
                 arg_fw[nargs] = 0;
                 arg_msize[nargs] = cc_type_size(at);
+                arg_vararg[nargs] = this_vararg;
                 if (pp)
                     pp = pp->next;
                 nargs++;
@@ -2544,7 +2611,19 @@ lower_expr(struct cc_node *n)
                 arg_kind[nargs] = 0;
                 if (iu < abi_nint)
                     iu++;
+                /* narrow a 64-bit argument to a 32-bit integer or pointer
+                   parameter.  The cast path does this explicitly (ND_CAST
+                   i64 -> non-i64); an implicit conversion at a prototyped
+                   call argument needs the same IR_TRUNC64, or the i64 value
+                   rides a register pair the plain-int ARG then misreads. */
+                if (pp && is_i64_type(lvalue_type(a)) && !is_i64_type(at)) {
+                    ins = emit(IR_TRUNC64);
+                    ins->dst = new_temp();
+                    ins->a = args[nargs];
+                    args[nargs] = ins->dst;
+                }
             }
+            arg_vararg[nargs] = this_vararg;
             if (pp)
                 pp = pp->next;
             nargs++;
@@ -2557,6 +2636,7 @@ lower_expr(struct cc_node *n)
                    : IR_ARG;
             ins = emit(op);
             ins->a = args[i];
+            ins->vararg = arg_vararg[i];
             /* FARG carries the float width in imm; ARG_MEM carries the struct
              * byte size; other ARGs carry the arg index */
             ins->imm = op == IR_FARG ? arg_fw[i]
@@ -2659,6 +2739,135 @@ lower_cond(struct cc_node *n, int ltrue, int lfalse)
     int v = lower_expr(n);
     emit_bnz(v, ltrue);
     emit_jmp(lfalse);
+}
+
+/* Zero the `size` bytes at base_addr.  A local aggregate is zeroed before its
+   initializer runs, so a slot no element reaches is zero as C 6.7.8 requires
+   (the provided leaves then overwrite their slots). */
+static void
+emit_zero_fill(int base_addr, int size)
+{
+    struct ir_insn *ins;
+    int z = lower_const(0);
+    int off = 0;
+    while (size - off >= 4) {
+        int da = off ? emit_addr_add(base_addr, emit_addr_const(off)) : base_addr;
+        ins = emit(IR_SW); ins->a = da; ins->b = z;
+        off += 4;
+    }
+    if (size - off >= 2) {
+        int da = off ? emit_addr_add(base_addr, emit_addr_const(off)) : base_addr;
+        ins = emit(IR_SH); ins->a = da; ins->b = z;
+        off += 2;
+    }
+    if (size - off >= 1) {
+        int da = off ? emit_addr_add(base_addr, emit_addr_const(off)) : base_addr;
+        ins = emit(IR_SB); ins->a = da; ins->b = z;
+    }
+}
+
+/* Store one scalar (or char-array-from-string) leaf of a local aggregate
+   initializer at base_addr + off.  The value is lowered first, then converted
+   to the slot type the way the scalar init path does, then stored. */
+static void
+store_leaf(int base_addr, int off, struct cc_type *ft, struct cc_node *e)
+{
+    if (ft && ft->kind == TY_ARRAY && cc_type_size(ft->base) == 1 &&
+        e->kind == ND_STRLIT) {
+        int src = lower_expr(e);                    /* pointer to the string */
+        int n = e->slen + 1;
+        int cap = cc_type_size(ft);
+        int addr = off ? emit_addr_add(base_addr, emit_addr_const(off))
+                       : base_addr;
+        emit_aggregate_copy(addr, src, n < cap ? n : cap);
+        return;
+    }
+    int val = lower_expr(e);
+    struct cc_type *st = lvalue_type(e);
+    if (is_float_type(ft))
+        val = to_float(val, st, ft);
+    else if (is_i64_type(ft))
+        val = widen_to_i64(val, st);
+    int addr = off ? emit_addr_add(base_addr, emit_addr_const(off))
+                   : base_addr;
+    emit_store(addr, val, ft);
+}
+
+/* Lower a local aggregate initializer into runtime stores at base_addr + base.
+   Mirrors build_image (the global byte-image walk): elements are consumed in
+   order, a `.field` / `[index]` designator repositions the slot, a braced
+   element initializes a sub-aggregate, and an unbraced aggregate slot draws
+   from the same cursor (brace elision).  Slots no element reaches keep the
+   zero from emit_zero_fill. */
+static void
+store_init(struct cc_type *t, struct init_cursor *cur, int base_addr, int base)
+{
+    if (!t)
+        return;
+
+    if (t->kind == TY_ARRAY && cc_type_size(t->base) == 1 &&
+        cur->cur && cur->cur->kind == ND_STRLIT) {
+        struct cc_node *s = cur->cur;
+        cur->cur = s->next;
+        store_leaf(base_addr, base, t, s);
+        return;
+    }
+
+    int nslots = agg_nslots(t);
+    int pos = 0;
+    while (cur->cur) {
+        struct cc_node *e = cur->cur;
+        struct cc_type *ft;
+        int off;
+
+        if (e->kind == ND_DESIG) {
+            if (t->kind == TY_ARRAY)
+                pos = (int)e->ival;
+            else {
+                int fi = field_index(t, e->name);
+                if (fi < 0)
+                    die("lower:%d: no field named '%s'", e->line, e->name);
+                pos = fi;
+            }
+            if (pos < 0 || pos >= nslots)
+                die("lower:%d: designator out of range", e->line);
+            ft = agg_slot(t, pos, &off);
+            cur->cur = e->next;
+            if (e->a->kind == ND_INIT_LIST) {
+                struct init_cursor sub = { e->a->body };
+                store_init(ft, &sub, base_addr, base + off);
+            } else {
+                store_leaf(base_addr, base + off, ft, e->a);
+            }
+            pos++;
+            continue;
+        }
+
+        if (pos >= nslots)
+            break;
+        ft = agg_slot(t, pos, &off);
+        if (!ft)
+            break;
+        if (e->kind == ND_INIT_LIST) {
+            cur->cur = e->next;
+            if (is_aggregate(ft)) {
+                struct init_cursor sub = { e->body };
+                store_init(ft, &sub, base_addr, base + off);
+            } else {
+                struct cc_node *lf = first_leaf(e);
+                if (lf)
+                    store_leaf(base_addr, base + off, ft, lf);
+            }
+        } else if (is_aggregate(ft) &&
+                   !(ft->kind == TY_ARRAY &&
+                     cc_type_size(ft->base) == 1 && e->kind == ND_STRLIT)) {
+            store_init(ft, cur, base_addr, base + off);   /* brace elision */
+        } else {
+            cur->cur = e->next;
+            store_leaf(base_addr, base + off, ft, e);
+        }
+        pos++;
+    }
 }
 
 /****************************************************************
@@ -2771,6 +2980,10 @@ lower_local_decl(struct cc_node *n)
         return;
     }
 
+    if (t->kind == TY_ARRAY && t->array_len < 0 && n->a &&
+        n->a->kind == ND_INIT_LIST)
+        t->array_len = infer_array_len(n->a);
+
     int sz = cc_type_size(t);
     if (is_float_type(t) && sz < 8)
         sz = 8;
@@ -2783,34 +2996,16 @@ lower_local_decl(struct cc_node *n)
     if (!n->a)
         return;
 
-    if (n->a->kind == ND_INIT_LIST && t &&
-        (t->kind == TY_ARRAY || t->kind == TY_STRUCT)) {
-        /* array/struct initializer list.  Addresses are address-width (64-bit
-           under LP64), so use the ADDR64-aware helpers rather than a raw
-           32-bit IR_ADL/IR_ADD, which would truncate a high stack address. */
+    if (n->a->kind == ND_INIT_LIST && is_aggregate(t)) {
+        /* array/struct/union initializer list, possibly with nested braces,
+           designators, or brace elision.  Zero the slot, then emit a store for
+           each provided leaf via the recursive walk that mirrors the global
+           byte-image path.  Addresses are address-width (64-bit under LP64),
+           so the ADDR64-aware helpers avoid truncating a high stack address. */
         int base_addr = emit_addr_slot(slot);
-
-        if (t->kind == TY_ARRAY) {
-            int elem_sz = cc_type_size(t->base);
-            int offset = 0;
-            for (struct cc_node *e = n->a->body; e; e = e->next) {
-                int val = lower_expr(e);
-                int addr = offset ? emit_addr_add(base_addr,
-                                        emit_addr_const(offset))
-                                  : base_addr;
-                emit_store(addr, val, t->base);
-                offset += elem_sz;
-            }
-        } else {
-            struct cc_field *f = t->fields;
-            for (struct cc_node *e = n->a->body; e && f; e = e->next, f = f->next) {
-                int val = lower_expr(e);
-                int addr = f->offset ? emit_addr_add(base_addr,
-                                           emit_addr_const(f->offset))
-                                     : base_addr;
-                emit_store(addr, val, f->type);
-            }
-        }
+        emit_zero_fill(base_addr, cc_type_size(t));
+        struct init_cursor cur = { n->a->body };
+        store_init(t, &cur, base_addr, 0);
     } else {
         int val = lower_expr(n->a);
         if (is_aggregate(t)) {

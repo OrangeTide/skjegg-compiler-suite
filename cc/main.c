@@ -28,7 +28,11 @@ main(int argc, char **argv)
     const char *outpath;
     int preprocess_only;
     struct cpp *pp;
-    char ppbuf[65536];
+    /* The whole translation unit after preprocessing lives here.  It is 1 MiB
+       (static, not on the stack) so a source that embeds a data blob as a byte
+       array, like the sandbox demos' guest-image headers, fits; 64 KiB did
+       not. */
+    static char ppbuf[1u << 20];
     int pplen;
     char linebuf[4096];
     int n;
@@ -80,6 +84,20 @@ main(int argc, char **argv)
 
     if (!inpath)
         die("usage: skj-cc [-V] [-o out.s] [-I path] [-D name[=val]] input.c");
+
+    /* Default search path for skj-provided headers (e.g. <stdarg.h>), added
+       after any -I so user paths win.  SKJ_INCLUDE_DIR is baked in at build
+       time; the SKJ_CC_INCLUDE environment variable overrides it for an
+       installed or relocated toolchain. */
+    {
+        const char *inc = getenv("SKJ_CC_INCLUDE");
+#ifdef SKJ_INCLUDE_DIR
+        if (!inc || !*inc)
+            inc = SKJ_INCLUDE_DIR;
+#endif
+        if (inc && *inc)
+            cpp_add_include_path(pp, inc);
+    }
 
     if (setjmp(util_die_env) != 0)
         return 1;

@@ -1,0 +1,5 @@
+Opposite(North)=South? 1
+Facing(North)? 1
+Facing(South)? 0
+Ready? 1
+steps=2

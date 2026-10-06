@@ -194,6 +194,10 @@ lex_one(void)
 
     if (c == '\'') {
         p++;
+        /* Stop at end of input instead of consuming the NUL terminator as the
+           character and then reading past it for the closing quote. */
+        if (*p == '\0')
+            die("%s:%d: unterminated char literal", src_file, line);
         if (*p == '\\') {
             p++;
             n = read_escape();

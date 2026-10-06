@@ -129,11 +129,13 @@ is_ident_char(char c)
     return isalnum((unsigned char)c) || c == '_';
 }
 
-static long
-parse_int_literal(int *is_long, int *is_llong)
+static long long
+parse_int_literal(int *is_long, int *is_llong, int *is_unsigned)
 {
-    long val = 0;
+    unsigned long long val = 0;
+    int base = 10;
     if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+        base = 16;
         p += 2;
         while (isxdigit((unsigned char)*p)) {
             int d = *p >= 'a' ? *p - 'a' + 10 :
@@ -142,6 +144,7 @@ parse_int_literal(int *is_long, int *is_llong)
             p++;
         }
     } else if (p[0] == '0' && isdigit((unsigned char)p[1])) {
+        base = 8;
         while (*p >= '0' && *p <= '7') {
             val = val * 8 + (*p - '0');
             p++;
@@ -152,27 +155,50 @@ parse_int_literal(int *is_long, int *is_llong)
             p++;
         }
     }
-    /* suffixes: u, l, ul, ll, ull.  Count the l's to size the literal. */
-    int nl = 0;
+    /* suffixes: u, l, ul, ll, ull. */
+    int nl = 0, nu = 0;
     while (*p == 'u' || *p == 'U' || *p == 'l' || *p == 'L') {
         if (*p == 'l' || *p == 'L')
             nl++;
+        else
+            nu++;
         p++;
     }
-    int too_big_for_int = val > 2147483647L;
-    if (is_long)
-        /* an l suffix, or a value too big for a signed 32-bit int */
-        *is_long = (nl >= 1) || too_big_for_int;
-    if (is_llong)
-        /* an ll suffix, or a value too big for the target's long as well */
-        *is_llong = (nl >= 2) || (too_big_for_int && CC_LONG_SIZE < 8);
-    return val;
+
+    /* Pick the smallest type that holds the value, following C's rank order.
+       A u suffix allows only the unsigned types; a decimal constant without a
+       u suffix allows only the signed types; a hex or octal constant allows
+       both (signed first at each width). This is what makes 0xdeadbeef an
+       unsigned int rather than a wider signed type. */
+    unsigned long long imax = 0x7fffffffULL, uimax = 0xffffffffULL;
+    unsigned long long lmax  = CC_LONG_SIZE >= 8 ? 0x7fffffffffffffffULL : imax;
+    unsigned long long ulmax = CC_LONG_SIZE >= 8 ? 0xffffffffffffffffULL : uimax;
+    unsigned long long llmax = 0x7fffffffffffffffULL;
+    int suf_u = nu > 0, allow_s = !suf_u, allow_u = suf_u || base != 10;
+    int start = nl >= 2 ? 2 : nl >= 1 ? 1 : 0;
+    int w, chosen = -1, uns = 0;
+
+    for (w = start; w <= 2 && chosen < 0; w++) {
+        unsigned long long smax = w == 0 ? imax  : w == 1 ? lmax  : llmax;
+        unsigned long long umax = w == 0 ? uimax : w == 1 ? ulmax : 0xffffffffffffffffULL;
+        if (allow_s && val <= smax) { chosen = w; uns = 0; }
+        else if (allow_u && val <= umax) { chosen = w; uns = 1; }
+    }
+    if (chosen < 0) { chosen = 2; uns = 1; }    /* does not fit: widest unsigned */
+
+    if (is_long)     *is_long = (chosen == 1);
+    if (is_llong)    *is_llong = (chosen == 2);
+    if (is_unsigned) *is_unsigned = uns;
+    return (long long)val;
 }
 
 static int
 parse_escape(void)
 {
     p++;
+    if (*p == '\0')             /* a backslash at end of input: do not read
+                                   past the NUL terminator */
+        return 0;
     switch (*p++) {
     case 'a':  return '\a';
     case 'b':  return '\b';
@@ -271,7 +297,7 @@ lex_token(void)
             }
         } else {
             t.kind = TOK_INTLIT;
-            t.ival = parse_int_literal(&t.is_long, &t.is_llong);
+            t.ival = parse_int_literal(&t.is_long, &t.is_llong, &t.is_unsigned);
         }
         return t;
     }
@@ -279,6 +305,12 @@ lex_token(void)
     /* character literal */
     if (*p == '\'') {
         p++;
+        if (*p == '\0') {       /* unterminated at end of input: stop rather
+                                   than read past the NUL terminator */
+            t.kind = TOK_CHARLIT;
+            t.ival = 0;
+            return t;
+        }
         if (*p == '\\')
             t.ival = parse_escape();
         else

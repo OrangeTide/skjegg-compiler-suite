@@ -222,7 +222,11 @@ collect_args(struct pp_token *open, int nparams, int is_variadic, int *nargs)
 
     for (int i = 0; i < argc && i <= cap; i++)
         args[i] = strip_leading_space(arg_heads[i]);
-    *nargs = argc;
+    /* args holds cap + 1 slots and the loop above fills at most that many; a
+       call with more arguments than the macro takes drives argc past it. Report
+       the count actually stored, so the caller's walk over args stays in bounds
+       (an over-long call is otherwise accepted, as before, just not overrun). */
+    *nargs = argc < cap + 1 ? argc : cap + 1;
     return args;
 }
 
@@ -297,8 +301,16 @@ substitute(struct cpp *p, struct cpp_macro *m, struct pp_token **args, int nargs
             if (ridx >= 0 && ridx < nargs && args[ridx]) {
                 struct pp_token *ar = pp_list_dup(args[ridx]);
                 rhs = ar;
-                if (ar)
+                if (ar) {
+                    /* Only the first token of the argument pastes with the lhs;
+                       the rest is appended afterward. Detach it so rhs is a
+                       single token: pp_free_tokens(rhs) below then frees only
+                       that token and leaves rhs_rest, which is spliced in after
+                       the paste, intact (otherwise freeing the whole list left
+                       rhs_rest dangling). */
                     rhs_rest = ar->next;
+                    ar->next = NULL;
+                }
             } else if (ridx >= 0) {
                 rhs = NULL;
             } else {

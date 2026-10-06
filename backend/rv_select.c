@@ -101,14 +101,24 @@ struct rv_ploc {
  * Returns the size of the outgoing stack block.  Both the caller and the
  * callee run this over the same sequence, which is what makes the two
  * sides agree.
+ *
+ * first_vararg, when >= 0, is the index of the first unnamed argument of a
+ * variadic call.  From there on every argument is placed on the stack
+ * (registers are treated as exhausted), which is skjegg's self-consistent
+ * variadic convention: unnamed arguments ride the stack so the callee's
+ * va_list can walk them contiguously with no register save area.  A fixed
+ * (named) argument assignment passes -1, the plain psABI placement.
  */
 static int
-rv_abi_assign(const int *words, int n, struct rv_ploc *loc)
+rv_abi_assign(const int *words, int n, struct rv_ploc *loc, int first_vararg)
 {
     int ix = 0, soff = 0, k;
 
     for (k = 0; k < n; k++) {
         int w = words[k];
+
+        if (first_vararg >= 0 && k >= first_vararg)
+            ix = NARGREG;       /* unnamed args: stack only */
 
         loc[k].words = w;
         loc[k].ireg = -1;
@@ -182,7 +192,7 @@ rv_param(struct ir_func *fn, int slot, struct rv_ploc *out, int *home)
         n = 64;
     for (i = 0; i < n; i++)
         words[i] = rv_param_words(fn, i);
-    rv_abi_assign(words, n, loc);
+    rv_abi_assign(words, n, loc, -1);
 
     for (i = 0; i < n; i++) {
         int sz = words[i] * 4;
@@ -633,6 +643,7 @@ static int arg_temps[RV_MAX_ARGS];
 static int arg_is_i64[RV_MAX_ARGS];
 static int arg_is_float[RV_MAX_ARGS];
 static int arg_fw[RV_MAX_ARGS];   /* per-arg float width: 1 = F32, 0 = F64 */
+static int arg_vararg[RV_MAX_ARGS]; /* 1 = unnamed arg of a variadic call */
 static int narg;
 
 static int used_fregs[12];
@@ -736,7 +747,7 @@ emit_call_flush(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i,
 {
     struct rv_ploc loc[RV_MAX_ARGS];
     int words[RV_MAX_ARGS] = { 0 };
-    int k, push_bytes, stack_bytes, stage, need_stage;
+    int k, push_bytes, stack_bytes, stage, need_stage, first_vararg = -1;
 
     for (k = 0; k < narg; k++) {
         if (arg_is_i64[k])
@@ -745,8 +756,10 @@ emit_call_flush(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i,
             words[k] = arg_fw[k] ? 1 : 2;
         else
             words[k] = 1;
+        if (first_vararg < 0 && arg_vararg[k])
+            first_vararg = k;
     }
-    stack_bytes = rv_abi_assign(words, narg, loc);
+    stack_bytes = rv_abi_assign(words, narg, loc, first_vararg);
 
     need_stage = (retkind == RET_FLOAT && i->imm != FWIDTH_F32);
     for (k = 0; k < narg; k++)
@@ -886,7 +899,7 @@ emit_tailcall_flush(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i,
 {
     struct rv_ploc loc[RV_MAX_ARGS];
     int words[RV_MAX_ARGS] = { 0 };
-    int k, stack_bytes;
+    int k, stack_bytes, first_vararg = -1;
 
     for (k = 0; k < narg; k++) {
         if (arg_is_i64[k])
@@ -895,8 +908,10 @@ emit_tailcall_flush(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i,
             words[k] = arg_fw[k] ? 1 : 2;
         else
             words[k] = 1;
+        if (first_vararg < 0 && arg_vararg[k])
+            first_vararg = k;
     }
-    stack_bytes = rv_abi_assign(words, narg, loc);
+    stack_bytes = rv_abi_assign(words, narg, loc, first_vararg);
 
     if (stack_bytes > 0) {
         struct ir_insn call = *i;
@@ -1079,6 +1094,7 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
         }
         arg_is_i64[narg] = 0;
         arg_is_float[narg] = 0;
+        arg_vararg[narg] = i->vararg;
         arg_temps[narg++] = i->a;
         break;
     case IR_ARG64:
@@ -1088,6 +1104,7 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
         }
         arg_is_i64[narg] = 1;
         arg_is_float[narg] = 0;
+        arg_vararg[narg] = i->vararg;
         arg_temps[narg++] = i->a;
         break;
     case IR_CALL:
@@ -1376,6 +1393,7 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
         arg_is_i64[narg] = 0;
         arg_is_float[narg] = 1;
         arg_fw[narg] = i->imm == FWIDTH_F32;
+        arg_vararg[narg] = i->vararg;
         arg_temps[narg++] = i->a;
         break;
 
@@ -1773,6 +1791,35 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
         if (ahi != A1)
             rv_mc_mv(m, A1, ahi);
         emit_epilogue(m, fn);
+        break;
+    }
+
+    case IR_VA_START: {
+        /* Initialize the va_list at [temp a].  skjegg's variadic convention
+           routes every unnamed argument onto the caller's outgoing stack
+           block (see rv_abi_assign's first_vararg), so the unnamed arguments
+           sit contiguously just past the named stack arguments at fp+8.  The
+           named arguments consume their psABI homes first; compute the byte
+           offset past them (8 for the saved fp/ra, plus the named stack
+           bytes, which is 0 for the common fmt-in-a0 case), point
+           overflow_arg_area (field @8 of the SysV __va_list_tag) there, and
+           zero the unused register-area fields.  runtime/va_rv.c reads only
+           overflow_arg_area, 8-aligning it for a 64-bit slot. */
+        struct rv_ploc loc[64];
+        int words[64] = { 0 };
+        int n = fn->nparams, k, off, sa;
+
+        if (n > 64)
+            n = 64;
+        for (k = 0; k < n; k++)
+            words[k] = rv_param_words(fn, k);
+        off = 8 + rv_abi_assign(words, n, loc, -1);
+        sa = rs(m, fn, i->a, 1);        /* va_list struct address (t1 scratch) */
+        rv_mc_addbig(m, T0, FP, off);   /* overflow_arg_area = fp + off */
+        rv_mc_sw(m, T0, sa, 8);
+        rv_mc_sw(m, 0, sa, 0);          /* gp_offset     = 0 */
+        rv_mc_sw(m, 0, sa, 4);          /* fp_offset     = 0 */
+        rv_mc_sw(m, 0, sa, 12);         /* reg_save_area = 0 */
         break;
     }
 

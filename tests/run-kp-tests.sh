@@ -1,5 +1,5 @@
 #!/bin/sh
-# run-kp-tests.sh - exercise the KPM1 module reader (kp/kpm.c) through the
+# run-kp-tests.sh - exercise the KPM1 module reader (kobold/kpm.c) through the
 # Kobold AOT driver skj-kp.  This is a self-contained in-tree regression for
 # the reader's input validation: it needs no external Kobold repo, no qemu, and
 # no assembler or linker, since skj-kp stops at emitting assembly.

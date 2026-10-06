@@ -111,7 +111,10 @@ pop_scope(void)
 static void
 add_sym(const char *name, int kind, struct cc_type *type, long eval)
 {
-    struct symbol *s = arena_alloc(parse_arena, sizeof *s);
+    struct symbol *s;
+    if (!name)                  /* a nameless declarator binds no symbol */
+        return;
+    s = arena_alloc(parse_arena, sizeof *s);
     s->name = arena_strdup(parse_arena,name);
     s->sym_kind = kind;
     s->type = type;
@@ -135,6 +138,8 @@ find_sym(const char *name)
 static struct cc_type *
 find_tag(const char *name)
 {
+    if (!name)                  /* an anonymous reference matches no named tag */
+        return NULL;
     for (struct tag *t = tags; t; t = t->next) {
         if (strcmp(t->name, name) == 0)
             return t->type;
@@ -145,7 +150,10 @@ find_tag(const char *name)
 static void
 add_tag(const char *name, struct cc_type *type)
 {
-    struct tag *t = arena_alloc(parse_arena, sizeof *t);
+    struct tag *t;
+    if (!name)                  /* nothing can look an anonymous tag back up */
+        return;
+    t = arena_alloc(parse_arena, sizeof *t);
     t->name = arena_strdup(parse_arena,name);
     t->type = type;
     t->next = tags;
@@ -154,7 +162,7 @@ add_tag(const char *name, struct cc_type *type)
 
 /* forward declarations */
 static struct cc_type *parse_declspec(int *is_static, int *is_extern, int *is_typedef);
-static long const_eval(struct cc_node *n);
+static long long const_eval(struct cc_node *n);
 
 /* _Alignas requested by the declspec just parsed (0 = none); read by the
    declaration immediately after parse_declspec returns. */
@@ -510,7 +518,7 @@ done:
     return result;
 }
 
-static long
+static long long
 const_eval(struct cc_node *n)
 {
     if (!n)
@@ -519,8 +527,8 @@ const_eval(struct cc_node *n)
     case ND_INTLIT:
         return n->ival;
     case ND_BINOP: {
-        long a = const_eval(n->a);
-        long b = const_eval(n->b);
+        long long a = const_eval(n->a);
+        long long b = const_eval(n->b);
         switch (n->op) {
         case TOK_PLUS:    return a + b;
         case TOK_MINUS:   return a - b;
@@ -546,7 +554,7 @@ const_eval(struct cc_node *n)
         }
     }
     case ND_UNOP: {
-        long a = const_eval(n->a);
+        long long a = const_eval(n->a);
         switch (n->op) {
         case TOK_MINUS: return -a;
         case TOK_TILDE: return ~a;
@@ -611,14 +619,26 @@ parse_declarator(struct cc_type *base, char **name_out)
 
     /* postfix: arrays and function params */
     for (;;) {
-        if (consume(TOK_LBRACK)) {
-            int len = -1;
-            if (peek().kind != TOK_RBRACK) {
-                struct cc_node *e = parse_assign_expr();
-                len = (int)const_eval(e);
+        if (peek().kind == TOK_LBRACK) {
+            /* Collect the whole run of dimensions in source order, then wrap
+               them innermost-last so the first-written dimension is the
+               outermost: `int a[3][2]` is array[3] of array[2] of int, not the
+               reverse.  Only the first dimension may be unspecified (`[]`). */
+            int dims[32];
+            int ndim = 0;
+            while (consume(TOK_LBRACK)) {
+                int len = -1;
+                if (peek().kind != TOK_RBRACK) {
+                    struct cc_node *e = parse_assign_expr();
+                    len = (int)const_eval(e);
+                }
+                expect(TOK_RBRACK);
+                if (ndim >= 32)
+                    die("too many array dimensions at line %d", cc_lex_line());
+                dims[ndim++] = len;
             }
-            expect(TOK_RBRACK);
-            base = cc_type_array(parse_arena,base, len);
+            for (int i = ndim - 1; i >= 0; i--)
+                base = cc_type_array(parse_arena, base, dims[i]);
         } else if (consume(TOK_LPAREN)) {
             struct cc_type *ft = cc_type_func(parse_arena,base);
             struct cc_param *phead = NULL, *ptail = NULL;
@@ -729,10 +749,18 @@ parse_primary(void)
     switch (t.kind) {
     case TOK_INTLIT: {
         struct cc_node *n = node(ND_INTLIT, t.line);
+        struct cc_type *bt;
         n->ival = t.ival;
-        n->type = t.is_llong ? cc_type_long_long()
-                : t.is_long  ? cc_type_long()
-                :              cc_type_int();
+        bt = t.is_llong ? cc_type_long_long()
+           : t.is_long  ? cc_type_long()
+           :              cc_type_int();
+        if (t.is_unsigned) {        /* a copy, since the base types are shared */
+            struct cc_type *u = arena_alloc(parse_arena, sizeof *u);
+            *u = *bt;
+            u->is_unsigned = 1;
+            bt = u;
+        }
+        n->type = bt;
         return n;
     }
     case TOK_FLOATLIT: {
@@ -754,7 +782,12 @@ parse_primary(void)
         struct cc_node *n = node(ND_STRLIT, t.line);
         n->sval = t.sval;
         n->slen = t.slen;
-        n->type = cc_type_ptr(parse_arena,cc_type_char());
+        /* A string literal is an array char[len+1] (the +1 is the trailing
+           NUL), not a pointer, so sizeof measures the storage.  It decays to
+           char* in value contexts through the ordinary TY_ARRAY decay, and the
+           lowering returns the string's address directly (it never reads this
+           type), so every value use is unchanged. */
+        n->type = cc_type_array(parse_arena, cc_type_char(), t.slen + 1);
         return n;
     }
     case TOK_IDENT: {
@@ -809,6 +842,22 @@ parse_postfix(void)
         } else if (consume(TOK_LPAREN)) {
             struct cc_node *r = node(ND_CALL, ln);
             r->a = n;
+            if (n->kind == ND_VAR &&
+                strcmp(n->name, "__builtin_va_arg") == 0) {
+                /* __builtin_va_arg(ap, type): the second operand is a type
+                   name, not an expression (what the real <stdarg.h> va_arg
+                   expands to).  Parse it and carry it on the call node; the
+                   lowering classifies it and types the result. */
+                r->b = parse_assign_expr();
+                expect(TOK_COMMA);
+                int vd1 = 0, vd2 = 0;
+                struct cc_type *vty = parse_declspec(&vd1, &vd2, NULL);
+                vty = parse_declarator(vty, NULL);
+                r->decl_type = vty;
+                expect(TOK_RPAREN);
+                n = r;
+                continue;
+            }
             struct cc_node *head = NULL, *tail = NULL;
             if (!consume(TOK_RPAREN)) {
                 for (;;) {
@@ -1261,12 +1310,21 @@ parse_top_decl(void)
     char *name = NULL;
     struct cc_type *dt = parse_declarator(base, &name);
 
+    /* A top-level declarator with no name is invalid (the nameless bare
+       struct/enum declaration was already consumed by the TOK_SEMI above), and
+       a NULL name would otherwise reach add_sym / add_global as a NUL string. */
+    if (!name)
+        die("parse error at line %d: declarator has no name", cc_lex_line());
+
     /* typedef */
     if (is_typedef) {
         add_sym(name, SYM_TYPEDEF, dt, 0);
         while (consume(TOK_COMMA)) {
             char *n2 = NULL;
             struct cc_type *dt2 = parse_declarator(base, &n2);
+            if (!n2)
+                die("parse error at line %d: declarator has no name",
+                    cc_lex_line());
             add_sym(n2, SYM_TYPEDEF, dt2, 0);
         }
         expect(TOK_SEMI);
@@ -1308,7 +1366,11 @@ parse_top_decl(void)
     while (consume(TOK_COMMA)) {
         char *n2 = NULL;
         struct cc_type *dt2 = parse_declarator(base, &n2);
-        struct cc_node *n = node(ND_GLOBAL_DECL, cc_lex_line());
+        struct cc_node *n;
+        if (!n2)
+            die("parse error at line %d: declarator has no name",
+                cc_lex_line());
+        n = node(ND_GLOBAL_DECL, cc_lex_line());
         n->name = n2;
         n->decl_type = dt2;
         n->is_static = is_static;
@@ -1330,6 +1392,12 @@ cc_parse_program(struct arena *a)
     struct cc_node *head = NULL, *tail = NULL;
 
     parse_arena = a;
+    /* Reset the file-scope symbol and tag tables, which hold pointers into the
+       parse arena: a prior compile's die() (or an in-process reuse) would
+       otherwise leave cur_scope and tags chained onto that compile's freed
+       arena, and find_sym / find_tag would walk into it. */
+    cur_scope = NULL;
+    tags = NULL;
     prog = node(ND_PROGRAM, 1);
     push_scope();
 

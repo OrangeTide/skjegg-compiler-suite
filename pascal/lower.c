@@ -3116,7 +3116,8 @@ lower_function(struct node *decl, int is_func,
 
     fn->nslots = nslots;
     fn->slot_size = arena_alloc(lower_arena, nslots * sizeof(int));
-    memcpy(fn->slot_size, slot_sizes, nslots * sizeof(int));
+    if (nslots)
+        memcpy(fn->slot_size, slot_sizes, nslots * sizeof(int));
 
     nsyms = saved_nsyms;
     nslots = saved_nslots;
@@ -3149,6 +3150,12 @@ lower_program(struct arena *a, struct node *ast)
     nsyms = 0;
     ntypes = 0;
     strctr = 0;
+    /* Reset the per-compile lowering state a prior die() longjmp may have left
+       non-zero: a nonzero nwith leaves with_stack holding type_def pointers
+       into a previous compile's freed types array, which the next compile's
+       with_field_addr would then dereference. */
+    nwith = 0;
+    nloops = 0;
 
     if (!ast || ast->kind != N_PROGRAM)
         die("lower: expected program node");

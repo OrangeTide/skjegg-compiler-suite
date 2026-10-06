@@ -139,9 +139,18 @@ rv_ref(struct rv_mc *m, int id, size_t site, int isj)
 }
 
 void rv_mc_j(struct rv_mc *m, int id) { size_t s = m->c->len; rv_jal(m->c, 0, 0); rv_ref(m, id, s, 1); }
-void rv_mc_beqz(struct rv_mc *m, int rs, int id) { size_t s = m->c->len; rv_beq(m->c, rs, 0, 0); rv_ref(m, id, s, 0); }
-void rv_mc_bnez(struct rv_mc *m, int rs, int id) { size_t s = m->c->len; rv_bne(m->c, rs, 0, 0); rv_ref(m, id, s, 0); }
-void rv_mc_bne(struct rv_mc *m, int rs1, int rs2, int id) { size_t s = m->c->len; rv_bne(m->c, rs1, rs2, 0); rv_ref(m, id, s, 0); }
+
+/* A conditional branch to a local label.  A B-type branch reaches only +/-4KB,
+   which a large function (kpcom has several) overruns, so always emit the inverted
+   condition skipping a jal that carries the real target.  The jal reaches +/-1MB,
+   covering any intra-function target, and the fixup is J-type.  Eight bytes instead
+   of four, but no sizing-iteration pass is needed, since the form is fixed. */
+void rv_mc_beqz(struct rv_mc *m, int rs, int id)
+{ size_t s; rv_bne(m->c, rs, 0, 8); s = m->c->len; rv_jal(m->c, 0, 0); rv_ref(m, id, s, 1); }
+void rv_mc_bnez(struct rv_mc *m, int rs, int id)
+{ size_t s; rv_beq(m->c, rs, 0, 8); s = m->c->len; rv_jal(m->c, 0, 0); rv_ref(m, id, s, 1); }
+void rv_mc_bne(struct rv_mc *m, int rs1, int rs2, int id)
+{ size_t s; rv_beq(m->c, rs1, rs2, 8); s = m->c->len; rv_jal(m->c, 0, 0); rv_ref(m, id, s, 1); }
 
 void rv_mc_ret(struct rv_mc *m) { rv_jalr(m->c, 0, 1, 0); }          /* jalr x0, ra, 0 */
 void rv_mc_jr(struct rv_mc *m, int rs) { rv_jalr(m->c, 0, rs, 0); }
@@ -301,8 +310,9 @@ void rv_mc_fmv_w_x(struct rv_mc *m, int fd, int rs) { rv_fmv_w_x(m->c, fd, rs); 
 /****************************************************************
  * Calls
  *
- * A module function is a direct jal with a deferred relocation; a runtime symbol
- * is a host binding whose address is materialised in t6 and called through.
+ * A module function is an auipc+jalr pair with a deferred relocation (reaching
+ * +/-2GB, so a large module links); a runtime symbol is a host binding whose
+ * address is materialised in t6 and called through.
  ****************************************************************/
 
 void
@@ -310,7 +320,8 @@ rv_mc_call(struct rv_mc *m, const char *name)
 {
     if (kp_is_module_func(m->e->prog, name)) {
         size_t site = m->c->len;
-        rv_jal(m->c, 1, 0);             /* jal ra, <patched> */
+        rv_auipc(m->c, RV_RA, 0);        /* auipc ra, hi (patched) */
+        rv_jalr(m->c, RV_RA, RV_RA, 0);  /* jalr ra, ra, lo: a +/-2GB far call */
         kp_add_reloc(m->e, site, name);
         return;
     }
@@ -325,7 +336,8 @@ rv_mc_j_sym(struct rv_mc *m, const char *name)
 {
     if (kp_is_module_func(m->e->prog, name)) {
         size_t site = m->c->len;
-        rv_jal(m->c, 0, 0);             /* j <patched> (jal x0) */
+        rv_auipc(m->c, T6, 0);           /* auipc t6, hi (patched) */
+        rv_jalr(m->c, RV_ZERO, T6, 0);   /* jalr x0, t6, lo: a far tail jump, ra kept */
         kp_add_reloc(m->e, site, name);
         return;
     }
@@ -360,13 +372,14 @@ emit_func(struct emitctx *e, struct code *c, struct ir_func *fn)
     return rc;
 }
 
-/* A deferred intra-module call is a J-type jal whose 20-bit word offset is
-   patched; -1 if the target is beyond the +/-1MB range. */
+/* A deferred intra-module call is the auipc+jalr pair rv_mc_call/rv_mc_j_sym
+   emitted; patch it PC-relative to the target.  The +/-2GB auipc range covers any
+   code region, so this never fails for a sanely sized module. */
 static int
 rv_apply_call_reloc(struct code *c, size_t site, size_t target)
 {
     int32_t disp = (int32_t)((long)target - (long)site);
-    return rv_patch_j(c, site, disp);
+    return rv_patch_call(c, site, disp);
 }
 
 /* An absolute function-code reference is the lui/addi pair rv_mc_la emitted:

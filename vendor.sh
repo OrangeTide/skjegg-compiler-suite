@@ -12,6 +12,7 @@
 # Frontends: tinc  scheme  moo  pascal  cc
 # Tools:     as  ld  cpp
 # Emulators: emu-cf  emu-rv
+# Kobold:    kp
 
 set -eu
 
@@ -35,6 +36,9 @@ Tools:     as  ld  as-rv  ld-rv  as-mips  ld-mips  ar  cpp
               MIPS I toolchain, ld-mips writes ELF and PlayStation PS-EXE;
               ar: a target-neutral archive tool for any of the linkers)
 Emulators: emu-cf  emu-rv    (skj-run; either, both, or neither)
+Kobold:    kp                (the Kobold-Pascal AOT path: the native front end
+             skj-kpc and the KPM1 compiler skj-kp over the bootstrap seed, plus
+             the runtime libkpaot.a; add riscv for the KPM1->RV32 compiler)
 
 Options:
   -d DIR   destination directory (default: skjegg)
@@ -74,6 +78,7 @@ has_as=0 has_ld=0 has_cpp=0
 has_as_rv=0 has_ld_rv=0
 has_as_mips=0 has_ld_mips=0 has_ar=0
 has_emu_cf=0 has_emu_rv=0
+has_kp=0
 
 for comp in $COMPONENTS; do
     case "$comp" in
@@ -95,6 +100,7 @@ for comp in $COMPONENTS; do
         cpp)      has_cpp=1 ;;
         emu-cf)   has_emu_cf=1 ;;
         emu-rv)   has_emu_rv=1 ;;
+        kp|kobold) has_kp=1 ;;
         *)        die "unknown component: $comp" ;;
     esac
 done
@@ -192,6 +198,15 @@ fi
 if [ "$has_cc" -eq 1 ]; then
     mkdir -p "$DEST/cc"
     cp "$S"/cc/*.c "$S"/cc/*.h "$DEST/cc/"
+    # The portable C headers skj-cc owns (<stdarg.h>), on skj-cc's default
+    # include search path (baked in as SKJ_INCLUDE_DIR on the tool build), plus
+    # the varargs runtime helper (__va_arg), one file per backend ABI.  A cc
+    # program using <stdarg.h> links the matching va_*.o.
+    mkdir -p "$DEST/include" "$DEST/runtime"
+    cp "$S/include/stdarg.h" "$DEST/include/"
+    [ "$has_cf" -eq 1 ]   && cp "$S/runtime/va_cf.c" "$DEST/runtime/"
+    [ "$has_rv" -eq 1 ]   && cp "$S/runtime/va_rv.c" "$DEST/runtime/"
+    [ "$has_mips" -eq 1 ] && cp "$S/runtime/va_mips.c" "$DEST/runtime/"
 fi
 
 # cpp library (needed by cc and cpp tool)
@@ -269,6 +284,28 @@ if [ "$has_emu_cf" -eq 1 ]; then
 fi
 if [ "$has_emu_rv" -eq 1 ]; then
     cp "$S/emu/rv32.c" "$S/emu/rv32.h" "$S/emu/rv_user.c" "$DEST/emu/"
+fi
+
+# Kobold-Pascal AOT path (kobold).  The front end kpcom is in-tree Pascal source
+# (kobold/kpcom.pas); this carries the KPM1 reader and runtime (kobold/), the
+# x86-64 selector the host tools build on, the jit/ call trampoline libkpaot links,
+# and the generated stage0 bootstrap seed (prebuild/kpcom.kpm + manifest).  With
+# riscv also selected it adds the jit/ pieces the RV32 runtime needs.  The
+# freestanding runtime and its libkpaot*-free rules arrive with a later step.
+if [ "$has_kp" -eq 1 ]; then
+    mkdir -p "$DEST/kobold" "$DEST/backend" "$DEST/jit" "$DEST/prebuild"
+    cp "$S"/kobold/*.c "$S"/kobold/*.h "$S"/kobold/*.S "$DEST/kobold/"
+    cp "$S/kobold/kpcom.pas" "$S/kobold/version.inc" "$S/kobold/stdlib.inc" \
+       "$DEST/kobold/"
+    cp "$S/backend/regalloc_x86.c" "$S/backend/x86_select.c" \
+       "$S/backend/mc_text.c" "$S/backend/x86_aot.c" \
+       "$S/backend/mc.h" "$S/backend/mc_text.h" "$S/backend/x86_select.h" \
+       "$DEST/backend/"
+    cp "$S/jit/call_guest_x86.S" "$DEST/jit/"
+    if [ "$has_rv" -eq 1 ]; then
+        cp "$S/jit/call_guest_rv.S" "$S/jit/rv_jit_i64.S" "$DEST/jit/"
+    fi
+    cp "$S/prebuild/kpcom.kpm" "$S/prebuild/kpcom.manifest" "$DEST/prebuild/"
 fi
 
 # LICENSE
@@ -365,6 +402,7 @@ if [ "$has_rv" -eq 1 ]; then
 
 RV_AS ?= riscv64-linux-gnu-as
 RV_LD ?= riscv64-linux-gnu-ld
+RV_CC ?= riscv64-linux-gnu-gcc
 MK
 fi
 if [ "$has_mips" -eq 1 ]; then
@@ -511,25 +549,29 @@ fi
 if [ "$has_pascal" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
     emit_compiler skj-pc-mips SKJ_PASCAL SKJ_MIPS '-I$(SKJEGG)pascal -I$(SKJEGG)ir'
 fi
+# The cc tools bake in the default include search path (the vendored
+# include/ holding <stdarg.h>), so `#include <stdarg.h>` resolves with no -I
+# from the consumer; SKJ_CC_INCLUDE still overrides it at run time.
+cc_inc='-I$(SKJEGG)cc -I$(SKJEGG)cpp -I$(SKJEGG)ir -DSKJ_INCLUDE_DIR='\''"$(abspath $(SKJEGG)include)"'\'
 if [ "$has_cc" -eq 1 ] && [ "$has_cf" -eq 1 ]; then
     emit_compiler skj-cc SKJ_CC SKJ_CF \
-        '-I$(SKJEGG)cc -I$(SKJEGG)cpp -I$(SKJEGG)ir' '$(SKJ_CPP_LIB)'
+        "$cc_inc" '$(SKJ_CPP_LIB)'
 fi
 if [ "$has_cc" -eq 1 ] && [ "$has_rv" -eq 1 ]; then
     # The RISC-V C compiler emits the standard ILP32 psABI (a0..a7) so its
     # output interlinks with gcc; it pairs with the standalone RV toolchain
     # (as-rv/ld-rv) and runtime/start_rv_psabi_cc.S.
     emit_compiler skj-cc-rv SKJ_CC SKJ_RV \
-        '-I$(SKJEGG)cc -I$(SKJEGG)cpp -I$(SKJEGG)ir' '$(SKJ_CPP_LIB)'
+        "$cc_inc" '$(SKJ_CPP_LIB)'
 fi
 if [ "$has_cc" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
     emit_compiler skj-cc-mips SKJ_CC SKJ_MIPS \
-        '-I$(SKJEGG)cc -I$(SKJEGG)cpp -I$(SKJEGG)ir' '$(SKJ_CPP_LIB)'
+        "$cc_inc" '$(SKJ_CPP_LIB)'
     # The soft-float build: same sources with -DMIPS_SOFTFLOAT, emitting no
     # coprocessor-1 instruction and lowering every float op to a runtime/
     # softfloat.c call, for the FPU-less R3051 (the PlayStation).
     emit_compiler skj-cc-mips-sf SKJ_CC SKJ_MIPS \
-        '-DMIPS_SOFTFLOAT -I$(SKJEGG)cc -I$(SKJEGG)cpp -I$(SKJEGG)ir' '$(SKJ_CPP_LIB)'
+        "-DMIPS_SOFTFLOAT $cc_inc" '$(SKJ_CPP_LIB)'
 fi
 
 # tool binary rules
@@ -590,6 +632,63 @@ if [ "$has_ar" -eq 1 ]; then
     } >> "$MK"
 fi
 
+# Kobold-Pascal AOT path: the host front end skj-kpc (the seed AOT-compiled) and
+# the KPM1 backend compiler skj-kp, plus the hosted runtime libkpaot.a.  With riscv
+# also selected, skj-kp-rv compiles KPM1 to RV32 asm (its target runtime, hosted
+# libkpaot-rv and the freestanding tier, arrives with a later step).
+if [ "$has_kp" -eq 1 ]; then
+    cat >> "$MK" <<'MK'
+
+AR      ?= ar
+X64_ASM ?= nasm
+
+SKJ_BE_X64 := $(SKJEGG)backend/regalloc_x86.c $(SKJEGG)backend/x86_select.c \
+              $(SKJEGG)backend/mc_text.c $(SKJEGG)backend/x86_aot.c
+SKJ_KP_AOT_RT := $(SKJEGG)kobold/aot_rt.c $(SKJEGG)kobold/kp_host.c $(SKJEGG)kobold/str_core.c \
+                 $(SKJEGG)kobold/str_fmt.c $(SKJEGG)kobold/dynarr.c $(SKJEGG)kobold/map.c \
+                 $(SKJEGG)kobold/rt_host.c $(SKJEGG)kobold/co_shim.c \
+                 $(SKJEGG)kobold/co_switch_x86.S $(SKJEGG)jit/call_guest_x86.S
+SKJ_KP_CFLAGS := $(CFLAGS) -DX86_BITS=64 -DKP_FREESTANDING -DKP_REAL=double \
+                 -I$(SKJEGG)ir -I$(SKJEGG)jit -I$(SKJEGG)backend -I$(SKJEGG)kobold
+
+# skj-kp: the x86-64 KPM1 AOT compiler (reads a .kpm, writes NASM assembly).
+SKJ_ALL += $(BUILD)/skj-kp
+$(BUILD)/skj-kp: $(SKJEGG)kobold/aot_main.c $(SKJEGG)kobold/kpm.c $(SKJ_IR) $(SKJ_BE_X64) | $(BUILD)
+	$(CC) $(CFLAGS) -DX86_BITS=64 -I$(SKJEGG)ir -I$(SKJEGG)backend -I$(SKJEGG)kobold -o $@ $(SKJEGG)kobold/aot_main.c $(SKJEGG)kobold/kpm.c $(SKJ_IR) $(SKJ_BE_X64)
+
+# co.c carries Kobold's own warning set (no -Wpedantic), so it is a separate object.
+$(BUILD)/kp_co.o: $(SKJEGG)kobold/co.c | $(BUILD)
+	$(CC) -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter -I$(SKJEGG)ir -I$(SKJEGG)jit -I$(SKJEGG)backend -I$(SKJEGG)kobold -c $(SKJEGG)kobold/co.c -o $@
+
+# libkpaot.a: the hosted Kobold runtime an AOT program links against.
+$(BUILD)/libkpaot.a: $(SKJ_KP_AOT_RT) $(BUILD)/kp_co.o | $(BUILD)
+	@rm -rf $(BUILD)/aot && mkdir -p $(BUILD)/aot
+	@for f in $(SKJ_KP_AOT_RT); do o=$(BUILD)/aot/`basename $$f | sed 's/\.[cS]$$/.o/'`; $(CC) $(SKJ_KP_CFLAGS) -c $$f -o $$o || exit 1; done
+	$(AR) rcs $@ $(BUILD)/aot/*.o $(BUILD)/kp_co.o
+
+# skj-kpc: the Kobold-Pascal front end as a native x86-64 binary.  The committed seed
+# (prebuild/kpcom.kpm) is AOT-compiled by skj-kp and linked against libkpaot.a, so
+# 'skj-kpc --emit-kpm foo.pas' turns Kobold source into a KPM1 module with no fpc.
+SKJ_ALL += $(BUILD)/skj-kpc
+$(BUILD)/kpcom.s: $(SKJEGG)prebuild/kpcom.kpm $(BUILD)/skj-kp | $(BUILD)
+	$(BUILD)/skj-kp $(SKJEGG)prebuild/kpcom.kpm -o $@
+$(BUILD)/kpcom.o: $(BUILD)/kpcom.s | $(BUILD)
+	$(X64_ASM) -f elf64 $< -o $@
+$(BUILD)/skj-kpc: $(BUILD)/kpcom.o $(BUILD)/libkpaot.a | $(BUILD)
+	$(CC) -no-pie $(BUILD)/kpcom.o $(BUILD)/libkpaot.a -o $@ -lm
+MK
+    if [ "$has_rv" -eq 1 ]; then
+        cat >> "$MK" <<'MK'
+
+# skj-kp-rv: the KPM1 -> RV32 asm AOT compiler, a host binary.  Link its output with
+# the freestanding runtime tier (a later step) or the hosted libkpaot-rv.
+SKJ_ALL += $(BUILD)/skj-kp-rv
+$(BUILD)/skj-kp-rv: $(SKJEGG)kobold/aot_main.c $(SKJEGG)kobold/kpm.c $(SKJ_IR) $(SKJ_RV) | $(BUILD)
+	$(CC) $(CFLAGS) -DKP_AOT_RV -I$(SKJEGG)ir -I$(SKJEGG)backend -I$(SKJEGG)kobold -o $@ $(SKJEGG)kobold/aot_main.c $(SKJEGG)kobold/kpm.c $(SKJ_IR) $(SKJ_RV)
+MK
+    fi
+fi
+
 # emulator driver
 if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ]; then
     _emu_src='$(SKJEGG)emu/main.c $(SKJEGG)emu/guest.c $(SKJEGG)emu/elf32.c'
@@ -640,6 +739,26 @@ if [ "$has_moo" -eq 1 ] && [ "$has_cf" -eq 1 ]; then
         printf '\t$(M68K_CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<\n'
         printf '\n$(BUILD)/toy_host.o: $(SKJEGG)runtime/toy_host.c | $(BUILD)\n'
         printf '\t$(M68K_CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<\n'
+    } >> "$MK"
+fi
+# The cc varargs runtime helper (__va_arg), linked when a cc program uses
+# <stdarg.h>.  One per backend ABI; the object name matches the in-tree build.
+if [ "$has_cc" -eq 1 ] && [ "$has_cf" -eq 1 ]; then
+    {
+        printf '\n$(BUILD)/va_cf.o: $(SKJEGG)runtime/va_cf.c | $(BUILD)\n'
+        printf '\t$(M68K_CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<\n'
+    } >> "$MK"
+fi
+if [ "$has_cc" -eq 1 ] && [ "$has_rv" -eq 1 ]; then
+    {
+        printf '\n$(BUILD)/va_rv.o: $(SKJEGG)runtime/va_rv.c | $(BUILD)\n'
+        printf '\t$(RV_CC) -std=c99 -O2 -Wall -ffreestanding -march=rv32imfd -mabi=ilp32 -c -o $@ $<\n'
+    } >> "$MK"
+fi
+if [ "$has_cc" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
+    {
+        printf '\n$(BUILD)/va_mips.o: $(SKJEGG)runtime/va_mips.c | $(BUILD)\n'
+        printf '\t$(MIPS_CC) -march=mips1 -EL -G 0 -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<\n'
     } >> "$MK"
 fi
 

@@ -243,3 +243,24 @@ rv_patch_j(struct code *c, size_t site, int32_t disp)
     wr_word(c, site, w);
     return 0;
 }
+
+/* Patch a PC-relative auipc+jalr pair: `site` is the auipc word, `site`+4 the
+   jalr.  `disp` is the signed distance from the auipc to the target.  The low 12
+   bits ride the jalr's sign-extended immediate, so the high 20 are bumped to
+   compensate: the PCREL_HI20/LO12 split, the same arithmetic rv_apply_abs_reloc
+   uses for a lui/addi pair.  Reaches the full auipc +/-2GB range, so it always
+   fits for a code region under 2GB. */
+int
+rv_patch_call(struct code *c, size_t site, int32_t disp)
+{
+    int32_t hi = (disp + 0x800) >> 12;
+    int32_t lo = disp - (hi << 12);
+    uint32_t w0 = rd_word(c, site);
+    uint32_t w1 = rd_word(c, site + 4);
+
+    w0 = (w0 & 0x00000fffu) | (((uint32_t)hi & 0xfffffu) << 12);   /* auipc imm[31:12] */
+    w1 = (w1 & 0x000fffffu) | (((uint32_t)lo & 0xfffu) << 20);     /* jalr  imm[11:0]  */
+    wr_word(c, site, w0);
+    wr_word(c, site + 4, w1);
+    return 0;
+}

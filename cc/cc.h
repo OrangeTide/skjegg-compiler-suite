@@ -78,7 +78,8 @@ enum cc_tok {
 
 struct cc_token {
     int kind;
-    long ival;
+    long long ival;     /* 64-bit: a host where long is 32-bit (the rv32-hosted
+                           JIT) must still carry a long long literal intact */
     double fval;
     char *sval;
     int slen;
@@ -87,6 +88,7 @@ struct cc_token {
     int is_half;
     int is_long;    /* integer literal with an l/L suffix or too big for int */
     int is_llong;   /* integer literal with an ll/LL suffix */
+    int is_unsigned;/* integer literal that resolves to an unsigned type */
 };
 
 /****************************************************************
@@ -217,7 +219,7 @@ struct cc_node {
     struct cc_node *body;
 
     char *name;
-    long ival;
+    long long ival;     /* 64-bit; see the note on cc_token.ival */
     double fval;
     char *sval;
     int slen;
@@ -267,6 +269,8 @@ int cc_type_size(struct cc_type *t);
 int cc_type_align(struct cc_type *t);
 int cc_type_is_integer(struct cc_type *t);
 int cc_type_is_arith(struct cc_type *t);
+struct cc_type *cc_type_promote(struct cc_type *t);
+struct cc_type *cc_type_usual_arith(struct cc_type *a, struct cc_type *b);
 int cc_type_is_ptr(struct cc_type *t);
 int cc_type_is_scalar(struct cc_type *t);
 

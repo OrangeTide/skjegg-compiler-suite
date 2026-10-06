@@ -14,10 +14,14 @@ struct __va_list_tag {
     void *reg_save_area;
 };
 
+/* The second argument classifies the slot: 0 = 32-bit int/pointer, 1 =
+   double, 2 = 64-bit integer.  On SysV every gp slot is 8 bytes, so int and
+   long long share the gp path; only a double uses the fp path. */
 void *
-__va_arg(struct __va_list_tag *ap, int is_fp)
+__va_arg(struct __va_list_tag *ap, int kind)
 {
     void *p;
+    int is_fp = (kind == 1);
 
     if (is_fp) {
         if (ap->fp_offset < 176) {

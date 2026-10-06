@@ -10,6 +10,10 @@ permissions:
   contents: read
 
 jobs:
+  # The core job: the full qemu matrix, the emulator and toolchain sanitizer
+  # passes. This is the breadth check-all already spans (every front end x
+  # backend, the IR-builder integration tests, the RV32 binutils-free
+  # toolchain, the Excelsior codegen tiers, and the host/x86-64 Kobold tiers).
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -60,9 +64,18 @@ jobs:
       - name: Full test matrix
         run: make check-all QEMU_A64="qemu-aarch64 -L /usr/aarch64-linux-gnu"
 
+      # One program to every backend and runner, with the host gcc as the oracle
+      # reference, asserting identical stdout and exit status.  The gcc peer
+      # catches front-end bugs uniform across the skj backends, the class a pure
+      # cross-backend diff misses.  The torture binaries are static, so the
+      # default qemu-aarch64 (no -L loader) is correct for the arm64 peer here.
+      - name: Cross-backend differential torture
+        run: make test-torture-diff
+
       # The host-only emulator tests rebuilt with ASan+UBSan.  They run
-      # natively with no qemu and cover the RV32 core, the guest allocator, and
-      # the process scheduler, catching memory and undefined-behavior bugs the
+      # natively with no qemu and cover the RV32 core, the guest allocator, the
+      # process scheduler, and the soft-ctx coroutine tier (context switch and
+      # guarded private stacks), catching memory and undefined-behavior bugs the
       # value-checking suites miss.
       - name: Emulator sanitizer pass
         run: make check-emu-san
@@ -73,3 +86,98 @@ jobs:
       # emulator already has.
       - name: Toolchain sanitizer slice
         run: make check-san-tools QEMU="qemu-m68k"
+
+  # MIPS: the whole MIPS tier under qemu-mipsel.  check-all only touches MIPS
+  # through test-f32-diff-mips, so every MIPS suite ran outside CI before this.
+  # The GNU mipsel binutils (as / ld / objcopy) replace the Makefile's default
+  # bare-metal mipsel-none-elf cross; check-mipsas is the encoding golden-master
+  # against that assembler (the MIPS encoder's oracle) and its spim load-delay
+  # tier needs spim.
+  mips:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MIPS_AS: mipsel-linux-gnu-as
+      MIPS_LD: mipsel-linux-gnu-ld
+      MIPS_OBJCOPY: mipsel-linux-gnu-objcopy
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install MIPS toolchain, QEMU, and spim
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-mipsel-linux-gnu binutils-mipsel-linux-gnu \
+            qemu-user spim
+      - name: MIPS test matrix
+        run: make check-mips-all
+
+  # The in-tree emulators end to end: skj-run across the ColdFire and RISC-V
+  # suites, the Excelsior and Kobold tiers on the RV32 and AArch64 emulators,
+  # the sandbox, and the RV32 unit rig.  None of this runs in check-all.
+  emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install cross toolchains and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-m68k-linux-gnu binutils-m68k-linux-gnu \
+            gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            nasm qemu-user
+      # check-emu-all builds skj-jit-rv (hosted rv32, run under qemu-riscv32)
+      # for the Kobold RV JIT tier, so zig is needed here too.
+      - name: Install zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+      - name: Emulator test matrix
+        run: make check-emu-all QEMU_A64="qemu-aarch64 -L /usr/aarch64-linux-gnu"
+
+  # The RV32 core against qemu-riscv32 as a reference model: instruction-by-
+  # instruction lockstep and randomized-encoding fuzzing, plus the self-checking
+  # unit and program rig.  These find divergences the value-checking suites
+  # cannot, and never ran in CI.
+  rv32-reference:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user
+      - name: RV32 unit and program rig
+        run: make check-rv32
+      - name: RV32 lockstep against qemu-riscv32
+        run: make test-rv32-lockstep
+      - name: RV32 randomized fuzz against qemu-riscv32
+        run: make test-rv32-fuzz
+
+  # RISC-V architectural conformance: riscv-arch-test run on the bare-metal
+  # machine beside skj-run and compared, suite by suite, against
+  # qemu-system-riscv32's serial signature.  It is opt-in from check-emu-all
+  # (an external suite and a second qemu), so it gets its own job: it checks out
+  # the suite (the old-framework-3.x branch, the one a binutils 2.42 assembler
+  # handles) and installs qemu-system-riscv32.
+  archtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install toolchain and system QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu \
+            qemu-system-misc
+      - name: Check out riscv-arch-test (old-framework-3.x)
+        uses: actions/checkout@v6
+        with:
+          repository: riscv-non-isa/riscv-arch-test
+          ref: old-framework-3.x
+          path: riscv-arch-test
+      - name: Conformance suite
+        run: make check-archtest ARCHTEST="$GITHUB_WORKSPACE/riscv-arch-test/riscv-test-suite"

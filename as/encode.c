@@ -878,6 +878,17 @@ static int
 do_encode(struct assembler *a, const char *mnemonic, int size,
           struct operand *op1, struct operand *op2, int emit)
 {
+    /* The parser passes a null operand for one that was not supplied (an
+       instruction given too few operands). The per-mnemonic encoders read
+       their operands unconditionally, so substitute a sentinel of an invalid
+       type (-1 matches no OP_* value): every encoder's type test then fails and
+       returns -1 ("cannot encode"), instead of dereferencing a null pointer. */
+    static struct operand none = { -1, 0, 0, NULL, 0 };
+    if (!op1)
+        op1 = &none;
+    if (!op2)
+        op2 = &none;
+
     if (strcmp(mnemonic, "move") == 0)
         return encode_move(a, size, op1, op2, emit);
     if (strcmp(mnemonic, "movea") == 0)

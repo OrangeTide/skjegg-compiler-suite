@@ -46,6 +46,10 @@ lex_string(struct lexer *l)
     while (*l->pos && *l->pos != '"') {
         if (*l->pos == '\\') {
             l->pos++;
+            /* a backslash at end of input: stop rather than consume the NUL
+               terminator and read past it on the next loop iteration */
+            if (*l->pos == '\0')
+                break;
             switch (*l->pos) {
             case 'n':
                 str_buf_push(l, &len, '\n');

@@ -309,14 +309,19 @@ handle_directive(struct assembler *a, const char *dir)
         lex_next(&a->lex);
         if (a->lex.tok.type == T_INT) {
             int align = (int)a->lex.tok.ival;
-            /* record the section's strongest alignment so the ELF writer can
-               set sh_addralign and the linker places the section aligned */
-            if (align > s->align)
-                s->align = align;
-            if (a->pass == 2)
-                sec_align(s, align);
-            else {
-                while (s->len % align) s->len++;
+            /* A non-positive alignment (`.align 0`, or a negative value from a
+               corrupt source) has no meaning and would divide by zero below;
+               ignore it. */
+            if (align > 0) {
+                /* record the section's strongest alignment so the ELF writer
+                   can set sh_addralign and the linker places it aligned */
+                if (align > s->align)
+                    s->align = align;
+                if (a->pass == 2)
+                    sec_align(s, align);
+                else {
+                    while (s->len % align) s->len++;
+                }
             }
             lex_next(&a->lex);
         }

@@ -641,8 +641,16 @@ shape_consume(struct shape_ctx *c, struct node *item, struct node *slot)
     }
     k = shape_kind(c->shape, slot->name);
     if (k) {
-        if (k->flags & NF_SHAPE_GROUP)
-            k = shape_kind(c->shape, datalit_head(item));   /* the alt */
+        if (k->flags & NF_SHAPE_GROUP) {
+            /* The item's head matched one of the group's alternative names,
+               but that alternative may name a kind the shape never declared;
+               shape_kind is then NULL, so report it rather than deref it. */
+            const char *alt = datalit_head(item);
+            k = alt ? shape_kind(c->shape, alt) : NULL;
+            if (!k)
+                terr(item, "`%s` is not a declared node kind in shape `%s`",
+                     alt ? alt : "?", c->shape->name);
+        }
         shape_match_item(c, item, k);
     }
     /* else: a literal keyword atom, already matched */
