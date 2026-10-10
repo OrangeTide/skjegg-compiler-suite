@@ -1391,9 +1391,12 @@ check-rv-emu: build/skj-run build/skj-tinc-rv build/skj-sc-rv \
 ## bench-cf or bench-rv to gate one core when only one toolchain is present.
 ##
 ## The corpus reuses the guests check-emu and check-rv-emu already build, so
-## these share their prerequisite sets.
+## these share their prerequisite sets.  exc_walker_test is the exception: it
+## is built by test-exc-walker rather than the suite binary lists, so name it
+## directly or bench and bench-accept would skip it (and --accept would drop
+## it from the baseline).
 BENCH_CF_DEPS := $(CF_TC_BINS) $(CF_SCM_BINS) $(CF_MOO_BINS) $(CF_TOY_BINS) \
-                 $(CF_PAS_BINS)
+                 $(CF_PAS_BINS) build/cf/exc_walker_test
 BENCH_RV_DEPS := build/skj-tinc-rv build/skj-sc-rv \
                  $(RV_TESTS:tests/%.tc=build/rv/%) \
                  $(RV_SCM_TESTS:tests/%.scm=build/rv/%)

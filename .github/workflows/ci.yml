@@ -24,6 +24,8 @@ jobs:
     env:
       MIPS_AS: mipsel-linux-gnu-as
       MIPS_LD: mipsel-linux-gnu-ld
+      MIPS_OBJCOPY: mipsel-linux-gnu-objcopy
+      MIPS_CC: mipsel-linux-gnu-gcc
     steps:
       - uses: actions/checkout@v6
 
@@ -100,6 +102,7 @@ jobs:
       MIPS_AS: mipsel-linux-gnu-as
       MIPS_LD: mipsel-linux-gnu-ld
       MIPS_OBJCOPY: mipsel-linux-gnu-objcopy
+      MIPS_CC: mipsel-linux-gnu-gcc
     steps:
       - uses: actions/checkout@v6
       - name: Install MIPS toolchain, QEMU, and spim
@@ -145,10 +148,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-      - name: Install QEMU
+      # check-rv32 builds the self-checking guest ELF with the riscv cross, so
+      # the toolchain is needed here too, not just qemu.
+      - name: Install RISC-V toolchain and QEMU
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-user
+          sudo apt-get install -y \
+            gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu \
+            qemu-user
       - name: RV32 unit and program rig
         run: make check-rv32
       - name: RV32 lockstep against qemu-riscv32
