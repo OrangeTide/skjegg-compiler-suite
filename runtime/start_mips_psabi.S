@@ -21,6 +21,12 @@
 
 	.text
 	.globl _start
+	/* GNU ld for mipsel-linux-gnu takes __start as the default entry
+	   symbol. Without it, it falls back to the start of .text, which is
+	   not _start when another object's code is laid out first, so the
+	   program ran main with no return address set up. Alias __start to
+	   _start so the entry is correct regardless of section ordering. */
+	.globl __start
 	.globl read
 	.globl write
 	.globl exit
@@ -32,6 +38,7 @@
 
 /* Linux/MIPS o32 syscall numbers: read 4003, write 4004, exit 4001 */
 
+__start:
 _start:
 	la	$sp, stack_top		/* our own stack, like start_mips.S: the
 					   kernel's is one page and the deeper

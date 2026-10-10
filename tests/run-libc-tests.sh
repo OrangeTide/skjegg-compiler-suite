@@ -42,16 +42,28 @@ if [ ! -x "$CCBIN" ]; then
 fi
 
 # Compile and assemble the libc once; it is shared by every test binary.
+# Each compile names its source first, and a failing one is reported and
+# skipped rather than aborting the run, so the log names every source the
+# compiler rejected (the diagnostic a CI-only failure needs).
 libc_objs=""
+libc_fail=0
 for src in $LIBC; do
     name=$(basename "$src" .c)
     asm="$OUTDIR/libc_$name.s"
     obj="$OUTDIR/libc_$name.o"
     # shellcheck disable=SC2086
-    "$CCBIN" $CFLAGS -o "$asm" "$src"
+    if ! "$CCBIN" $CFLAGS -o "$asm" "$src"; then
+        echo "FAIL  libc compile: $src"
+        libc_fail=1
+        continue
+    fi
     $ASM "$obj" "$asm"
     libc_objs="$libc_objs $obj"
 done
+if [ "$libc_fail" -ne 0 ]; then
+    echo "libc: the compiler rejected the source(s) named above"
+    exit 1
+fi
 
 status=0
 for test in $TEST; do
@@ -60,7 +72,11 @@ for test in $TEST; do
     obj="$OUTDIR/$name.o"
     bin="$OUTDIR/$name"
     # shellcheck disable=SC2086
-    "$CCBIN" $CFLAGS -o "$asm" "$test"
+    if ! "$CCBIN" $CFLAGS -o "$asm" "$test"; then
+        echo "FAIL  test compile: $test"
+        status=1
+        continue
+    fi
     $ASM "$obj" "$asm"
     # shellcheck disable=SC2086
     $LD "$bin" "$START" "$obj" $libc_objs $HALF

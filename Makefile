@@ -1036,11 +1036,15 @@ check-mips: build/skj-tinc-mips build/skj-sc-mips $(MIPS_TESTS:tests/%.tc=build/
 ## The runtime is hard-float o32 (the default), so a leading double argument
 ## arrives in $f12/$f14 and a double result in $f0; the backend's psABI emits
 ## exactly that at the boundary.
-## -mfp32 pins the o32 32-bit FP register model that -march=mips1 implies.
-## The bare-metal mipsel-none-elf cross defaults to it, but the Debian
-## mipsel-linux-gnu cross (a newer FP ABI default) rejects -march=mips1
-## without it, so name it explicitly to build under either toolchain.
-MIPS_RT_CFLAGS := -march=mips1 -mfp32 -EL -G 0 -std=c99 -O2 -Wall -ffreestanding
+## Pin the o32 model the skj MIPS backend emits, so the runtime links with
+## backend output under either cross. -mfp32 is the 32-bit FP register model
+## -march=mips1 implies (the bare-metal mipsel-none-elf cross defaults to it,
+## the Debian mipsel-linux-gnu cross rejects -march=mips1 without it).
+## -mno-abicalls -fno-pic is the non-PIC, no-$gp model the backend and crt
+## use; the linux cross defaults to -mabicalls (SVR4 PIC), which links as
+## "abicalls files with non-abicalls files" and faults at runtime.
+MIPS_RT_CFLAGS := -march=mips1 -mfp32 -mno-abicalls -fno-pic -EL -G 0 \
+                  -std=c99 -O2 -Wall -ffreestanding
 MIPS_CC ?= mipsel-none-elf-gcc
 
 build/mips/start_rt.o: runtime/start_mips.S | build/mips

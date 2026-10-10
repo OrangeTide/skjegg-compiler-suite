@@ -400,15 +400,22 @@ macro_expand(struct cpp *p, struct pp_token *input)
                 tail->next->len = (int)strlen(buf);
                 tail->next->kind = PP_NUMBER;
                 break;
-            case BUILTIN_FILE:
-                snprintf(buf, sizeof buf, "\"%s\"",
-                         p->file ? p->file->path : "");
+            case BUILTIN_FILE: {
+                /* A path can be arbitrarily long (a deep CI checkout dir),
+                 * so size the quoted literal to the path rather than a fixed
+                 * buffer: truncation here dropped the closing quote and left
+                 * an unterminated string that ran the parser off to EOF. */
+                const char *fp = p->file ? p->file->path : "";
+                size_t fn = strlen(fp) + 3;     /* two quotes + NUL */
+                char *fb = xmalloc(fn);
+                snprintf(fb, fn, "\"%s\"", fp);
                 tail->next = pp_token_dup(t);
                 free(tail->next->text);
-                tail->next->text = xstrdup(buf);
-                tail->next->len = (int)strlen(buf);
+                tail->next->text = fb;
+                tail->next->len = (int)strlen(fb);
                 tail->next->kind = PP_STRING;
                 break;
+            }
             case BUILTIN_DATE:
                 tail->next = pp_token_dup(t);
                 free(tail->next->text);

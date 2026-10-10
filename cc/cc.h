@@ -249,6 +249,9 @@ void cc_lex_init(struct arena *a, const char *src, const char *filename);
 struct cc_token cc_lex_next(void);
 struct cc_token cc_lex_peek(void);
 int cc_lex_line(void);
+const char *cc_lex_file(void);
+const char *cc_tok_name(int kind);
+void cc_lex_print_context(int n, int before);
 
 /****************************************************************
  * Parser

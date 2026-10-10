@@ -90,6 +90,73 @@ cc_lex_line(void)
     return line;
 }
 
+const char *
+cc_lex_file(void)
+{
+    return src_file;
+}
+
+/* A readable name for a token kind, for diagnostics; NULL for a kind this
+   table does not cover (the caller prints the number). */
+const char *
+cc_tok_name(int kind)
+{
+    const struct kw *k;
+
+    switch (kind) {
+    case TOK_EOF:      return "end of file";
+    case TOK_INTLIT:   return "integer literal";
+    case TOK_FLOATLIT: return "floating literal";
+    case TOK_STRLIT:   return "string literal";
+    case TOK_CHARLIT:  return "character literal";
+    case TOK_IDENT:    return "identifier";
+    case TOK_LPAREN:   return "'('";
+    case TOK_RPAREN:   return "')'";
+    case TOK_LBRACE:   return "'{'";
+    case TOK_RBRACE:   return "'}'";
+    case TOK_LBRACK:   return "'['";
+    case TOK_RBRACK:   return "']'";
+    case TOK_SEMI:     return "';'";
+    case TOK_COMMA:    return "','";
+    case TOK_DOT:      return "'.'";
+    case TOK_ARROW:    return "'->'";
+    case TOK_ELLIPSIS: return "'...'";
+    case TOK_ASSIGN:   return "'='";
+    case TOK_QUESTION: return "'?'";
+    case TOK_COLON:    return "':'";
+    default:           break;
+    }
+    for (k = keywords; k->s; k++)
+        if (k->k == kind)
+            return k->s;
+    return NULL;
+}
+
+/* Print, to stderr, the (preprocessed) source lines from max(1, n - before)
+   through n, each with its line number, as context for a parse diagnostic. */
+void
+cc_lex_print_context(int n, int before)
+{
+    const char *s = src_buf;
+    int cur = 1, from = n - before;
+
+    if (!s || n < 1)
+        return;
+    if (from < 1)
+        from = 1;
+    while (*s && cur < from) {
+        if (*s++ == '\n')
+            cur++;
+    }
+    for (; *s && cur <= n; cur++) {
+        const char *eol = s;
+        while (*eol && *eol != '\n')
+            eol++;
+        fprintf(stderr, "  %5d | %.*s\n", cur, (int)(eol - s), s);
+        s = (*eol == '\n') ? eol + 1 : eol;
+    }
+}
+
 static void
 skip_ws(void)
 {

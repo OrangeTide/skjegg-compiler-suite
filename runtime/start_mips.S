@@ -26,12 +26,17 @@
 
 	.text
 	.globl _start
+	/* GNU ld for mipsel-linux-gnu takes __start as its default entry
+	   symbol; alias it to _start so the entry is correct no matter how
+	   the objects' .text is ordered (see start_mips_psabi.S). */
+	.globl __start
 	.globl write
 	.globl read
 	.weak  exit
 	.globl _exit
 	.weak  __libc_fini
 
+__start:
 _start:
 	la	$sp, stack_top
 	addiu	$sp, $sp, -16

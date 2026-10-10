@@ -65,9 +65,17 @@ static struct cc_token
 expect(int kind)
 {
     struct cc_token t = next();
-    if (t.kind != kind)
-        die("parse error at line %d: unexpected token %d (expected %d)",
-            t.line, t.kind, kind);
+    if (t.kind != kind) {
+        const char *gn = cc_tok_name(t.kind), *en = cc_tok_name(kind);
+        cc_lex_print_context(t.line, 5);
+        if (t.sval && *t.sval)
+            die("parse error at line %d in %s: unexpected %s [%d] \"%s\" "
+                "(expected %s [%d])", t.line, cc_lex_file(),
+                gn ? gn : "token", t.kind, t.sval, en ? en : "token", kind);
+        die("parse error at line %d in %s: unexpected %s [%d] "
+            "(expected %s [%d])", t.line, cc_lex_file(),
+            gn ? gn : "token", t.kind, en ? en : "token", kind);
+    }
     return t;
 }
 

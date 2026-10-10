@@ -39,6 +39,25 @@ extract() {
     [ -f "$3" ] || : > "$3"
 }
 
+# Equal ignoring trailing zero padding. The amount of section-alignment
+# padding at the end of .text is a binutils choice that varies by version
+# (a newer mipsel-linux-gnu as rounds .text to 16 bytes, the bare-metal
+# mipsel-none-elf as to 4), so the instruction bytes are the common prefix
+# and any extra on the longer side must be all zero.
+sect_equal() {
+    cmp -s "$1" "$2" && return 0
+    na=$(wc -c < "$1"); nb=$(wc -c < "$2")
+    n=$na; [ "$nb" -lt "$n" ] && n=$nb
+    cmp -s -n "$n" "$1" "$2" || return 1
+    for f in "$1" "$2"; do
+        nf=$(wc -c < "$f")
+        [ "$nf" -gt "$n" ] || continue
+        [ "$(tail -c "$((nf - n))" "$f" | tr -d '\000' | wc -c)" -eq 0 ] \
+            || return 1
+    done
+    return 0
+}
+
 echo "== encoding tests (golden master: $GAS) =="
 for s in "$DIR"/enc_*.s; do
     [ -f "$s" ] || continue
@@ -54,7 +73,7 @@ for s in "$DIR"/enc_*.s; do
     for sec in .text .data; do
         extract "$TMP/$name.skj.o" "$sec" "$TMP/$name.skj$sec"
         extract "$TMP/$name.gas.o" "$sec" "$TMP/$name.gas$sec"
-        cmp -s "$TMP/$name.skj$sec" "$TMP/$name.gas$sec" || ok=0
+        sect_equal "$TMP/$name.skj$sec" "$TMP/$name.gas$sec" || ok=0
     done
     if [ "$ok" = 1 ]; then
         echo "PASS $name"; pass=$((pass + 1))
