@@ -116,10 +116,13 @@ add(uint32_t insn, uint32_t a, uint32_t b)
 
     rv_init(&cpu, r8, r16, r32, w8, w16, w32, NULL);
     rv_reset(&cpu, CODE_BASE);
-    cpu.f[1] = a;
-    cpu.f[2] = b;
+    /* The f-registers are FLEN = 64, so a single operand is NaN-boxed (upper
+     * 32 bits all ones); a bare single pattern reads back as the canonical
+     * NaN.  fadd.s likewise NaN-boxes its result, so take the low 32 bits. */
+    cpu.f[1] = 0xffffffff00000000ull | a;
+    cpu.f[2] = 0xffffffff00000000ull | b;
     rv_step(&cpu);
-    return cpu.f[3];
+    return (uint32_t)cpu.f[3];
 }
 
 /* Like signs keep the sign, in every mode. */
