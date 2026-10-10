@@ -62,13 +62,12 @@ compare(rv_cpu *cpu, const gdb_state *st, int check_fp, struct mismatch *out,
 
     if (check_fp) {
         for (i = 0; i < 32; i++) {
-            /* When the remote implements D, a single-precision value is
-             * NaN-boxed into the upper half of a 64-bit register. Only the
-             * low half is architecturally visible to an F-only guest. */
-            uint32_t theirs = (uint32_t)st->f[i];
-
-            if (cpu->f[i] != theirs)
-                RECORD("f", i, cpu->f[i], theirs);
+            /* The core implements D, so an f-register is a full 64-bit
+             * value and a single is NaN-boxed into it exactly as the
+             * remote does. Compare the whole register, which also checks
+             * the NaN-box upper half. */
+            if (cpu->f[i] != st->f[i])
+                RECORD("f", i, cpu->f[i], st->f[i]);
         }
         if ((cpu->fcsr & 0xff) != (st->fcsr & 0xff))
             RECORD("fcsr", -1, cpu->fcsr & 0xff, st->fcsr & 0xff);
@@ -89,9 +88,10 @@ print_mismatches(const struct mismatch *m, int n, int shown)
                    rv_x_names[m[i].index], (uint32_t)m[i].ours,
                    (uint32_t)m[i].theirs);
         else if (strcmp(m[i].what, "f") == 0)
-            printf("    f%-2d (%-4s) ours=%08x qemu=%08x\n", m[i].index,
-                   rv_f_names[m[i].index], (uint32_t)m[i].ours,
-                   (uint32_t)m[i].theirs);
+            printf("    f%-2d (%-4s) ours=%016llx qemu=%016llx\n", m[i].index,
+                   rv_f_names[m[i].index],
+                   (unsigned long long)m[i].ours,
+                   (unsigned long long)m[i].theirs);
         else
             printf("    %-10s ours=%08x qemu=%08x\n", m[i].what,
                    (uint32_t)m[i].ours, (uint32_t)m[i].theirs);

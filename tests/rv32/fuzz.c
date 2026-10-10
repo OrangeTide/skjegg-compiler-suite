@@ -550,8 +550,12 @@ main(int argc, char **argv)
         for (i = 1; i < 32; i++)
             st.x[i] = rnd_int_value();
         st.pc = base;
+        /* The f-registers are FLEN = 64 and the fuzzer exercises only
+         * single-precision ops, so a single is NaN-boxed into the register
+         * exactly as flw and the single ops leave it; an unboxed pattern
+         * reads back as the canonical NaN on both models. */
         for (i = 0; i < 32; i++)
-            st.f[i] = rnd_float_bits();
+            st.f[i] = 0xffffffff00000000ull | rnd_float_bits();
         st.fcsr = (rnd_below(5) << 5) | rnd_below(32);
 
         if (gdb_write_state(&g, &st) || gdb_write_fpu(&g, &st)) {
@@ -564,7 +568,7 @@ main(int argc, char **argv)
             cpu.x[i] = st.x[i];
         cpu.pc = st.pc;
         for (i = 0; i < 32; i++)
-            cpu.f[i] = (uint32_t)st.f[i];
+            cpu.f[i] = st.f[i];
         cpu.fcsr = st.fcsr & 0xff;
         cpu.halted = 0;
 
@@ -669,10 +673,11 @@ main(int argc, char **argv)
                     rc = 1;
                     break;
                 }
-                if (cpu.f[rd] != (uint32_t)fq) {
+                if (cpu.f[rd] != fq) {
                     printf("DIVERGENCE round %ld instruction %d: f%u (%s) "
-                           "ours=%08x qemu=%08x\n", round, n, rd,
-                           rv_f_names[rd], cpu.f[rd], (uint32_t)fq);
+                           "ours=%016llx qemu=%016llx\n", round, n, rd,
+                           rv_f_names[rd], (unsigned long long)cpu.f[rd],
+                           (unsigned long long)fq);
                     describe(insn, lens[n]);
                     dump_operands(&before, lens[n] == 2 ?
                                   rv_expand_c((uint16_t)insn) : insn);
@@ -690,11 +695,12 @@ main(int argc, char **argv)
                     break;
                 }
                 for (i = 0; i < 32; i++) {
-                    if (cpu.f[i] != (uint32_t)st.f[i]) {
+                    if (cpu.f[i] != st.f[i]) {
                         printf("DIVERGENCE round %ld instruction %d: f%d "
-                               "(%s) ours=%08x qemu=%08x on the periodic "
+                               "(%s) ours=%016llx qemu=%016llx on the periodic "
                                "sweep\n", round, n, i, rv_f_names[i],
-                               cpu.f[i], (uint32_t)st.f[i]);
+                               (unsigned long long)cpu.f[i],
+                               (unsigned long long)st.f[i]);
                         rc = 1;
                         break;
                     }

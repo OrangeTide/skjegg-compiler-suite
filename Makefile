@@ -1036,7 +1036,11 @@ check-mips: build/skj-tinc-mips build/skj-sc-mips $(MIPS_TESTS:tests/%.tc=build/
 ## The runtime is hard-float o32 (the default), so a leading double argument
 ## arrives in $f12/$f14 and a double result in $f0; the backend's psABI emits
 ## exactly that at the boundary.
-MIPS_RT_CFLAGS := -march=mips1 -EL -G 0 -std=c99 -O2 -Wall -ffreestanding
+## -mfp32 pins the o32 32-bit FP register model that -march=mips1 implies.
+## The bare-metal mipsel-none-elf cross defaults to it, but the Debian
+## mipsel-linux-gnu cross (a newer FP ABI default) rejects -march=mips1
+## without it, so name it explicitly to build under either toolchain.
+MIPS_RT_CFLAGS := -march=mips1 -mfp32 -EL -G 0 -std=c99 -O2 -Wall -ffreestanding
 MIPS_CC ?= mipsel-none-elf-gcc
 
 build/mips/start_rt.o: runtime/start_mips.S | build/mips
