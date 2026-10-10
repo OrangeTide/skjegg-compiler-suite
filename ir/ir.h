@@ -189,7 +189,7 @@ enum ir_op {
 
     /* two-integer return: the value plus a second result (an error signal) in a
        second return register, the ABI for a failable routine (see the Kobold
-       front end, doc/kp-errors.md).  RETV2 puts operand a in the first return
+       front end, doc/languages/kobold/kp-errors.md).  RETV2 puts operand a in the first return
        register (the value) and operand b in the second (the error), then
        returns.  CALL2 and CALLI2 make the call, leave the value in dst as an
        ordinary single def, and store the second return register to local slot
@@ -220,6 +220,11 @@ struct ir_insn {
                            argument of a variadic call.  Only the RISC-V backend
                            reads it (to place unnamed args on the stack); the
                            other backends keep their psABI placement. */
+    int argalign;       /* on an IR_ARG: the byte alignment this argument's slot
+                           requires in the outgoing argument structure (8 for
+                           the first word of a by-value struct with 8-aligned
+                           members).  Only the MIPS backend reads it, to start
+                           such a struct on an even word; 0 means word alignment. */
     struct ir_insn *next;
 };
 
@@ -234,6 +239,14 @@ struct ir_func {
     int nparams;
     int nslots;
     int *slot_size;
+    int *slot_align;    /* per-slot natural alignment in bytes, or NULL if the
+                           front end did not set it.  A backend that cares about
+                           a slot's alignment (the MIPS o32 argument structure,
+                           where a doubleword scalar is 8-aligned but a word-
+                           sized aggregate is only 4-aligned) reads it here; with
+                           NULL or a 0 entry it falls back to inferring 8 from an
+                           8-multiple size, which is exact for a scalar-only
+                           front end. */
     int *param_class;   /* per-param: 0 = integer/pointer, 1 = float (for the
                            register calling convention); NULL if unset */
     signed char *param_neb; /* psABI: register slots for param i (1 for a

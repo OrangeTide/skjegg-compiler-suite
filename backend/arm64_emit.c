@@ -1588,6 +1588,20 @@ emit_string_bytes(FILE *out, const char *s, int n)
     fputs("\"\n", out);
 }
 
+/* format a relocation operand "sym", "sym + N", or "sym - N" (the addend is a
+   symbol-relative initializer's byte offset, carried in the init value word) */
+static const char *
+sym_ref(char *buf, size_t n, const char *sym, int64_t addend)
+{
+    if (addend > 0)
+        snprintf(buf, n, "%s + %lld", sym, (long long)addend);
+    else if (addend < 0)
+        snprintf(buf, n, "%s - %lld", sym, (long long)-addend);
+    else
+        snprintf(buf, n, "%s", sym);
+    return buf;
+}
+
 /* emit an aggregate global's byte image: pad to each item's offset, emit the
    sized value (.quad for 8-byte, little-endian), pad to the full size */
 static void
@@ -1601,10 +1615,11 @@ emit_init_image(FILE *out, struct ir_global *g)
             fprintf(out, "\t.space %d\n", it->offset - cur);
             cur = it->offset;
         }
-        if (it->sym)
+        if (it->sym) {
+            char ref[160];
             fprintf(out, "\t%s %s\n", it->size == 8 ? ".quad" : ".word",
-                it->sym);
-        else if (it->size == 8)
+                sym_ref(ref, sizeof ref, it->sym, it->ival));
+        } else if (it->size == 8)
             fprintf(out, "\t.quad 0x%016llx\n",
                 (unsigned long long)(uint64_t)it->ival);
         else if (it->size == 2)
@@ -1619,48 +1634,71 @@ emit_init_image(FILE *out, struct ir_global *g)
         fprintf(out, "\t.space %d\n", g->arr_size - cur);
 }
 
+/* true when a global is zero-filled (no initializer): it belongs in .bss
+   (NOBITS), so its bytes cost no file space, rather than in .data. */
+static int
+global_is_bss(struct ir_global *g)
+{
+    return !g->inits && !g->init_string && g->init_count == 0;
+}
+
+static int
+global_elsz(struct ir_global *g)
+{
+    switch (g->base_type) {
+    case IR_I8:  return 1;
+    case IR_I16: return 2;
+    case IR_I64: return 8;
+    case IR_F64: return 8;
+    default:     return 4;
+    }
+}
+
+/* alignment (GAS power-of-two exponent) + optional .globl + label */
+static void
+emit_global_head(FILE *out, struct ir_global *g)
+{
+    /* arm64 aligns globals to 8; an _Alignas request may raise it. */
+    int alb = 8, e = 0;
+    if (g->align > alb)
+        alb = g->align;
+    while ((1 << e) < alb)
+        e++;
+    fprintf(out, "\t.align %d\n", e);
+    if (!g->is_local)
+        fprintf(out, "\t.globl %s\n", g->name);
+    fprintf(out, "%s:\n", g->name);
+}
+
 static void
 emit_globals(FILE *out, struct ir_program *prog)
 {
     struct ir_global *g;
+    int any_bss = 0;
 
     fputs("\n\t.data\n", out);
     for (g = prog->globals; g; g = g->next) {
-        int elsz;
+        int elsz = global_elsz(g);
 
-        switch (g->base_type) {
-        case IR_I8:  elsz = 1; break;
-        case IR_I16: elsz = 2; break;
-        case IR_I64: elsz = 8; break;
-        case IR_F64: elsz = 8; break;
-        default:     elsz = 4; break;
+        if (global_is_bss(g)) {
+            any_bss = 1;
+            continue;
         }
-
-        {
-            /* arm64 aligns globals to 8; an _Alignas request may raise it.
-               GAS .align is a power-of-two exponent. */
-            int alb = 8, e = 0;
-            if (g->align > alb)
-                alb = g->align;
-            while ((1 << e) < alb)
-                e++;
-            fprintf(out, "\t.align %d\n", e);
-        }
-        if (!g->is_local)
-            fprintf(out, "\t.globl %s\n", g->name);
-        fprintf(out, "%s:\n", g->name);
+        emit_global_head(out, g);
         if (g->inits) {
             emit_init_image(out, g);
         } else if (g->init_string) {
             emit_string_bytes(out, g->init_string,
                       g->init_strlen);
-        } else if (g->init_count > 0) {
+        } else {
             int k;
             for (k = 0; k < g->init_count; k++) {
-                if (g->init_syms && g->init_syms[k])
+                if (g->init_syms && g->init_syms[k]) {
+                    char ref[160];
                     fprintf(out, "\t%s %s\n",
-                        elsz == 8 ? ".quad" : ".word", g->init_syms[k]);
-                else if (g->base_type == IR_I64 || g->base_type == IR_F64)
+                        elsz == 8 ? ".quad" : ".word",
+                        sym_ref(ref, sizeof ref, g->init_syms[k], g->init_ivals[k]));
+                } else if (g->base_type == IR_I64 || g->base_type == IR_F64)
                     fprintf(out, "\t.quad %" PRId64 "\n",
                         g->init_ivals[k]);
                 else if (elsz == 1)
@@ -1676,12 +1714,23 @@ emit_globals(FILE *out, struct ir_program *prog)
             if (g->arr_size > g->init_count)
                 fprintf(out, "\t.space %d\n",
                     (g->arr_size - g->init_count) * elsz);
-        } else {
-            int sz = (g->arr_size > 0)
-                 ? g->arr_size * elsz
-                 : elsz;
-            fprintf(out, "\t.space %d\n", sz);
         }
+    }
+
+    if (!any_bss)
+        return;
+
+    /* Zero-filled globals: .bss (NOBITS), no file space for their zeros. */
+    fputs("\n\t.bss\n", out);
+    for (g = prog->globals; g; g = g->next) {
+        int elsz = global_elsz(g);
+        int sz;
+
+        if (!global_is_bss(g))
+            continue;
+        emit_global_head(out, g);
+        sz = (g->arr_size > 0) ? g->arr_size * elsz : elsz;
+        fprintf(out, "\t.space %d\n", sz);
     }
 }
 

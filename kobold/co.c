@@ -1,4 +1,4 @@
-/* co.c : stackful coroutine runtime (Muxx), platform-neutral core */
+/* co.c : stackful coroutine runtime, platform-neutral core */
 
 #define _DEFAULT_SOURCE   /* mmap, mprotect, MAP_ANONYMOUS, sysconf under -std=c99 */
 

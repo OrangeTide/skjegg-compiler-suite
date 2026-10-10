@@ -150,8 +150,14 @@ layout_data(struct kp_jit *j, struct ir_program *prog, char *err, size_t errlen)
     /* assign 8-aligned offsets */
     int i = 0;
     for (struct ir_global *g = prog->globals; g; g = g->next, i++) {
-        size_t sz = (size_t)(g->arr_size > 0 ? g->arr_size : 1)
-                    * (size_t)base_size(g->base_type);
+        /* the written region is init_count scalars; a multidimensional array's
+           arr_size is only the outer dimension, so size to whichever is larger
+           (otherwise m[2][2]'s 4 words overflow its 2-word slot into the next
+           global) */
+        size_t count = (size_t)(g->arr_size > 0 ? g->arr_size : 1);
+        if ((size_t)g->init_count > count)
+            count = (size_t)g->init_count;
+        size_t sz = count * (size_t)base_size(g->base_type);
         off = (off + 7) & ~(size_t)7;
         j->globals[i].name = g->name;
         j->globals[i].addr = (uint8_t *)off;   /* provisional: byte offset */
@@ -328,6 +334,7 @@ kp_jit(struct kp_jit *j, struct ir_program *prog,
                     kp_jit_free(j);
                     return -1;
                 }
+                addr += (uint64_t)it->ival;   /* symbol-relative byte addend */
                 memcpy(base + it->offset, &addr, (size_t)it->size);
             }
             if (g->init_count > 0 && g->init_syms) {
@@ -342,6 +349,7 @@ kp_jit(struct kp_jit *j, struct ir_program *prog,
                         kp_jit_free(j);
                         return -1;
                     }
+                    addr += (uint64_t)g->init_ivals[k]; /* byte addend */
                     memcpy(base + (size_t)k * es, &addr, (size_t)es);
                 }
             }

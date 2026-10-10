@@ -19,7 +19,7 @@
    plain embedder of it.  A host that wants to expose its own opaque handle types
    installs the same runtime and then binds its own factories and methods (see
    patrol_main.c).  The Kobold front end stays a separate self-hosting Pascal
-   program; its KPM1 output is the bridge into the Skjegg tree (doc/port-to-skjegg.md). */
+   program; its KPM1 output is the bridge into the Skjegg tree (doc/languages/kobold/kobold.md). */
 
 #include "kpm.h"
 #include "jit_common.h"

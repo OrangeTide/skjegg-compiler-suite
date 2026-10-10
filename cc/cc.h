@@ -11,7 +11,7 @@
  *
  * LP64 (8-byte long and pointers) is selected at compile time for the 64-bit
  * targets by defining CC_LP64; the 32-bit targets stay ILP32 (4-byte long and
- * pointers).  See doc/lp64.md.
+ * pointers).  See doc/internals/lp64.md.
  ****************************************************************/
 
 #ifdef CC_LP64
@@ -36,7 +36,7 @@ enum cc_tok {
     TOK_IDENT,
 
     /* keywords — types */
-    TOK_VOID, TOK_CHAR, TOK_SHORT, TOK_INT, TOK_LONG,
+    TOK_VOID, TOK_BOOL, TOK_CHAR, TOK_SHORT, TOK_INT, TOK_LONG,
     TOK_FLOAT16, TOK_FLOAT, TOK_DOUBLE, TOK_SIGNED, TOK_UNSIGNED,
     TOK_STRUCT, TOK_UNION, TOK_ENUM, TOK_TYPEDEF,
     TOK_CONST, TOK_VOLATILE, TOK_RESTRICT, TOK_INLINE,
@@ -53,6 +53,8 @@ enum cc_tok {
     TOK_SIZEOF,
     TOK_ALIGNOF,
     TOK_ALIGNAS,
+    TOK_STATIC_ASSERT,
+    TOK_GENERIC,
     TOK_ASM,
 
     /* punctuation */
@@ -119,6 +121,9 @@ struct cc_type {
     int kind;
     int is_unsigned;
     int is_const;
+    int is_bool;                /* _Bool: a 1-byte unsigned integer (kind
+                                   TY_CHAR) that holds only 0 or 1; a conversion
+                                   to it normalizes any nonzero value to 1 */
 
     struct cc_type *base;       /* PTR target, ARRAY element, FUNC return */
 
@@ -206,6 +211,10 @@ enum cc_node_kind {
     ND_STRLIT,
     ND_INIT_LIST,
     ND_DESIG,       /* designated init element: name (.field) or ival ([index]), a = value */
+    ND_COMPOUND_LIT,/* compound literal (type){init}: decl_type is the type, a is the init list */
+    ND_GENERIC,     /* _Generic(a, assoc-list in b): each assoc is a node whose
+                       decl_type is the type-name (NULL = default) and a is the
+                       result expression, chained by next; selected at lowering */
 };
 
 struct cc_node {
@@ -246,6 +255,9 @@ int cc_lex_line(void);
  ****************************************************************/
 
 struct cc_node *cc_parse_program(struct arena *a);
+
+/* Fold an integer constant expression (dies if not constant). */
+long long cc_const_eval(struct cc_node *n);
 
 /****************************************************************
  * Lowering

@@ -254,17 +254,33 @@ The o32 argument rules used here:
 - A two-word argument (a `long long`, or a double) is 8-aligned in that
   structure, so it starts on an even word. With that alignment it never
   splits across the register/stack boundary.
+- A `struct` or `union` passed by value is decomposed by the front end into
+  its `ceil(size/4)` words (each a copy, so value semantics hold), which fill
+  the argument structure word by word like any other arguments. A word-aligned
+  struct may start on an odd word and may straddle the register/stack boundary;
+  the callee reads it back from its parameter slot. A struct with 8-byte-aligned
+  members (an embedded `double` or `long long`) carries `argalign` 8 on its
+  first word, so like a two-word scalar it starts on an even word and matches
+  the 8-aligned home slot the callee reads the aligned field from.
 - A leading run of floating-point arguments (at most two, before any integer
   argument) is also passed in `$f12` and `$f14`, and a double result comes
   back in `$f0`. This is the hard-float o32 rule, and it is what a gcc-built
   `__exc_str_from_float(double)` reads.
 - Other results come back in `$v0`, or `$v0:$v1` for two words.
 
-The parameter side reuses `slot_offset` unchanged: it already lays parameters
-out at `$fp+8` upward, 8-aligned for 8-byte slots, which is exactly the
-argument structure. The prologue spills the register parameters (`$a0`-`$a3`)
-into those homes, and the rest of the lowering reads every parameter from its
-slot as before.
+The parameter side reuses `slot_offset`: it lays parameters out at `$fp+8`
+upward by each slot's alignment, which is exactly the argument structure. A
+slot's alignment comes from `ir_func.slot_align` (the front end's natural
+alignment, so a doubleword scalar is 8-aligned and a word-sized aggregate is
+only 4-aligned); with no `slot_align` the backend falls back to treating an
+8-byte slot as a doubleword, which is exact for a scalar-only front end. A
+single-`float` parameter is the one place the natural alignment is overridden:
+its home is widened to an 8-byte, 8-aligned slot, since the caller passes every
+float argument as a two-word even-word slot, so the two sides agree even when a
+leading single word (a hidden struct-return pointer) pushes it onto an odd word. The
+prologue spills every register parameter word (`$a0`-`$a3`) into its home,
+which for a by-value struct is more than two words, and the rest of the
+lowering reads every parameter from its slot as before.
 
 Two decisions make the float path work with this specific toolchain, which
 ships a single hard-float libgcc multilib:

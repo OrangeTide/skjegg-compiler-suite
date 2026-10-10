@@ -1,0 +1,3 @@
+# A failing static assertion must stop compilation and report the message.
+static assertion failed
+int and long long differ in size

@@ -377,6 +377,7 @@ proc_finish(sched *S, proc *p, const elf32_info *info, char **argv, int argc)
     p->cpu.atomics = 1;
     p->cpu.bitmanip = 1;
     p->cpu.zcb = 1;
+    p->cpu.dp = 1;              /* double precision, host-double (see rv_cpu.dp) */
     rv_dec_enable(&p->cpu);     /* the decoded-instruction cache: a pure speed-up */
     p->cpu.x[2] = sp;
 

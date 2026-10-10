@@ -1,7 +1,7 @@
-{ Kobold-Pascal language front end (Pascal), single file. It has a lexer
-  (milestone Azza) and a recursive-descent parser that builds an AST (milestone
-  Blix). Semantics, IR, and the module writer arrive in later milestones.
-  See ROADMAP.md and doc/kp-grammar.md. }
+{ Kobold-Pascal language front end (Pascal), single file. It is a complete
+  compiler: a lexer, a recursive-descent parser that builds an AST, the
+  semantic analyzer and type system, IR generation, and the KPM1 module
+  writer. See doc/languages/kobold/kp-grammar.md. }
 
 program kpcom;
 
@@ -20,21 +20,21 @@ type
     tkEOF,
     { literals and identifiers }
     tkIdent, tkIntLit, tkRealLit, tkStrLit,
-    { reserved words (doc/kp-grammar.md) }
+    { reserved words (doc/languages/kobold/kp-grammar.md) }
     tkAnd, tkArray, tkBegin, tkBreak, tkCase, tkConst, tkContinue, tkDiv,
     tkDo, tkDownto, tkElse, tkEnd, tkExternal, tkFor, tkForward, tkFunction,
     tkIf, tkIn, tkInterface, tkMod, tkNil, tkNot, tkOf, tkOr, tkProcedure,
     tkProgram, tkRecord, tkRepeat, tkStart, tkSet, tkBind, tkString, tkThen,
     tkTo, tkType, tkUntil, tkVar, tkWhile, tkWith, tkYield,
-    { the units surface (doc/kp-units.md), implemented; `property` is reserved for the
-      deferred uniform-access feature (doc/kp-property.md) }
+    { the units surface (doc/languages/kobold/kp-units.md), implemented; `property` is reserved for the
+      deferred uniform-access feature (doc/languages/kobold/kp-property.md) }
     tkImplementation, tkProperty, tkShared, tkUnit, tkUses, tkReexport, tkAs,
     { `ref array of T` is the reference (shared) dynamic array; `buffer of T` is its
       host-backed sibling. `slice` stays reserved for a future windowed view (a[lo..hi]). }
     tkRef, tkSlice, tkBuffer,
-    { `map of T` is the string-keyed associative array (doc/kp-language.md) }
+    { `map of T` is the string-keyed associative array (doc/languages/kobold/kp-language.md) }
     tkMap,
-    { guest-record trait conformance: `implement I for R` (doc/kp-units.md) }
+    { guest-record trait conformance: `implement I for R` (doc/languages/kobold/kp-units.md) }
     tkImplement,
     { punctuation and operators }
     tkAssign, tkColon, tkSemicolon, tkComma, tkDot, tkDotDot,
@@ -92,12 +92,12 @@ type
     nkBinary, nkUnary, nkIntLit, nkRealLit, nkStrLit, nkNil, nkIdent,
     nkField, nkIndex, nkCall, nkSetConstructor, nkSetElement, nkAggregate,
     nkRecordLit, nkFieldInit,
-    { compilation-unit surface (doc/kp-units.md) }
+    { compilation-unit surface (doc/languages/kobold/kp-units.md) }
     nkUnit, nkUses, nkUsesItem, nkImportItem,
     nkInterface, nkImplementation, nkReexport, nkReexportItem,
-    { guest-record trait conformance: `implement I for R;` (doc/kp-design.md) }
+    { guest-record trait conformance: `implement I for R;` (doc/languages/kobold/kobold.md) }
     nkImplement,
-    { failable call-site forms (doc/kp-errors.md): the `fails [e]` postfix test, the
+    { failable call-site forms (doc/languages/kobold/kp-errors.md): the `fails [e]` postfix test, the
       `or else EXPR` / `or else ignore` recover, and the `or exit|break|continue|fail` divert }
     nkFailsTest, nkOrElse, nkOrDivert
   );
@@ -185,7 +185,7 @@ type
     LinkConst: Boolean;         { a link-time constant: its value is resolved at link (patched
                                   to an immediate), not baked into consumers. A unit declares it
                                   value-less in its interface and supplies the value in the
-                                  implementation (doc/kp-units.md). Not usable in a constant
+                                  implementation (doc/languages/kobold/kp-units.md). Not usable in a constant
                                   position, since it has no compile-time value. }
     LinkPending: Boolean;       { a link-time const declared in the interface, not yet completed
                                   by the implementation's value. }
@@ -387,7 +387,7 @@ var
   GlobalScope: LongInt;   { the program/global scope; its vars become IR globals }
   SystemScope: LongInt;   { the outer scope holding predefined names (built-ins, base types),
                             which a user declaration shadows; used to warn on that shadowing }
-  { Cross-unit resolution (doc/kp-units.md). UnitPath holds the -U dependency search
+  { Cross-unit resolution (doc/languages/kobold/kp-units.md). UnitPath holds the -U dependency search
     directories; UnitSrcDir is the directory of the source being compiled, searched first.
     CompilingUnitName is the unit under compilation, so a self-use reads as a cycle. }
   UnitPath: array of string;
@@ -413,7 +413,7 @@ var
   DepName: array of string;
   DepFingerprint: array of Int64;
   { Symbols this unit re-exports from a dependency: promoted into its own interface so a
-    consumer can name them without using that dependency directly (doc/kp-units.md). }
+    consumer can name them without using that dependency directly (doc/languages/kobold/kp-units.md). }
   ReexportCount: LongInt;
   ReexportSym: array of LongInt;
   { methods attached to a type by a receiver: parallel arrays }
@@ -430,7 +430,7 @@ var
   tyMapIter: LongInt;   { a map iterator handle, produced by MapFirst, advanced by MapNext }
   tyErrorVal: LongInt;  { the language `error` type for failable routines; opaque, an i32 code
                           for now (0 = success), built by fail() and read by code(). Distinct
-                          from tyErr, the compiler's internal bottom type. See doc/kp-errors.md }
+                          from tyErr, the compiler's internal bottom type. See doc/languages/kobold/kp-errors.md }
 
   { Driver options }
   OptVerbose: Boolean;
@@ -1232,10 +1232,10 @@ begin
 end;
 
 { ---- Parser ---- }
-{ A recursive-descent parser for the grammar in doc/kp-grammar.md. It builds the
-  AST in the node pool and recovers at statement and declaration boundaries so a
-  single run can report more than one error. It does not check types or resolve
-  names; that is a later milestone. }
+{ A recursive-descent parser for the grammar in doc/languages/kobold/kp-grammar.md.
+  It builds the AST in the node pool and recovers at statement and declaration
+  boundaries so a single run can report more than one error. It does not check
+  types or resolve names; the semantic analyzer below does that. }
 
 { Forward declarations for the mutually recursive productions. }
 function ParseExpression: LongInt; forward;
@@ -1514,7 +1514,7 @@ begin
   else left := ParseTerm;
   while Tok.Kind in AddOps do begin
     { `or else/exit/break/continue/fail` is the failable suffix, lowest precedence: stop the
-      boolean loop and leave it for ParseFailSuffix (doc/kp-errors.md) }
+      boolean loop and leave it for ParseFailSuffix (doc/languages/kobold/kp-errors.md) }
     if (Tok.Kind = tkOr) and OrIntroducesFailSuffix then Break;
     n := NewNode(nkBinary); Nodes[n].Op := Tok.Kind; NextToken;
     if OptOverflowChecks then Nodes[n].Flag := 1;
@@ -1543,7 +1543,7 @@ function OrIntroducesFailSuffix: Boolean;
 { With the current token `or`, True when the token after it begins a failable suffix
   (else / break / continue / exit / fail), so the `or` is the failable recover or divert,
   not the boolean operator. The words exit and fail are matched by text: they are builtins,
-  not reserved, and neither can legally begin a boolean operand (doc/kp-errors.md). }
+  not reserved, and neither can legally begin a boolean operand (doc/languages/kobold/kp-errors.md). }
 var
   k: TTokenKind;
   t: string;
@@ -2069,7 +2069,7 @@ begin
     Nodes[c].Text := Tok.StrVal; NextToken;
     if Accept(tkColon) then Nodes[c].A := ParseType;
     { `= value` is optional: `const Name: Type;` with no value is a link-time constant, valid
-      only in a unit interface, whose value the implementation supplies (doc/kp-units.md). }
+      only in a unit interface, whose value the implementation supplies (doc/languages/kobold/kp-units.md). }
     if Accept(tkEq) then Nodes[c].B := ParseExpression;
     Expect(tkSemicolon);
     AddKid(owner, c);
@@ -2168,7 +2168,7 @@ end;
 function ParseImplement: LongInt;
 { ImplementDecl = 'implement' Identifier 'for' Identifier ';'. A nominal, static assertion
   that record R (the second name, in A) conforms to interface I (the first name, in Text):
-  the sema pass checks R's for-receiver methods match I's signatures (doc/kp-design.md). }
+  the sema pass checks R's for-receiver methods match I's signatures (doc/languages/kobold/kobold.md). }
 var
   n, r: LongInt;
 begin
@@ -2214,7 +2214,7 @@ begin
   ParseProgram := p;
 end;
 
-{ Units and separate compilation (doc/kp-units.md, doc/kp-grammar.md). These routines parse a
+{ Units and separate compilation (doc/languages/kobold/kp-units.md, doc/languages/kobold/kp-grammar.md). These routines parse a
   `unit` file and the `uses` / `reexport` clauses into the AST. Cross-unit resolution, interface
   emission, and linking are implemented downstream (AnalyzeUnit, LowerUnit, the loader). }
 
@@ -2565,7 +2565,7 @@ end;
   type checks. Full overload resolution, Go-style method attachment, the
   coroutine answer/resume typing, and the no-closure rule are later increments;
   where a check is not yet reliable, the analyzer degrades to the error type
-  rather than reporting a false positive. See ROADMAP.md (Crag). }
+  rather than reporting a false positive. }
 
 { Forward declarations for the mutually recursive analysis. }
 function ResolveType(node: LongInt): LongInt; forward;
@@ -4144,7 +4144,7 @@ begin
     carries its signature on the callee symbol }
   callee := Nodes[node].A;
   { must-consume: a call to a `fails` routine has to be handled by a failable form, so its
-    result and error cannot reach the program unchecked (doc/kp-errors.md). The fail-form
+    result and error cannot reach the program unchecked (doc/languages/kobold/kp-errors.md). The fail-form
     analysis flags its own target in FailTargetNode; any other failable call is an error. }
   s := -1;
   if Nodes[callee].Kind = nkIdent then s := Nodes[callee].Sym;
@@ -4237,11 +4237,6 @@ begin
         fb := AnalyzeExpr(Nodes[node].B);
         if vt = tyVoid then
           SemErr(node, '''or else'' needs a value, but the call is a procedure')
-        else if IsHandle(vt) or (vt = tyStr) or IsDynArray(vt) or IsMap(vt) then
-          { the recover path round-trips the value through a slot; getting the ARC right for a
-            managed result is deferred, so restrict `or else EXPR` to plain values for now }
-          SemErr(node, '''or else'' with a managed value (handle, string, array, or map) is ' +
-            'not yet supported; use a ''fails'' test')
         else if not AssignCompatible(vt, fb) then
           SemErr(node, 'the ''or else'' fallback does not match the call result type');
         AnalyzeFailForm := vt;
@@ -4466,6 +4461,12 @@ begin
   if IsDynArray(dst) and IsDynArray(src) and
      (SemTypes[dst].Base = SemTypes[src].Base) and
      (IsBuffer(dst) = IsBuffer(src)) then Exit;
+  { two maps share a value (a handle) when their value types match, the same structural rule
+    dynamic arrays get above. A map is always string-keyed and has no host-backed variant, so
+    the value type (Base) is the only thing that distinguishes two map types. This is what lets
+    a map pass to a `map of T` parameter and lets an `or else` fallback recover a map result, the
+    fallback and the call result being separate declaration occurrences. }
+  if IsMap(dst) and IsMap(src) and (SemTypes[dst].Base = SemTypes[src].Base) then Exit;
   { the empty constructor `[]` (a set with no element type) also denotes an empty array }
   if IsDynArray(dst) and IsSet(src) and (SemTypes[src].Base = tyErr) then Exit;
   if (SemTypes[dst].Kind = skReal) and IsIntClass(src) then Exit;
@@ -4620,7 +4621,7 @@ begin
         AnalyzeCallOf(d, noArgs, d);
       end;
       { a statement-position `fail(code)` returns failure from the enclosing routine, so it is
-        only legal inside a failable one (doc/kp-errors.md) }
+        only legal inside a failable one (doc/languages/kobold/kp-errors.md) }
       if Nodes[d].Kind = nkCall then begin
         s := Nodes[Nodes[d].A].Sym;
         if (s >= 0) and (Syms[s].Node < 0) and (LowerStr(Syms[s].Name) = 'fail')
@@ -4779,7 +4780,7 @@ var
   cv: TConstVal;
   sw: TSetWords;
 begin
-  { a value-less const `Name: Type;` is a link-time constant (doc/kp-units.md): its value is
+  { a value-less const `Name: Type;` is a link-time constant (doc/languages/kobold/kp-units.md): its value is
     supplied by the unit's implementation and resolved at link, not baked into consumers. It is
     valid only in a unit interface, and must be an ordinal or int64 scalar (a value the loader
     can patch as an immediate). }
@@ -4809,7 +4810,7 @@ begin
     { An array or record constant has no cross-unit interface form yet, so a unit cannot export
       one: it would be dropped silently from the interface and a consumer would fail to find it.
       Report it here instead. Keep the constant in the implementation and expose it through a
-      function (doc/kp-units.md). }
+      function (doc/languages/kobold/kp-units.md). }
     if AnalyzingInterface then begin
       SemErr(node, 'an array or record constant cannot be exported from a unit interface yet; ' +
         'keep it in the implementation and expose it through a function');
@@ -5063,7 +5064,7 @@ function FailsConflict(const name: string; sig, recvTy: LongInt;
 { True when a routine of this name and the same parameter signature (and receiver, for a
   method) is already declared but with the opposite `fails` marker. Failable is deliberately
   left out of SigEqual so the two read as one signature, which is exactly the case the language
-  forbids: a name may not be overloaded on `fails` alone (doc/kp-errors.md). Free routines are
+  forbids: a name may not be overloaded on `fails` alone (doc/languages/kobold/kp-errors.md). Free routines are
   matched within the current scope, methods against every same-receiver declaration. }
 var
   i, s: LongInt;
@@ -5114,7 +5115,7 @@ begin
   SemTypes[sig].Failable := Nodes[node].Failable = 1;
   { a failable function's value returns in the integer result register, with the error beside
     it; real, int64, and aggregate results would need a wider return pair, deferred for now
-    (doc/kp-errors.md) }
+    (doc/languages/kobold/kp-errors.md) }
   if (Nodes[node].Failable = 1) and isFunc and (SemTypes[sig].RetType >= 0) and
      (IsRealType(SemTypes[sig].RetType) or IsInt64(SemTypes[sig].RetType) or
       IsAggregate(SemTypes[sig].RetType)) then
@@ -5145,7 +5146,7 @@ begin
     Syms[s].Node := node   { point the heading symbol at the body-bearing node for lowering }
   end
   else begin
-    { a name may not be overloaded on `fails` alone (doc/kp-errors.md) }
+    { a name may not be overloaded on `fails` alone (doc/languages/kobold/kp-errors.md) }
     if FailsConflict(Nodes[node].Text, sig, recvTy, isFunc, Nodes[node].A >= 0) then
       SemErrName(node, 'routine ''' + Nodes[node].Text +
         ''' cannot overload on ''fails'' alone');
@@ -5351,7 +5352,7 @@ begin
   DeclareBuiltinFunc('mapfirst', tyMapIter);
   DeclareBuiltinFunc('mapnext', tyBool);
   { failable error values: fail(code) builds an error, errorcode(e) reads its code back. See
-    doc/kp-errors.md. On the int-code representation both are identities over the i32. }
+    doc/languages/kobold/kp-errors.md. On the int-code representation both are identities over the i32. }
   DeclareBuiltinFunc('fail', tyErrorVal);
   DeclareBuiltinFunc('errorcode', tyInt);
   DeclareBuiltinProc('str');
@@ -5375,7 +5376,7 @@ end;
 procedure CheckOneImplement(node: LongInt);
 { Verify a `implement I for R;` assertion: I names an interface type, R a record type, and R
   has a for-receiver method matching each of I's method signatures. A static, compile-time
-  conformance check with no runtime representation (doc/kp-design.md). }
+  conformance check with no runtime representation (doc/languages/kobold/kobold.md). }
 var
   isym, rsym, ity, rty, i, rsig: LongInt;
   mname: string;
@@ -5462,7 +5463,7 @@ begin
   end;
 end;
 
-{ ---- cross-unit resolution: read a dependency's .interface (doc/kp-units.md) ---- }
+{ ---- cross-unit resolution: read a dependency's .interface (doc/languages/kobold/kp-units.md) ---- }
 
 function ParseI64(const s: string): Int64;
 { A signed decimal, tolerant of surrounding text: non-digits after an optional leading
@@ -5743,7 +5744,7 @@ begin
       Syms[s].Imported := True;
       if val = '' then begin
         { a value-less `.const` is a link-time constant: its value is not baked in here but
-          resolved by name at link (doc/kp-units.md) }
+          resolved by name at link (doc/languages/kobold/kp-units.md) }
         Syms[s].LinkConst := True;
         Syms[s].LinkName := nm;
       end
@@ -6013,7 +6014,7 @@ end;
 
 { ---- IR (Skjegg 3AC) and the KPM1 writer ---- }
 { Lowers the analyzed AST to a Skjegg-modeled three-address IR and serializes it
-  as a KPM1 text module (doc/kp-module-format.md, REF/ir.md). This first increment
+  as a KPM1 text module (doc/languages/kobold/kp-module-format.md, REF/ir.md). This first increment
   covers the integer and boolean scalar language: program globals and routine
   slots, integer arithmetic, bitwise and shift, comparisons, control flow,
   external-routine calls, and integer returns. Reals, strings, sets, records,
@@ -6759,7 +6760,7 @@ end;
 
 procedure EmitRetv2(a, b: LongInt);
 { Return a failable routine's two results: the value in a, the error in b. a and b both go to
-  integer return registers (doc/kp-errors.md: failable function values are integer-class). }
+  integer return registers (doc/languages/kobold/kp-errors.md: failable function values are integer-class). }
 begin
   PushInsn('RETV2', 'a=' + IntToStr(a) + ' b=' + IntToStr(b));
 end;
@@ -6967,7 +6968,7 @@ function AddIrStaticStringImage(const name, bytes: string; exported: Boolean): s
 { Reserve a static string object: a saturated-refcount gheap string laid out in the data image,
   not allocated at run time. Its address is the string value, so a literal or constant lowers to
   a LEA of it with no allocation; retain and release no-op on the saturated count, so it is
-  shared freely and never freed (doc/kp-units.md). The image is the refcount, kind, and len as
+  shared freely and never freed (doc/languages/kobold/kp-units.md). The image is the refcount, kind, and len as
   three little-endian words, then the bytes and a trailing NUL, matching struct kp_str
   (src/str_core.c) and the object header (src/obj.h: KP_RC_STATIC refcount, KP_OBJ_STRING kind).
   Every global is laid out at an 8-aligned offset, so the address is low-bit-0 (a gheap object,
@@ -7461,7 +7462,7 @@ begin
     if Syms[s].ConstIsStr then LoadSym := EmitStringValue(Syms[s].ConstStr)
     { an imported link-time const has no value here: it is an exported read-only global in the
       defining unit, so load it by address, resolved cross-unit at link. The defining unit
-      inlines its own known value below (doc/kp-units.md). }
+      inlines its own known value below (doc/languages/kobold/kp-units.md). }
     else if Syms[s].LinkConst and Syms[s].Imported then
       { a string const is a static object: its address is the value (LEA, no load). A scalar
         const's value is held in the exported global, so load it. }
@@ -7689,7 +7690,7 @@ begin
   else
     Exit;
   { a failable method captures its error into FailCaptureSlot via CALL2, taken before the
-    declared arguments lower (doc/kp-errors.md) }
+    declared arguments lower (doc/languages/kobold/kp-errors.md) }
   errSlot := -1;
   if (sig >= 0) and (SemTypes[sig].Kind = skProc) and SemTypes[sig].Failable and
      (FailCaptureSlot >= 0) then begin
@@ -8108,7 +8109,7 @@ begin
     Exit;
   end;
   { fail(code) and errorcode(e) are identities on the int-code error representation: the i32
-    flows through unchanged, only its static type differs. See doc/kp-errors.md. }
+    flows through unchanged, only its static type differs. See doc/languages/kobold/kp-errors.md. }
   if ((bname = 'fail') or (bname = 'errorcode')) and
      (Length(argNodes) = 1) then begin
     LowerBuiltin := LowerExpr(argNodes[0]);
@@ -8530,7 +8531,7 @@ begin
   na := Length(argNodes);
   { a failable call captures the callee's error register into FailCaptureSlot via CALL2. Consume
     the slot now, before arguments lower, so a handled failable call in an argument gets its own
-    slot rather than this one (doc/kp-errors.md). }
+    slot rather than this one (doc/languages/kobold/kp-errors.md). }
   errSlot := -1;
   if (sig >= 0) and (SemTypes[sig].Kind = skProc) and SemTypes[sig].Failable and
      (FailCaptureSlot >= 0) then begin
@@ -8670,7 +8671,7 @@ begin
   LowerCall := LowerCallSym(Nodes[node].A, Nodes[node].Kids, wantVal);
 end;
 
-{ ---- failable call-site lowering (doc/kp-errors.md) ---- }
+{ ---- failable call-site lowering (doc/languages/kobold/kp-errors.md) ---- }
 
 function LowerFailableCall(target: LongInt; wantVal: Boolean; var errTemp: LongInt): LongInt;
 { Lower the call of a failable form: a fresh slot receives the callee's error register (the call
@@ -8716,7 +8717,7 @@ function LowerFailForm(node: LongInt; wantVal: Boolean): LongInt;
 { Lower nkFailsTest (to a boolean), nkOrElse (value, or void for `ignore`), or nkOrDivert
   (value on success, a control transfer on failure). }
 var
-  v, err, fb, rslot, lEnd: LongInt;
+  v, err, fb, rslot, lEnd, oty: LongInt;
 begin
   LowerFailForm := -1;
   case Nodes[node].Kind of
@@ -8733,13 +8734,27 @@ begin
       if Nodes[node].Flag = 1 then
         LowerFailableCall(Nodes[node].A, False, err)   { or else ignore: drop value and error }
       else begin
-        { or else EXPR: the value on success, the fallback (evaluated only on failure) otherwise }
+        { or else EXPR: the value on success, the fallback (evaluated only on failure) otherwise.
+          The result round-trips through a slot and flows out as an owned transfer (IsOwnedExpr),
+          so both paths must leave an owned (+1) reference in it when the type is managed: the
+          success value is the callee's owned result, and a borrowed fallback is made owned the
+          same way an assignment does (clone a value array/map, retain a reference handle). On
+          failure the callee returns a nil value, so overwriting the slot leaks nothing. }
+        oty := Nodes[node].Ty;
         rslot := NewSlot(4);
         v := LowerFailableCall(Nodes[node].A, True, err);
         EmitSTL(v, rslot);
         lEnd := NewLabel;
         EmitBZ(err, lEnd);
         fb := LowerExpr(Nodes[node].B);
+        if not IsOwnedExpr(Nodes[node].B) then begin
+          if IsDynArray(oty) and not IsBuffer(oty) then
+            fb := EmitStrCall1('kp_arr_clone', fb)
+          else if IsMap(oty) then
+            fb := EmitStrCall1('kp_map_clone', fb)
+          else if IsHandle(oty) or (oty = tyStr) then
+            EmitRetain(fb);
+        end;
         EmitSTL(fb, rslot);
         EmitLabel(lEnd);
         LowerFailForm := EmitLDL(rslot);
@@ -8761,7 +8776,7 @@ function BodyHasYield(node: LongInt): Boolean;
 { True when a routine body suspends directly, through a yield or bind. It does not
   descend into a `start begin..end` block (nkStart): those yields belong to the lifted
   entry, not this routine. A yield reached only through a call is not seen here either,
-  so this reports the single-frame case cancel-by-unwind handles (see kp-design.md). }
+  so this reports the single-frame case cancel-by-unwind handles (see doc/languages/kobold/kobold.md). }
 var
   i: LongInt;
 begin
@@ -9877,9 +9892,10 @@ begin
   case Nodes[node].Kind of
     nkStrLit, nkCall, nkNil, nkStart: IsOwnedExpr := True;
     { an `or divert` yields the call's result on success (a transfer); on failure it diverts,
-      so the value is never used. `or else` is excluded: its fallback may be borrowed, and it is
-      restricted to non-managed values anyway (see AnalyzeFailForm). }
-    nkOrDivert: IsOwnedExpr := True;
+      so the value is never used. `or else` also transfers: its lowering leaves an owned
+      reference in the result slot on both paths (the callee's owned value on success, a
+      cloned/retained fallback on failure, see LowerFailForm). }
+    nkOrDivert, nkOrElse: IsOwnedExpr := True;
     nkBinary: IsOwnedExpr := (Nodes[node].Op = tkPlus) and (Nodes[node].Ty = tyStr);
     nkIdent: IsOwnedExpr := (Nodes[node].Sym >= 0) and
                             (Syms[Nodes[node].Sym].Kind = syFunc);
@@ -10036,7 +10052,7 @@ begin
   d := Nodes[node].A;
   { a statement-position `fail(code)` returns failure from the enclosing failable routine: set
     its error slot and jump to the shared exit, which runs the handle-release cleanup then the
-    RETV2 (doc/kp-errors.md) }
+    RETV2 (doc/languages/kobold/kp-errors.md) }
   if (Nodes[d].Kind = nkCall) and (Nodes[Nodes[d].A].Kind = nkIdent) then begin
     cs := Nodes[Nodes[d].A].Sym;
     if (cs >= 0) and (Syms[cs].Node < 0) and (LowerStr(Syms[cs].Name) = 'fail')
@@ -10466,7 +10482,7 @@ begin
     else CurResultSlot := NewSlot(4);
   end;
   { a failable routine reports its error beside the value; the slot defaults to 0 (success),
-    and `fail` / `or fail` set it before jumping to the shared exit (doc/kp-errors.md) }
+    and `fail` / `or fail` set it before jumping to the shared exit (doc/languages/kobold/kp-errors.md) }
   if failRet then begin
     CurErrorSlot := NewSlot(4);
     EmitSTL(EmitLIC(0), CurErrorSlot);
@@ -11160,7 +11176,7 @@ end;
 procedure LowerLinkConsts(intfNode: LongInt);
 { Each link-time constant (a value-less interface const, valued in the implementation) becomes
   an exported read-only global holding its value, resolved cross-unit through the exported-global
-  table (doc/kp-units.md). A consumer references it by name (LEA + load); the defining unit
+  table (doc/languages/kobold/kp-units.md). A consumer references it by name (LEA + load); the defining unit
   inlines its own known value. The value is not in the interface, so it is out of the
   fingerprint and changing it needs only a relink. }
 var
@@ -11566,7 +11582,7 @@ begin
     EmitLine('.entry main');
   end;
   { the direct dependencies and the interface fingerprint each was compiled against, so a
-    link can traverse the graph and reject a stale interface (doc/kp-units.md) }
+    link can traverse the graph and reject a stale interface (doc/languages/kobold/kp-units.md) }
   for i := 0 to DepCount - 1 do
     EmitLine('.uses ' + DepName[i] + ' fingerprint ' + IntToStr(DepFingerprint[i]));
   if OptDebug then

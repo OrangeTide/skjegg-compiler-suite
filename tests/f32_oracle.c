@@ -112,8 +112,11 @@ oracle(const struct f32_vec *v)
     if (v->op == OP_I2F)
         cpu.x[RS1_X] = v->a;              /* signed int32 input */
     else {
-        cpu.f[RS1_F] = v->a;              /* float bits */
-        cpu.f[RS2_F] = v->b;
+        /* the F registers are 64 bits wide since the D extension, so a
+           single-precision operand must be NaN-boxed (high 32 bits all 1) or
+           the f32 core reads it as NaN.  The result is the low 32 bits. */
+        cpu.f[RS1_F] = 0xffffffff00000000ull | (uint32_t)v->a;
+        cpu.f[RS2_F] = 0xffffffff00000000ull | (uint32_t)v->b;
     }
 
     if (rv_step(&cpu) < 0) {
@@ -121,7 +124,7 @@ oracle(const struct f32_vec *v)
         exit(2);
     }
 
-    return result_is_int ? cpu.x[RD_X] : cpu.f[RD_F];
+    return result_is_int ? cpu.x[RD_X] : (uint32_t)cpu.f[RD_F];
 }
 
 int

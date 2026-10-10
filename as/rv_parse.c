@@ -284,15 +284,29 @@ emit_int_list(struct rv_asm *a, int width)
             }
         } else if ((l->tok.type == T_IDENT || l->tok.type == T_DOT_IDENT)
                    && width == 4) {
+            /* resolve the symbol while tok.str is valid, then parse an optional
+               "+ N" / "- N" addend (a symbol-relative `.word sym + 8`) */
+            int idx = -1;
             if (a->pass == 2) {
-                int idx = sym_lookup(&a->st, l->tok.str);
+                idx = sym_lookup(&a->st, l->tok.str);
                 if (idx < 0) idx = sym_add(&a->st, l->tok.str);
-                sec_add_reloc_t(s, s->len, idx, 0, R_RISCV_32);
+            }
+            lex_next(l);
+            int32_t addend = 0;
+            if (l->tok.type == T_PLUS || l->tok.type == T_MINUS) {
+                int neg = l->tok.type == T_MINUS;
+                lex_next(l);
+                if (l->tok.type == T_INT) {
+                    addend = neg ? -(int32_t)l->tok.ival : (int32_t)l->tok.ival;
+                    lex_next(l);
+                }
+            }
+            if (a->pass == 2) {
+                sec_add_reloc_t(s, s->len, idx, addend, R_RISCV_32);
                 sec_emit32(s, 0);
             } else {
                 s->len += 4;
             }
-            lex_next(l);
         } else {
             break;
         }
@@ -359,12 +373,15 @@ handle_directive(struct rv_asm *a, const char *dir)
         return;
     }
 
-    if (strcmp(dir, ".globl") == 0 || strcmp(dir, ".global") == 0) {
+    if (strcmp(dir, ".globl") == 0 || strcmp(dir, ".global") == 0 ||
+        strcmp(dir, ".weak") == 0) {
+        int is_weak = (dir[1] == 'w');
         lex_next(l);
         if (l->tok.type == T_IDENT || l->tok.type == T_DOT_IDENT) {
             int idx = sym_lookup(&a->st, l->tok.str);
             if (idx < 0) idx = sym_add(&a->st, l->tok.str);
-            sym_set_global(&a->st, idx);
+            if (is_weak) sym_set_weak(&a->st, idx);
+            else sym_set_global(&a->st, idx);
             lex_next(l);
         }
         return;

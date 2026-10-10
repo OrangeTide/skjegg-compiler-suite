@@ -121,7 +121,7 @@ TOOLS := build/skj-tinc build/skj-tinc-rv build/skj-tinc-mips build/skj-tinc-arm
          build/skj-mooc build/skj-pc build/skj-as build/skj-ld \
          build/skj-as-rv build/skj-ld-rv build/skj-as-mips build/skj-ld-mips build/skj-ar \
          build/skj-cpp build/skj-cc build/skj-cc-x86-64 build/skj-cc-arm64 \
-         build/skj-cc-rv build/skj-run \
+         build/skj-cc-rv build/skjcc build/skj-run \
          build/skj-jit build/skj-kp-jit build/skj-kp-patrol \
          build/skj-kp build/libkpaot.a build/skj-kpc
 
@@ -167,7 +167,14 @@ build/skj-cc-arm64: $(CC_SRC_A64) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h backe
 	$(CC) $(CFLAGS) -DCC_LP64 -DCC_PSABI -DCC_ARM64 $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_A64)
 
 build/skj-cc-rv: $(CC_SRC_RV) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | build
-	$(CC) $(CFLAGS) $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_RV)
+	$(CC) $(CFLAGS) -DCC_RISCV $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_RV)
+
+## skjcc: the cross driver.  One command runs the per-target cc -> as -> ld
+## pipeline and links the crt + runtime helpers from <libdir>/<target>/.  The
+## compiled-in lib dir points at the in-tree staging tree (build/lib); the
+## SKJ_CC_LIB env var overrides it, and the sub-tools are found beside skjcc.
+build/skjcc: driver/main.c build/version.h | build
+	$(CC) $(CFLAGS) -DSKJ_LIB_DIR='"$(CURDIR)/build/lib"' -o $@ driver/main.c
 
 ## skj-jit: the in-process x86-64 JIT.  The cc front end lowers a C source to
 ## an ir_program which the jit/ library compiles to native code and runs in
@@ -194,7 +201,7 @@ check-jit: build/skj-jit
 ## skj-kp-jit: the in-process x86-64 JIT for Kobold modules.  The Kobold front
 ## end stays a separate self-hosting Pascal program; its KPM1 text output is the
 ## bridge into this tree (kobold/kpm.c reads it into an ir_program).  The driver then
-## drives the same selector and byte sink as skj-jit.  See doc/port-to-skjegg.md.
+## drives the same selector and byte sink as skj-jit.  See doc/languages/kobold/kobold.md.
 ## The Kobold runtime ported into this tree: the guest-owned string object
 ## (str_core.c) over the host platform layer (rt_host.c: a low-memory guest heap,
 ## ARC, finalizers).  Compiled in the freestanding tier (KP_FREESTANDING), whose
@@ -204,7 +211,7 @@ check-jit: build/skj-jit
 ## A driver's main.c links against this; skj-kp-jit is the generic runner and
 ## skj-kp-patrol a host that adds an opaque handle type.
 KP_RT  := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kobold/map.c kobold/rt_host.c \
-          kobold/co_shim.c kobold/co_switch_x86.S kobold/kp_host.c \
+          kobold/co_shim.c runtime/co_switch_x86.S kobold/kp_host.c \
           jit/jit_common.c jit/jit_arena.c jit/jit_x86.c jit/emit_x86.c jit/code.c \
           jit/call_guest_x86.S \
           backend/x86_select.c backend/regalloc_x86.c $(IR_SRC)
@@ -245,7 +252,7 @@ build/skj-kp-patrol: kobold/patrol_main.c $(KP_RT) build/kp_co.o $(KP_HDRS) Make
 ## holds without MAP_32BIT.  Built with RVJIT_CC (zig's bundled rv32 libc, since the
 ## rv64 toolchain has no ilp32 multilib) and run under qemu-riscv32.
 KP_RT_RV := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kobold/map.c kobold/rt_host.c \
-            kobold/co_shim.c kobold/co_switch_rv.S kobold/kp_host.c \
+            kobold/co_shim.c runtime/co_switch_rv.S kobold/kp_host.c \
             jit/jit_common.c jit/jit_arena.c jit/jit_rv.c jit/emit_rv.c jit/code.c \
             jit/call_guest_rv.S jit/rv_jit_i64.S \
             backend/rv_select.c backend/regalloc_rv.c $(IR_SRC)
@@ -270,7 +277,7 @@ build/skj-kp-jit-rv: kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c $(KP_
 ## rt_host.c/co_shim.c).  Cross-built with the arm64 toolchain and run under
 ## qemu-aarch64, which executes the JIT-generated code.
 KP_RT_A64 := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kobold/map.c kobold/rt_host.c \
-             kobold/co_shim.c kobold/co_switch_arm64.S kobold/kp_host.c \
+             kobold/co_shim.c runtime/co_switch_arm64.S kobold/kp_host.c \
              jit/jit_common.c jit/jit_arena.c jit/jit_arm64.c jit/emit_arm64.c jit/code.c \
              jit/call_guest_arm64.S \
              backend/arm64_select.c backend/regalloc_arm64.c $(IR_SRC)
@@ -317,7 +324,7 @@ check-kp: build/skj-kp
 ## from the shared build/kp_co.o rule rather than recompiled here.
 KP_AOT_RT := kobold/aot_rt.c kobold/kp_host.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
              kobold/map.c kobold/rt_host.c kobold/co_shim.c \
-             kobold/co_switch_x86.S jit/call_guest_x86.S
+             runtime/co_switch_x86.S jit/call_guest_x86.S
 build/libkpaot.a: $(KP_AOT_RT) build/kp_co.o $(KP_HDRS) Makefile | build
 	@rm -rf build/aot && mkdir -p build/aot
 	@for f in $(KP_AOT_RT); do \
@@ -353,7 +360,7 @@ build/skj-kp-arm64: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_A64_SEL) kobol
 ## runtime library at link).  arm64 needs neither: i64 and doubles are native.
 KP_AOT_RT_RV := kobold/aot_rt.c kobold/kp_host.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
                 kobold/map.c kobold/rt_host.c kobold/co_shim.c \
-                kobold/co_switch_rv.S jit/call_guest_rv.S jit/rv_jit_i64.S \
+                runtime/co_switch_rv.S jit/call_guest_rv.S jit/rv_jit_i64.S \
                 kobold/rv_i64_aot_alias.S
 build/libkpaot-rv.a: $(KP_AOT_RT_RV) build/kp_co_rv.o $(KP_HDRS_RV) Makefile | build
 	@rm -rf build/aot-rv && mkdir -p build/aot-rv
@@ -366,7 +373,7 @@ build/libkpaot-rv.a: $(KP_AOT_RT_RV) build/kp_co_rv.o $(KP_HDRS_RV) Makefile | b
 
 KP_AOT_RT_A64 := kobold/aot_rt.c kobold/kp_host.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
                  kobold/map.c kobold/rt_host.c kobold/co_shim.c \
-                 kobold/co_switch_arm64.S jit/call_guest_arm64.S
+                 runtime/co_switch_arm64.S jit/call_guest_arm64.S
 build/libkpaot-arm64.a: $(KP_AOT_RT_A64) build/kp_co_a64.o $(KP_HDRS_A64) Makefile | build
 	@rm -rf build/aot-arm64 && mkdir -p build/aot-arm64
 	@for f in $(KP_AOT_RT_A64); do \
@@ -457,7 +464,7 @@ update-kpcom: build/skj-kp-jit
 	  echo "# kobold/kpcom.pas.  The fingerprint is a source-based staleness key over the exact"; \
 	  echo "# emit inputs, in order:"; \
 	  echo "#   kpcom.pas  version.inc  stdlib.inc"; \
-	  echo "# emit-flags are the kpcom arguments that produced kpcom.kpm.  See doc/kobold.md."; \
+	  echo "# emit-flags are the kpcom arguments that produced kpcom.kpm.  See doc/languages/kobold/kobold.md."; \
 	  echo "fingerprint $$fp"; \
 	  echo "emit-flags --emit-kpm"; \
 	  echo "kpm-sha256 $$ks"; \
@@ -721,7 +728,7 @@ build/kpfree-rv/rv_jit_i64.o: jit/rv_jit_i64.S | build/kpfree-rv
 
 # The coroutine context switch uses fsd/fld, so the rv cross assembler builds it
 # (like the i64 helpers); co_free.c goes through the generic rule above.
-build/kpfree-rv/co_switch_rv.o: kobold/co_switch_rv.S | build/kpfree-rv
+build/kpfree-rv/co_switch_rv.o: runtime/co_switch_rv.S | build/kpfree-rv
 	$(RV_CC) $(RV_ARCH) -fno-pic -mno-relax -c -o $@ $<
 
 KPFREE_RV_ARCHIVE := build/kpfree-rv/rt_free.o build/kpfree-rv/io_free.o \
@@ -799,15 +806,15 @@ JIT_SRC_RV := jit/main.c jit/jit_common.c jit/jit_arena.c jit/jit_rv.c jit/emit_
               backend/rv_select.c backend/regalloc_rv.c \
               $(JIT_FE) $(CC_CPP) $(IR_SRC)
 build/skj-jit-rv: $(JIT_SRC_RV) cc/cc.h jit/jit_common.h jit/jit_arena.h jit/jit_x86.h jit/emit_rv.h jit/code.h backend/rv_mc.h backend/rv_select.h ir/ir.h Makefile build/version.h | build
-	$(RVJIT_CC) $(CFLAGS) $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ijit -Ibackend -o $@ $(JIT_SRC_RV)
+	$(RVJIT_CC) $(CFLAGS) -DCC_RISCV $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ijit -Ibackend -o $@ $(JIT_SRC_RV)
 
 ## Run the C suite in-process through skj-jit-rv under qemu-riscv32.  The RV JIT
 ## supports _Float16 natively (Zfh flh/fcvt), so beyond inline asm it excludes
-## only what the RV psABI backend itself does not implement (the same varargs and
-## by-value struct passing check-cc-rv excludes via NOPSABI_EXCLUDE).
+## only what the RV psABI backend itself does not implement (the same cc_t071
+## varargs test check-cc-rv excludes via RV_EXCLUDE).
 check-jit-rv: build/skj-jit-rv
 	@JIT="$(CURDIR)/build/skj-jit-rv" RUNNER="$(QEMU_RV)" \
-	 EXCLUDE="$(NOPSABI_EXCLUDE) cc_t077_inline_asm" sh tests/run-jit-tests.sh
+	 EXCLUDE="$(RV_EXCLUDE) cc_t077_inline_asm" sh tests/run-jit-tests.sh
 
 ## Disassembly-legality sweep of the RV32 byte sink, the counterpart of
 ## check-jit-arm64-disasm: JIT each cc test, dump its code region, and confirm
@@ -819,17 +826,17 @@ check-jit-rv-disasm: build/skj-jit-rv
 	@JIT="$(CURDIR)/build/skj-jit-rv" RUNNER="$(QEMU_RV)" \
 	 OBJDUMP="riscv64-linux-gnu-objdump" MARCH="riscv:rv32" \
 	 BIN="$(CURDIR)/build/jitdis-rv.bin" \
-	 EXCLUDE="$(NOPSABI_EXCLUDE) cc_t077_inline_asm" sh tests/run-jit-disasm.sh
+	 EXCLUDE="$(RV_EXCLUDE) cc_t077_inline_asm" sh tests/run-jit-disasm.sh
 
 
 build/skj-cc-mips: $(CC_SRC_MIPS) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | build
-	$(CC) $(CFLAGS) $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_MIPS)
+	$(CC) $(CFLAGS) -DCC_MIPS $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_MIPS)
 
 ## The PlayStation (R3051, no coprocessor 1) soft-float C compiler: the same
 ## sources with -DMIPS_SOFTFLOAT, which emits no cop-1 instruction and lowers
 ## every float op to a runtime/softfloat.c call.
 build/skj-cc-mips-sf: $(CC_SRC_MIPS) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | build
-	$(CC) $(CFLAGS) -DMIPS_SOFTFLOAT $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_MIPS)
+	$(CC) $(CFLAGS) -DCC_MIPS -DMIPS_SOFTFLOAT $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_MIPS)
 
 ## skj-run emulator driver
 #
@@ -869,7 +876,7 @@ build/skj-as-rv: $(AS_RV_SRC) as/rv.h as/asm_lex.h as/asm_obj.h | build
 	$(CC) $(CFLAGS) -Ias -Iir -o $@ $(AS_RV_SRC)
 
 ## MIPS I assembler (shares the lexer + object helpers with skj-as)
-## Built up in steps; step 2 encodes the instruction set.  See doc/mips.md.
+## Built up in steps; step 2 encodes the instruction set.  See doc/tools/mips.md.
 AS_MIPS_SRC := as/mips_main.c as/asm_lex.c as/asm_obj.c as/mips_parse.c \
                as/mips_encode.c as/mips_elf.c as/mips_sched.c ir/util.c ir/arena.c
 
@@ -877,7 +884,7 @@ build/skj-as-mips: $(AS_MIPS_SRC) as/mips.h as/asm_lex.h as/asm_obj.h | build
 	$(CC) $(CFLAGS) -Ias -Iir -o $@ $(AS_MIPS_SRC)
 
 ## skj-ld linker
-LD_SRC := ld/main.c ld/elf_read.c ld/script.c ld/link.c ld/elf_write.c ld/mapfile.c ir/util.c ir/arena.c
+LD_SRC := ld/main.c ld/elf_read.c ld/script.c ld/link.c ld/elf_write.c ld/mapfile.c ld/archive.c ir/util.c ir/arena.c
 
 build/skj-ld: $(LD_SRC) ld/ld.h ld/mapfile.h | build
 	$(CC) $(CFLAGS) -Ild -Iir -o $@ $(LD_SRC)
@@ -891,7 +898,7 @@ build/skj-ld-rv: $(LD_RV_SRC) ld/ld.h ld/rv_ld.h ld/mapfile.h | build
 	$(CC) $(CFLAGS) -Ild -Iir -o $@ $(LD_RV_SRC)
 
 ## MIPS I linker (shares layout core, script parser and mapfile reader).
-## REL relocations with the o32 HI16/LO16 addend carry-pairing.  See doc/mips.md.
+## REL relocations with the o32 HI16/LO16 addend carry-pairing.  See doc/tools/mips.md.
 LD_MIPS_SRC := ld/mips_main.c ld/mips_elf_read.c ld/mips_link.c \
                ld/mips_elf_write.c ld/mips_psexe_write.c ld/mips_archive.c \
                ld/link.c ld/script.c ld/mapfile.c ir/util.c ir/arena.c
@@ -1044,6 +1051,11 @@ build/mips/%.o: runtime/%.c | build/mips
 
 build/mips/start_psabi.o: runtime/start_mips_psabi.S | build/mips
 	$(MIPS_AS) -march=mips1 -EL -o $@ $<
+
+## Divide-only soft64 for the libc, as on RISC-V: start_mips.S already has the
+## mul and shift family, so a full soft64.o would collide on them.
+build/mips/soft64_div.o: runtime/soft64.c | build/mips
+	$(MIPS_CC) $(MIPS_RT_CFLAGS) -DSOFT64_NO_MULSHIFT -c -o $@ $<
 
 ## I64 integration test
 I64_TEST_MIPS_SRC := tests/test_i64.c $(IR_SRC) $(BE_MIPS)
@@ -1419,6 +1431,13 @@ build/rv/%.o: runtime/%.c | build/rv
 
 build/rv/start_psabi.o: runtime/start_rv_psabi.S | build/rv
 	$(RV_AS) $(RV_AS_ARCH) -o $@ $<
+
+## Divide-only soft64 for the libc: start_rv.S already defines the mul and
+## shift family, so only the __udivdi3 div family must be added (a full
+## soft64.o would collide on the shifts).  A separate object from the shared
+## build/rv/soft64.o, which the Excelsior runtime links whole.
+build/rv/soft64_div.o: runtime/soft64.c | build/rv
+	$(RV_CC) $(RV_RT_CFLAGS) -DSOFT64_NO_MULSHIFT -c -o $@ $<
 
 EXC_RV_RT := build/rv/start_psabi.o build/rv/libexc.o build/rv/exc_native.o \
              build/rv/utf8.o build/rv/soft64.o
@@ -1801,7 +1820,7 @@ check-san-cpp: build/san/skj-cpp
 check-san-cc: build/san/skj-cc build/san/skj-as build/start.o build/half.o build/va_cf.o
 	@echo "== check-san: C compiler (skj-cc + skj-as, ColdFire) =="
 	@$(SAN_RUNENV) CCBIN="$(CURDIR)/build/san/skj-cc" ASM="$(CURDIR)/build/san/skj-as -o" \
-	   OUTDIR="$(CURDIR)/build/san/cc-out" EXCLUDE="$(NOPSABI_EXCLUDE)" \
+	   OUTDIR="$(CURDIR)/build/san/cc-out" EXCLUDE="$(CF_EXCLUDE)" \
 	   HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o" \
 	   sh tests/run-cc-tests.sh
 
@@ -2038,6 +2057,9 @@ build/arm64/start_aapcs.o: runtime/start_arm64_aapcs.S | build/arm64
 build/arm64/va.o: runtime/va_aarch64.c | build/arm64
 	$(A64_CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<
 
+build/arm64/soft64.o: runtime/soft64.c | build/arm64
+	$(A64_CC) -std=c99 -O2 -Wall -ffreestanding -DSOFT64_NO_MULSHIFT -c -o $@ $<
+
 build/arm64/%: build/arm64/%.o build/arm64/start.o
 	$(A64_LD) -o $@ build/arm64/start.o $<
 
@@ -2120,6 +2142,35 @@ build/test_gc: scheme/test_gc.c scheme/gc.c scheme/gc.h | build
 
 test-gc: build/test_gc
 	./build/test_gc
+
+## The libc coroutine primitive (host-only quick gate).  Compiles libc/coro.c
+## with the x86-64 co_switch natively and runs the generator/echo self-check, so
+## the primitive has a no-qemu smoke test; the per-target qemu runs through
+## check-libc cover rv/mips/cf/arm64.  x86-64 host only.
+build/test_coro: libc/coro.c runtime/co_switch_x86.S tests/libc_coroutine.c \
+                 include/coro.h | build
+	$(CC) $(CFLAGS) -Iinclude -o $@ libc/coro.c runtime/co_switch_x86.S \
+	    tests/libc_coroutine.c
+
+test-coro: build/test_coro
+	@./build/test_coro; ec=$$?; \
+	 if [ $$ec -eq 42 ]; then echo "PASS: libc coroutine (host, exit 42)"; \
+	 else echo "FAIL: libc coroutine (exit $$ec, expected 42)"; exit 1; fi
+
+## The cooperative threads.h subset (host-only quick gate).  Compiles the
+## scheduler (libc/threads.c) over the coroutine primitive with the x86-64
+## co_switch natively and runs the producer/consumer + mutex/cnd/once/tss
+## self-check, so threads.h has a no-qemu smoke test; the per-target qemu runs
+## through check-libc cover rv/mips/cf/arm64.  x86-64 host only.
+build/test_threads: libc/threads.c libc/coro.c runtime/co_switch_x86.S \
+                    tests/libc_threads_stress.c include/threads.h include/coro.h | build
+	$(CC) $(CFLAGS) -Iinclude -o $@ libc/threads.c libc/coro.c \
+	    runtime/co_switch_x86.S tests/libc_threads_stress.c
+
+test-threads: build/test_threads
+	@./build/test_threads; ec=$$?; \
+	 if [ $$ec -eq 42 ]; then echo "PASS: libc threads (host, exit 42)"; \
+	 else echo "FAIL: libc threads (exit $$ec, expected 42)"; exit 1; fi
 
 ## The guest-32 libexc build (host-only).  Compiles the portable Excelsior
 ## runtime as LP64 host code over the 32-bit guest object model (the
@@ -2233,7 +2284,7 @@ test-rv-fp: build/test_rv_fp
 ## one addition is tests/rv32/elf_loader.h, which maps their loader
 ## interface onto emu/elf32.c rather than carrying a second ELF reader.
 ## ---------------------------------------------------------------
-RV32_UNIT := test_mem test_fp test_atomic test_zcmp test_zcb \
+RV32_UNIT := test_mem test_fp test_fp_d test_atomic test_zcmp test_zcb \
              test_bitmanip test_irq
 RV32_INC  := -Iemu -Itests/rv32
 RV32_CORE := emu/rv32.c tests/rv32/machine.c
@@ -2637,7 +2688,7 @@ build/exc_native.o: runtime/exc_native.c runtime/libexc.h | build
 ## supplies the 64-bit helpers the toolchain's absent rv32 libgcc cannot.
 ## Link-only smoke in this tree: the ELF runs under the smolmoo server,
 ## whose ecall hypercalls have no Linux meaning, not qemu.  make
-## smolmoo-demo proves the pipeline; M0 in doc/smolmoo-v1.md runs it on a
+## smolmoo-demo proves the pipeline; M0 in doc/languages/smolmoo-v1.md runs it on a
 ## real server.
 build/smolmoo:
 	mkdir -p build/smolmoo
@@ -2949,6 +3000,12 @@ build/x86_64/fpu_test.o: build/x86_64/fpu_test.s
 build/x86_64/half.o: runtime/half.c | build/x86_64
 	$(CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<
 
+## 64-bit div/mod helpers (__udivdi3 and family).  Even the native-i64 targets
+## lower 64-bit division to these calls, so a libc using 64-bit arithmetic
+## (printf's %lld path) needs them; soft64.c supplies them in portable C.
+build/x86_64/soft64.o: runtime/soft64.c | build/x86_64
+	$(CC) -std=c99 -O2 -Wall -ffreestanding -DSOFT64_NO_MULSHIFT -c -o $@ $<
+
 build/x86_64/fpu_test: build/x86_64/fpu_test.o build/x86_64/start.o build/x86_64/half.o
 	$(X64_LD) -m elf_x86_64 -o $@ build/x86_64/start.o build/x86_64/half.o $<
 
@@ -2997,22 +3054,22 @@ test-f32-rv: build/rv/f32_test
 	@$(QEMU_RV) ./build/rv/f32_test && echo "PASS: f32_test (RISC-V)" || (echo "FAIL: f32_test (RISC-V)"; exit 1)
 
 ## C preprocessor tests
-# psABI feature tests, excluded where the target lacks that phase.  Varargs is
-# done on x86-64 (P2) and arm64 (P4-P2); by-value struct passing is x86-64 only
-# (P3).  ColdFire and RISC-V use the stack convention and have neither.
-# The psABI cc tests (varargs, struct-by-value) run on x86-64 and arm64 and are
-# excluded only on the stack-convention targets (ColdFire, RISC-V).
+# cc_t071 uses the __builtin_va_arg_* accessors and is excluded on every
+# target; the portable <stdarg.h> coverage is the VA_STDARG test below.
 VARARGS_EXCLUDE   := cc_t071_varargs
-STRUCT_EXCLUDE    := cc_t072_struct_byval
-REGSTRUCT_EXCLUDE := cc_t074_hfa cc_t075_struct_straddle
-NOPSABI_EXCLUDE   := $(VARARGS_EXCLUDE) $(STRUCT_EXCLUDE) $(REGSTRUCT_EXCLUDE)
+# Every target passes and returns a struct by value, including MIPS o32 (a
+# struct with 8-byte-aligned members starts on an even argument word, matching
+# its 8-aligned home slot), so the struct tests run on every target.
+CF_EXCLUDE        := $(VARARGS_EXCLUDE)
+MIPS_EXCLUDE      := $(VARARGS_EXCLUDE)
+RV_EXCLUDE        := $(VARARGS_EXCLUDE)
 # The portable <stdarg.h> test runs on ColdFire, MIPS hard-float, x86-64 and
 # arm64.  It is excluded only where the varargs backend is not implemented
 # (RISC-V) or where a double vararg is not supported (MIPS soft-float).
 VA_STDARG_EXCLUDE := cc_t081_varargs_stdarg
 
 check-cc: build/skj-cc build/skj-as build/start.o build/half.o build/va_cf.o
-	@OUTDIR="$(CURDIR)/build/cc-cf" EXCLUDE="$(NOPSABI_EXCLUDE)" \
+	@OUTDIR="$(CURDIR)/build/cc-cf" EXCLUDE="$(CF_EXCLUDE)" \
 	 HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o" \
 	 sh tests/run-cc-tests.sh
 
@@ -3052,7 +3109,7 @@ check-cc-rv: build/skj-cc-rv build/rv/start.o build/rv/va_rv.o
 	 START="$(CURDIR)/build/rv/start.o" \
 	 HALF="$(CURDIR)/build/rv/va_rv.o" \
 	 OUTDIR="$(CURDIR)/build/cc-rv" \
-	 EXCLUDE="$(NOPSABI_EXCLUDE)" \
+	 EXCLUDE="$(RV_EXCLUDE)" \
 	 sh tests/run-cc-tests.sh
 
 ## The same C suite, but assembled and linked entirely by the in-tree RV32
@@ -3191,7 +3248,7 @@ check-cc-rv-skj: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv-skj/st
 	 START="$(CURDIR)/build/rv-skj/start.o" \
 	 HALF="$(CURDIR)/build/rv-skj/va_rv.o" \
 	 OUTDIR="$(CURDIR)/build/cc-rv-skj" \
-	 EXCLUDE="$(NOPSABI_EXCLUDE)" \
+	 EXCLUDE="$(RV_EXCLUDE)" \
 	 sh tests/run-cc-tests.sh
 
 ## The RV32 process sandbox: skj-run runs a root guest that spawns a child
@@ -3300,7 +3357,7 @@ check-cc-rv-psabi: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv-skj/
 	 START="$(CURDIR)/build/rv-skj/start_psabi_cc.o" \
 	 HALF="$(CURDIR)/build/rv-skj/va_rv.o" \
 	 OUTDIR="$(CURDIR)/build/cc-rv-psabi" \
-	 EXCLUDE="$(NOPSABI_EXCLUDE)" \
+	 EXCLUDE="$(RV_EXCLUDE)" \
 	 sh tests/run-cc-tests.sh
 
 ## psABI interop proof: a skj-cc-rv main calls a gcc-built RV32 function
@@ -3316,6 +3373,245 @@ test-cc-rv-psabi-interop: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/
 	@$(QEMU_RV) ./build/rv-skj/interop; ec=$$?; \
 	 if [ $$ec -eq 42 ]; then echo "PASS: cc-rv-psabi interop (skj main + gcc fn, exit 42)"; \
 	 else echo "FAIL: cc-rv-psabi interop (exit $$ec, expected 42)"; exit 1; fi
+
+## By-value struct interop: skj-cc-rv passes and returns structs by value to and
+## from gcc-built RV32 objects through the ilp32 psABI, in both directions (a
+## 2-word struct in registers and a >8-byte struct by reference), and gcc calls
+## back into a skj-built function with a by-value struct.  The direct proof that
+## skj-cc-rv's struct ABI matches a stock RISC-V toolchain.
+test-cc-rv-psabi-struct: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv-skj/start_psabi_cc.o | build/rv-skj
+	@$(RV_CC) $(RV_SKJ_RT_CFLAGS) -Itests -c -o build/rv-skj/struct_gcc.o tests/rv_struct_interop_gcc.c
+	@./build/skj-cc-rv -Itests -o build/rv-skj/struct_main.s tests/rv_struct_interop_main.c
+	@./build/skj-as-rv -o build/rv-skj/struct_main.o build/rv-skj/struct_main.s
+	@./build/skj-ld-rv -o build/rv-skj/struct build/rv-skj/start_psabi_cc.o \
+	    build/rv-skj/struct_main.o build/rv-skj/struct_gcc.o
+	@$(QEMU_RV) ./build/rv-skj/struct; ec=$$?; \
+	 if [ $$ec -eq 42 ]; then echo "PASS: cc-rv-psabi struct interop (skj <-> gcc, by-value + return, exit 42)"; \
+	 else echo "FAIL: cc-rv-psabi struct interop (exit $$ec, expected 42)"; exit 1; fi
+
+## Cross-driver (skjcc) library staging: the crt and runtime helpers skjcc links
+## per target, copied into build/lib/<target>/ (the compiled-in lib dir).  The
+## source objects are the same per-target crt/runtime the check-cc-* suites use.
+build/lib/coldfire/crt0.o: build/start.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/coldfire/half.o: build/half.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/coldfire/va_cf.o: build/va_cf.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/riscv/crt0.o: build/rv/start.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/riscv/va_rv.o: build/rv/va_rv.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/mips/crt0.o: build/mips/start.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/mips/half.o: build/mips/half.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/mips/va_mips.o: build/mips/va_mips.o
+	@mkdir -p $(@D) && cp $< $@
+
+## soft64 divide helpers (__udivdi3/__umoddi3/...) the rv/mips crts do not carry
+## but the libc's 64-bit formatting (and any user 64-bit divide) needs.  The cf
+## crt already defines the whole family, so only rv/mips stage it.
+build/lib/riscv/soft64_div.o: build/rv/soft64_div.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/mips/soft64_div.o: build/mips/soft64_div.o
+	@mkdir -p $(@D) && cp $< $@
+
+## The coroutine context switch (co_switch), the one arch-specific piece of the
+## libc coroutine primitive (libc/coro.c), assembled per target.  The rv, x86-64
+## and arm64 switches already exist for the Kobold runtime and are reused as-is;
+## ColdFire and MIPS get their own in runtime/.  Each is archived into that
+## target's libc.a (so a program pulls it only when it uses a coroutine) and
+## also linked loose by the libc test harness.
+build/co_switch_cf.o: runtime/co_switch_cf.S build/skj-as | build
+	@./build/skj-as -o $@ $<
+build/rv/co_switch.o: runtime/co_switch_rv.S build/skj-as-rv | build/rv
+	@./build/skj-as-rv -o $@ $<
+build/mips/co_switch.o: runtime/co_switch_mips.S build/skj-as-mips | build/mips
+	@./build/skj-as-mips -o $@ $<
+build/x86_64/co_switch.o: runtime/co_switch_x86.S | build/x86_64
+	@$(CC) -c $< -o $@
+build/arm64/co_switch.o: runtime/co_switch_arm64.S | build/arm64
+	@$(A64_CC) -c $< -o $@
+
+## The libc archive (doc/tools/libc.md Phase D): the Phase A-C sources compiled per
+## target with that target's skj-cc, assembled with the in-tree assembler, and
+## archived by skj-ar with a symbol index so the linker pulls only what a hosted
+## program references.  skjcc links it by default; -ffreestanding omits it.
+LIBC_SRCS := string ctype stdlib printf stdio assert malloc sbrk errno \
+             strerror rand strtod scanf coro threads
+LIBC_SRC_FILES := $(addprefix libc/,$(addsuffix .c,$(LIBC_SRCS)))
+LIBC_HDRS := $(wildcard include/*.h) libc/fmt.h
+
+## printf's floating conversions (f F e E g G a A) are a compile-time option
+## (SKJ_LIBC_FLOAT in libc/printf.c): defined here, the shipped libc.a formats
+## floats; omitted, it links an integer-only printf with no double arithmetic.
+## On everywhere today.  To ship a float-free libc for a target that cannot run
+## double (for example the RV32 skj-run core, which has no D extension), clear
+## that target's variable below.
+LIBC_CFLAGS_CF   := -DSKJ_LIBC_FLOAT
+LIBC_CFLAGS_RV   := -DSKJ_LIBC_FLOAT
+LIBC_CFLAGS_MIPS := -DSKJ_LIBC_FLOAT
+
+build/lib/coldfire/libc.a: build/skj-cc build/skj-as build/skj-ar \
+                           $(LIBC_SRC_FILES) $(LIBC_HDRS) build/co_switch_cf.o | build
+	@mkdir -p build/lib/coldfire/obj
+	@for s in $(LIBC_SRCS); do \
+	    ./build/skj-cc $(LIBC_CFLAGS_CF) -o build/lib/coldfire/obj/$$s.s libc/$$s.c && \
+	    ./build/skj-as -o build/lib/coldfire/obj/$$s.o build/lib/coldfire/obj/$$s.s \
+	    || exit 1; \
+	done
+	@rm -f $@
+	@./build/skj-ar rcs $@ $(addprefix build/lib/coldfire/obj/,$(addsuffix .o,$(LIBC_SRCS))) build/co_switch_cf.o
+
+build/lib/riscv/libc.a: build/skj-cc-rv build/skj-as-rv build/skj-ar \
+                        $(LIBC_SRC_FILES) $(LIBC_HDRS) build/rv/co_switch.o | build
+	@mkdir -p build/lib/riscv/obj
+	@for s in $(LIBC_SRCS); do \
+	    ./build/skj-cc-rv $(LIBC_CFLAGS_RV) -o build/lib/riscv/obj/$$s.s libc/$$s.c && \
+	    ./build/skj-as-rv -o build/lib/riscv/obj/$$s.o build/lib/riscv/obj/$$s.s \
+	    || exit 1; \
+	done
+	@rm -f $@
+	@./build/skj-ar rcs $@ $(addprefix build/lib/riscv/obj/,$(addsuffix .o,$(LIBC_SRCS))) build/rv/co_switch.o
+
+build/lib/mips/libc.a: build/skj-cc-mips build/skj-as-mips build/skj-ar \
+                       $(LIBC_SRC_FILES) $(LIBC_HDRS) build/mips/co_switch.o | build
+	@mkdir -p build/lib/mips/obj
+	@for s in $(LIBC_SRCS); do \
+	    ./build/skj-cc-mips $(LIBC_CFLAGS_MIPS) -o build/lib/mips/obj/$$s.s libc/$$s.c && \
+	    ./build/skj-as-mips -o build/lib/mips/obj/$$s.o build/lib/mips/obj/$$s.s \
+	    || exit 1; \
+	done
+	@rm -f $@
+	@./build/skj-ar rcs $@ $(addprefix build/lib/mips/obj/,$(addsuffix .o,$(LIBC_SRCS))) build/mips/co_switch.o
+
+## fini.o: exit/atexit and the finalizer the crt calls when main returns.  It
+## is force-linked (not archived) so the crt's weak __libc_fini reference
+## always resolves in a hosted link and the atexit/flush path is present even
+## when the program never calls exit; -ffreestanding omits it.
+build/lib/coldfire/fini.o: build/skj-cc build/skj-as libc/fini.c $(LIBC_HDRS) | build
+	@mkdir -p $(@D)
+	@./build/skj-cc -o $(@D)/fini.s libc/fini.c
+	@./build/skj-as -o $@ $(@D)/fini.s
+build/lib/riscv/fini.o: build/skj-cc-rv build/skj-as-rv libc/fini.c $(LIBC_HDRS) | build
+	@mkdir -p $(@D)
+	@./build/skj-cc-rv -o $(@D)/fini.s libc/fini.c
+	@./build/skj-as-rv -o $@ $(@D)/fini.s
+build/lib/mips/fini.o: build/skj-cc-mips build/skj-as-mips libc/fini.c $(LIBC_HDRS) | build
+	@mkdir -p $(@D)
+	@./build/skj-cc-mips -o $(@D)/fini.s libc/fini.c
+	@./build/skj-as-mips -o $@ $(@D)/fini.s
+
+DRIVER_LIB_CF   := build/lib/coldfire/crt0.o build/lib/coldfire/half.o build/lib/coldfire/va_cf.o build/lib/coldfire/fini.o build/lib/coldfire/libc.a
+DRIVER_LIB_RV   := build/lib/riscv/crt0.o build/lib/riscv/va_rv.o build/lib/riscv/soft64_div.o build/lib/riscv/fini.o build/lib/riscv/libc.a
+DRIVER_LIB_MIPS := build/lib/mips/crt0.o build/lib/mips/half.o build/lib/mips/va_mips.o build/lib/mips/soft64_div.o build/lib/mips/fini.o build/lib/mips/libc.a
+
+## The cross driver end to end: build and run a self-checking program (exit 42)
+## for each in-tree (binutils-free) target through the one skjcc command, plus
+## the -S / -c stages and a two-file link.
+test-cc-driver: build/skjcc \
+                build/skj-cc build/skj-as build/skj-ld $(DRIVER_LIB_CF) \
+                build/skj-cc-rv build/skj-as-rv build/skj-ld-rv $(DRIVER_LIB_RV) \
+                build/skj-cc-mips build/skj-as-mips build/skj-ld-mips $(DRIVER_LIB_MIPS) | build
+	@mkdir -p build/driver
+	@./build/skjcc -target coldfire -o build/driver/hello_cf tests/driver_hello.c
+	@$(QEMU) ./build/driver/hello_cf; ec=$$?; \
+	 [ $$ec -eq 42 ] || { echo "FAIL: driver coldfire (exit $$ec)"; exit 1; }
+	@./build/skjcc -target riscv -o build/driver/hello_rv tests/driver_hello.c
+	@$(QEMU_RV) ./build/driver/hello_rv; ec=$$?; \
+	 [ $$ec -eq 42 ] || { echo "FAIL: driver riscv (exit $$ec)"; exit 1; }
+	@./build/skjcc -target mips -o build/driver/hello_mips tests/driver_hello.c
+	@$(QEMU_MIPS) ./build/driver/hello_mips; ec=$$?; \
+	 [ $$ec -eq 42 ] || { echo "FAIL: driver mips (exit $$ec)"; exit 1; }
+	@./build/skjcc -target riscv -S -o build/driver/h.s tests/driver_hello.c; test -s build/driver/h.s \
+	 || { echo "FAIL: driver -S produced no asm"; exit 1; }
+	@./build/skjcc -target riscv -c -o build/driver/h.o tests/driver_hello.c; test -s build/driver/h.o \
+	 || { echo "FAIL: driver -c produced no object"; exit 1; }
+	@./build/skjcc -target riscv -o build/driver/two tests/driver_two_a.c tests/driver_two_b.c
+	@$(QEMU_RV) ./build/driver/two; ec=$$?; \
+	 [ $$ec -eq 42 ] || { echo "FAIL: driver multi-file link (exit $$ec)"; exit 1; }
+	@# Hosted link: the driver pulls libc.a by default, so a printf+malloc
+	@# program links and runs with no explicit library on the command line.
+	@./build/skjcc -target coldfire -o build/driver/host_cf tests/libc_phase_c.c
+	@$(QEMU) ./build/driver/host_cf < tests/libc_phase_c.input > build/driver/host_cf.out; ec=$$?; \
+	 [ $$ec -eq 42 ] || { echo "FAIL: driver hosted coldfire (exit $$ec)"; exit 1; }
+	@diff tests/libc_phase_c.expected build/driver/host_cf.out \
+	 || { echo "FAIL: driver hosted coldfire stdout"; exit 1; }
+	@./build/skjcc -target riscv -o build/driver/host_rv tests/libc_phase_c.c
+	@$(QEMU_RV) ./build/driver/host_rv < tests/libc_phase_c.input > build/driver/host_rv.out; ec=$$?; \
+	 [ $$ec -eq 42 ] || { echo "FAIL: driver hosted riscv (exit $$ec)"; exit 1; }
+	@diff tests/libc_phase_c.expected build/driver/host_rv.out \
+	 || { echo "FAIL: driver hosted riscv stdout"; exit 1; }
+	@./build/skjcc -target mips -o build/driver/host_mips tests/libc_phase_c.c
+	@$(QEMU_MIPS) ./build/driver/host_mips < tests/libc_phase_c.input > build/driver/host_mips.out; ec=$$?; \
+	 [ $$ec -eq 42 ] || { echo "FAIL: driver hosted mips (exit $$ec)"; exit 1; }
+	@diff tests/libc_phase_c.expected build/driver/host_mips.out \
+	 || { echo "FAIL: driver hosted mips stdout"; exit 1; }
+	@# Freestanding: -ffreestanding links only the crt, no libc.  A program
+	@# that needs no library still builds and runs.
+	@./build/skjcc -target coldfire -ffreestanding -o build/driver/free_cf tests/driver_hello.c
+	@$(QEMU) ./build/driver/free_cf; ec=$$?; \
+	 [ $$ec -eq 42 ] || { echo "FAIL: driver -ffreestanding coldfire (exit $$ec)"; exit 1; }
+	@echo "PASS: cross driver (build+run, -S, -c, multi-file, hosted libc, -ffreestanding)"
+
+## The Phase A C standard library (doc/tools/libc.md): headers, string/ctype, the
+## snprintf formatter, and stdlib numeric/sort.  Each target compiles the libc
+## sources plus a self-checking test with its skj-cc, links over the crt, and
+## runs under qemu (exit 42).  Same per-target env as the check-cc-* suites.
+## See tests/run-libc-tests.sh.
+check-libc-cf: build/skj-cc build/skj-as build/start.o build/half.o build/va_cf.o build/co_switch_cf.o
+	@OUTDIR="$(CURDIR)/build/libc-cf" \
+	 HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o $(CURDIR)/build/co_switch_cf.o" \
+	 sh tests/run-libc-tests.sh
+
+check-libc-rv: build/skj-cc-rv build/rv/start.o build/rv/va_rv.o build/rv/soft64_div.o build/rv/co_switch.o
+	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
+	 ASM="$(RV_AS) -march=rv32imfd_zfh -mabi=ilp32 -o" \
+	 LD="$(RV_LD) -m elf32lriscv -o" \
+	 QEMU="$(QEMU_RV)" \
+	 START="$(CURDIR)/build/rv/start.o" \
+	 HALF="$(CURDIR)/build/rv/va_rv.o $(CURDIR)/build/rv/soft64_div.o $(CURDIR)/build/rv/co_switch.o" \
+	 OUTDIR="$(CURDIR)/build/libc-rv" \
+	 sh tests/run-libc-tests.sh
+
+check-libc-mips: build/skj-cc-mips build/mips/start.o build/mips/half.o build/mips/va_mips.o build/mips/soft64_div.o build/mips/co_switch.o
+	@CCBIN="$(CURDIR)/build/skj-cc-mips" \
+	 ASM="$(MIPS_AS) -march=mips1 -EL -o" \
+	 LD="$(MIPS_LD) -o" \
+	 QEMU="$(QEMU_MIPS)" \
+	 START="$(CURDIR)/build/mips/start.o" \
+	 HALF="$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/va_mips.o $(CURDIR)/build/mips/soft64_div.o $(CURDIR)/build/mips/co_switch.o" \
+	 OUTDIR="$(CURDIR)/build/libc-mips" \
+	 sh tests/run-libc-tests.sh
+
+check-libc-x86-64: build/skj-cc-x86-64 build/x86_64/start_sysv.o build/x86_64/half.o build/x86_64/va.o build/x86_64/soft64.o build/x86_64/co_switch.o
+	@CCBIN="$(CURDIR)/build/skj-cc-x86-64" \
+	 ASM="$(X64_ASM) -f elf64 -o" \
+	 LD="$(X64_LD) -m elf_x86_64 -o" \
+	 QEMU="$(QEMU_X64)" \
+	 START="$(CURDIR)/build/x86_64/start_sysv.o" \
+	 HALF="$(CURDIR)/build/x86_64/half.o $(CURDIR)/build/x86_64/va.o $(CURDIR)/build/x86_64/soft64.o $(CURDIR)/build/x86_64/co_switch.o" \
+	 OUTDIR="$(CURDIR)/build/libc-x86_64" \
+	 sh tests/run-libc-tests.sh
+
+check-libc-arm64: build/skj-cc-arm64 build/arm64/start_aapcs.o build/arm64/va.o build/arm64/soft64.o build/arm64/co_switch.o
+	@CCBIN="$(CURDIR)/build/skj-cc-arm64" \
+	 ASM="$(A64_AS) -o" \
+	 LD="$(A64_LD) -o" \
+	 QEMU="$(QEMU_A64)" \
+	 START="$(CURDIR)/build/arm64/start_aapcs.o" \
+	 HALF="$(CURDIR)/build/arm64/va.o $(CURDIR)/build/arm64/soft64.o $(CURDIR)/build/arm64/co_switch.o" \
+	 OUTDIR="$(CURDIR)/build/libc-arm64" \
+	 sh tests/run-libc-tests.sh
+
+## check-libc aggregates only the targets that pass today: RISC-V, x86-64, and
+## arm64 (all using the shared instruction selector).  All five are aggregated
+## and passing: the 64-bit-codegen bug the older cf_emit.c/mips_emit.c backends
+## once hit on the Phase A printf was fixed, so ColdFire and MIPS run the suite
+## too.
+check-libc: check-libc-cf check-libc-rv check-libc-mips check-libc-x86-64 check-libc-arm64
+	@echo "libc Phase A+B+C+E+F+G+H: cf/rv/mips/x86-64/arm64 passed."
 
 ## Stock-gcc interlink: a gcc object built with the default flags (PIE and
 ## linker relaxation, so R_RISCV_GOT_HI20 and R_RISCV_CALL_PLT) linked into a
@@ -3361,7 +3657,7 @@ check-cc-mips: build/skj-cc-mips build/mips/start.o build/mips/half.o build/mips
 	 START="$(CURDIR)/build/mips/start.o" \
 	 HALF="$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/va_mips.o" \
 	 OUTDIR="$(CURDIR)/build/cc-mips" \
-	 EXCLUDE="$(NOPSABI_EXCLUDE)" \
+	 EXCLUDE="$(MIPS_EXCLUDE)" \
 	 sh tests/run-cc-tests.sh
 
 ## skj-as-mips validation: the encoding golden-master against GNU as (the
@@ -3387,7 +3683,7 @@ check-cc-mips-skj: build/skj-cc-mips build/skj-as-mips build/skj-ld-mips build/m
 	 START="$(CURDIR)/build/mips/start.o" \
 	 HALF="$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/va_mips.o" \
 	 OUTDIR="$(CURDIR)/build/cc-mips-skj" \
-	 EXCLUDE="$(NOPSABI_EXCLUDE)" \
+	 EXCLUDE="$(MIPS_EXCLUDE)" \
 	 sh tests/run-cc-tests.sh
 
 ## Archive (.a) support end to end: skj-ar builds a GNU archive with a symbol
@@ -3508,7 +3804,7 @@ check-cc-mips-noreorder: build/skj-cc-mips build/mips/start.o build/mips/half.o 
 	 START="$(CURDIR)/build/mips/start.o" \
 	 HALF="$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/va_mips.o" \
 	 OUTDIR="$(CURDIR)/build/cc-mips-nr" \
-	 EXCLUDE="$(NOPSABI_EXCLUDE)" \
+	 EXCLUDE="$(MIPS_EXCLUDE)" \
 	 sh tests/run-cc-tests.sh
 
 ## The C compiler suite compiled soft-float: skj-cc-mips-sf emits no cop-1
@@ -3522,7 +3818,7 @@ check-cc-mips-sf: build/skj-cc-mips-sf build/mips/start.o build/mips/half.o buil
 	 START="$(CURDIR)/build/mips/start.o" \
 	 HALF="$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/softfloat.o" \
 	 OUTDIR="$(CURDIR)/build/cc-mips-sf" \
-	 EXCLUDE="$(NOPSABI_EXCLUDE) $(VA_STDARG_EXCLUDE)" \
+	 EXCLUDE="$(MIPS_EXCLUDE) $(VA_STDARG_EXCLUDE)" \
 	 sh tests/run-cc-tests.sh
 
 ## The whole PlayStation soft-float tier.
@@ -3614,7 +3910,7 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp c
            check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm \
            test-jit-trap test-jit-trap-arm64 \
            check-exc-jit-arm64 test-libexc-guest32 test-jit-arena \
-           test-gc test-exc-walker \
+           test-gc test-coro test-threads test-exc-walker \
            test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 \
            test-f32-diff \
            test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 \
@@ -3622,6 +3918,7 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp c
            check-rvas check-cc-rv-skj check-exc-rv-skj \
            check-cc-rv-psabi test-cc-rv-psabi-interop \
            test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive \
+           test-cc-rv-psabi-struct test-cc-driver check-libc \
            check-kp check-kpcom \
            check-kp-frontend check-kp-jit check-kp-aot check-kp-corpus check-kp-multi check-kp-io check-kp-inc
 	@echo "All architecture test suites passed."
@@ -3642,4 +3939,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-exc-rv-emu check-exc-rv-emu-san test-exc-coro-overflow check-emu check-rv-emu check-exc-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-exc-x86-64-asm check-exc-arm64-asm check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive check-mipsas check-cc-mips-skj check-mips-all check-smoke check-exc-jit-arm64 test-gc test-libexc-guest32 test-jit-arena test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-corpus check-kp-corpus-rv check-kp-corpus-arm64 check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free coverage-codegen clean FORCE
+.PHONY: all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-exc-rv-emu check-exc-rv-emu-san test-exc-coro-overflow check-emu check-rv-emu check-exc-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-exc-x86-64-asm check-exc-arm64-asm check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj check-mips-all check-smoke check-exc-jit-arm64 test-gc test-coro test-threads test-libexc-guest32 test-jit-arena test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-corpus check-kp-corpus-rv check-kp-corpus-arm64 check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free coverage-codegen clean FORCE

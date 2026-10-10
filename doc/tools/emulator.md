@@ -583,50 +583,61 @@ run exits on the root's status. That one demo exercises spawn, the guarded
 map and release, the shared budget, and the scheduler resuming a child
 across many slices.
 
-## Double precision is a non-goal (decided 2026-08-04)
+## Double precision (host double, on by default; revised 2026-10-07)
 
-`check-exc-rv` runs under qemu, not `skj-run`, because the RV32 core
-implements F but not D: `emu/rv32.c` rejects any instruction whose
-format field is not single. Excelsior's `float` is an IEEE double, so
-`fadd.d` and `fsd` are both unreachable. `skj-run` passes 80 of the 87
-RV Excelsior binaries and fails 7 on exactly that.
+The RV32 core implements D, in host `double`. The `cpu->dp` flag gates it
+(`skj-run` sets it, so double is on by default); with `dp` clear every
+D-format instruction is illegal, which is the older F-only core. The
+decoding is about 90 lines mirroring the single-precision block for the
+D mnemonics the RV corpus uses, and FLD/FSD are the uncompressed forms
+only (the compressed `c.fld`/`c.fsd` encodings collide with Zcmp, so
+they stay unimplemented). A single value living in a D register is
+NaN-boxed, so the F and D ops share one `uint64_t f[32]` register file.
 
-**D will not be added.** The work is out of proportion to what it buys.
-Six of those seven failures are programs that really do use doubles, so
-the payoff is six tests; the cost is a software binary64 core.
+**Double is host-dependent, and that is the point.** Unlike single
+precision, double is *not* on the deterministic surface the F core keeps
+(see "Single-precision determinism" below). The core computes double
+arithmetic in host `double`, so an inexact result, a subnormal, or a NaN
+sign can differ between a host that rounds one way and a host that rounds
+another, and across WebAssembly embeddings. There is no wider host type
+to round from (`long double` is x87-specific and absent on WebAssembly),
+so honoring determinism for double would mean a Berkeley-style softfloat
+binary64 (directed rounding, the inexact flag, a 106-bit product for the
+fused ops), a larger and more delicate body of code than the rest of the
+FPU put together. That machinery is not built. Results are canonicalized
+only where it is free (a NaN result is forced to a single quiet-NaN bit
+pattern), not to force cross-host agreement.
 
-The cost is not the instruction decoding, which is about 90 lines
-mirroring the single-precision block, for the thirteen D mnemonics our
-whole RV corpus actually uses. It is that this file states a property
-worth keeping: nothing depends on the host FPU's rounding mode, so
-`<fenv.h>` is never needed, because WebAssembly has no rounding-mode
-control and a host mode makes results depend on whatever the embedding
-process left behind. Single precision honors that cheaply by computing
-in a host double and rounding down to single by hand. **For double
-there is no wider host type** (`long double` is x87-specific and absent
-on WebAssembly), so honoring it means a Berkeley-style softfloat
-binary64: directed rounding, the inexact flag, and a 106-bit product
-for the fused ops. That is a far larger and more delicate body of code
-than the rest of the FPU put together, to run six tests that qemu
-already runs.
+On by default is the right default for the three hosts. boris and
+smolmoo run double enabled: neither synchronizes floating-point state
+between systems, so host-dependent rounding never shows. Only aldeby
+synchronizes state, and only one program on it (the client/server
+prediction VM) is sensitive to it; that one must clear `dp` (or use the
+deterministic single-precision path) rather than impose a softfloat cost
+on everything else. `fadd.d`/`fsd` now run on `skj-run`, so a double
+Excelsior guest no longer needs qemu; qemu stays the cross-check for
+double, since it is the independent model.
 
-So the RV tier is split by design: qemu-riscv32 is the runner for
-anything with a double in it, `skj-run` for everything else. The same
-gap covers `_Float16`, which the core also lacks (`fmt` must be S), so
-a `_Float16` guest is qemu's too.
+`_Float16` (Zfh) is still absent on this core (`fmt` must be S or D), so
+a `_Float16` guest belongs to qemu.
 
-One of the seven was not really a float program: `exs_source_yield` has
-no doubles and used to fail because `start_rv_psabi.S` spills fs0-fs11
-with `fsd` on every source switch, and the F-only core cannot execute
-`fsd`. A coroutine switch has to preserve those registers, and the
-backend allocates them as doubles, so the honest fixes were a build
-variant or nothing. The build variant now exists: `make check-exc-rv-emu`
-runs the coroutine tier on `skj-run` with a soft-ctx crt, a mechanical
-`fsd`->`fsw` / `fld`->`flw` rewrite of `start_rv_psabi.S` (the Makefile
-generates it with `sed`). That is correct on this core precisely because
-it runs no double, so the saved float slots only ever hold 32-bit values.
-See "Guest mmap and guarded stacks" below for the private stack those
-coroutines run on.
+A committed regression test pins the D decoding: `tests/rv32/test_fp_d.c`
+(in `make test-rv32-unit`) checks each D op's dispatch, the full 64-bit
+register read/write, the double/single/integer conversions, FLD/FSD
+moving eight bytes, and that every D instruction is illegal when `dp` is
+clear.
+
+The coroutine tier keeps its soft-ctx crt for a separate reason.
+`exs_source_yield` and its siblings have no doubles but spill fs0-fs11
+with `fsd` on every source switch, since the backend allocates those
+callee-saved float registers as doubles. `make check-exc-rv-emu` runs
+that tier on `skj-run` with a soft-ctx crt, a mechanical `fsd`->`fsw` /
+`fld`->`flw` rewrite of `start_rv_psabi.S` (the Makefile generates it
+with `sed`). With `dp` on the core could now execute the `fsd` form too,
+so the rewrite is no longer a correctness requirement there; it stays
+because those slots only ever hold 32-bit values, so the narrow saves are
+exact and cheaper. See "Guest mmap and guarded stacks" below for the
+private stack those coroutines run on.
 
 ## Single-precision determinism across backends
 
@@ -683,10 +694,12 @@ determinism the games need, with no new emulator work.
 
 ## Limits
 
-- The RV32 core has F, and neither D nor Zfh, by decision rather than
-  omission (see above). A guest using `float` or `_Float16` on that
-  target belongs to qemu. ColdFire's FPU is full 64-bit, so the
-  ColdFire tier has no such split.
+- The RV32 core has F and D (D in host double, on by default; see
+  above), but not Zfh. A `_Float16` guest on that target belongs to
+  qemu. A double guest runs on `skj-run`, but its results are
+  host-dependent, so a guest that must agree bit-for-bit across hosts
+  uses the deterministic single-precision path or clears `dp`.
+  ColdFire's FPU is full 64-bit.
 - `skj-run` is user mode only. A bare-metal mode (memory-mapped
   devices, the shape the VM hosts use) is not exposed as a flag,
   though `tests/archtest.c` now shows the shape of one for RV32 and

@@ -146,8 +146,11 @@ typedef struct rv_cpu {
     uint32_t x[32];         /* x0-x31; x0 is hardwired to zero */
     uint32_t pc;            /* program counter */
 
-    /* F extension: 32 single-precision registers held as raw bit patterns */
-    uint32_t f[32];
+    /* F and D: 32 floating-point registers, FLEN = 64.  A double occupies the
+     * whole word; a single-precision value lives NaN-boxed in the low 32 bits
+     * (the high 32 all ones), and an operand that is not so boxed reads as the
+     * canonical single NaN, per the spec. */
+    uint64_t f[32];
     uint32_t fcsr;          /* frm in bits 7:5, fflags in bits 4:0 */
 
     /* Machine-mode CSRs */
@@ -206,6 +209,22 @@ typedef struct rv_cpu {
      * the specification's dependency: with those extensions off, those
      * forms raise the illegal-instruction trap after expansion. */
     int      zcb;
+
+    /* The D extension: double-precision floating point.  Unlike the F path,
+     * which computes every single-precision result through host-independent
+     * software rounding to stay bit-reproducible on any host, double arithmetic
+     * is done directly in the host's `double`.  So a double result is only as
+     * portable as the host FPU: the common IEEE-754 operations agree everywhere,
+     * but NaN payloads, and anything that would depend on the host rounding
+     * mode or on fused multiply-add, are not guaranteed bit-identical across
+     * hosts.  That is a deliberate trade (no softfloat core, no rounding
+     * tricks): it is on by default because the hosts that run doubles, boris
+     * and smolmoo, do not synchronise floating-point state between machines.
+     * The one consumer that does, aldeby's client/server prediction, is a
+     * single program that must clear this for a reproducible double, or pin its
+     * prediction math to single precision.  Clearing it makes a plain RV32IMFC
+     * machine whose double instructions trap as illegal. */
+    int      dp;
 
     uint64_t cycles;        /* retired instruction counter */
     rv_trace_t trace;       /* diagnostic event ring buffer */

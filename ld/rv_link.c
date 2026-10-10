@@ -286,8 +286,9 @@ rv_ld_link(struct linker *ld)
                 die("%s: reloc references unmapped symbol %d",
                     obj->path, rel->sym_idx);
             struct ld_symbol *gsym = &ld->syms[gi];
-            if (!gsym->defined)
+            if (!gsym->defined && !gsym->weak)
                 die("%s: undefined symbol '%s'", obj->path, gsym->name);
+            /* a weak-undefined symbol has value 0, so the reloc resolves to 0 */
 
             uint32_t file_off = (isec->assigned_vaddr - os->vaddr) +
                                 rel->offset;

@@ -45,20 +45,24 @@ shdr_at(const uint8_t *buf, uint32_t shoff, int idx)
 int
 ld_read_object(struct arena *a, struct ld_object *obj, const char *path)
 {
-    const uint8_t *buf;
-    size_t fsize;
+    if (mapfile_open(&obj->mf, path) != OK)
+        die("cannot open %s", path);
+    return ld_parse_object(a, obj, obj->mf.data, obj->mf.len, path);
+}
+
+/* Parse a relocatable object already in memory (a mapped file or an archive
+   member copied out of its archive), under the diagnostic name `path`. */
+int
+ld_parse_object(struct arena *a, struct ld_object *obj,
+                const uint8_t *buf, size_t fsize, const char *path)
+{
     uint32_t shoff;
     int shnum, shstrndx;
     const uint8_t *shstrtab_hdr;
     const char *shstrtab;
     int i;
 
-    if (mapfile_open(&obj->mf, path) != OK)
-        die("cannot open %s", path);
-
     obj->path = path;
-    buf = obj->mf.data;
-    fsize = obj->mf.len;
 
     if (fsize < 52)
         die("%s: too small for ELF header", path);

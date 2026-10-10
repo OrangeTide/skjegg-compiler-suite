@@ -16,8 +16,9 @@
     .globl _start
     .globl read
     .globl write
-    .globl exit
+    .weak  exit                 | libc's exit (flush + atexit) overrides this
     .globl _exit
+    .weak  __libc_fini          | provided by libc; absent (0) when freestanding
     .globl __cont_capture
     .globl __cont_resume
 
@@ -26,11 +27,18 @@ _start:
     sub.l   #16, %sp            | default stack is a single page; recursive
                                 | tests overflow it within a few frames)
     jsr     main
-    move.l  %d0, %d1            | exit status
+    move.l  %d0, %d2            | preserve main's return across the finalizer
+    lea     __libc_fini, %a0    | weak: 0 when no libc is linked
+    move.l  %a0, %d0
+    tst.l   %d0
+    beq     1f
+    jsr     (%a0)               | run atexit handlers and flush stdio
+1:
+    move.l  %d2, %d1            | exit status
     move.l  #1, %d0             | __NR_exit
     trap    #0
     | unreachable
-1:  bra     1b
+2:  bra     2b
 
 | int read(int fd, char *buf, int n);
 read:

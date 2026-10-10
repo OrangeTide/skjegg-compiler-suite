@@ -117,6 +117,31 @@ if [ "$has_cc" -eq 1 ] || [ "$has_cpp" -eq 1 ]; then
     need_cpp_lib=1
 fi
 
+# The cross driver (skjcc) ships with cc.  It is useful for a target only when
+# that target's in-tree assembler and linker are also vendored, since the driver
+# runs the binutils-free skj-as*/skj-ld* pipeline (the ColdFire path uses
+# skj-as/skj-ld, not m68k-linux-gnu-as/ld).  Stage a target's crt/runtime only
+# when its whole in-tree toolchain is present.
+drv_cf=0 drv_rv=0 drv_mips=0
+if [ "$has_cc" -eq 1 ]; then
+    [ "$has_cf" -eq 1 ]   && [ "$has_as" -eq 1 ]      && [ "$has_ld" -eq 1 ]      && drv_cf=1
+    [ "$has_rv" -eq 1 ]   && [ "$has_as_rv" -eq 1 ]   && [ "$has_ld_rv" -eq 1 ]   && drv_rv=1
+    [ "$has_mips" -eq 1 ] && [ "$has_as_mips" -eq 1 ] && [ "$has_ld_mips" -eq 1 ] && drv_mips=1
+fi
+has_driver=0
+[ $((drv_cf + drv_rv + drv_mips)) -gt 0 ] && has_driver=1
+
+# The hosted libc (printf/malloc/stdio/... plus the coroutine primitive and the
+# cooperative threads.h subset over it) ships
+# with the driver when skj-ar is also vendored, since its on-demand libc.a is
+# built with skj-ar.  Without ar the driver stays freestanding (the crt plus the
+# runtime helpers), as before.
+has_libc=0
+[ "$has_driver" -eq 1 ] && [ "$has_ar" -eq 1 ] && has_libc=1
+if [ "$has_driver" -eq 1 ] && [ "$has_ar" -eq 0 ]; then
+    printf 'note: add the "ar" component for a hosted libc; the driver is freestanding without it\n' >&2
+fi
+
 # ---- fetch ----
 
 command -v git >/dev/null || die "git is required"
@@ -209,6 +234,30 @@ if [ "$has_cc" -eq 1 ]; then
     [ "$has_mips" -eq 1 ] && cp "$S/runtime/va_mips.c" "$DEST/runtime/"
 fi
 
+# cross driver (skjcc): one command over the per-target cc -> as -> ld pipeline.
+# Ships with cc, for the targets whose in-tree toolchain is also vendored.  The
+# ColdFire driver links half.o (the _Float16 helper), so half.c comes along;
+# the MIPS backend already copied it, RISC-V uses native Zfh and needs none.
+if [ "$has_driver" -eq 1 ]; then
+    mkdir -p "$DEST/driver" "$DEST/runtime"
+    cp "$S/driver/main.c" "$DEST/driver/"
+    [ "$drv_cf" -eq 1 ] && cp "$S/runtime/half.c" "$DEST/runtime/"
+fi
+
+# The hosted libc: its C sources and the public headers skj-cc resolves from the
+# baked-in include dir, the coroutine context switch for each driver target, and
+# the 64-bit divide helpers (soft64.c, divide-only) the rv/mips libc needs for
+# 64-bit printf.  Archived into a per-target libc.a the driver links on demand.
+if [ "$has_libc" -eq 1 ]; then
+    mkdir -p "$DEST/libc" "$DEST/include" "$DEST/runtime"
+    cp "$S"/libc/*.c "$S/libc/fmt.h" "$DEST/libc/"
+    cp "$S"/include/*.h "$DEST/include/"
+    [ "$drv_cf" -eq 1 ]   && cp "$S/runtime/co_switch_cf.S" "$DEST/runtime/"
+    [ "$drv_rv" -eq 1 ]   && cp "$S/runtime/co_switch_rv.S" "$DEST/runtime/"
+    [ "$drv_mips" -eq 1 ] && cp "$S/runtime/co_switch_mips.S" "$DEST/runtime/"
+    { [ "$drv_rv" -eq 1 ] || [ "$drv_mips" -eq 1 ]; } && cp "$S/runtime/soft64.c" "$DEST/runtime/"
+fi
+
 # cpp library (needed by cc and cpp tool)
 if [ "$need_cpp_lib" -eq 1 ]; then
     mkdir -p "$DEST/cpp"
@@ -251,7 +300,8 @@ if [ "$has_ld" -eq 1 ] || [ "$has_ld_rv" -eq 1 ] || [ "$has_ld_mips" -eq 1 ]; th
        "$S/ld/ld.h" "$S/ld/mapfile.h" "$DEST/ld/"
 fi
 if [ "$has_ld" -eq 1 ]; then                    # ColdFire ELF I/O + tool
-    cp "$S/ld/elf_read.c" "$S/ld/elf_write.c" "$S/ld/main.c" "$DEST/ld/"
+    cp "$S/ld/elf_read.c" "$S/ld/elf_write.c" "$S/ld/archive.c" \
+       "$S/ld/main.c" "$DEST/ld/"
 fi
 if [ "$has_ld_rv" -eq 1 ]; then                 # RISC-V ELF I/O + reloc + tool
     cp "$S/ld/rv_elf_read.c" "$S/ld/rv_link.c" "$S/ld/rv_elf_write.c" \
@@ -293,8 +343,12 @@ fi
 # riscv also selected it adds the jit/ pieces the RV32 runtime needs.  The
 # freestanding runtime and its libkpaot*-free rules arrive with a later step.
 if [ "$has_kp" -eq 1 ]; then
-    mkdir -p "$DEST/kobold" "$DEST/backend" "$DEST/jit" "$DEST/prebuild"
+    mkdir -p "$DEST/kobold" "$DEST/backend" "$DEST/jit" "$DEST/prebuild" "$DEST/runtime"
     cp "$S"/kobold/*.c "$S"/kobold/*.h "$S"/kobold/*.S "$DEST/kobold/"
+    # The coroutine context switches live in runtime/ (beside start*.S); the
+    # Kobold runtime links the one for each selected backend.
+    cp "$S/runtime/co_switch_x86.S" "$S/runtime/co_switch_rv.S" \
+       "$S/runtime/co_switch_arm64.S" "$DEST/runtime/"
     cp "$S/kobold/kpcom.pas" "$S/kobold/version.inc" "$S/kobold/stdlib.inc" \
        "$DEST/kobold/"
     cp "$S/backend/regalloc_x86.c" "$S/backend/x86_select.c" \
@@ -477,7 +531,7 @@ if [ "$has_ld" -eq 1 ]; then
     cat >> "$MK" <<'MK'
 SKJ_LD_LIB := $(SKJEGG)ld/elf_read.c $(SKJEGG)ld/script.c \
               $(SKJEGG)ld/link.c $(SKJEGG)ld/elf_write.c \
-              $(SKJEGG)ld/mapfile.c
+              $(SKJEGG)ld/mapfile.c $(SKJEGG)ld/archive.c
 MK
 fi
 if [ "$has_as_rv" -eq 1 ]; then
@@ -555,23 +609,23 @@ fi
 cc_inc='-I$(SKJEGG)cc -I$(SKJEGG)cpp -I$(SKJEGG)ir -DSKJ_INCLUDE_DIR='\''"$(abspath $(SKJEGG)include)"'\'
 if [ "$has_cc" -eq 1 ] && [ "$has_cf" -eq 1 ]; then
     emit_compiler skj-cc SKJ_CC SKJ_CF \
-        "$cc_inc" '$(SKJ_CPP_LIB)'
+        "-DCC_M68K $cc_inc" '$(SKJ_CPP_LIB)'
 fi
 if [ "$has_cc" -eq 1 ] && [ "$has_rv" -eq 1 ]; then
     # The RISC-V C compiler emits the standard ILP32 psABI (a0..a7) so its
     # output interlinks with gcc; it pairs with the standalone RV toolchain
     # (as-rv/ld-rv) and runtime/start_rv_psabi_cc.S.
     emit_compiler skj-cc-rv SKJ_CC SKJ_RV \
-        "$cc_inc" '$(SKJ_CPP_LIB)'
+        "-DCC_RISCV $cc_inc" '$(SKJ_CPP_LIB)'
 fi
 if [ "$has_cc" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
     emit_compiler skj-cc-mips SKJ_CC SKJ_MIPS \
-        "$cc_inc" '$(SKJ_CPP_LIB)'
+        "-DCC_MIPS $cc_inc" '$(SKJ_CPP_LIB)'
     # The soft-float build: same sources with -DMIPS_SOFTFLOAT, emitting no
     # coprocessor-1 instruction and lowering every float op to a runtime/
     # softfloat.c call, for the FPU-less R3051 (the PlayStation).
     emit_compiler skj-cc-mips-sf SKJ_CC SKJ_MIPS \
-        "-DMIPS_SOFTFLOAT $cc_inc" '$(SKJ_CPP_LIB)'
+        "-DCC_MIPS -DMIPS_SOFTFLOAT $cc_inc" '$(SKJ_CPP_LIB)'
 fi
 
 # tool binary rules
@@ -632,6 +686,87 @@ if [ "$has_ar" -eq 1 ]; then
     } >> "$MK"
 fi
 
+# cross driver (skjcc).  The driver links each target's crt and runtime helpers
+# from <libdir>/<target>/; the build stages that layout under $(BUILD)/lib from
+# the already-built runtime objects, and bakes its absolute path in as the
+# default lib dir (SKJ_CC_LIB overrides it at run time).  The staged files are
+# prerequisites so `make skjegg` produces a working driver; the sub-tools it
+# execs (skj-cc*, skj-as*, skj-ld*) are in SKJ_ALL already.
+# Emit the per-target libc.a (with the archived co_switch) and fini.o rules into
+# the generated Makefile.  $1 lib-dir name, $2 skj-cc, $3 skj-as, $4 co_switch
+# source under runtime/.  LIBC_SRCS is defined once below.
+emit_libc_rules() {
+    _d=$1; _cc=$2; _as=$3; _csw=$4
+    {
+        printf '\n$(BUILD)/lib/%s/obj/co_switch.o: $(SKJEGG)%s $(BUILD)/%s | $(BUILD)\n' "$_d" "$_csw" "$_as"
+        printf '\t@mkdir -p $(BUILD)/lib/%s/obj\n' "$_d"
+        printf '\t@$(BUILD)/%s -o $@ $(SKJEGG)%s\n' "$_as" "$_csw"
+        printf '$(BUILD)/lib/%s/libc.a: $(BUILD)/%s $(BUILD)/%s $(BUILD)/skj-ar $(BUILD)/lib/%s/obj/co_switch.o | $(BUILD)\n' "$_d" "$_cc" "$_as" "$_d"
+        printf '\t@mkdir -p $(BUILD)/lib/%s/obj\n' "$_d"
+        printf '\t@for s in $(LIBC_SRCS); do \\\n'
+        printf '\t    $(BUILD)/%s -DSKJ_LIBC_FLOAT -I$(SKJEGG)include -I$(SKJEGG)libc -o $(BUILD)/lib/%s/obj/$$s.s $(SKJEGG)libc/$$s.c && \\\n' "$_cc" "$_d"
+        printf '\t    $(BUILD)/%s -o $(BUILD)/lib/%s/obj/$$s.o $(BUILD)/lib/%s/obj/$$s.s || exit 1; \\\n' "$_as" "$_d" "$_d"
+        printf '\tdone\n'
+        printf '\t@rm -f $@\n'
+        printf '\t@$(BUILD)/skj-ar rcs $@ $(addprefix $(BUILD)/lib/%s/obj/,$(addsuffix .o,$(LIBC_SRCS))) $(BUILD)/lib/%s/obj/co_switch.o\n' "$_d" "$_d"
+        printf '$(BUILD)/lib/%s/fini.o: $(BUILD)/%s $(BUILD)/%s | $(BUILD)\n' "$_d" "$_cc" "$_as"
+        printf '\t@mkdir -p $(BUILD)/lib/%s\n' "$_d"
+        printf '\t@$(BUILD)/%s -I$(SKJEGG)include -o $(BUILD)/lib/%s/fini.s $(SKJEGG)libc/fini.c\n' "$_cc" "$_d"
+        printf '\t@$(BUILD)/%s -o $@ $(BUILD)/lib/%s/fini.s\n' "$_as" "$_d"
+    } >> "$MK"
+}
+
+if [ "$has_driver" -eq 1 ]; then
+    drv_lib=""
+    if [ "$has_libc" -eq 1 ]; then
+        printf '\nLIBC_SRCS := string ctype stdlib printf stdio assert malloc sbrk errno strerror rand strtod scanf coro threads\n' >> "$MK"
+    fi
+    if [ "$drv_cf" -eq 1 ]; then
+        {
+            printf '\n$(BUILD)/lib/coldfire/crt0.o: $(BUILD)/start.o\n\t@mkdir -p $(@D) && cp $< $@\n'
+            printf '$(BUILD)/lib/coldfire/half.o: $(BUILD)/half.o\n\t@mkdir -p $(@D) && cp $< $@\n'
+            printf '$(BUILD)/lib/coldfire/va_cf.o: $(BUILD)/va_cf.o\n\t@mkdir -p $(@D) && cp $< $@\n'
+        } >> "$MK"
+        drv_lib="$drv_lib \$(BUILD)/lib/coldfire/crt0.o \$(BUILD)/lib/coldfire/half.o \$(BUILD)/lib/coldfire/va_cf.o"
+        if [ "$has_libc" -eq 1 ]; then
+            emit_libc_rules coldfire skj-cc skj-as runtime/co_switch_cf.S
+            drv_lib="$drv_lib \$(BUILD)/lib/coldfire/libc.a \$(BUILD)/lib/coldfire/fini.o"
+        fi
+    fi
+    if [ "$drv_rv" -eq 1 ]; then
+        {
+            printf '\n$(BUILD)/lib/riscv/crt0.o: $(BUILD)/start_rv.o\n\t@mkdir -p $(@D) && cp $< $@\n'
+            printf '$(BUILD)/lib/riscv/va_rv.o: $(BUILD)/va_rv.o\n\t@mkdir -p $(@D) && cp $< $@\n'
+        } >> "$MK"
+        drv_lib="$drv_lib \$(BUILD)/lib/riscv/crt0.o \$(BUILD)/lib/riscv/va_rv.o"
+        if [ "$has_libc" -eq 1 ]; then
+            # The rv libc needs the 64-bit divide helpers (divide-only soft64) its
+            # 64-bit printf uses; the rv crt does not carry them.
+            printf '\n$(BUILD)/lib/riscv/soft64_div.o: $(SKJEGG)runtime/soft64.c | $(BUILD)\n\t@mkdir -p $(@D)\n\t$(RV_CC) -std=c99 -O2 -Wall -ffreestanding -march=rv32imfd -mabi=ilp32 -DSOFT64_NO_MULSHIFT -c -o $@ $<\n' >> "$MK"
+            emit_libc_rules riscv skj-cc-rv skj-as-rv runtime/co_switch_rv.S
+            drv_lib="$drv_lib \$(BUILD)/lib/riscv/soft64_div.o \$(BUILD)/lib/riscv/libc.a \$(BUILD)/lib/riscv/fini.o"
+        fi
+    fi
+    if [ "$drv_mips" -eq 1 ]; then
+        {
+            printf '\n$(BUILD)/lib/mips/crt0.o: $(BUILD)/start_mips.o\n\t@mkdir -p $(@D) && cp $< $@\n'
+            printf '$(BUILD)/lib/mips/half.o: $(BUILD)/half_mips.o\n\t@mkdir -p $(@D) && cp $< $@\n'
+            printf '$(BUILD)/lib/mips/va_mips.o: $(BUILD)/va_mips.o\n\t@mkdir -p $(@D) && cp $< $@\n'
+        } >> "$MK"
+        drv_lib="$drv_lib \$(BUILD)/lib/mips/crt0.o \$(BUILD)/lib/mips/half.o \$(BUILD)/lib/mips/va_mips.o"
+        if [ "$has_libc" -eq 1 ]; then
+            printf '\n$(BUILD)/lib/mips/soft64_div.o: $(SKJEGG)runtime/soft64.c | $(BUILD)\n\t@mkdir -p $(@D)\n\t$(MIPS_CC) -march=mips1 -EL -G 0 -std=c99 -O2 -Wall -ffreestanding -DSOFT64_NO_MULSHIFT -c -o $@ $<\n' >> "$MK"
+            emit_libc_rules mips skj-cc-mips skj-as-mips runtime/co_switch_mips.S
+            drv_lib="$drv_lib \$(BUILD)/lib/mips/soft64_div.o \$(BUILD)/lib/mips/libc.a \$(BUILD)/lib/mips/fini.o"
+        fi
+    fi
+    {
+        printf '\nSKJ_ALL += $(BUILD)/skjcc\n'
+        printf '$(BUILD)/skjcc: $(SKJEGG)driver/main.c%s | $(BUILD)\n' "$drv_lib"
+        printf '\t$(CC) $(CFLAGS) -DSKJ_LIB_DIR='\''"$(abspath $(BUILD))/lib"'\'' -o $@ $(SKJEGG)driver/main.c\n'
+    } >> "$MK"
+fi
+
 # Kobold-Pascal AOT path: the host front end skj-kpc (the seed AOT-compiled) and
 # the KPM1 backend compiler skj-kp, plus the hosted runtime libkpaot.a.  With riscv
 # also selected, skj-kp-rv compiles KPM1 to RV32 asm (its target runtime, hosted
@@ -647,7 +782,7 @@ SKJ_BE_X64 := $(SKJEGG)backend/regalloc_x86.c $(SKJEGG)backend/x86_select.c \
 SKJ_KP_AOT_RT := $(SKJEGG)kobold/aot_rt.c $(SKJEGG)kobold/kp_host.c $(SKJEGG)kobold/str_core.c \
                  $(SKJEGG)kobold/str_fmt.c $(SKJEGG)kobold/dynarr.c $(SKJEGG)kobold/map.c \
                  $(SKJEGG)kobold/rt_host.c $(SKJEGG)kobold/co_shim.c \
-                 $(SKJEGG)kobold/co_switch_x86.S $(SKJEGG)jit/call_guest_x86.S
+                 $(SKJEGG)runtime/co_switch_x86.S $(SKJEGG)jit/call_guest_x86.S
 SKJ_KP_CFLAGS := $(CFLAGS) -DX86_BITS=64 -DKP_FREESTANDING -DKP_REAL=double \
                  -I$(SKJEGG)ir -I$(SKJEGG)jit -I$(SKJEGG)backend -I$(SKJEGG)kobold
 
@@ -758,6 +893,25 @@ fi
 if [ "$has_cc" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
     {
         printf '\n$(BUILD)/va_mips.o: $(SKJEGG)runtime/va_mips.c | $(BUILD)\n'
+        printf '\t$(MIPS_CC) -march=mips1 -EL -G 0 -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<\n'
+    } >> "$MK"
+fi
+
+# The _Float16 helper (half.c) and the MIPS crt the cross driver links.  half.o
+# is linked for ColdFire and MIPS cc programs (IR_FLH/FSH lower to these calls,
+# no hardware _Float16); start_mips.o is the MIPS Linux crt, GNU-assembled like
+# the RISC-V and ColdFire crts above (skj-ld-mips reads GNU objects).
+if [ "$drv_cf" -eq 1 ]; then
+    {
+        printf '\n$(BUILD)/half.o: $(SKJEGG)runtime/half.c | $(BUILD)\n'
+        printf '\t$(M68K_CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<\n'
+    } >> "$MK"
+fi
+if [ "$drv_mips" -eq 1 ]; then
+    {
+        printf '\n$(BUILD)/start_mips.o: $(SKJEGG)runtime/start_mips.S | $(BUILD)\n'
+        printf '\t$(MIPS_AS) -march=mips1 -EL -o $@ $<\n'
+        printf '\n$(BUILD)/half_mips.o: $(SKJEGG)runtime/half.c | $(BUILD)\n'
         printf '\t$(MIPS_CC) -march=mips1 -EL -G 0 -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<\n'
     } >> "$MK"
 fi

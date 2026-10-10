@@ -36,6 +36,7 @@
 
 #define STB_LOCAL       0
 #define STB_GLOBAL      1
+#define STB_WEAK        2
 
 #define STT_NOTYPE      0
 #define STT_SECTION     3
@@ -111,6 +112,9 @@ struct ld_symbol {
     const char *name;
     uint32_t value;
     int defined;
+    int weak;           /* the resolved symbol is weak (def or ref); a strong
+                           def or ref clears it, so an unresolved weak symbol
+                           resolves to 0 instead of being an error */
     int obj_idx;
     int sec_idx;
 };
@@ -199,6 +203,13 @@ struct linker {
 
 /* elf_read.c */
 int ld_read_object(struct arena *a, struct ld_object *obj, const char *path);
+int ld_parse_object(struct arena *a, struct ld_object *obj,
+                    const uint8_t *buf, size_t size, const char *path);
+
+/* archive.c: ar(1) archive (.a) support, symbol-index driven member pulls */
+int ld_is_archive(const char *path);
+int ld_read_archive(struct linker *ld, const char *path);
+void ld_archive_reset(void);
 
 /* script.c */
 void ld_parse_script(struct arena *a, struct ld_script *script, const char *src);

@@ -239,8 +239,10 @@ reals. It is shared between the JIT (bound as host symbols) and the AOT path
   formatting/parsing (`Str`, `Val`).
 - `dynarr.c` — the guest-owned dynamic array (`array of T`).
 - `map.c` — the guest-owned string-keyed associative array (`map of T`).
-- `co.c`, `co_switch_{x86,arm64,rv}.S`, `co_shim.c` — stackful coroutines
-  (the Muxx runtime) and the host primitives they need.
+- `co.c`, `co_shim.c` — stackful coroutines (the coroutine runtime) and the
+  host primitives they need. The per-arch context switch is
+  `runtime/co_switch_{x86,arm64,rv}.S`, shared with the libc coroutine
+  primitive (`doc/tools/libc.md`).
 - `handle.h` — refcounted (ARC) opaque handles.
 - `rt_host.c` — the platform layer: the guest heap over a low-memory mmap (so a
   guest address fits the 32 bits the front end models), plus a live-bytes
@@ -397,7 +399,7 @@ raises it, and the checked ops never appear in C.
   `tests/kp-src` is the portable set: every mode, including the freestanding one,
   runs it, so it stays to integer, string, int64, and parameters.
 - **In-tree, behavioral corpus**: `tests/kp-corpus` is the broader behavioral set,
-  63 real Kobold programs. Each `<name>.expected` is the program's stdout as
+  64 real Kobold programs. Each `<name>.expected` is the program's stdout as
   produced by the **independent** reference VM `kprun`, not by a skjegg tool, so
   the corpus is an oracle, not a self-comparison. It covers arithmetic, records,
   arrays, maps, dynamic arrays, strings, enums, sets, coroutines, reals and
@@ -406,8 +408,9 @@ raises it, and the checked ops never appear in C.
   arm64 AOT paths at once, so it also checks that every backend agrees.
   `make check-kp-corpus` runs the x86 JIT and AOT (in `check-all`);
   `check-kp-corpus-rv` and `check-kp-corpus-arm64` run the AOT path under qemu (in
-  `check-emu-all`). The corpus is 63 programs, the failable two-return (`CALL2`)
-  cases `failforms`/`failmethod` among them (see the reader note below).
+  `check-emu-all`). The corpus is 64 programs, the failable two-return (`CALL2`)
+  cases `failforms`/`failmethod`/`failmanaged` among them (see the reader note
+  below); `failmanaged` covers `or else` recovering a managed result.
 - **In-tree, multi-unit corpus**: `tests/kp-multi` is the cross-module set, the
   one behavioral surface the single-module corpus cannot reach. A fixture is told
   apart by its first keyword: `program NAME;` is a test (paired with
@@ -450,9 +453,32 @@ raises it, and the checked ops never appear in C.
   such a tree. Neither is wired into skjegg CI; the in-tree corpora are the
   committed oracle.
 
+## Language documentation
+
+This file is the in-tree reference for how the Kobold front end is built,
+bootstrapped, and run inside skjegg. The language itself and its host contract
+are specified by the companion documents in this directory:
+
+- `kp-language.md` — the language reference: types, statements, routines, and
+  built-ins.
+- `kp-grammar.md` — the surface grammar (EBNF).
+- `kp-units.md` — units and separate compilation: `uses`, interface
+  fingerprints, and guest-record traits.
+- `kp-module-format.md` — the KPM1 serialized-IR format in full (this file
+  summarizes the subset the reader accepts).
+- `kp-errors.md` — the failable-routine model and the trap semantics.
+- `kp-diagnostics.md` — the compiler's diagnostic format and codes.
+- `kp-abi.md` — the host ABI: values, calls, handles, lifetime, and faults.
+- `kp-embedding.md` — the step-by-step guide to embedding the runtime in a C
+  host.
+- `kp-conformance.md` — the map against ISO 7185 / 10206 and the dialect
+  extensions.
+- `kp-hardening.md` — the plan for running untrusted scripts safely.
+- `kp-property.md` — the deferred uniform-access (`property`) feature.
+
 ## See also
 
-- `doc/jit.md` — the shared in-process JIT the Kobold tools build on.
-- `doc/ir.md` — the IR a KPM1 module is read into.
+- `doc/tools/jit.md` — the shared in-process JIT the Kobold tools build on.
+- `doc/internals/ir.md` — the IR a KPM1 module is read into.
 - `PLAN.md`, "Kobold-Pascal in-process linking and lazy compilation" — the
   deferred lazy-compilation work (Steps C and D) and why it waits.

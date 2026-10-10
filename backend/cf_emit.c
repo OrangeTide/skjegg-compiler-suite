@@ -339,6 +339,7 @@ static int arg_is_float[CF_MAX_ARGS];
 static int arg_is_f32[CF_MAX_ARGS];
 static int arg_is_i64[CF_MAX_ARGS];
 static int narg;
+static int *temp_is_i64;         /* per-temp map, built per function */
 static int label_prefix;
 static int uses_floats;
 static int fcmp_serial;
@@ -602,12 +603,21 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
             fprintf(out, "\tmove.l %s, %%d1\n", sb);
             sb = "%d1";
         }
+        /* remainder = dividend - (dividend / divisor) * divisor.  The quotient
+           and product are built in %d0; the dividend must survive until the
+           final subtract, so it is saved and restored into %d1 (the divisor in
+           %d1 is dead after the muls).  Restoring into the destination instead
+           breaks when the destination is %d0, since that holds the product: the
+           subtract would then be sub.l %d0,%d0 and the modulo would always be
+           zero.  Computing in %d1 and moving to the destination avoids that. */
         fprintf(out, "\tmove.l %s, -(%%sp)\n", sa);
         fprintf(out, "\tmove.l %s, %%d0\n", sa);
         fprintf(out, "\t%s %s, %%d0\n", divop, sb);
         fprintf(out, "\tmuls.l %s, %%d0\n", sb);
-        fprintf(out, "\tmove.l (%%sp)+, %s\n", sd);
-        fprintf(out, "\tsub.l %%d0, %s\n", sd);
+        fprintf(out, "\tmove.l (%%sp)+, %%d1\n");
+        fprintf(out, "\tsub.l %%d0, %%d1\n");
+        if (strcmp(sd, "%d1") != 0)
+            fprintf(out, "\tmove.l %%d1, %s\n", sd);
         wd(out, fn, i->dst, sd);
         break;
     }
@@ -668,16 +678,22 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_JMP:
         fprintf(out, "\tbra .L%d_%d\n", label_prefix, i->label);
         break;
-    case IR_BZ: {
-        const char *sa = rs(out, fn, i->a, 0);
-        fprintf(out, "\ttst.l %s\n\tbeq .L%d_%d\n",
-            sa, label_prefix, i->label);
-        break;
-    }
+    case IR_BZ:
     case IR_BNZ: {
-        const char *sa = rs(out, fn, i->a, 0);
-        fprintf(out, "\ttst.l %s\n\tbne .L%d_%d\n",
-            sa, label_prefix, i->label);
+        const char *bcc = (i->op == IR_BZ) ? "beq" : "bne";
+        if (i->a >= 0 && i->a < fn->ntemps && temp_is_i64[i->a]) {
+            /* test the full 64-bit value: OR both words into a scratch.
+               move the high word first (a nop when it is already d0), so
+               the low word (never d0) is not clobbered before the or. */
+            int hi, lo;
+            i64_rs(out, fn, i->a, &hi, &lo);
+            fprintf(out, "\tmove.l %s, %%d0\n\tor.l %s, %%d0\n\t%s .L%d_%d\n",
+                dregs[hi], dregs[lo], bcc, label_prefix, i->label);
+        } else {
+            const char *sa = rs(out, fn, i->a, 0);
+            fprintf(out, "\ttst.l %s\n\t%s .L%d_%d\n",
+                sa, bcc, label_prefix, i->label);
+        }
         break;
     }
     case IR_LABEL:
@@ -1469,6 +1485,13 @@ emit_function(FILE *out, struct ir_func *fn)
     label_prefix = ++fn_serial;
     uses_floats = func_uses_fpregs(fn);
 
+    /* map each temp defined by a 64-bit op, so a truthiness test on an
+       i64 operand (IR_BZ/IR_BNZ) tests both words, not just one. */
+    temp_is_i64 = arena_zalloc(fn->arena, fn->ntemps * sizeof(int));
+    for (i = fn->head; i; i = i->next)
+        if (i->dst >= 0 && i->dst < fn->ntemps && ir_op_is_i64_def(i->op))
+            temp_is_i64[i->dst] = 1;
+
     fprintf(out, "\n\t.text\n\t.align 2\n");
     if (!fn->is_local)
         fprintf(out, "\t.globl %s\n", fn->name);
@@ -1518,6 +1541,20 @@ emit_string_bytes(FILE *out, const char *s, int n)
     fputs("\"\n", out);
 }
 
+/* format a relocation operand "sym", "sym + N", or "sym - N" (the addend is a
+   symbol-relative initializer's byte offset, carried in the init value word) */
+static const char *
+sym_ref(char *buf, size_t n, const char *sym, int64_t addend)
+{
+    if (addend > 0)
+        snprintf(buf, n, "%s + %lld", sym, (long long)addend);
+    else if (addend < 0)
+        snprintf(buf, n, "%s - %lld", sym, (long long)-addend);
+    else
+        snprintf(buf, n, "%s", sym);
+    return buf;
+}
+
 /* emit an aggregate global's byte image: pad to each item's offset, emit the
    sized value (8-byte high word first, big-endian m68k), pad to the full size */
 static void
@@ -1531,9 +1568,10 @@ emit_init_image(FILE *out, struct ir_global *g)
             fprintf(out, "\t.space %d\n", it->offset - cur);
             cur = it->offset;
         }
-        if (it->sym)
-            fprintf(out, "\t.long %s\n", it->sym);
-        else if (it->size == 8) {
+        if (it->sym) {
+            char ref[160];
+            fprintf(out, "\t.long %s\n", sym_ref(ref, sizeof ref, it->sym, it->ival));
+        } else if (it->size == 8) {
             uint64_t b = (uint64_t)it->ival;
             fprintf(out, "\t.long 0x%08x\n", (unsigned)(b >> 32));
             fprintf(out, "\t.long 0x%08x\n", (unsigned)(b & 0xFFFFFFFF));
@@ -1549,48 +1587,72 @@ emit_init_image(FILE *out, struct ir_global *g)
         fprintf(out, "\t.space %d\n", g->arr_size - cur);
 }
 
+/* true when a global has no initializer at all (zero-filled): it belongs in
+   .bss (NOBITS), so its zero bytes cost no file space, rather than in .data. */
+static int
+global_is_bss(struct ir_global *g)
+{
+    return !g->inits && !g->init_string && g->init_count == 0;
+}
+
+static int
+global_elsz(struct ir_global *g)
+{
+    switch (g->base_type) {
+    case IR_I8:  return 1;
+    case IR_I16: return 2;
+    case IR_F64: return 8;
+    case IR_I64: return 8;
+    default:     return 4;
+    }
+}
+
+/* the alignment + optional .globl + label common to both sections */
+static void
+emit_global_head(FILE *out, struct ir_global *g)
+{
+    /* m68k aligns to 4; an _Alignas request (g->align) may raise it.  On m68k
+       (both m68k-linux-gnu-as and skj-as) the .align operand is a byte count,
+       not a power-of-two exponent (RISC-V's is the exponent), so emit the
+       alignment in bytes. */
+    int alb = 4;
+    if (g->align > alb)
+        alb = g->align;
+    fprintf(out, "\t.align %d\n", alb);
+    if (!g->is_local)
+        fprintf(out, "\t.globl %s\n", g->name);
+    fprintf(out, "%s:\n", g->name);
+}
+
 static void
 emit_globals(FILE *out, struct ir_program *prog)
 {
     struct ir_global *g;
+    int any_bss = 0;
 
     fputs("\n\t.data\n", out);
     for (g = prog->globals; g; g = g->next) {
-        int elsz;
+        int elsz = global_elsz(g);
 
-        switch (g->base_type) {
-        case IR_I8:  elsz = 1; break;
-        case IR_I16: elsz = 2; break;
-        case IR_F64: elsz = 8; break;
-        case IR_I64: elsz = 8; break;
-        default:     elsz = 4; break;
+        if (global_is_bss(g)) {
+            any_bss = 1;
+            continue;
         }
-
-        {
-            /* m68k aligns to 4; an _Alignas request (g->align) may raise it.
-               On m68k (both m68k-linux-gnu-as and skj-as) the .align operand
-               is a byte count, not a power-of-two exponent (RISC-V's is the
-               exponent), so emit the alignment in bytes. */
-            int alb = 4;
-            if (g->align > alb)
-                alb = g->align;
-            fprintf(out, "\t.align %d\n", alb);
-        }
-        if (!g->is_local)
-            fprintf(out, "\t.globl %s\n", g->name);
-        fprintf(out, "%s:\n", g->name);
+        emit_global_head(out, g);
         if (g->inits) {
             emit_init_image(out, g);
         } else if (g->init_string) {
             emit_string_bytes(out, g->init_string,
                       g->init_strlen);
-        } else if (g->init_count > 0) {
+        } else {
             int k;
             for (k = 0; k < g->init_count; k++) {
-                if (g->init_syms && g->init_syms[k])
+                if (g->init_syms && g->init_syms[k]) {
+                    char ref[160];
                     fprintf(out, "\t.long %s\n",
-                        g->init_syms[k]);
-                else if (g->base_type == IR_F64 ||
+                        sym_ref(ref, sizeof ref, g->init_syms[k],
+                                g->init_ivals[k]));
+                } else if (g->base_type == IR_F64 ||
                      g->base_type == IR_I64) {
                     uint64_t bits = (uint64_t)g->init_ivals[k];
                     fprintf(out, "\t.long 0x%08x\n",
@@ -1610,12 +1672,23 @@ emit_globals(FILE *out, struct ir_program *prog)
             if (g->arr_size > g->init_count)
                 fprintf(out, "\t.space %d\n",
                     (g->arr_size - g->init_count) * elsz);
-        } else {
-            int sz = (g->arr_size > 0)
-                 ? g->arr_size * elsz
-                 : elsz;
-            fprintf(out, "\t.space %d\n", sz);
         }
+    }
+
+    if (!any_bss)
+        return;
+
+    /* Zero-filled globals: .bss (NOBITS) so their bytes cost no file space. */
+    fputs("\n\t.bss\n", out);
+    for (g = prog->globals; g; g = g->next) {
+        int elsz = global_elsz(g);
+        int sz;
+
+        if (!global_is_bss(g))
+            continue;
+        emit_global_head(out, g);
+        sz = (g->arr_size > 0) ? g->arr_size * elsz : elsz;
+        fprintf(out, "\t.space %d\n", sz);
     }
 }
 

@@ -33,6 +33,7 @@
 
 #define STB_LOCAL    0
 #define STB_GLOBAL   1
+#define STB_WEAK     2
 
 #define STT_NOTYPE   0
 #define STT_SECTION  3
@@ -283,7 +284,8 @@ elf_write(struct assembler *a, FILE *out)
             .st_name = (uint32_t)strtab_add(&strtab, a->st.syms[k].name),
             .st_value = a->st.syms[k].value,
             .st_size = 0,
-            .st_info = ELF32_ST_INFO(STB_GLOBAL, STT_NOTYPE),
+            .st_info = ELF32_ST_INFO(
+                a->st.syms[k].weak ? STB_WEAK : STB_GLOBAL, STT_NOTYPE),
             .st_other = 0,
             .st_shndx = shndx,
         };

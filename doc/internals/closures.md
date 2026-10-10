@@ -4,7 +4,7 @@ This is the authoritative note for the toolkit's closure and continuation
 support. It records the design decisions, their rationale, and their status.
 Where a claim is a contract other code must honor, it is marked **decided**;
 what is built is **implemented**; what is intentionally not built is
-**deferred**. The IR opcode table in `doc/ir.md` is the reference for the
+**deferred**. The IR opcode table in `doc/internals/ir.md` is the reference for the
 three continuation opcodes; this note explains the whole mechanism and pins
 the semantics.
 
@@ -167,7 +167,7 @@ The mechanism is stack-segment copying:
 **Decided: metadata is 32-bit on every target.** The mark slot's
 `{ fp, sp, PC }` and the buffer header are 32-bit words even on the 64-bit
 backends, because those run ILP32-style with every live address below 4 GB (see
-`doc/lp64.md` and `doc/calling-convention.md`). A 32-bit word therefore holds a
+`doc/internals/lp64.md` and `doc/internals/calling-convention.md`). A 32-bit word therefore holds a
 pointer, and the segment copy runs in dwords (`rep movsd` on x86).
 
 ### Resume semantics: one-shot per buffer (decided)
@@ -181,7 +181,7 @@ deliberate scope choice, not an accident of the current code: the copy-back
 model is chosen because it is small, allocation-light, and identical across six
 crts, and one-shot delimited continuations are enough for the intended uses
 (generators, early exit, cooperative turn scripting; see
-`doc/game-scripting.md`). Multi-shot resume would require re-copying to a fresh
+`doc/languages/game-scripting.md`). Multi-shot resume would require re-copying to a fresh
 region on each resume and is not planned.
 
 The buffer is a plain `__cont_arena` allocation, so within that arena's
@@ -291,7 +291,7 @@ send boundary.
 | Host-side closure GC (compile-time only) | `scheme/gc.c` (`gc_closure`, `mark_val` `OBJ_CLOSURE` arm), `scheme/gc.h`, `scheme/test_gc.c` (`make test-gc`) |
 | Continuation surface (TinScheme) | `scheme/lower.c` (`lower_reset`, `lower_shift`, `lower_resume`) |
 | Continuation surface (TinC) | `tinc/lower.c` (the `mark` / `capture` / `resume` intrinsics), `tinc/DESIGN.md` |
-| Continuation IR opcodes | `ir/ir.h`, documented in `doc/ir.md` |
+| Continuation IR opcodes | `ir/ir.h`, documented in `doc/internals/ir.md` |
 | Continuation opcode emission | `backend/{cf,x86,arm64,rv,mips}_emit.c` |
 | Continuation runtime | `runtime/start.S`, `start_x86.asm`, `start_x86_64.asm`, `start_arm64.S`, `start_rv.S`, `start_mips.S`, `start_psx.S` (`__cont_capture`, `__cont_resume`, `__cont_mark_sp`, `__cont_arena`) |
 | Excelsior func values (non-capturing) | `excelsior/lower.c` (`lower_funclit_fn`), `excelsior/resolve.c` (`funclit_capture_check`), `excelsior/function-values.md` |

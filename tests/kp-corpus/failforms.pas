@@ -1,6 +1,6 @@
 program failforms;
 
-{ The call-site forms of failable routines (doc/kp-errors.md): `or else` recovery, the `fails`
+{ The call-site forms of failable routines (doc/languages/kobold/kp-errors.md): `or else` recovery, the `fails`
   test with and without a binder, the `or exit|continue|fail` diverts, and `or else ignore`.
   parse doubles a non-negative number and fails with code 99 on a negative one. }
 

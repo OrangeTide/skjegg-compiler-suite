@@ -3,7 +3,7 @@
 The design of the Excelsior language core: how code is represented, how
 it evaluates, how it is extended, and how the readable surface maps onto
 it. This is the authoritative language spec. The companion
-`../doc/game-scripting.md` is the game and runtime brief (distribution,
+`../doc/languages/game-scripting.md` is the game and runtime brief (distribution,
 sandbox, concurrency runtime, permissions, client architecture); it holds
 the rationale for decisions the language inherits, and this document
 copies the language-relevant parts so it stands on its own.

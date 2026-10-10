@@ -209,4 +209,7 @@ __moo_arena_ptr:
 __moo_arena:
 	.space	1048576
 	.space	262144
+	.align	3		/* o32 requires an 8-byte-aligned stack (see
+				   start_mips.S): a 64-bit stack argument is read
+				   at an 8-aligned offset from the arg base */
 stack_top:

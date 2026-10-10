@@ -21,16 +21,23 @@
 	.globl _start
 	.globl write
 	.globl read
-	.globl exit
+	.weak  exit
 	.globl _exit
+	.weak  __libc_fini
 
 _start:
 	la	sp, stack_top
 	addi	sp, sp, -16
 	jal	ra, main
+	mv	s1, a0			/* preserve main's return across the finalizer */
+	la	t0, __libc_fini		/* weak: 0 when no libc is linked */
+	beqz	t0, 1f
+	jalr	t0			/* run atexit handlers and flush stdio */
+1:
+	mv	a0, s1
 	li	a7, 93
 	ecall
-1:	j	1b
+2:	j	2b
 
 /* int write(int fd, const char *buf, int n); */
 write:

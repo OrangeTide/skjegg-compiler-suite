@@ -1,4 +1,4 @@
-/* handle.h : the VM handle table (Hagz), id -> object with reference counts */
+/* handle.h : the VM handle table, id -> object with reference counts */
 
 #ifndef KP_HANDLE_H
 #define KP_HANDLE_H
@@ -128,8 +128,8 @@ int       kp_dispatch_to(kp_vm *vm, kp_hostfn fn, int nargs);
 kp_hostfn kp_type_method(kp_vm *vm, uint32_t type, int slot);
 
 /* Traps: a recoverable fatal error the VM raises, distinct from an ordinary result.
-   For now a bad coroutine resume and a yield outside any coroutine; the {$R+} range
-   and overflow checks join them in Zib. The host guards a region with a landing pad
+   For now a bad coroutine resume and a yield outside any coroutine, joined by the
+   {$R+} range and overflow checks. The host guards a region with a landing pad
    and the runtime jumps back to it; with no pad installed a trap prints and aborts. */
 enum kp_trap_code {
     KP_TRAP_UNCONSUMED = 1,     /* resumed a running, completed, or unknown coroutine */

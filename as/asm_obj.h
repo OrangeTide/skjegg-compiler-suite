@@ -55,6 +55,7 @@ struct symbol {
     int section;
     uint32_t value;
     int global;
+    int weak;           /* STB_WEAK binding (a weak definition or reference) */
     int defined;
 };
 
@@ -69,5 +70,6 @@ int sym_lookup(struct symtab *st, const char *name);
 int sym_add(struct symtab *st, const char *name);
 void sym_define(struct symtab *st, int idx, int section, uint32_t value);
 void sym_set_global(struct symtab *st, int idx);
+void sym_set_weak(struct symtab *st, int idx);
 
 #endif

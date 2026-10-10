@@ -5,7 +5,7 @@
  * backend emits and writes little-endian ELF32 EM_MIPS relocatable objects.
  *
  * This header describes the full assembler; the source files are built up in
- * steps (see doc/mips.md "First sub-step").  Step 1 supplies the driver, the
+ * steps (see doc/tools/mips.md "First sub-step").  Step 1 supplies the driver, the
  * two-pass state, the register lookups and a tokenizing assemble pass; the
  * encoder, the ELF writer, macro expansion and the .set reorder engine follow. */
 

@@ -112,6 +112,7 @@ sym_add(struct symtab *st, const char *name)
     st->syms[idx].section = -1;
     st->syms[idx].value = 0;
     st->syms[idx].global = 0;
+    st->syms[idx].weak = 0;
     st->syms[idx].defined = 0;
     return idx;
 }
@@ -128,4 +129,14 @@ void
 sym_set_global(struct symtab *st, int idx)
 {
     st->syms[idx].global = 1;
+}
+
+/* A weak symbol binds like a global for symbol-table ordering (it is not a
+   local), but the ELF writer emits STB_WEAK so the linker lets a strong
+   definition override it and an unresolved weak reference stay 0. */
+void
+sym_set_weak(struct symtab *st, int idx)
+{
+    st->syms[idx].global = 1;
+    st->syms[idx].weak = 1;
 }

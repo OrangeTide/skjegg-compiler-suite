@@ -85,13 +85,32 @@ main(int argc, char **argv)
     if (entry_override)
         ld.script.entry = entry_override;
 
-    /* read input objects */
-    ld.objs = arena_zalloc(&ld.arena,
-                           (size_t)ninputs * sizeof(struct ld_object));
-    ld.nobjs = ninputs;
+    /* Read the explicit objects; stash archives for symbol-driven pulls.  An
+       archive contributes only the members that resolve a still-undefined
+       symbol, so it is processed after the objects that reference into it. */
+    const char **archives = NULL;
+    int narchives = 0;
+    for (int i = 0; i < ninputs; i++) {
+        if (ld_is_archive(inputs[i])) {
+            archives = realloc(archives,
+                               (size_t)(narchives + 1) * sizeof(char *));
+            archives[narchives++] = inputs[i];
+        } else {
+            ld_read_object(&ld.arena, ld_add_object(&ld), inputs[i]);
+        }
+    }
 
-    for (int i = 0; i < ninputs; i++)
-        ld_read_object(&ld.arena, &ld.objs[i], inputs[i]);
+    /* pull archive members until a full pass adds nothing (a pulled member may
+       reference symbols only another archive provides, so loop over them all).
+       The loaded-member set makes each member load at most once. */
+    ld_archive_reset();
+    int pulled = 1;
+    while (pulled) {
+        pulled = 0;
+        for (int i = 0; i < narchives; i++)
+            pulled += ld_read_archive(&ld, archives[i]);
+    }
+    free(archives);
 
     /* link */
     ld_link(&ld);

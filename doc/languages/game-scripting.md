@@ -836,7 +836,7 @@ a casual shard, but a shard running an economy must guard it.
 ### Networking and content availability (covered separately)
 
 Not underthought here; it has its own design, SHOAL
-(`~/Vibe/smolvfs/SHOAL.md`): a content-addressed replication confederation
+(the SHOAL.md note in the smolvfs project): a content-addressed replication confederation
 over smolvfs, in the IPFS/Dat/Perkeep family, with fetch-by-hash verified
 against local storage or a peer, offline-first nodes, signed single-writer
 topics, and asset plus player-state portability across federated shards.
@@ -866,7 +866,7 @@ not core.
 ### ColdFire VM choice (justified)
 
 The native-CPU-VM choice was analyzed in
-`~/research/coldfire-emulator/index.md`. A tiny bytecode is not much
+the coldfire-emulator research note. A tiny bytecode is not much
 smaller in practice (the Quake 3 VM is about 2,000 LOC but needs a whole
 toolchain built), while a real ISA brings GCC and FreePascal for free.
 ColdFire V4e was the one finalist where every arithmetic and floating-point

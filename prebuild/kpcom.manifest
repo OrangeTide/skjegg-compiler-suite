@@ -4,8 +4,8 @@
 # kobold/kpcom.pas.  The fingerprint is a source-based staleness key over the exact
 # emit inputs, in order:
 #   kpcom.pas  version.inc  stdlib.inc
-# emit-flags are the kpcom arguments that produced kpcom.kpm.  See doc/kobold.md.
-fingerprint 10ecf84211efc820707fc75dd2e388eab2a16f4eff8ed522f1c9e01f83244549
+# emit-flags are the kpcom arguments that produced kpcom.kpm.  See doc/languages/kobold/kobold.md.
+fingerprint e435b126089f75283e3538061e03bb68731c22b5995ad67bfa9bd7a49955c169
 emit-flags --emit-kpm
-kpm-sha256 51977c1976d9f1a0157c26310162a488058de769e60ee2d1f4583a7d3e26f3f0
-kpm-bytes 3560888
+kpm-sha256 fb7165c5a1784c3206169d49d310d315f61810e9f3410535e9673b46c8e637fa
+kpm-bytes 3564422

@@ -2,7 +2,7 @@ program errtype;
 
 { The opaque error type with its fail/errorcode builtins (int-code representation). An error is
   built only with fail() and read only with errorcode(); it never mixes with integer. See
-  doc/kp-errors.md. }
+  doc/languages/kobold/kp-errors.md. }
 
 var
   e: error;

@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>$title$ — Skjegg</title>
+  <link rel="stylesheet" href="$css-path$article.css">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Sans+Condensed:wght@400;600&family=IBM+Plex+Mono:wght@400&display=swap">
+</head>
+<body>
+  <nav class="top-bar">
+    <a href="$index-path$index.html" class="back-link">&larr; Skjegg manual</a>
+    <div class="format-links">
+$if(pdf-file)$
+      <a href="$pdf-file$" class="pdf-link">PDF</a>
+$endif$
+$if(md-file)$
+      <a href="$md-file$" class="md-link">Markdown</a>
+$endif$
+    </div>
+  </nav>
+  <article class="doc-article">
+    <header>
+      <span class="doc-category">$if(category)$$category$$else$Documentation$endif$</span>
+      <h1>$title$</h1>
+$if(date)$
+      <div class="doc-meta">
+        <time>$date$</time>
+      </div>
+$endif$
+    </header>
+    <div class="doc-body">
+$body$
+    </div>
+  </article>
+$if(toc)$
+  <input type="checkbox" class="toc-state" id="toc-toggle">
+  <label for="toc-toggle" class="toc-btn">Contents</label>
+  <label for="toc-toggle" class="toc-close">&times;</label>
+  <div class="toc-panel">
+    <div class="toc-header"><span>Contents</span></div>
+    <nav class="toc-list" role="doc-toc">
+$toc$
+    </nav>
+  </div>
+  <script>
+    (function() {
+      var toc = document.querySelector('.toc-list');
+      var cb = document.getElementById('toc-toggle');
+      if (toc && cb) toc.addEventListener('click', function() { cb.checked = false; });
+    })();
+  </script>
+$endif$
+  <footer class="bottom-bar">
+    <span class="site-title"><a href="$index-path$index.html">Skjegg</a> &mdash; <a href="https://github.com/OrangeTide/skjegg-compiler-suite">GitHub</a></span>
+  </footer>
+</body>
+</html>

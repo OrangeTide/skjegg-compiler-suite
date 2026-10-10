@@ -26,7 +26,7 @@
  * Everything above the sys_* stubs is arch-neutral C. The prior version
  * of this file targeted ColdFire (LINE_A hypercalls); the retarget to
  * RV32 ecall touched only the six stubs, the coroutine shim, and the
- * linker script, per doc/smolmoo-v1.md.
+ * linker script, per doc/languages/smolmoo-v1.md.
  *
  * Built with the smolmoo SDK convention: RV32 psABI, -ffreestanding,
  * linked against runtime/smolmoo_rv.ld by skj-ld-rv (make smolmoo-demo).

@@ -13,17 +13,23 @@
 	.globl _start
 	.globl write
 	.globl read
-	.globl exit
+	.weak  exit
 	.globl _exit
+	.weak  __libc_fini
 
 _start:
 	ldr	x0, =stack_top
 	mov	sp, x0			/* switch to the low-memory stack */
 	bl	main
-	/* main's return value is in w0; pass it to exit_group */
+	mov	w19, w0			/* preserve main's return across the finalizer */
+	ldr	x9, =__libc_fini	/* weak: 0 when no libc is linked */
+	cbz	x9, 1f
+	blr	x9			/* run atexit handlers and flush stdio */
+1:
+	mov	w0, w19			/* main's return is the exit status */
 	mov	x8, #93
 	svc	#0
-1:	b	1b
+2:	b	2b
 
 /* ssize_t write(int fd, const void *buf, size_t n); AAPCS64 args already in
    x0/x1/x2, which are the syscall arg registers too */

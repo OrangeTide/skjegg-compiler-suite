@@ -39,7 +39,7 @@ struct kp_obj_hdr {
    compile time (a string literal or constant) rather than allocated on the guest heap. retain
    and release leave it untouched, so it is never freed and lives for the program. A real heap
    object never reaches this count. Strings are immutable, so a static string needs only this
-   no-free guarantee to be shared safely (doc/kp-units.md, decision log 2026-09-30). */
+   no-free guarantee to be shared safely (doc/languages/kobold/kp-units.md, decision log 2026-09-30). */
 #define KP_RC_STATIC 0xFFFFFFFFu
 
 /* A managed value with low bit 1 is a host-handle table id; low bit 0 (and

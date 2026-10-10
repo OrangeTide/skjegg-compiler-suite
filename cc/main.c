@@ -47,6 +47,31 @@ main(int argc, char **argv)
     arena_init(&a);
     pp = cpp_new();
 
+    /* Target identification macros, predefined so a libc header can size its
+       own types and select per-target code.  The compiler ships none of gcc's
+       builtin target macros, so these are the only signal a header has.  They
+       are set before the command line is scanned, so a user -D still wins.  One
+       target id is defined, plus the data model (__skj_lp64__ on x86-64 and
+       arm64, __skj_ilp32__ on the 32-bit targets, where pointer, long, and
+       size_t are all one machine word). */
+    cpp_define(pp, "__skj__", "1");
+#if defined(CC_M68K)
+    cpp_define(pp, "__skj_m68k__", "1");
+#elif defined(CC_RISCV)
+    cpp_define(pp, "__skj_riscv__", "1");
+#elif defined(CC_MIPS)
+    cpp_define(pp, "__skj_mips__", "1");
+#elif defined(CC_ARM64)
+    cpp_define(pp, "__skj_arm64__", "1");
+#elif defined(X86_BITS) && X86_BITS == 64
+    cpp_define(pp, "__skj_x86_64__", "1");
+#endif
+#if defined(CC_LP64)
+    cpp_define(pp, "__skj_lp64__", "1");
+#else
+    cpp_define(pp, "__skj_ilp32__", "1");
+#endif
+
     inpath = NULL;
     outpath = NULL;
     preprocess_only = 0;

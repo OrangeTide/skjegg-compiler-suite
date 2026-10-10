@@ -1,4 +1,4 @@
-/* str.h : the minimal VM string runtime (Hagz) */
+/* str.h : the minimal VM string runtime */
 
 #ifndef KP_STR_H
 #define KP_STR_H

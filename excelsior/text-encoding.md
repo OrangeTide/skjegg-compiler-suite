@@ -180,7 +180,7 @@ a decode.
    no positive test artifact for the current byte behavior to protect,
    and the ASCII path is unaffected (one code point per byte), so ASCII
    tests stay green; new tests cover accented text. Do not write the decoder:
-   vendor the battle-tested `~/Vibe/lumi/src/libutf8/utf8.{c,h}` (MIT-0 or
+   vendor the battle-tested libutf8 `utf8.{c,h}` from the lumi project (MIT-0 or
    public domain, freestanding, only `<stddef.h>`/`<stdint.h>`), whose
    `utf8_decode` already implements D4 exactly (a bad or truncated byte yields
    `UTF8_RUNE_ERROR` and consumes one byte, never faulting) and rejects overlong

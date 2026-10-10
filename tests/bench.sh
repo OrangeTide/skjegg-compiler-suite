@@ -4,7 +4,7 @@
 # Each guest named in the corpus list is run under skj-run --stats, and the
 # retired-instruction count is read back.  The interpreter counts
 # instructions with no timing input, so that count is identical on every
-# host (see doc/emulator.md), which makes it a reproducible benchmark metric
+# host (see doc/tools/emulator.md), which makes it a reproducible benchmark metric
 # where wall-clock time is not.
 #
 # The count is compared against a committed baseline.  A change in either

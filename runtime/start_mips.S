@@ -28,17 +28,23 @@
 	.globl _start
 	.globl write
 	.globl read
-	.globl exit
+	.weak  exit
 	.globl _exit
+	.weak  __libc_fini
 
 _start:
 	la	$sp, stack_top
 	addiu	$sp, $sp, -16
 	jal	main
-	move	$a0, $v0		/* exit status = main's return */
+	move	$s0, $v0		/* preserve main's return across the finalizer */
+	la	$t0, __libc_fini	/* weak: 0 when no libc is linked */
+	beqz	$t0, 1f
+	jalr	$t0			/* run atexit handlers and flush stdio */
+1:
+	move	$a0, $s0		/* exit status = main's return */
 	li	$v0, 4001		/* __NR_exit */
 	syscall
-1:	b	1b
+2:	b	2b
 
 /* int write(int fd, const char *buf, int n); */
 write:
@@ -306,4 +312,8 @@ __cont_arena:
 __moo_arena:
 	.space	65536
 	.space	65536
+	.align	3		/* o32 requires an 8-byte-aligned stack: a 64-bit
+				   stack argument (a long long / double vararg)
+				   is read at an 8-aligned offset from the arg
+				   base, so the stack pointer must be 8-aligned */
 stack_top:

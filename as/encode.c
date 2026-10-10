@@ -962,6 +962,10 @@ do_encode(struct assembler *a, const char *mnemonic, int size,
         uint16_t base = (size == 1) ? 0x4400 : (size == 2) ? 0x4440 : 0x4480;
         return encode_unary(a, base, op1, emit);
     }
+    if (strcmp(mnemonic, "negx") == 0) {
+        uint16_t base = (size == 1) ? 0x4000 : (size == 2) ? 0x4040 : 0x4080;
+        return encode_unary(a, base, op1, emit);
+    }
     if (strcmp(mnemonic, "not") == 0) {
         uint16_t base = (size == 1) ? 0x4600 : (size == 2) ? 0x4640 : 0x4680;
         return encode_unary(a, base, op1, emit);

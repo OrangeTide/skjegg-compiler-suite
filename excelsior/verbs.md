@@ -12,7 +12,7 @@ and the de-arrow principle (symbols do math, words do structure).
 ## Do we need verbs at all?
 
 Asked before deciding the surface, answered from the game brief
-(doc/game-scripting.md): yes, and the brief needs them narrowly, as the
+(doc/languages/game-scripting.md): yes, and the brief needs them narrowly, as the
 boundary element and nothing else. Five commitments of the server design
 each independently require an element with a verb's properties:
 

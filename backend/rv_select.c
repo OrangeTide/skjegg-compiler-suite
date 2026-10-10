@@ -1119,6 +1119,21 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
     case IR_CALLI2:
         emit_call_flush(m, fn, i, 1, RET_FAIL);
         break;
+    case IR_CALL_AGG:
+    case IR_CALLI_AGG: {
+        /* a call returning a <=8-byte struct in a0 (and a1): make the call
+           (i->dst is -1, so emit_call_flush leaves a0/a1 untouched), then store
+           the returned words into the hidden result slot.  imm bits 0-2 hold
+           the word count (every slot integer under ilp32). */
+        int rneb = (int)(i->imm & 7);
+        int off;
+        emit_call_flush(m, fn, i, i->op == IR_CALLI_AGG, RET_INT);
+        off = slot_offset(fn, i->slot);
+        rv_mc_sw(m, A0, FP, off);
+        if (rneb == 2)
+            rv_mc_sw(m, A1, FP, off + 4);
+        break;
+    }
     case IR_TAILCALL:
         emit_tailcall_flush(m, fn, i, 0);
         break;
@@ -1146,6 +1161,19 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
             rv_mc_mv(m, A0, sa);
         if (sb != A1)
             rv_mc_mv(m, A1, sb);
+        emit_epilogue(m, fn);
+        break;
+    }
+    case IR_RETV_AGG: {
+        /* return a <=8-byte struct in a0 (and a1): load each 4-byte word from
+           the struct's address (i->a) into the return registers.  Every slot
+           is integer under the ilp32 soft-float ABI, so ret_cls is unused.
+           The struct address is never a0/a1 (not an allocatable register), so
+           loading a0 then a1 cannot clobber the base. */
+        int ab = rs(m, fn, i->a, 0);
+        int j;
+        for (j = 0; j < fn->ret_neb; j++)
+            rv_mc_lw(m, argreg[j], ab, 4 * j);
         emit_epilogue(m, fn);
         break;
     }

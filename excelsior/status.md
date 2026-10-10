@@ -25,7 +25,7 @@ resolver, and type checker cover the whole language surface.
   - **RISC-V RV32**, platform ABI (`skj-exc-rv`, `-DCC_PSABI`, `make
     check-exc-rv`, qemu-riscv32). Links a gcc-built guest runtime. The tier is
     split by the emulator's F-only floating point: qemu-riscv32 runs anything
-    with a `double`, `skj-run` runs the rest (see `../doc/emulator.md`).
+    with a `double`, `skj-run` runs the rest (see `../doc/tools/emulator.md`).
   - **MIPS I o32**, platform ABI (`skj-exc-mips`, `make check-exc-mips`,
     qemu-mipsel).
 - **In-process JIT**, platform ABI: **AArch64** (`skj-exc-jit-arm64`,
@@ -53,7 +53,7 @@ portable `libexc.c` (dispatch, object table, fault/trace formatting, the
 value helpers, and the freeze/thaw walker) plus a host binding that provides
 the `__exh_*` services. Bindings today: `exc_native.c` (standalone, over
 write/exit, for the test tiers) and `exc_smolmoo.c` (the smolmoo RV32 binding,
-`__exh_*` over `ecall` hypercalls, link-only). `../doc/smolmoo-v1.md` is the
+`__exh_*` over `ecall` hypercalls, link-only). `../doc/languages/smolmoo-v1.md` is the
 milestone path from that link-only state to a persistent verb on a real
 smolmoo server. boris is a provisional third host.
 
@@ -171,6 +171,6 @@ binary-data type), `string-literals.md` (the `{...}` prose string),
 ### 4. Deployment milestones
 
 - **smolmoo v1**: from the current link-only verb to a persistent verb running
-  on a real smolmoo server (`../doc/smolmoo-v1.md`).
+  on a real smolmoo server (`../doc/languages/smolmoo-v1.md`).
 - **boris**: firm up the provisional binding.
 

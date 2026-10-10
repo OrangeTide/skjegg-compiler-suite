@@ -20,6 +20,7 @@ struct kw {
 };
 
 static const struct kw keywords[] = {
+    { "_Bool",    TOK_BOOL },
     { "_Float16", TOK_FLOAT16 },
     { "asm",      TOK_ASM },
     { "__asm",    TOK_ASM },
@@ -57,6 +58,9 @@ static const struct kw keywords[] = {
     { "alignof",  TOK_ALIGNOF },
     { "_Alignas", TOK_ALIGNAS },
     { "alignas",  TOK_ALIGNAS },
+    { "_Static_assert", TOK_STATIC_ASSERT },
+    { "static_assert",  TOK_STATIC_ASSERT },
+    { "_Generic", TOK_GENERIC },
     { "static",   TOK_STATIC },
     { "struct",   TOK_STRUCT },
     { "switch",   TOK_SWITCH },

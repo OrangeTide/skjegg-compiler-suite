@@ -1,13 +1,12 @@
-/* co.h : stackful coroutine runtime (Muxx), platform-neutral core */
+/* co.h : stackful coroutine runtime, platform-neutral core */
 
 #ifndef KP_CO_H
 #define KP_CO_H
 
 #include <stdint.h>
 
-/* The full VM state arrives in Hagz. The coroutine helpers carry a kp_vm pointer
-   for ABI compatibility with the calls the front end emits, but the core does not
-   dereference it yet. */
+/* The coroutine helpers carry a kp_vm pointer for ABI compatibility with the
+   calls the front end emits, but the core does not dereference it. */
 #ifndef KP_VM_FWD
 #define KP_VM_FWD
 typedef struct kp_vm kp_vm;
@@ -16,7 +15,7 @@ typedef struct kp_vm kp_vm;
 /* A coroutine entry point. The front end passes the body routine's address plus a
    buffer of nargs by-value seed arguments (each an 8-byte cell); the entry reads
    them as int64 slots and returns its completion value. This is the runtime-side
-   convention; bridging it to the JIT's routine calling convention is a Rasp task. */
+   convention, bridged to the JIT's routine calling convention by the shim. */
 typedef int64_t (*kp_co_entry)(kp_vm *vm, const int64_t *args, int nargs);
 
 /* The operators start / resume / yield / bind / release lower to these. A coroutine

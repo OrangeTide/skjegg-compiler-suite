@@ -14,7 +14,7 @@ The boris mapping is provisional
 (D8): its VM ABI is explicitly pre-freeze. The aldeby mapping waits on
 its scripting spec; its constraints are recorded.
 
-Companion to core.md (the language) and `../doc/game-scripting.md` (the
+Companion to core.md (the language) and `../doc/languages/game-scripting.md` (the
 runtime brief). Each host is cited by its upstream URL; the survey facts
 below were read from the repositories in 2026-07.
 

@@ -15,16 +15,23 @@ section .text
 global _start
 global read
 global write
-global exit
+global exit:weak                ; libc's exit (flush + atexit) overrides this
 global _exit
 extern main
+extern __libc_fini:weak         ; provided by libc; 0 when freestanding
 
 _start:
     mov     esp, stack_top     ; 16-aligned low-memory stack
     xor     edi, edi           ; argc = 0
     xor     esi, esi           ; argv = NULL
     call    main
-    mov     edi, eax           ; status
+    mov     ebx, eax           ; preserve main's return across the finalizer
+    lea     rax, [rel __libc_fini]  ; weak: 0 when no libc is linked
+    test    rax, rax
+    jz      .nofini
+    call    rax                ; run atexit handlers and flush stdio
+.nofini:
+    mov     edi, ebx           ; status
     mov     eax, 60            ; __NR_exit
     syscall
 .hang:

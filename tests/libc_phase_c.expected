@@ -1,0 +1,13 @@
+hello world, 2+3=5
+hex ff oct 10 chr Q pct %
+pad [   42] [42   ] [00042]
+long 1000000
+puts-line
+fputs-part
+AB
+fwrite12
+wrote 8
+line 1: alpha
+line 2: beta
+line 3: gamma
+eof=1 lines=3

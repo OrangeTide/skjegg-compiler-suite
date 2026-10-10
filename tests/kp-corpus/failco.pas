@@ -1,7 +1,7 @@
 program failco;
 
 { A coroutine is not failable, but its body may call a failable routine and handle it locally
-  (doc/kp-errors.md). Here the worker yields each parsed value, recovering a negative input with
+  (doc/languages/kobold/kp-errors.md). Here the worker yields each parsed value, recovering a negative input with
   `or else`, so the failable call-site form composes inside a suspended frame. }
 
 function parse(n: integer): integer fails;

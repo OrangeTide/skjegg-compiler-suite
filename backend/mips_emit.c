@@ -120,6 +120,20 @@ slot_bytes(struct ir_func *fn, int i)
     return (fn->slot_size[i] + 3) & ~3;
 }
 
+/* A slot's alignment in the frame and the argument structure.  The o32
+   argument structure 8-aligns a doubleword scalar (i64 / double) but only
+   word-aligns an aggregate of word-sized members, so the two cannot be told
+   apart from the slot size alone (both are 8 bytes).  The front end records
+   the real alignment in fn->slot_align; with none (a scalar-only front end) an
+   8-multiple size is a doubleword scalar, which is the legacy inference. */
+static int
+slot_align(struct ir_func *fn, int i)
+{
+    if (fn->slot_align && fn->slot_align[i])
+        return fn->slot_align[i];
+    return (slot_bytes(fn, i) % 8 == 0) ? 8 : 4;
+}
+
 static int
 locals_size(struct ir_func *fn)
 {
@@ -127,10 +141,9 @@ locals_size(struct ir_func *fn)
 
     x = 0;
     for (i = fn->nparams; i < fn->nslots; i++) {
-        int sz = slot_bytes(fn, i);
-        if (sz % 8 == 0)
-            x = (x + 7) & ~7;
-        x += sz;
+        int a = slot_align(fn, i);
+        x = (x + a - 1) & ~(a - 1);
+        x += slot_bytes(fn, i);
     }
     return (x + 7) & ~7;   /* keep the spill areas below 8-aligned */
 }
@@ -144,21 +157,19 @@ slot_offset(struct ir_func *fn, int slot)
         /* params sit above the frame from $fp+8 upward */
         off = 8;
         for (i = 0; ; i++) {
-            int sz = slot_bytes(fn, i);
-            if (sz % 8 == 0)
-                off = (off + 7) & ~7;
+            int a = slot_align(fn, i);
+            off = (off + a - 1) & ~(a - 1);
             if (i == slot)
                 return off;
-            off += sz;
+            off += slot_bytes(fn, i);
         }
     }
     /* locals grow downward from $fp */
     off = 0;
     for (i = fn->nparams; i <= slot; i++) {
-        int sz = slot_bytes(fn, i);
-        if (sz % 8 == 0)
-            off = (off + 7) & ~7;
-        off += sz;
+        int a = slot_align(fn, i);
+        off = (off + a - 1) & ~(a - 1);
+        off += slot_bytes(fn, i);
     }
     return -off;
 }
@@ -558,7 +569,10 @@ static int arg_temps[MIPS_MAX_ARGS];
 static int arg_is_i64[MIPS_MAX_ARGS];
 static int arg_is_float[MIPS_MAX_ARGS];
 static int arg_fw[MIPS_MAX_ARGS];   /* per-arg float width: 1 = F32, 0 = F64 */
+static int arg_align8[MIPS_MAX_ARGS]; /* 1: start this arg on an even word (the
+                                         first word of an 8-aligned struct) */
 static int narg;
+static int *temp_is_i64;         /* per-temp map, built per function */
 static int label_prefix;
 #ifndef MIPS_SOFTFLOAT
 static int fcmp_serial;
@@ -656,12 +670,12 @@ emit_prologue(FILE *out, struct ir_func *fn)
     for (k = 0; k < fn->nparams; k++) {
         int off = slot_offset(fn, k);
         int word = (off - 8) / 4;
-        int words = slot_bytes(fn, k) >= 8 ? 2 : 1;
-        if (word >= 4)
-            continue;
-        fprintf(out, "\tsw %s, %d($fp)\n", argreg[word], off);
-        if (words == 2 && word + 1 < 4)
-            fprintf(out, "\tsw %s, %d($fp)\n", argreg[word + 1], off + 4);
+        int words = slot_bytes(fn, k) / 4;   /* 1 for a scalar, 2 for a
+                                                doubleword, ceil(size/4) for a
+                                                by-value struct */
+        int w;
+        for (w = 0; w < words && word + w < 4; w++)
+            fprintf(out, "\tsw %s, %d($fp)\n", argreg[word + w], off + 4 * w);
     }
 
     /* A variadic function also homes the argument registers past its named
@@ -723,7 +737,7 @@ emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
            word of a two-word slot (its value, high word unused).  An i64 is
            two words for the same reason. */
         int w = (arg_is_i64[k] || arg_is_float[k]) ? 2 : 1;
-        if (w == 2)
+        if (w == 2 || arg_align8[k])
             wi = (wi + 1) & ~1;
         loc[k].words = w;
         loc[k].boff = 4 * wi;
@@ -869,7 +883,7 @@ emit_tailcall_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
 
     for (k = 0; k < narg; k++) {
         int w = (arg_is_i64[k] || arg_is_float[k]) ? 2 : 1;
-        if (w == 2)
+        if (w == 2 || arg_align8[k])
             wi = (wi + 1) & ~1;
         wi += w;
         if (arg_is_float[k])
@@ -893,7 +907,7 @@ emit_tailcall_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
     wi = 0;
     for (k = 0; k < narg; k++) {
         int w = (arg_is_i64[k] || arg_is_float[k]) ? 2 : 1;
-        if (w == 2)
+        if (w == 2 || arg_align8[k])
             wi = (wi + 1) & ~1;
         if (arg_is_i64[k]) {
             const char *lo = i64_rs_lo(out, fn, arg_temps[k], 0);
@@ -1036,16 +1050,20 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_JMP:
         fprintf(out, "\tj .L%d_%d\n", label_prefix, i->label);
         break;
-    case IR_BZ: {
-        const char *sa = rs(out, fn, i->a, 0);
-        fprintf(out, "\tbeqz %s, .L%d_%d\n",
-            sa, label_prefix, i->label);
-        break;
-    }
+    case IR_BZ:
     case IR_BNZ: {
-        const char *sa = rs(out, fn, i->a, 0);
-        fprintf(out, "\tbnez %s, .L%d_%d\n",
-            sa, label_prefix, i->label);
+        const char *bcc = (i->op == IR_BZ) ? "beqz" : "bnez";
+        if (i->a >= 0 && i->a < fn->ntemps && temp_is_i64[i->a]) {
+            /* test the full 64-bit value: OR both words into a scratch. */
+            const char *lo = i64_rs_lo(out, fn, i->a, 0);
+            const char *hi = i64_rs_hi(out, fn, i->a, 1);
+            fprintf(out, "\tor $t0, %s, %s\n\t%s $t0, .L%d_%d\n",
+                lo, hi, bcc, label_prefix, i->label);
+        } else {
+            const char *sa = rs(out, fn, i->a, 0);
+            fprintf(out, "\t%s %s, .L%d_%d\n",
+                bcc, sa, label_prefix, i->label);
+        }
         break;
     }
     case IR_LABEL:
@@ -1057,6 +1075,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
             die("mips_emit: too many args");
         arg_is_i64[narg] = 0;
         arg_is_float[narg] = 0;
+        arg_align8[narg] = i->argalign == 8;
         arg_temps[narg++] = i->a;
         break;
     case IR_ARG64:
@@ -1064,6 +1083,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
             die("mips_emit: too many args");
         arg_is_i64[narg] = 1;
         arg_is_float[narg] = 0;
+        arg_align8[narg] = 0;
         arg_temps[narg++] = i->a;
         break;
     case IR_FARG:
@@ -1072,6 +1092,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         arg_is_i64[narg] = 0;
         arg_is_float[narg] = 1;
         arg_fw[narg] = i->imm == FWIDTH_F32;
+        arg_align8[narg] = 0;
         arg_temps[narg++] = i->a;
         break;
     case IR_CALL:
@@ -1951,6 +1972,13 @@ emit_function(FILE *out, struct ir_func *fn)
     label_prefix = ++fn_serial;
     compute_used_fregs(fn);
 
+    /* map each temp defined by a 64-bit op, so a truthiness test on an
+       i64 operand (IR_BZ/IR_BNZ) tests both words, not just one. */
+    temp_is_i64 = arena_zalloc(fn->arena, fn->ntemps * sizeof(int));
+    for (i = fn->head; i; i = i->next)
+        if (i->dst >= 0 && i->dst < fn->ntemps && ir_op_is_i64_def(i->op))
+            temp_is_i64[i->dst] = 1;
+
     fprintf(out, "\n\t.text\n\t.align 2\n");
     if (!fn->is_local)
         fprintf(out, "\t.globl %s\n", fn->name);
@@ -2000,6 +2028,20 @@ emit_string_bytes(FILE *out, const char *s, int n)
     fputs("\"\n", out);
 }
 
+/* format a relocation operand "sym", "sym + N", or "sym - N" (the addend is a
+   symbol-relative initializer's byte offset, carried in the init value word) */
+static const char *
+sym_ref(char *buf, size_t n, const char *sym, int64_t addend)
+{
+    if (addend > 0)
+        snprintf(buf, n, "%s + %lld", sym, (long long)addend);
+    else if (addend < 0)
+        snprintf(buf, n, "%s - %lld", sym, (long long)-addend);
+    else
+        snprintf(buf, n, "%s", sym);
+    return buf;
+}
+
 /* emit an aggregate global's byte image: pad to each item's offset, emit the
    sized value (8-byte low word first, little-endian), pad to the full size */
 static void
@@ -2013,9 +2055,10 @@ emit_init_image(FILE *out, struct ir_global *g)
             fprintf(out, "\t.space %d\n", it->offset - cur);
             cur = it->offset;
         }
-        if (it->sym)
-            fprintf(out, "\t.word %s\n", it->sym);
-        else if (it->size == 8) {
+        if (it->sym) {
+            char ref[160];
+            fprintf(out, "\t.word %s\n", sym_ref(ref, sizeof ref, it->sym, it->ival));
+        } else if (it->size == 8) {
             uint64_t b = (uint64_t)it->ival;
             fprintf(out, "\t.word 0x%08x\n", (unsigned)(b & 0xFFFFFFFF));
             fprintf(out, "\t.word 0x%08x\n", (unsigned)(b >> 32));
@@ -2031,49 +2074,72 @@ emit_init_image(FILE *out, struct ir_global *g)
         fprintf(out, "\t.space %d\n", g->arr_size - cur);
 }
 
+/* true when a global is zero-filled (no initializer): it belongs in .bss
+   (NOBITS), so its bytes cost no file space, rather than in .data. */
+static int
+global_is_bss(struct ir_global *g)
+{
+    return !g->inits && !g->init_string && g->init_count == 0;
+}
+
+static int
+global_elsz(struct ir_global *g)
+{
+    switch (g->base_type) {
+    case IR_I8:  return 1;
+    case IR_I16: return 2;
+    case IR_I64: return 8;
+    case IR_F64: return 8;
+    default:     return 4;          /* incl. IR_F32 (4-byte bit pattern) */
+    }
+}
+
+/* alignment (GAS power-of-two exponent) + optional .globl + label */
+static void
+emit_global_head(FILE *out, struct ir_global *g)
+{
+    /* 8-align a double global; an aggregate with an 8-byte field or an
+       _Alignas request (g->align) may raise it. */
+    int alb = g->base_type == IR_F64 ? 8 : 4, e = 0;
+    if (g->align > alb)
+        alb = g->align;
+    while ((1 << e) < alb)
+        e++;
+    fprintf(out, "\t.align %d\n", e);
+    if (!g->is_local)
+        fprintf(out, "\t.globl %s\n", g->name);
+    fprintf(out, "%s:\n", g->name);
+}
+
 static void
 emit_globals(FILE *out, struct ir_program *prog)
 {
     struct ir_global *g;
+    int any_bss = 0;
 
     fputs("\n\t.data\n", out);
     for (g = prog->globals; g; g = g->next) {
-        int elsz;
+        int elsz = global_elsz(g);
 
-        switch (g->base_type) {
-        case IR_I8:  elsz = 1; break;
-        case IR_I16: elsz = 2; break;
-        case IR_I64: elsz = 8; break;
-        case IR_F64: elsz = 8; break;
-        default:     elsz = 4; break;   /* incl. IR_F32 (4-byte bit pattern) */
+        if (global_is_bss(g)) {
+            any_bss = 1;
+            continue;
         }
-
-        /* 8-align a double global; an aggregate with an 8-byte field or an
-           _Alignas request (g->align) may raise it.  GAS .align is a
-           power-of-two exponent (3 = 8 bytes, 2 = 4 bytes). */
-        {
-            int alb = g->base_type == IR_F64 ? 8 : 4, e = 0;
-            if (g->align > alb)
-                alb = g->align;
-            while ((1 << e) < alb)
-                e++;
-            fprintf(out, "\t.align %d\n", e);
-        }
-        if (!g->is_local)
-            fprintf(out, "\t.globl %s\n", g->name);
-        fprintf(out, "%s:\n", g->name);
+        emit_global_head(out, g);
         if (g->inits) {
             emit_init_image(out, g);
         } else if (g->init_string) {
             emit_string_bytes(out, g->init_string,
                       g->init_strlen);
-        } else if (g->init_count > 0) {
+        } else {
             int k;
             for (k = 0; k < g->init_count; k++) {
-                if (g->init_syms && g->init_syms[k])
+                if (g->init_syms && g->init_syms[k]) {
+                    char ref[160];
                     fprintf(out, "\t.word %s\n",
-                        g->init_syms[k]);
-                else if (g->base_type == IR_I64 ||
+                        sym_ref(ref, sizeof ref, g->init_syms[k],
+                                g->init_ivals[k]));
+                } else if (g->base_type == IR_I64 ||
                          g->base_type == IR_F64) {
                     /* little-endian: low word first (F64 holds the raw
                        64-bit IEEE bit pattern in init_ivals) */
@@ -2095,12 +2161,23 @@ emit_globals(FILE *out, struct ir_program *prog)
             if (g->arr_size > g->init_count)
                 fprintf(out, "\t.space %d\n",
                     (g->arr_size - g->init_count) * elsz);
-        } else {
-            int sz = (g->arr_size > 0)
-                 ? g->arr_size * elsz
-                 : elsz;
-            fprintf(out, "\t.space %d\n", sz);
         }
+    }
+
+    if (!any_bss)
+        return;
+
+    /* Zero-filled globals: .bss (NOBITS), no file space for their zeros. */
+    fputs("\n\t.bss\n", out);
+    for (g = prog->globals; g; g = g->next) {
+        int elsz = global_elsz(g);
+        int sz;
+
+        if (!global_is_bss(g))
+            continue;
+        emit_global_head(out, g);
+        sz = (g->arr_size > 0) ? g->arr_size * elsz : elsz;
+        fprintf(out, "\t.space %d\n", sz);
     }
 }
 

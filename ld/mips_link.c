@@ -55,8 +55,9 @@ reloc_symval(struct linker *ld, struct ld_object *obj, struct ld_reloc *rel)
     if (gi < 0)
         die("%s: reloc references unmapped symbol %d", obj->path, rel->sym_idx);
     gsym = &ld->syms[gi];
-    if (!gsym->defined)
+    if (!gsym->defined && !gsym->weak)
         die("%s: undefined symbol '%s'", obj->path, gsym->name);
+    /* a weak-undefined symbol has value 0, so the reloc resolves to 0 */
     return gsym->value;
 }
 

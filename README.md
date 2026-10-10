@@ -70,17 +70,35 @@ as/          ColdFire assembler, plus the RV32 and MIPS front ends over a shared
 ld/          ColdFire linker, plus the RV32 and MIPS front ends over a shared layout core
 ar/          target-neutral ar(1) archive tool
 cpp/         C preprocessor (library and standalone tool)
-emu/         ColdFire and RV32 emulator cores, and skj-run (doc/emulator.md)
+emu/         ColdFire and RV32 emulator cores, and skj-run (doc/tools/emulator.md)
 runtime/     target runtimes (start_*.S per target, pascal_rt.c, str.c, list.c, libexc.c, 64-bit helpers)
 tinc/        TinC front end (C-like)
-scheme/      TinScheme front end (Scheme subset with GC; doc/closures.md)
+scheme/      TinScheme front end (Scheme subset with GC; doc/internals/closures.md)
 moo/         MooScript front end
-pascal/      Compact Pascal front end (doc/pascal.md)
+pascal/      Compact Pascal front end (doc/languages/pascal.md)
 cc/          C front end (uses the cpp library)
 excelsior/   Excelsior front end and its design notes (excelsior/core.md, status.md)
 tests/       test programs and harnesses
-doc/         design and reference docs
+doc/         design and reference docs (tools/, languages/, internals/)
 ```
+
+## Documentation
+
+The reference manual is published at
+<https://orangetide.github.io/skjegg-compiler-suite/>, organized by language,
+tool, and internals. Its source of truth is the Markdown under `doc/`:
+
+- `doc/languages/` the language front ends, including the full Kobold-Pascal
+  specification under `doc/languages/kobold/` (grammar, language reference,
+  units, module format, host ABI, and more).
+- `doc/tools/` the emulator, the JIT, the libc, and the MIPS backend.
+- `doc/internals/` the shared IR, calling conventions, closures, and the LP64
+  model.
+
+Build the manual locally with `make -C doc` (HTML) or `make -C doc all` (HTML
+and PDF); it needs `pandoc`, and PDF output additionally needs `typst`. The
+built site lands in `build/manual/`, and `build/manual/index.html` opens
+directly in a browser.
 
 ## Prerequisites
 

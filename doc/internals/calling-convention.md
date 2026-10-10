@@ -4,7 +4,7 @@ Goal: `skj-cc-x86-64` and `skj-cc-arm64` should call C library functions, and
 be called by the C runtime, using the platform psABI (**System V AMD64** on
 x86-64, **AAPCS64** on arm64) instead of the toolkit's uniform stack
 convention. This is what lets cc link against real glibc/musl and crt, the last
-big ABI item after LP64 (`doc/lp64.md`).
+big ABI item after LP64 (`doc/internals/lp64.md`).
 
 ## Decisions (scoped 2026-07)
 
@@ -174,6 +174,26 @@ big ABI item after LP64 (`doc/lp64.md`).
      Verified against gcc for a 2- and a 4-member float HFA; `cc_t074` covers
      both (x86-64 reaches the same shapes through its SSE eightbytes). **AAPCS64
      struct-by-value is now complete.**
+   - **RISC-V ilp32** ✓ struct-by-value and struct return, matching the psABI
+     (so `skj-cc-rv` interlinks with gcc, unlike its self-consistent varargs).
+     A struct of at most 8 bytes rides 1-2 **integer** registers, one 4-byte
+     word each; float content does not change placement under the ilp32
+     soft-float ABI, so there is no HFA rule and every slot is integer-classed.
+     A larger struct is passed **by reference** (a pointer to a caller copy, the
+     AAPCS64 indirect mechanism, not the SysV in-place stack copy). Returns are
+     in `a0`/`a1` (<= 8 bytes) or through a hidden pointer. The shared
+     `cc/lower.c` machinery (`abi_agg`, the register decompose, the
+     by-reference `mem_ptr` param path, the `sret` return, `IR_RETV_AGG` /
+     `IR_CALL_AGG`) gained branches under `CC_RISCV`, the register slot being a
+     4-byte word (`ABI_SLOT_BYTES`) and the hidden pointer an ILP32 4-byte value
+     (`IR_LDL`/`IR_RETV`, not the LP64 `IR_LDL64`/`IR_RETV64`). The backend
+     `rv_select.c` gained `IR_RETV_AGG` (load the words into `a0`/`a1`) and
+     `IR_CALL_AGG` (store the returned `a0`/`a1` into the result slot). A 2-word
+     struct splits naturally (last register, then stack); there is no x86/arm64
+     all-or-nothing on RISC-V, matching gcc. Verified by
+     `cc_t072`/`cc_t074`/`cc_t075`/`cc_t083` on every RISC-V tier and by `make
+     test-cc-rv-psabi-struct` (structs passed and returned both ways across a
+     gcc-built RV32 object).
 3. **x86-64 first** (SysV AMD64 is the best-documented), arm64 second.
 
 ## Current state (the stack convention)

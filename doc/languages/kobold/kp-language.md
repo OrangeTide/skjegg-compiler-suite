@@ -1,0 +1,567 @@
+# Kobold-Pascal Language Reference
+
+This is the reference for writing Kobold-Pascal programs: the types, expressions,
+statements, routines, built-ins, and directives the front end accepts. It describes the
+language as the compiler implements it, not a superset.
+
+Related documents:
+
+- `kp-grammar.md` gives the full grammar in EBNF. This reference is the prose companion.
+- `kobold.md` explains how the compiler and runtime work, and how the language lowers.
+- `kp-abi.md` specifies the host boundary that `external` routines and handle types cross.
+- `kp-module-format.md` specifies the KPM1 module the front end emits.
+
+## Program structure
+
+A program is a `program` header, a block, and a terminating dot.
+
+```pascal
+program hello;
+begin
+  writeln('hello');
+end.
+```
+
+The block holds declarations followed by the program body, a `begin ... end` compound
+statement. The compiled program body becomes the module's `main` entry.
+
+A block's declaration part mixes `const`, `type`, `var`, and routine declarations in any
+order and any number, each introducing names visible to what follows.
+
+## Comments
+
+Three comment forms, none nesting:
+
+```pascal
+{ brace comment }
+(* parenthesis-star comment *)
+// line comment to end of line
+```
+
+A brace comment whose first character is `$` is a compiler directive, not a comment. See
+[Compiler directives](#compiler-directives).
+
+## Identifiers and reserved words
+
+An identifier starts with a letter and continues with letters, digits, or underscores.
+Identifiers and reserved words are case-insensitive: `Count`, `count`, and `COUNT` are
+the same name, and `Begin` is the keyword `begin`.
+
+Reserved words:
+
+```
+and array begin bind break buffer case const continue div do downto else end
+external for forward function if implement implementation in interface mod nil
+not of or procedure program property record ref repeat set shared shl shr slice
+start string then to type unit until uses var while with yield
+```
+
+`ref`, `slice`, and `property` are reserved but not parsed: `ref` named a dropped reference
+array, `slice` is held for a future windowed view, and `property` belongs to a separately
+scheduled feature. `out`, `cdecl`, `export`, `as`, `read`, `write`, and `reexport` are
+contextual: they act as keywords only where a routine, `uses`, or property declaration expects
+them, so an ordinary identifier may still carry one of these names.
+
+## Constants and literals
+
+- **Integer.** Decimal `123`, or hexadecimal with a `$` prefix, `$1F`.
+- **Real.** Digits, a dot, digits, and an optional exponent: `3.14`, `1.0e-9`.
+- **String.** Single-quoted text, with `''` for an embedded quote, and `#code` for one
+  byte by its numeric code (decimal `#10` or hex `#$0A`). Adjacent pieces join, so
+  `'line'#10` is a five-byte string. A one-character string literal is also valid where
+  a `char` is expected.
+- **Boolean.** The predefined constants `true` and `false`.
+- **Nil.** `nil`, the empty handle, usable where any handle, string, or dynamic array is
+  expected.
+
+Named constants are declared in a `const` part:
+
+```pascal
+const
+  Limit = 100;
+  Name  = 'kobold';
+```
+
+A typed constant can also be an aggregate: an array, a record, or a nesting of both. An
+array constant gives a parenthesized list of element values, with one nested list per
+dimension for a multi-dimensional array. A record constant is a first-class record literal,
+`(field: value; ...)`, with its fields in declared order.
+
+```pascal
+type
+  Point = record x, y: integer; end;
+const
+  Grid:   array[1..2, 1..3] of integer = ((1, 2, 3), (4, 5, 6));
+  Corner: Point = (x: 10; y: 20);
+  Spans:  array[0..1] of Point = ((x: 0; y: 0), (x: 4; y: 8));
+```
+
+Each value is a constant expression. An ordinal value may use the usual constant arithmetic
+(`+`, `-`, `*`, `div`, `mod`, shifts, and bitwise operators); a real value must be a signed
+literal, since real constant arithmetic is not folded. A value cannot call a function. A real
+constant is allowed as a record field or an array element, but a plain scalar real constant
+is not supported yet.
+
+## Types
+
+### Ordinal types
+
+The integer types differ only in width and signedness at declaration; arithmetic is done
+at 32 or 64 bits.
+
+| Name | Width | Signed |
+|---|---|---|
+| `shortint` | 8 | yes |
+| `byte` | 8 | no |
+| `word` | 16 | no |
+| `integer` / `longint` | 32 | yes |
+| `cardinal` | 32 | no |
+| `int64` | 64 | yes |
+| `qword` | 64 | no |
+
+`integer` is the default 32-bit type; `int64` is a real 64-bit type with 64-bit literals,
+arithmetic, and comparison. `char` holds one byte. `boolean` holds `false` (0) or `true`
+(1).
+
+An **enumeration** declares its own ordered constants:
+
+```pascal
+type Color = (Red, Green, Blue);
+```
+
+A **subrange** restricts an ordinal type to a range of values:
+
+```pascal
+type Digit = 0..9;
+```
+
+`ord`, `low`, `high`, `chr`, `inc`, `dec`, `succ`, `pred`, and `odd` operate on
+ordinal types.
+
+### Real types
+
+`real` and `double` are 64-bit IEEE doubles; `single` is a 32-bit float. Mixed integer
+and real arithmetic promotes to real. `/` always yields a real result.
+
+### string
+
+`string` is a length-counted, host-managed byte string. It is indexed from 1, so `s[1]`
+is the first character and `length(s)` is the count. Strings are immutable: `s[i]` reads a
+character but cannot be assigned, and `setlength` cannot resize a string. Assignment shares
+the bytes by reference, and because no owner can mutate them there is no copy on write.
+A new string value is built by concatenation or `copy`, so
+
+```pascal
+b := a;                       { b and a share the same immutable value }
+a := 'x' + copy(a, 2, length(a) - 1);   { a is a new value; b is unchanged }
+```
+
+Concatenation is `+`. A `char` in a string context is boxed to a one-character string, so
+`s + ch` and `ch1 + ch2` are strings. See [Strings](#strings).
+
+### Arrays
+
+A fixed array has an ordinal index range:
+
+```pascal
+type Row = array[1..8] of integer;
+```
+
+A **dynamic array** has no bound and is sized with `setlength`:
+
+```pascal
+var xs: array of integer;
+...
+setlength(xs, n);
+```
+
+A dynamic array is a handle with value semantics like a string: assignment shares the
+storage, and `setlength` on a shared array makes it unique first (copy on write).
+`length`, `low`, and `high` report its bounds; `low` is 0.
+
+`delete(a, index, count)` removes `count` elements starting at `index`, shifting the tail
+down. `insert(a, index, count)` opens `count` zero-filled slots at `index`, shifting the tail
+up, which the caller then fills by assignment. Both edit the array in place copy-on-write, so
+an edit of a shared array leaves the other owners untouched. `index` and `count` are clamped
+to the array, so a `delete` past the end removes only to the end. (Kobold's `insert` opens a
+gap rather than taking the value to insert, unlike Delphi's `Insert`.)
+
+```pascal
+delete(xs, 1, 2);      { drop xs[1] and xs[2] }
+insert(xs, 1, 1);      { open one slot at index 1 }
+xs[1] := 42;           { fill it }
+```
+
+An **open-array parameter**, written `array of T`, receives any dynamic array (or a fixed
+array) of element type `T`, so one routine works over arrays of any length.
+
+### Maps
+
+A **map** is a string-keyed associative array with a typed value:
+
+```pascal
+var scores: map of integer;
+```
+
+`scores[k]` reads or writes the value for key `k`. Assigning to a key inserts it, creating the
+map if the variable is nil; reading a key that is not present traps, so test first with `k in m`
+or fetch with `TryGet`. Like a dynamic array, a map has value semantics: assigning or passing
+it by value copies it, so an edit of the copy does not affect the original (pass it as a `const`
+parameter to avoid the copy when read only).
+
+| Operation | Meaning |
+|---|---|
+| `m[k]` | the value for key `k` (traps if `k` is absent) |
+| `m[k] := v` | insert or update key `k` |
+| `k in m` | true when key `k` is present |
+| `TryGet(m, k, v)` | if `k` is present, copy its value into `v` and return true, else false |
+| `Delete(m, k)` | remove key `k` (no effect if absent) |
+| `Length(m)` | the number of entries |
+
+Iterate with a cursor:
+
+```pascal
+var it: mapiter; k: string; v: integer;
+...
+it := MapFirst(scores);
+while MapNext(it, k, v) do
+  writeln(k, ' = ', v);
+```
+
+`MapFirst(m)` returns a `mapiter` over the map, and `MapNext(it, k, v)` writes the next entry's
+key and value and returns true, or false at the end. The iteration order is unspecified.
+Inserting or removing a key while an iteration is in progress traps; updating the value of a key
+that already exists is allowed. The key passed to any map operation is a string, and the value
+type is whatever the map was declared with (an ordinal, real, string, record, or array).
+
+### Records
+
+A record groups named fields:
+
+```pascal
+type Point = record
+  x, y: integer;
+end;
+```
+
+A **variant record** overlays alternatives after a tag, sharing storage:
+
+```pascal
+type Number = record
+  case kind: integer of
+    0: (i: int64);
+    1: (d: double);
+end;
+```
+
+The fields of the largest variant determine the record's size, and the variant fields
+share the same offset.
+
+### Sets
+
+A set holds a subset of a small ordinal base type:
+
+```pascal
+type CharSet = set of char;
+...
+if c in ['a'..'z'] then ...
+```
+
+Set operators are `+` (union), `-` (difference), `*` (intersection), and `in`
+(membership). A set literal is written with brackets, and `[]` is the empty set.
+
+### Handle and interface types
+
+An `interface` type is a handle: an opaque reference to a host-owned object, reached
+through methods rather than fields. Handle values are reference-counted (retain on
+assignment, release when overwritten or when a scope ends); `release` drops a reference
+explicitly. Handle types and their methods are provided by the host and specified in
+`kp-abi.md`. `nil` is the empty handle.
+
+### The process type
+
+`process` is the handle type of a coroutine. See [Coroutines](#coroutines).
+
+## Expressions and operators
+
+Operators, highest precedence first:
+
+| Precedence | Operators | Associativity |
+|---|---|---|
+| 1 | `not`, unary `+` / `-` | right |
+| 2 | `*`, `/`, `div`, `mod`, `and`, `shl`, `shr` | left |
+| 3 | `+`, `-`, `or` | left |
+| 4 | `=`, `<>`, `<`, `>`, `<=`, `>=`, `in` | none |
+
+`div` and `mod` are integer division and remainder; `/` is real division. `and`, `or`,
+and `not` are boolean when applied to booleans and bitwise when applied to integers.
+Boolean `and` and `or` short-circuit: the right operand is evaluated only when it can
+change the result. `shl` and `shr` are bit shifts. Comparisons yield a boolean.
+
+A type name applied like a call is a conversion, for example `int64(x)`, `longint(x)`, or
+`real(x)`.
+
+Argument and operand evaluation order is right to left, matching the bootstrap compiler,
+so the self-hosted and native compilers emit identical code.
+
+## Statements
+
+- **Assignment.** `target := expr`, where the target is a variable, a field, an array or
+  string element, or the enclosing function's name (to set its result).
+- **Procedure call.** `name` or `name(args)`. A call with no arguments needs no
+  parentheses.
+- **Compound.** `begin ... end` groups a sequence separated by semicolons.
+- **if.** `if cond then stmt` with an optional `else stmt`.
+- **case.** Selects on an ordinal value; labels may be single values or ranges, with an
+  optional `else` branch:
+
+  ```pascal
+  case c of
+    'a'..'z': writeln('lower');
+    '0'..'9': writeln('digit');
+  else
+    writeln('other');
+  end;
+  ```
+
+- **while.** `while cond do stmt`.
+- **repeat.** `repeat stmts until cond`, testing after the body.
+- **for.** `for i := lo to hi do stmt`, or `downto` to count down. The counter is
+  undefined after the loop; do not read it once the loop ends.
+- **with.** `with recordExpr do stmt` opens a record's fields as bare names in the body.
+- **break / continue.** Exit the nearest enclosing loop, or skip to its next iteration.
+
+## Routines
+
+### Procedures and functions
+
+A procedure has no result; a function declares a result type and returns a value:
+
+```pascal
+function max(a, b: integer): integer;
+begin
+  if a > b then max := a else max := b;
+end;
+```
+
+A function returns by assigning its own name, as above, or with `exit(value)`. Plain
+`exit` returns from the current routine.
+
+### Parameters
+
+A parameter group is `[ var | out | const ] names : Type`:
+
+- **value** (no keyword): the routine gets a copy.
+- **var**: by reference; the routine may read and write the caller's variable.
+- **out**: by reference, intended for output; like `var` for passing.
+- **const**: by reference but immutable, for passing aggregates without a copy.
+
+An **open-array parameter** is `array of T` (see [Arrays](#arrays)).
+
+### Forward declarations
+
+`forward` declares a routine's header ahead of its body so two routines can call each
+other:
+
+```pascal
+function even(n: integer): boolean; forward;
+```
+
+### Overloading
+
+Several routines may share a name and be chosen by argument type, resolved at the call
+site. This is why `writeln` prints a `string`, an `integer`, or a `real` under one name,
+and a program can add its own overload for its own type.
+
+### Nested routines
+
+A routine may be declared inside another and may read and write the enclosing routine's
+locals and parameters. Nesting does not escape: a nested routine that uses an enclosing
+local may be called but not stored or returned as a value, because there are no closures.
+
+### Methods
+
+A routine may be attached to a record or handle type with a receiver, and called with dot
+notation:
+
+```pascal
+function sum for (const p: Point): integer;
+begin
+  sum := p.x + p.y;
+end;
+...
+n := somePoint.sum;
+```
+
+The receiver is by reference by default, so a method may mutate it; a `const` receiver is
+immutable. On a record the call resolves statically; on a handle it resolves at link to a
+direct call to the host's registered method, and a script method with the same name
+overrides that host method.
+
+### External routines
+
+`external` marks a routine the host provides through the FFI; it has no Pascal body. The
+`cdecl` directive names the C calling convention explicitly and may appear with or in
+place of `external`:
+
+```pascal
+procedure printInt(n: integer); external;
+function ReadFileStr(const path: string): string; external cdecl;
+```
+
+The host registers a matching function before the module links (see `kp-abi.md`).
+
+### Exported routines
+
+`export` marks a routine as a module entry an embedding host may call across the FFI, in
+addition to lowering its body:
+
+```pascal
+function compile(const srcName, srcText: string): string; export;
+begin
+  ...
+end;
+```
+
+The program body (`main`) is always an entry. An `export` adds another, which is how a
+host calls into a module without running `main`. See the two-stage boot in `kobold.md`.
+
+## Built-in routines
+
+These names are predefined. They are not reserved words, so a program may shadow them.
+
+| Routine | Purpose |
+|---|---|
+| `length(s)` | length of a string or array |
+| `low(x)` / `high(x)` | first and last valid index or ordinal value |
+| `ord(x)` | ordinal value of an ordinal or char |
+| `chr(n)` | the char with byte code `n` |
+| `succ(x)` / `pred(x)` | the next or previous value of an ordinal, as a value of its own type |
+| `odd(x)` | `true` when an integer `x` is odd |
+| `abs(x)` / `sqr(x)` | absolute value and square, in the argument's own numeric type |
+| `sqrt(x)` | square root, as a real (an integer argument is widened) |
+| `round(x)` / `trunc(x)` | a real to the nearest integer (round-to-nearest-even) or toward zero |
+| `sin(x)` / `cos(x)` / `arctan(x)` | trigonometric functions, in radians, as a real |
+| `exp(x)` / `ln(x)` | the exponential and natural logarithm, as a real |
+| `pos(sub, s)` | 1-based index of `sub` in `s`, or 0 |
+| `copy(s, i, n)` | the `n` characters of `s` from index `i` |
+| `setlength(a, n)` | resize a dynamic array (not a string: strings are immutable, not a buffer: the host owns its backing) |
+| `delete(a, i, n)` | remove `n` elements of dynamic array `a` at index `i` (copy on write) |
+| `insert(a, i, n)` | open `n` zero-filled slots in dynamic array `a` at index `i` (copy on write) |
+| `delete(m, k)` | remove key `k` from map `m` |
+| `tryget(m, k, v)` | if key `k` is in map `m`, copy its value to `v` and return true, else false |
+| `mapfirst(m)` | a `mapiter` cursor over map `m` |
+| `mapnext(it, k, v)` | write the next entry's key and value through the cursor; false at the end |
+| `str(x, s)` | format `x` (integer or real) into string `s` |
+| `val(s, x, code)` | parse `s` into `x`; `code` is 0 on success, else the error position |
+| `inc(x [, d])` / `dec(x [, d])` | add or subtract 1 (or `d`) in place |
+| `exit` / `exit(v)` | return from the current routine, optionally with a result |
+| `write(...)` / `writeln(...)` | write values to a stream (see below) |
+| `flush(stream)` | flush a stream |
+| `halt` / `halt(code)` | end the program with an exit code |
+| `release(h)` | drop a reference to a handle |
+| `paramcount` | number of command-line arguments |
+| `paramstr(i)` | the `i`-th command-line argument (`paramstr(0)` is the program name) |
+
+## Strings
+
+`string` is the one variable-length text type; there is no fixed-length string. Strings
+are indexed from 1 and carry their own length, so a NUL byte is an ordinary character.
+Strings are immutable: `s[i]` reads a character but cannot be written, and `setlength`
+does not apply. Assignment shares the bytes by reference and is cheap; since no owner can
+change them, there is never a copy. Build a new value by concatenation (`+`, with a `char`
+operand promoted to a one-character string) or `copy`. Convert with `str` (to a string)
+and `val` (from a string).
+
+Higher-level string helpers (`UpperCase`, `LowerCase`, `Trim`, `StringReplace`, and string
+`Delete`/`Insert`) live in the standard-library `strings` unit, reached with `uses strings`.
+See `kp-units.md` for the unit and the search path that finds it.
+
+## Input and output
+
+Output uses the overloaded `write` and `writeln` routines. Each argument is written by
+its type, an integer, real, char, or string, and `writeln` ends the line:
+
+```pascal
+writeln('count = ', n);
+writeln(erroutput, 'failed');
+```
+
+An optional first argument selects a stream: the predefined `output` (standard output,
+the default) or `erroutput` (standard error). `flush` flushes a stream, and `halt` ends
+the program.
+
+Input uses `read` and `readln`, which read from standard input into their arguments.
+Each argument must be a variable of a readable type: an integer, real, char, or string.
+Reading is token-based: a numeric argument skips leading whitespace (including line
+breaks) and reads one whitespace-delimited token; a string argument reads the rest of
+the current line; and a char argument reads the next single character. `read` leaves the
+line's newline in place, while `readln` consumes the rest of the current line after its
+arguments, so `readln(a, b)` reads two values from one line and moves past it. Plain
+`readln` with no arguments skips a line. There is no field-width formatting, matching
+`write`.
+
+```pascal
+readln(count);        { one integer from a line }
+readln(x, y);         { two values from one line }
+readln(name);         { the rest of the line as a string }
+readln;               { skip to the next line }
+```
+
+`write` and `writeln` take plain overloaded arguments. Standard Pascal's field-width
+and precision formatting (`write(x:width)` and `write(x:width:decimals)`) is not
+supported by design: it is a clumsy mini-language rarely needed in a script. Format a
+value with the string builtins (`str`, `copy`) or a host `external` when needed.
+
+File input in a program is done through a host primitive, not a built-in `file` type. The
+compiler itself reads its input with an `external` `ReadFileStr(path): string`.
+
+## Coroutines
+
+A coroutine is a routine that runs on its own stack and can suspend. Its value has type
+`process`, a handle.
+
+- **start.** `start routine(args)` creates a coroutine from a call and returns a
+  `process`. A `start begin ... end` block form runs an inline body; the block may not
+  read an enclosing local, so data reaches a coroutine through the started routine's
+  by-value arguments.
+- **yield.** `yield` inside a coroutine suspends it, returning control to whoever ran it.
+  A yield is a statement, not an expression, so it may not appear nested in an expression.
+- **bind.** `bind` resumes a suspended coroutine.
+- **release.** `release` drops a coroutine (or any handle). Dropping a suspended coroutine
+  unwinds it so its locals are released.
+
+The full grammar and the lifetime rules are in `kp-grammar.md` and `kobold.md`.
+
+## Handles and lifetime
+
+A handle (an interface value or a `process`) is a reference-counted reference to a
+host-owned object. The compiler manages references automatically: an assignment retains
+the new value and releases the old, and a handle local is released when its scope ends.
+`release` drops a reference early. This is reference counting (ARC), not tracing garbage
+collection. Fields of a record that are handles are managed the same way.
+
+## Compiler directives
+
+A directive is a brace comment whose first character is `$`.
+
+- **Range and overflow checks.** `{$R+}` turns on array-bounds checks (raising an index
+  trap), `{$R-}` off; `{$Q+}` turns on checked arithmetic (raising an overflow trap),
+  `{$Q-}` off. Both are off by default and may be toggled through the source.
+- **Conditional compilation.** `{$DEFINE name}` and `{$UNDEF name}` set and clear a
+  symbol; `{$IFDEF name}` / `{$IFNDEF name}` ... `{$ELSE}` ... `{$ENDIF}` include a region
+  by whether a symbol is defined. The compiler predefines `KOBOLD`, so a source can select
+  a Kobold-only body against a bootstrap that does not define it.
+- **Include.** `{$I filename}` (with a space after `I`) inserts another file at that point.
+  The compiler searches the including file's directory.
+
+Directives the compiler does not act on, such as `{$mode ...}` or `{$H+}`, are ignored, so
+a source shared with Free Pascal may carry them.
+
+## See also
+
+- `kp-grammar.md` the full grammar in EBNF.
+- `kobold.md` the compiler and runtime design, including nested-routine lowering, the
+  string and coroutine runtimes, and the self-hosting bootstrap.
+- `kp-abi.md` the host ABI for `external` routines and handle types.
+- `kp-module-format.md` the KPM1 module the front end emits.

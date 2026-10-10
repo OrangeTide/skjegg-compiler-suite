@@ -45,6 +45,13 @@ enc_fma(uint32_t opcode, uint32_t rm)
            (RD << 7) | opcode;
 }
 
+/* The f-registers are FLEN = 64 now that the core has the D extension, so a
+ * single-precision operand must be NaN-boxed going in (the high 32 bits all
+ * ones) and the low 32 bits taken out of a result.  These helpers keep this
+ * single-precision test speaking in 32-bit values. */
+#define FBOX(v)   (0xffffffff00000000ull | (uint32_t)(v))
+#define FLOW(v)   ((uint32_t)(v))
+
 /** Execute one encoding with the given operands and rounding mode. */
 static void
 run(uint32_t insn, uint32_t a, uint32_t b, uint32_t c, uint32_t frm)
@@ -55,9 +62,9 @@ run(uint32_t insn, uint32_t a, uint32_t b, uint32_t c, uint32_t frm)
     mach.mem[CODE_ADDR + 2] = (uint8_t)(insn >> 16);
     mach.mem[CODE_ADDR + 3] = (uint8_t)(insn >> 24);
 
-    cpu.f[RS1] = a;
-    cpu.f[RS2] = b;
-    cpu.f[RS3] = c;
+    cpu.f[RS1] = FBOX(a);
+    cpu.f[RS2] = FBOX(b);
+    cpu.f[RS3] = FBOX(c);
     cpu.x[RS1] = a;             /* for the integer-to-float conversions */
     cpu.fcsr = (frm & 7) << 5;
     rv_step(&cpu);
@@ -105,7 +112,7 @@ expect_f(const char *name, uint32_t insn, uint32_t a, uint32_t b, uint32_t c,
          uint32_t frm, uint32_t want, uint32_t want_flags)
 {
     run(insn, a, b, c, frm);
-    check(name, cpu.f[RD], want, cpu.fcsr & 0x1f, want_flags);
+    check(name, FLOW(cpu.f[RD]), want, cpu.fcsr & 0x1f, want_flags);
 }
 
 /** Run an instruction producing an integer result and check it. */
