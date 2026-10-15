@@ -13,9 +13,13 @@
    64-bit integer helper call; the object stays free of __*di3 references, like
    the rest of the freestanding runtime.
 
-   The guest reaches these through the brv_* names skj-kp-rv's remap gives the
-   math intrinsics; a double rides a call as its 64-bit bits under the rv
-   soft-float ABI, so each wrapper converts bits to a double and back. */
+   The ABI wrapper differs by target. On rv32 a double rides a call as its 64-bit
+   bits (soft-float), so the guest reaches these through brv_* bridges (below) that
+   convert bits to a double and back. On a native-double target (ColdFire) a real
+   passes in the FPU and a double returns in fp0, which is the convention the kp
+   backend's call reads, so the h_* entries (below, the names the aot_main remap
+   points the kp_sin family at) are plain C wrappers over the my_* cores. The
+   double-math core (my_* below) is shared and exported for both. */
 
 #include <stdint.h>
 
@@ -32,6 +36,7 @@ b2d(uint64_t b)
     return x.d;
 }
 
+#if defined(__riscv) || defined(__skj_riscv__)
 static uint64_t
 d2b(double d)
 {
@@ -39,6 +44,7 @@ d2b(double d)
     x.d = d;
     return x.u;
 }
+#endif
 
 /* High-precision constants (two-part where a reduction needs the extra bits). */
 #define PI       3.14159265358979311600
@@ -120,19 +126,19 @@ trig(double x, int want_sin)
     }
 }
 
-static double
+double
 my_sin(double x)
 {
     return trig(x, 1);
 }
 
-static double
+double
 my_cos(double x)
 {
     return trig(x, 0);
 }
 
-static double
+double
 my_exp(double x)
 {
     double k, r, p;
@@ -149,7 +155,7 @@ my_exp(double x)
     return ldexp2(p, (int)k);
 }
 
-static double
+double
 my_ln(double x)
 {
     union dbits b;
@@ -187,7 +193,7 @@ atan_kernel(double t)
                (1.0 / 9 + t2 * (-1.0 / 11 + t2 * (1.0 / 13 + t2 * (-1.0 / 15))))))));
 }
 
-static double
+double
 my_atan(double x)
 {
     int neg = 0, inv = 0;
@@ -209,9 +215,25 @@ my_atan(double x)
     return neg ? -r : r;
 }
 
-/* The brv_* bridges: a double rides a call as its 64-bit bits (rv soft-float). */
+#if defined(__riscv) || defined(__skj_riscv__)
+/* The brv_* bridges: a double rides a call as its 64-bit bits (rv soft-float),
+   so each wrapper converts bits to a double and back. */
 uint64_t brv_sin(uint64_t x)    { return d2b(my_sin(b2d(x))); }
 uint64_t brv_cos(uint64_t x)    { return d2b(my_cos(b2d(x))); }
 uint64_t brv_exp(uint64_t x)    { return d2b(my_exp(b2d(x))); }
 uint64_t brv_ln(uint64_t x)     { return d2b(my_ln(b2d(x))); }
 uint64_t brv_arctan(uint64_t x) { return d2b(my_atan(b2d(x))); }
+#endif
+
+#if defined(__mcoldfire__) || defined(__skj_m68k__)
+/* On ColdFire a double is returned in fp0, which is the toolkit convention the
+   kp backend's float-returning call reads.  Built by skj-cc these h_* entries
+   carry that convention, so they bridge the guest's kp_sin family straight to
+   the shared my_* cores with no register repacking (the old d0/d1 -> fp0 asm
+   shim was for the gcc-built core, which returns a double in d0/d1). */
+double h_sin(double x)    { return my_sin(x); }
+double h_cos(double x)    { return my_cos(x); }
+double h_exp(double x)    { return my_exp(x); }
+double h_ln(double x)     { return my_ln(x); }
+double h_arctan(double x) { return my_atan(x); }
+#endif

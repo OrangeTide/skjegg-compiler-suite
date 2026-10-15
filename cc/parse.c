@@ -183,6 +183,7 @@ static struct cc_node *parse_expr(void);
 static struct cc_node *parse_assign_expr(void);
 static struct cc_node *parse_initializer(void);
 static void parse_static_assert(void);
+static struct cc_node *parse_asm_operands(int have_expr);
 
 /* is the next token the start of a type specifier? */
 static int
@@ -1232,6 +1233,18 @@ parse_local_decl(struct cc_type *base, int is_static, int is_extern)
         n->decl_type = dt;
         n->is_static = is_static;
         n->is_extern = is_extern;
+        /* GNU local register variable: register T x __asm__("$reg").  The
+           asm("...") binding follows the declarator; the register name is
+           carried on sval/slen for the lowering to pin asm operands to. */
+        if (peek().kind == TOK_ASM) {
+            struct cc_token r;
+            next();
+            expect(TOK_LPAREN);
+            r = expect(TOK_STRLIT);
+            expect(TOK_RPAREN);
+            n->sval = r.sval;
+            n->slen = r.slen;
+        }
         if (name)
             add_sym(name, SYM_VAR, dt, 0);
         if (consume(TOK_ASSIGN))
@@ -1242,6 +1255,36 @@ parse_local_decl(struct cc_type *base, int is_static, int is_extern)
             break;
     }
     expect(TOK_SEMI);
+    return head;
+}
+
+/* One extended-asm section (outputs, inputs, or clobbers), stopping at the
+   next ':' or ')'.  The introducing ':' is already consumed.  An operand is
+   "constraint"(expr) when have_expr; a clobber is just "string".  Returns a
+   ->next-chained list of ND_ASM_OP nodes, or NULL for an empty section. */
+static struct cc_node *
+parse_asm_operands(int have_expr)
+{
+    struct cc_node *head = NULL, *tail = NULL;
+
+    if (peek().kind == TOK_COLON || peek().kind == TOK_RPAREN)
+        return NULL;                    /* empty section */
+    for (;;) {
+        int ln = cc_lex_line();
+        struct cc_node *op = node(ND_ASM_OP, ln);
+        struct cc_token c = expect(TOK_STRLIT);
+        op->sval = c.sval;
+        op->slen = c.slen;
+        if (have_expr) {
+            expect(TOK_LPAREN);
+            op->a = parse_assign_expr();
+            expect(TOK_RPAREN);
+        }
+        if (!head) head = op; else tail->next = op;
+        tail = op;
+        if (!consume(TOK_COMMA))
+            break;
+    }
     return head;
 }
 
@@ -1366,16 +1409,27 @@ parse_stmt(void)
         return n;
     }
     case TOK_ASM: {
-        /* basic inline asm: asm [volatile] ( string-literal ) ;
-           The string is passed through verbatim.  Extended asm (operand
-           constraints and % substitution) is not supported. */
-        next();
+        /* inline asm: asm [volatile] ( template [: outputs [: inputs
+           [: clobbers]]] ) ;  With no colon sections it is basic asm (the
+           template is emitted verbatim).  Extended asm numbers its operands
+           %0.. (outputs first); each operand is "constraint"(expr), each
+           clobber a string. */
         struct cc_node *n = node(ND_ASM, ln);
-        consume(TOK_VOLATILE);          /* the qualifier is accepted, no effect */
+        struct cc_token s;
+        next();
+        n->ival = consume(TOK_VOLATILE) ? 1 : 0;
         expect(TOK_LPAREN);
-        struct cc_token s = expect(TOK_STRLIT);
+        s = expect(TOK_STRLIT);
         n->sval = s.sval;
         n->slen = s.slen;
+        if (consume(TOK_COLON)) {           /* outputs section */
+            n->a = parse_asm_operands(1);   /* "constraint"(expr) list */
+            if (consume(TOK_COLON)) {       /* inputs section */
+                n->b = parse_asm_operands(1);
+                if (consume(TOK_COLON))     /* clobbers: bare strings */
+                    n->c = parse_asm_operands(0);
+            }
+        }
         expect(TOK_RPAREN);
         expect(TOK_SEMI);
         return n;

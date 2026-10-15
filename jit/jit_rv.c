@@ -363,7 +363,7 @@ emit_func(struct emitctx *e, struct code *c, struct ir_func *fn)
     int rc;
 
     rv_reset(&M, c, e);
-    rc = rv_select_func(&M, fn, errbuf, sizeof errbuf);
+    rc = rv_select_func(&M, fn, RV_TRAP_GUARDED, errbuf, sizeof errbuf);
     if (rc == 0 && M.errsym)
         rc = kp_fail(e, "unresolved symbol '%s'", M.errsym, 0);
     else if (rc != 0)

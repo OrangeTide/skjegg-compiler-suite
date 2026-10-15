@@ -514,6 +514,267 @@ il(struct mc *m, int *lbl, int n)
     return lbl[n];
 }
 
+/* x86-64 register names by hardware number, for extended-asm %N substitution. */
+static const char *x86_reg64[16] = {
+    "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+    "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+};
+static const char *x86_reg32[16] = {
+    "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi",
+    "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d",
+};
+
+/* A register name (64- or 32-bit, with or without a leading %) to its hardware
+   number, or -1.  Used to resolve a pin name and match a clobber. */
+static int
+x86_name_to_hw(const char *name)
+{
+    int h;
+    if (name[0] == '%')
+        name++;
+    for (h = 0; h < 16; h++)
+        if (strcmp(x86_reg64[h], name) == 0 || strcmp(x86_reg32[h], name) == 0)
+            return h;
+    return -1;
+}
+
+static int
+asm_hw_clobbered(struct ir_asm_info *ai, int h)
+{
+    int k;
+    for (k = 0; k < ai->nclobbers; k++)
+        if (x86_name_to_hw(ai->clobbers[k]) == h)
+            return 1;
+    return 0;
+}
+
+static int x86_op_forced(struct ir_asm_op *op);
+
+/* Is physical register `h` forced (pinned or constrained to a single register)
+   by any operand?  Used to keep a spilled generic operand's pool register off
+   a forced register. */
+static int
+asm_hw_pinned(struct ir_asm_info *ai, int h)
+{
+    int k, n = ai->noutputs + ai->ninputs;
+    for (k = 0; k < n; k++)
+        if (x86_op_forced(&ai->ops[k]) == h)
+            return 1;
+    return 0;
+}
+
+/* The allocator index (temp_reg value) of hardware register `h`, or -1 if `h`
+   is not allocatable. */
+static int
+x86_hw_to_index(int h)
+{
+    int k;
+    for (k = 0; k < 5; k++)
+        if (intreg[k] == h)
+            return k;
+    return -1;
+}
+
+/* A single-register-class constraint maps to one physical register, like a
+   pin: "a"=rax, "b"=rbx, "c"=rcx, "d"=rdx, "S"=rsi, "D"=rdi (the leading
+   =/+/&/% modifier is skipped).  Any other class (the general "r") returns -1,
+   meaning the operand may go in any register. */
+static int
+x86_constraint_reg(const char *c)
+{
+    while (*c == '=' || *c == '+' || *c == '&' || *c == '%')
+        c++;
+    switch (*c) {
+    case 'a': return MC_RAX;
+    case 'b': return MC_RBX;
+    case 'c': return MC_RCX;
+    case 'd': return MC_RDX;
+    case 'S': return MC_RSI;
+    case 'D': return MC_RDI;
+    default:  return -1;
+    }
+}
+
+/* The physical register an operand is forced into (a pin or a single-register
+   constraint), or -1 for a general "r" operand.  Dies on an unknown pin. */
+static int
+x86_op_forced(struct ir_asm_op *op)
+{
+    if (op->pin_reg) {
+        int h = x86_name_to_hw(op->pin_reg);
+        if (h < 0)
+            die("x86: unknown asm register %s", op->pin_reg);
+        return h;
+    }
+    return x86_constraint_reg(op->constraint);
+}
+
+/* Fill out[] (capacity max) with the allocator indices of the allocatable
+   registers any extended asm in fn pins, forces by constraint, or clobbers,
+   deduplicated. */
+int
+x86_asm_reserved_regs(struct ir_func *fn, int *out, int max)
+{
+    struct ir_insn *i;
+    int n = 0, k, j;
+
+    for (i = fn->head; i; i = i->next) {
+        struct ir_asm_info *ai = i->asm_info;
+        if (i->op != IR_ASM || !ai)
+            continue;
+        for (k = 0; k < ai->noutputs + ai->ninputs; k++) {
+            int h = x86_op_forced(&ai->ops[k]);
+            int idx = h < 0 ? -1 : x86_hw_to_index(h);
+            if (idx < 0)
+                continue;
+            for (j = 0; j < n && out[j] != idx; j++)
+                ;
+            if (j == n && n < max)
+                out[n++] = idx;
+        }
+        for (k = 0; k < ai->nclobbers; k++) {
+            int h = x86_name_to_hw(ai->clobbers[k]);
+            int idx = h < 0 ? -1 : x86_hw_to_index(h);
+            if (idx < 0)
+                continue;
+            for (j = 0; j < n && out[j] != idx; j++)
+                ;
+            if (j == n && n < max)
+                out[n++] = idx;
+        }
+    }
+    return n;
+}
+
+/* Extended inline asm.  A generic "r" operand goes in its allocated register
+ * or a scratch materialised from the spill slot; a pinned operand goes in the
+ * named physical register (its value moved in from the operand temp's home
+ * and, for an output, back out).  Each %N is substituted with the AT&T
+ * register name at the operand's width (%rax for an 8-byte operand, %eax for a
+ * 4-byte one) and the template is emitted as one text blob.  This is the
+ * syscall case: rax/rdi/rsi/rdx/r10 are not allocatable, so the pins are free. */
+static void
+emit_asm_ext(struct mc *m, struct ir_func *fn, struct frame *fr,
+             struct ir_insn *i)
+{
+    struct ir_asm_info *ai = i->asm_info;
+    int n = ai->noutputs + ai->ninputs;
+    static const int pool[] = { MC_RAX, MC_RCX, MC_RDX, MC_R10, MC_R11 };
+    int npool = (int)(sizeof pool / sizeof pool[0]);
+    int ophw[32];               /* the register each operand uses */
+    int forced[32];             /* its forced hw (pin/single-reg), or -1 */
+    int next = 0, k;
+    const char *s;
+    char buf[1024];
+    size_t bp = 0;
+
+    if (n > 32)
+        die("x86: too many asm operands");
+
+    for (k = 0; k < n; k++) {
+        struct ir_asm_op *op = &ai->ops[k];
+        int j, h = x86_op_forced(op);
+
+        forced[k] = h;
+        if (h >= 0) {
+            /* an allocatable forced register is fine: the allocator reserved
+               it (x86_asm_reserved_regs).  Two operands may share a forced
+               register only as a pure output + pure input pair (the input is
+               moved in before the template, the output moved out after); any
+               other overlap is a real conflict. */
+            for (j = 0; j < k; j++) {
+                if (forced[j] != h)
+                    continue;
+                int jp_in = ai->ops[j].is_output == 0;
+                int jp_out = ai->ops[j].is_output && !ai->ops[j].is_inout;
+                int kp_in = op->is_output == 0;
+                int kp_out = op->is_output && !op->is_inout;
+                if (!((jp_in && kp_out) || (jp_out && kp_in)))
+                    die("x86: conflicting asm operands forced to one register");
+            }
+            ophw[k] = h;
+        } else if (fn->temp_reg[op->temp] >= 0) {
+            ophw[k] = intreg[fn->temp_reg[op->temp]];
+        } else {
+            ophw[k] = -1;
+        }
+    }
+    for (k = 0; k < n; k++) {
+        if (ophw[k] >= 0)
+            continue;
+        while (next < npool && (asm_hw_clobbered(ai, pool[next]) ||
+                                asm_hw_pinned(ai, pool[next])))
+            next++;
+        if (next >= npool)
+            die("x86: too many spilled asm operands");
+        ophw[k] = pool[next++];
+    }
+
+    /* materialise input values (the home is 64-bit, so moves are 64-bit) */
+    for (k = 0; k < n; k++) {
+        struct ir_asm_op *op = &ai->ops[k];
+        int home = fn->temp_reg[op->temp];
+
+        if (op->is_output && !op->is_inout)
+            continue;
+        if (forced[k] >= 0) {
+            if (home >= 0)
+                mc_mov_rr(m, ophw[k], intreg[home]);
+            else
+                mc_load64(m, ophw[k], MC_RBP, spill_disp(fr, fn, op->temp));
+        } else if (home < 0) {
+            mc_load64(m, ophw[k], MC_RBP, spill_disp(fr, fn, op->temp));
+        }
+    }
+
+    /* build the template with %N substituted (width from the operand size) */
+    for (s = i->sym; *s && bp + 1 < sizeof buf; s++) {
+        if (*s != '%') {
+            buf[bp++] = *s;
+            continue;
+        }
+        s++;
+        if (*s == '%') {
+            buf[bp++] = '%';
+        } else if (*s >= '0' && *s <= '9') {
+            int idx = 0;
+            const char *nm;
+            while (*s >= '0' && *s <= '9')
+                idx = idx * 10 + (*s++ - '0');
+            s--;
+            if (idx >= n)
+                die("x86: asm operand %%%d out of range", idx);
+            /* the mc_text sink emits NASM/Intel syntax, so a register name
+               carries no % prefix (the template is Intel too) */
+            nm = ai->ops[idx].size >= 8 ? x86_reg64[ophw[idx]]
+                                        : x86_reg32[ophw[idx]];
+            while (*nm && bp + 1 < sizeof buf)
+                buf[bp++] = *nm++;
+        } else {
+            buf[bp++] = '%';
+            if (bp + 1 < sizeof buf)
+                buf[bp++] = *s;
+        }
+    }
+    buf[bp] = '\0';
+    mc_asm(m, buf);
+
+    /* store outputs back */
+    for (k = 0; k < ai->noutputs; k++) {
+        struct ir_asm_op *op = &ai->ops[k];
+        int home = fn->temp_reg[op->temp];
+
+        if (forced[k] >= 0) {
+            if (home >= 0)
+                mc_mov_rr(m, intreg[home], ophw[k]);
+            else
+                mc_store64(m, MC_RBP, spill_disp(fr, fn, op->temp), ophw[k]);
+        } else if (home < 0) {
+            mc_store64(m, MC_RBP, spill_disp(fr, fn, op->temp), ophw[k]);
+        }
+    }
+}
+
 /* Emit one function's body through the mc sink.  Branch targets are mc labels
    the sink resolves; intra-module calls and code-pointer fixups are deferred by
    the sink's mc_call_sym / mc_lea_sym. */
@@ -801,10 +1062,21 @@ x86_select_func(struct mc *m, struct ir_func *fn, int tp,
             mat(m, fn, &fr, in->b, SC0);
             if (tp == TRAP_GUARDED) {
                 int over = mc_new_label(m);
+                int noovf = mc_new_label(m);
                 mc_test32_rr(m, SC0, SC0);
                 mc_jcc(m, MC_NE, over);
                 mc_trap_div_zero(m);    /* never returns; raises the trap */
                 mc_label(m, over);
+                /* INT_MIN / -1 overflows (idiv would #DE); trap OVERFLOW.  SC1
+                   is free here (SC0 is the divisor, rax the dividend). */
+                mc_mov_ri32(m, SC1, (uint32_t)-1);
+                mc_cmp32_rr(m, SC0, SC1);
+                mc_jcc(m, MC_NE, noovf);     /* divisor != -1: cannot overflow */
+                mc_mov_ri32(m, SC1, 0x80000000u);
+                mc_cmp32_rr(m, MC_RAX, SC1);
+                mc_jcc(m, MC_NE, noovf);     /* dividend != INT_MIN: no overflow */
+                mc_trap_overflow(m);
+                mc_label(m, noovf);
             }
             mc_cdq(m);
             mc_idiv32_r(m, SC0);
@@ -868,7 +1140,11 @@ x86_select_func(struct mc *m, struct ir_func *fn, int tp,
             case IR_SUBO: mc_sub32_rr(m, SC0, SC1); break;
             case IR_MULO: mc_imul32_rr(m, SC0, SC1); break;
             }
-            if (tp == TRAP_GUARDED) {
+            if (in->label >= 0) {
+                /* explicit per-site trap target (Excelsior's cold __exc_trap
+                   trampoline): branch there on overflow. */
+                mc_jcc(m, MC_O, il(m, lbl, in->label));
+            } else if (tp == TRAP_GUARDED) {
                 int ok = mc_new_label(m);
                 mc_jcc(m, MC_NO, ok);   /* skip the trap when OF is clear */
                 mc_trap_overflow(m);    /* never returns; raises OVERFLOW */
@@ -1231,6 +1507,10 @@ x86_select_func(struct mc *m, struct ir_func *fn, int tp,
             break;
         case IR_ASM:
             /* basic inline assembly: emitted verbatim (AOT text sink only) */
+            if (in->asm_info) {
+                emit_asm_ext(m, fn, &fr, in);
+                break;
+            }
             mc_asm(m, in->sym);
             break;
         case IR_FRETV:

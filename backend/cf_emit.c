@@ -37,6 +37,35 @@ static const char *fpregs[] = {
     "%fp0", "%fp1", "%fp2", "%fp3", "%fp4", "%fp5", "%fp6", "%fp7",
 };
 
+/* A single-precision argument's stack footprint under the toolkit convention.
+   The two front ends that pass single-float arguments size the matching
+   parameter slot differently, and since each compiles as its own tool the
+   stride is a build-time choice.  The C compiler (CC_M68K) gives a single-float
+   parameter an 8-byte doubleword home (cc/lower.c, its cross-target o32 rule),
+   so its caller pushes 8.  The Kobold AOT compiler sizes a single parameter slot
+   at one 4-byte word (it sets param_fw and a 4-byte slot), so its caller pushes
+   4.  Pushing the wrong stride lands the next argument mid-slot. */
+#if defined(CC_M68K)
+#define CF_SINGLE_ARG_BYTES 8
+#else
+#define CF_SINGLE_ARG_BYTES 4
+#endif
+
+/* per-temp "defined by a 64-bit op" map, built per function (emit_function).
+   The i32/i64 accessors below read it to bridge a mixed-width operand: an i64
+   temp used in an i32 context is narrowed to its low word, and an i32 temp used
+   as an i64 is widened with a sign-extended high word.  The KPM IR mixes the two
+   freely (e.g. the coroutine seed store ST64s a plain i32), which the one-register
+   i64 backends get for free; ColdFire's register-pair model must bridge it. */
+static int *temp_is_i64;
+
+/* forward declarations: the i32/i64 accessors below reference helpers defined
+   further down (the register-pair math and the constant-count shift). */
+static int i64_hi_reg(int pair);
+static int i64_lo_reg(int pair);
+static void emit_shift_imm(FILE *out, const char *mnemonic,
+                           const char *reg, int n);
+
 /****************************************************************
  * Frame layout helpers
  ****************************************************************/
@@ -115,6 +144,16 @@ rs(FILE *out, struct ir_func *fn, int t, int scratch)
 {
     int r = fn->temp_reg[t];
 
+    if (temp_is_i64 && temp_is_i64[t]) {
+        /* An i64 temp used in an i32 context is narrowed to its low word.  The
+           pair's low register, or (big-endian) the high address of the i64
+           spill cell, which i64_rs loads from off - 4. */
+        if (r >= 0)
+            return dregs[i64_lo_reg(r)];
+        fprintf(out, "\tmove.l %d(%%fp), %s\n",
+            i64spill_byte_offset(fn, t) - 4, dregs[scratch]);
+        return dregs[scratch];
+    }
     if (r >= 0)
         return dregs[r];
     fprintf(out, "\tmove.l %d(%%fp), %s\n",
@@ -199,6 +238,19 @@ i64_rs(FILE *out, struct ir_func *fn, int t, int *hi, int *lo)
 {
     int p = fn->temp_reg[t];
 
+    if (!(temp_is_i64 && temp_is_i64[t])) {
+        /* An i32 temp used as an i64 (e.g. the coroutine seed store): its value
+           is the low word and the high word is its sign extension.  Materialise
+           the low word in d1 and the sign fill in d0. */
+        const char *sv = rs(out, fn, t, 1);
+        if (strcmp(sv, "%d1") != 0)
+            fprintf(out, "\tmove.l %s, %%d1\n", sv);
+        fprintf(out, "\tmove.l %%d1, %%d0\n");
+        emit_shift_imm(out, "asr.l", "%d0", 31);
+        *hi = 0;
+        *lo = 1;
+        return;
+    }
     if (p >= 0) {
         *hi = i64_hi_reg(p);
         *lo = i64_lo_reg(p);
@@ -209,6 +261,58 @@ i64_rs(FILE *out, struct ir_func *fn, int t, int *hi, int *lo)
         *hi = 0;
         *lo = 1;
     }
+}
+
+/* Read one 32-bit word of i64 temp t into a register: the high word when hi is
+   nonzero, the low word otherwise.  A pair-allocated temp returns its own
+   register (no load); a spilled temp loads the word into `scratch` (big-endian
+   spill: hi at off, lo at off - 4).  An i32 temp widened to i64 gives its value
+   as the low word and its sign extension (in `scratch`) as the high word.  Used
+   by the i64 comparisons, which read both operands' high words, then both low
+   words, so loading a word at a time keeps the second operand's load from
+   clobbering the first's scratch (the bug a plain two-operand i64_rs has when
+   both operands spill into the shared d0/d1 pair). */
+static const char *
+i64_word(FILE *out, struct ir_func *fn, int t, int hi, int scratch)
+{
+    int p = fn->temp_reg[t];
+
+    if (temp_is_i64 && temp_is_i64[t]) {
+        if (p >= 0)
+            return dregs[hi ? i64_hi_reg(p) : i64_lo_reg(p)];
+        {
+            int off = i64spill_byte_offset(fn, t);
+            fprintf(out, "\tmove.l %d(%%fp), %s\n",
+                hi ? off : off - 4, dregs[scratch]);
+            return dregs[scratch];
+        }
+    }
+    /* i32 widened to i64 */
+    if (!hi) {
+        if (p >= 0)
+            return dregs[p];
+        fprintf(out, "\tmove.l %d(%%fp), %s\n",
+            spill_byte_offset(fn, t), dregs[scratch]);
+        return dregs[scratch];
+    }
+    if (p >= 0)
+        fprintf(out, "\tmove.l %s, %s\n", dregs[p], dregs[scratch]);
+    else
+        fprintf(out, "\tmove.l %d(%%fp), %s\n",
+            spill_byte_offset(fn, t), dregs[scratch]);
+    emit_shift_imm(out, "asr.l", dregs[scratch], 31);
+    return dregs[scratch];
+}
+
+/* Load operand a's and b's high words (hi=1) or low words (hi=0) into
+   non-overlapping registers (a through scratch d0, b through scratch d1), for
+   the i64 comparisons. */
+static void
+i64_cmp_words(FILE *out, struct ir_func *fn, int ta, int tb, int hi,
+              const char **ra, const char **rb)
+{
+    *ra = i64_word(out, fn, ta, hi, 0);
+    *rb = i64_word(out, fn, tb, hi, 1);
 }
 
 static void
@@ -237,6 +341,95 @@ i64_wd(FILE *out, struct ir_func *fn, int t, int hi, int lo)
     fprintf(out, "\tmove.l %s, %d(%%fp)\n", dregs[lo], off - 4);
 }
 
+/* If temp t is defined by a load-immediate-constant, return 1 and its value;
+   otherwise 0.  Temps are function-unique and written once, so the single
+   defining instruction is unambiguous.  Used to inline a constant-count i64
+   shift (the shift helpers in soft64.c shift a 64-bit value by a constant, so
+   lowering that to a helper call would make each helper call itself). */
+static int
+i64_const_shift_count(struct ir_func *fn, int t, int *val)
+{
+    struct ir_insn *i;
+
+    for (i = fn->head; i; i = i->next)
+        if (i->dst == t && i->op == IR_LIC) {
+            *val = (int)i->imm;
+            return 1;
+        }
+    return 0;
+}
+
+/* Emit a constant-count shift on one data register, in chunks of at most 8
+   (ColdFire shift-immediate encodes a count of 1..8). */
+static void
+emit_shift_imm(FILE *out, const char *mnemonic, const char *reg, int n)
+{
+    while (n > 0) {
+        int step = n > 8 ? 8 : n;
+        fprintf(out, "\t%s #%d, %s\n", mnemonic, step, reg);
+        n -= step;
+    }
+}
+
+/* Inline a 64-bit shift by a compile-time constant count.  The result is
+   computed in the d0:d1 scratch pair (hi:lo), so it may overlap a spilled
+   source, then moved to the destination.  For a sub-word count the cross-word
+   term needs one more scratch; d2 is borrowed over the stack after the source
+   has been copied out. */
+static void
+emit_i64_shift_const(FILE *out, struct ir_func *fn, struct ir_insn *i,
+                     int shi, int slo, int dhi, int dlo, int c)
+{
+    const char *rsh = (i->op == IR_SHRS64) ? "asr.l" : "lsr.l";
+
+    c &= 63;
+    fprintf(out, "\tmove.l %s, %%d0\n", dregs[shi]);
+    fprintf(out, "\tmove.l %s, %%d1\n", dregs[slo]);
+
+    if (i->op == IR_SHL64) {
+        if (c == 0) {
+            /* identity: result already in d0:d1 */
+        } else if (c >= 32) {
+            fprintf(out, "\tmove.l %%d1, %%d0\n");     /* hi = lo */
+            emit_shift_imm(out, "lsl.l", "%d0", c - 32);
+            fprintf(out, "\tmoveq #0, %%d1\n");         /* lo = 0 */
+        } else {
+            fprintf(out, "\tmove.l %%d2, -(%%sp)\n");
+            fprintf(out, "\tmove.l %%d1, %%d2\n");       /* d2 = lo */
+            emit_shift_imm(out, "lsr.l", "%d2", 32 - c);
+            emit_shift_imm(out, "lsl.l", "%d0", c);      /* hi <<= c */
+            fprintf(out, "\tor.l %%d2, %%d0\n");          /* hi |= lo>>(32-c) */
+            emit_shift_imm(out, "lsl.l", "%d1", c);      /* lo <<= c */
+            fprintf(out, "\tmove.l (%%sp)+, %%d2\n");
+        }
+    } else { /* IR_SHRU64 / IR_SHRS64 */
+        if (c == 0) {
+            /* identity */
+        } else if (c >= 32) {
+            fprintf(out, "\tmove.l %%d0, %%d1\n");       /* lo = hi */
+            emit_shift_imm(out, rsh, "%d1", c - 32);
+            if (i->op == IR_SHRS64)
+                emit_shift_imm(out, "asr.l", "%d0", 31); /* hi = sign fill */
+            else
+                fprintf(out, "\tmoveq #0, %%d0\n");       /* hi = 0 */
+        } else {
+            fprintf(out, "\tmove.l %%d2, -(%%sp)\n");
+            fprintf(out, "\tmove.l %%d0, %%d2\n");       /* d2 = hi */
+            emit_shift_imm(out, "lsl.l", "%d2", 32 - c);
+            emit_shift_imm(out, "lsr.l", "%d1", c);      /* lo >>= c (logical) */
+            fprintf(out, "\tor.l %%d2, %%d1\n");          /* lo |= hi<<(32-c) */
+            emit_shift_imm(out, rsh, "%d0", c);          /* hi >>= c */
+            fprintf(out, "\tmove.l (%%sp)+, %%d2\n");
+        }
+    }
+
+    if (dhi != 0)
+        fprintf(out, "\tmove.l %%d0, %s\n", dregs[dhi]);
+    if (dlo != 1)
+        fprintf(out, "\tmove.l %%d1, %s\n", dregs[dlo]);
+    i64_wd(out, fn, i->dst, dhi, dlo);
+}
+
 /****************************************************************
  * Binary op helper
  ****************************************************************/
@@ -260,6 +453,13 @@ emit_binop(FILE *out, struct ir_func *fn, struct ir_insn *i,
     wd(out, fn, i->dst, sd);
 }
 
+/* file-scope: the per-function label namespace and a counter for the unique
+   local labels the label-less overflow trap needs (declared up here because
+   emit_overflow below references them). */
+static int label_prefix;
+static int uses_floats;
+static int ovf_label_ctr;
+
 static void
 emit_unop(FILE *out, struct ir_func *fn, struct ir_insn *i,
           const char *mnem)
@@ -271,6 +471,112 @@ emit_unop(FILE *out, struct ir_func *fn, struct ir_insn *i,
     if (strcmp(sa, sd) != 0)
         fprintf(out, "\tmove.l %s, %s\n", sa, sd);
     fprintf(out, "\t%s %s\n", mnem, sd);
+    wd(out, fn, i->dst, sd);
+}
+
+/* Overflow-checked signed 32-bit arithmetic (IR_ADDO/SUBO/MULO).  add.l,
+ * sub.l, and muls.l each set the V flag on signed overflow (the emulator sets
+ * it for muls.l too; see emu/coldfire.c), so a bvs after the operation takes
+ * the trap.  i->label >= 0 is an explicit per-site trap target (Excelsior's
+ * cold __exc_trap trampoline): branch there on overflow.  Otherwise (Kobold,
+ * i->label == -1) call the runtime's kp_trap_overflow.  The branch is emitted
+ * before wd(), since a move to a spill slot would clear V. */
+static void
+emit_overflow(FILE *out, struct ir_func *fn, struct ir_insn *i)
+{
+    const char *mnem = i->op == IR_ADDO ? "add.l" :
+                       i->op == IR_SUBO ? "sub.l" : "muls.l";
+    const char *sa, *sb, *sd;
+
+    sa = rs(out, fn, i->a, 0);
+    sb = rs(out, fn, i->b, 1);
+    sd = rd(fn, i->dst, 0);
+    if (strcmp(sb, sd) == 0 && strcmp(sa, sd) != 0) {
+        fprintf(out, "\tmove.l %s, %%d1\n", sb);
+        sb = dregs[1];
+    }
+    if (strcmp(sa, sd) != 0)
+        fprintf(out, "\tmove.l %s, %s\n", sa, sd);
+    fprintf(out, "\t%s %s, %s\n", mnem, sb, sd);
+    if (i->label >= 0) {
+        fprintf(out, "\tbvs .L%d_%d\n", label_prefix, i->label);
+    } else {
+        int k = ovf_label_ctr++;
+        fprintf(out, "\tbvc .Lovfok%d\n", k);
+        fprintf(out, "\tjsr kp_trap_overflow\n");
+        fprintf(out, ".Lovfok%d:\n", k);
+    }
+    wd(out, fn, i->dst, sd);
+}
+
+static int divz_label_ctr;
+
+/* Under Kobold's guarded trap policy (target_aot_trap_guarded) a zero divisor
+ * must raise the clean DIV_ZERO trap (exit 70), not the m68k hardware
+ * divide-by-zero exception (which reaches the shell as SIGFPE).  Test the
+ * divisor and call kp_trap_div_zero when it is zero.  cc and Excelsior leave
+ * the policy clear and keep the bare divide (Excelsior checks a fallible
+ * divisor in its own lowering, cc's divide by zero is undefined). */
+static void
+emit_divzero_guard(FILE *out, const char *divisor)
+{
+    int k;
+    if (!target_aot_trap_guarded)
+        return;
+    k = divz_label_ctr++;
+    fprintf(out, "\ttst.l %s\n", divisor);
+    fprintf(out, "\tbne .Ldivok%d\n", k);
+    fprintf(out, "\tjsr kp_trap_div_zero\n");
+    fprintf(out, ".Ldivok%d:\n", k);
+}
+
+/* Under the guarded policy a signed INT_MIN / -1 divide (and its modulo) must
+ * trap OVERFLOW: the true quotient 2^31 is not a representable signed 32-bit
+ * value.  divs.l's own overflow behavior is not usable here, qemu-m68k raises
+ * SIGFPE on the divide itself, so the pair is detected before the divide and
+ * kp_trap_overflow is called; the divide runs only when there is no overflow.
+ * The constant goes in %a0 (address scratch, never a live data temp) and is
+ * compared with cmp.l %a0,Dn, the register form both skj-as and GNU as encode
+ * alike (the immediate CMPI form they encode differently).  Signed only;
+ * divu.l cannot overflow this way. */
+static void
+emit_divovf_guard(FILE *out, const char *dividend, const char *divisor,
+                  int is_signed)
+{
+    int k;
+    if (!target_aot_trap_guarded || !is_signed)
+        return;
+    k = divz_label_ctr++;
+    fprintf(out, "\tmovea.l #-1, %%a0\n");
+    fprintf(out, "\tcmp.l %%a0, %s\n", divisor);
+    fprintf(out, "\tbne .Lovfok%d\n", k);          /* divisor != -1: no overflow */
+    fprintf(out, "\tmovea.l #-2147483648, %%a0\n");
+    fprintf(out, "\tcmp.l %%a0, %s\n", dividend);
+    fprintf(out, "\tbne .Lovfok%d\n", k);          /* dividend != INT_MIN: none */
+    fprintf(out, "\tjsr kp_trap_overflow\n");
+    fprintf(out, ".Lovfok%d:\n", k);
+}
+
+/* 32-bit divide quotient (IR_DIVS/IR_DIVU), emit_binop plus the divisor guard.
+ * The guard tests sb after any remap to %d1, before sd is overwritten. */
+static void
+emit_div(FILE *out, struct ir_func *fn, struct ir_insn *i, const char *mnem,
+         int is_signed)
+{
+    const char *sa, *sb, *sd;
+
+    sa = rs(out, fn, i->a, 0);
+    sb = rs(out, fn, i->b, 1);
+    sd = rd(fn, i->dst, 0);
+    if (strcmp(sb, sd) == 0 && strcmp(sa, sd) != 0) {
+        fprintf(out, "\tmove.l %s, %%d1\n", sb);
+        sb = dregs[1];
+    }
+    emit_divzero_guard(out, sb);
+    emit_divovf_guard(out, sa, sb, is_signed);   /* before sa is moved into sd */
+    if (strcmp(sa, sd) != 0)
+        fprintf(out, "\tmove.l %s, %s\n", sa, sd);
+    fprintf(out, "\t%s %s, %s\n", mnem, sb, sd);
     wd(out, fn, i->dst, sd);
 }
 
@@ -339,9 +645,6 @@ static int arg_is_float[CF_MAX_ARGS];
 static int arg_is_f32[CF_MAX_ARGS];
 static int arg_is_i64[CF_MAX_ARGS];
 static int narg;
-static int *temp_is_i64;         /* per-temp map, built per function */
-static int label_prefix;
-static int uses_floats;
 static int fcmp_serial;
 static int i64cmp_serial;
 
@@ -445,14 +748,16 @@ emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
         if (arg_is_float[k]) {
             const char *sa = frs(out, fn, arg_temps[k], 0);
             if (arg_is_f32[k]) {
-                /* single format at the slot base (the callee reads fmove.s);
-                 * reserve the full 8-byte arg slot */
-                fprintf(out, "\tlea -8(%%sp), %%sp\n");
+                /* A single argument's stack footprint (CF_SINGLE_ARG_BYTES)
+                 * must match the callee's single-parameter slot, or the next
+                 * argument lands mid-slot.  The single sits at the slot base. */
+                fprintf(out, "\tlea -%d(%%sp), %%sp\n", CF_SINGLE_ARG_BYTES);
                 fprintf(out, "\tfmove.s %s, (%%sp)\n", sa);
+                arg_bytes += CF_SINGLE_ARG_BYTES;
             } else {
                 fprintf(out, "\tfmove.d %s, -(%%sp)\n", sa);
+                arg_bytes += 8;
             }
-            arg_bytes += 8;
         } else if (arg_is_i64[k]) {
             int hi, lo;
             i64_rs(out, fn, arg_temps[k], &hi, &lo);
@@ -475,6 +780,12 @@ emit_call_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
     if (arg_bytes > 0)
         fprintf(out, "\tlea %d(%%sp), %%sp\n", arg_bytes);
     narg = 0;
+
+    /* A failable call (CALL2/CALLI2) returns the error signal in the second
+       return register (d1); store it to the error slot before the value in d0
+       is moved to dst, since a spilled dst's fix-up scratch is d1. */
+    if (i->op == IR_CALL2 || i->op == IR_CALLI2)
+        fprintf(out, "\tmove.l %%d1, %d(%%fp)\n", slot_offset(fn, i->slot));
 
     if (i->dst >= 0) {
         if (float_ret) {
@@ -512,7 +823,7 @@ emit_tailcall_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
                 const char *sa = frs(out, fn, arg_temps[k], 0);
                 fprintf(out, "\tfmove.%c %s, %d(%%fp)\n",
                     arg_is_f32[k] ? 's' : 'd', sa, off);
-                off += 8;
+                off += arg_is_f32[k] ? CF_SINGLE_ARG_BYTES : 8;
             } else {
                 const char *sa = rs(out, fn, arg_temps[k], 0);
                 fprintf(out, "\tmove.l %s, %d(%%fp)\n", sa, off);
@@ -532,6 +843,210 @@ emit_tailcall_flush(FILE *out, struct ir_func *fn, struct ir_insn *i,
         fprintf(out, "\tjmp %s\n", i->sym);
 }
 
+/* Is physical register `name` named in the asm's clobber list? */
+static int
+asm_reg_clobbered(struct ir_asm_info *ai, const char *name)
+{
+    int k;
+    for (k = 0; k < ai->nclobbers; k++)
+        if (strcmp(ai->clobbers[k], name) == 0)
+            return 1;
+    return 0;
+}
+
+/* The dregs[] index of data register `name`, or -1.  Indices 2..7 (%d2..%d7)
+   are the allocatable registers; the register allocator reserves any that an
+   asm pins or clobbers (cf_asm_reserved_regs below). */
+static int
+cf_regindex(const char *name)
+{
+    int t;
+    for (t = 0; t < (int)(sizeof dregs / sizeof dregs[0]); t++)
+        if (strcmp(dregs[t], name) == 0)
+            return t;
+    return -1;
+}
+
+/* Fill out[] (capacity max) with the allocator indices of the allocatable
+   data registers any extended asm in fn pins or clobbers, deduplicated. */
+int
+cf_asm_reserved_regs(struct ir_func *fn, int *out, int max)
+{
+    struct ir_insn *i;
+    int n = 0, k, j;
+
+    for (i = fn->head; i; i = i->next) {
+        struct ir_asm_info *ai = i->asm_info;
+        if (i->op != IR_ASM || !ai)
+            continue;
+        for (k = 0; k < ai->noutputs + ai->ninputs; k++) {
+            int idx = ai->ops[k].pin_reg ? cf_regindex(ai->ops[k].pin_reg) : -1;
+            if (idx < 2)                /* not allocatable (or not a d-reg) */
+                continue;
+            for (j = 0; j < n && out[j] != idx; j++)
+                ;
+            if (j == n && n < max)
+                out[n++] = idx;
+        }
+        for (k = 0; k < ai->nclobbers; k++) {
+            int idx = cf_regindex(ai->clobbers[k]);
+            if (idx < 2)
+                continue;
+            for (j = 0; j < n && out[j] != idx; j++)
+                ;
+            if (j == n && n < max)
+                out[n++] = idx;
+        }
+    }
+    return n;
+}
+
+/* Is physical register `name` the pin target of any operand in this asm? */
+static int
+asm_reg_pinned(struct ir_asm_info *ai, const char *name)
+{
+    int k, n = ai->noutputs + ai->ninputs;
+    for (k = 0; k < n; k++)
+        if (ai->ops[k].pin_reg && strcmp(ai->ops[k].pin_reg, name) == 0)
+            return 1;
+    return 0;
+}
+
+/* Extended inline asm (cc's asm(template : outputs : inputs : clobbers)).
+ * A generic "r" operand goes in a data register: its allocated %d2..%d7, or a
+ * %d0/%d1 scratch materialised from the spill slot.  A pinned operand (a
+ * "{%reg}" constraint or a GNU local register variable) goes in that physical
+ * register, with its value moved in from the operand temp's home and, for an
+ * output, moved back out.  The template's %N are substituted.  Register names
+ * are the assembler's own spelling, e.g. %d0. */
+/* The register class a constraint asks for (the leading =/+/&/% skipped):
+   'a' is an address register, 'd'/'r' a data register (the default). */
+static int
+cf_constraint_class(const char *c)
+{
+    while (*c == '=' || *c == '+' || *c == '&' || *c == '%')
+        c++;
+    return *c == 'a' ? 'a' : 'd';
+}
+
+static void
+emit_asm_ext(FILE *out, struct ir_func *fn, struct ir_insn *i)
+{
+    struct ir_asm_info *ai = i->asm_info;
+    int n = ai->noutputs + ai->ninputs;
+    const char *pool[] = { "%d0", "%d1" };          /* data scratch */
+    const char *apool[] = { "%a0", "%a1" };         /* address scratch */
+    int npool = (int)(sizeof pool / sizeof pool[0]);
+    int nap = (int)(sizeof apool / sizeof apool[0]);
+    const char *opreg[32];
+    int forced[32];     /* 1 = a pin or an address-class operand: move in/out */
+    int next = 0, anext = 0, k;
+    const char *s;
+
+    if (n > 32)
+        die("cf: too many asm operands");
+
+    /* 1. name each operand's register.  A pin goes to the named register; an
+       "a"-class operand to an address scratch register; otherwise a data
+       register (its allocated %d2..%d7, or a %d0/%d1 scratch assigned next). */
+    for (k = 0; k < n; k++) {
+        struct ir_asm_op *op = &ai->ops[k];
+
+        if (op->pin_reg) {
+            int j;
+            /* an allocatable pin is fine: the allocator reserved it (see
+               cf_asm_reserved_regs), so no temp lives there across the asm */
+            for (j = 0; j < k; j++)
+                if (ai->ops[j].pin_reg &&
+                    strcmp(ai->ops[j].pin_reg, op->pin_reg) == 0)
+                    die("cf: two asm operands pinned to %s", op->pin_reg);
+            opreg[k] = op->pin_reg;
+            forced[k] = 1;
+        } else if (cf_constraint_class(op->constraint) == 'a') {
+            if (anext >= nap)
+                die("cf: too many address-class asm operands");
+            opreg[k] = apool[anext++];
+            forced[k] = 1;
+        } else if (fn->temp_reg[op->temp] >= 0) {
+            opreg[k] = dregs[fn->temp_reg[op->temp]];
+            forced[k] = 0;
+        } else {
+            opreg[k] = NULL;    /* a data pool reg, assigned next */
+            forced[k] = 0;
+        }
+    }
+    /* 2. hand the spilled generic operands a scratch register each */
+    for (k = 0; k < n; k++) {
+        if (opreg[k])
+            continue;
+        while (next < npool && (asm_reg_clobbered(ai, pool[next]) ||
+                                asm_reg_pinned(ai, pool[next])))
+            next++;
+        if (next >= npool)
+            die("cf: too many spilled asm operands");
+        opreg[k] = pool[next++];
+    }
+
+    /* 3. materialise input values into their operand registers */
+    for (k = 0; k < n; k++) {
+        struct ir_asm_op *op = &ai->ops[k];
+        int home = fn->temp_reg[op->temp];
+
+        if (op->is_output && !op->is_inout)
+            continue;
+        if (forced[k]) {
+            if (home >= 0)
+                fprintf(out, "\tmove.l %s, %s\n", dregs[home], opreg[k]);
+            else
+                fprintf(out, "\tmove.l %d(%%fp), %s\n",
+                    spill_byte_offset(fn, op->temp), opreg[k]);
+        } else if (home < 0) {
+            fprintf(out, "\tmove.l %d(%%fp), %s\n",
+                spill_byte_offset(fn, op->temp), opreg[k]);
+        }
+    }
+
+    /* 4. the template, %N substituted */
+    for (s = i->sym; *s; s++) {
+        if (*s != '%') {
+            fputc(*s, out);
+            continue;
+        }
+        s++;
+        if (*s == '%') {
+            fputc('%', out);
+        } else if (*s >= '0' && *s <= '9') {
+            int idx = 0;
+            while (*s >= '0' && *s <= '9')
+                idx = idx * 10 + (*s++ - '0');
+            s--;
+            if (idx >= n)
+                die("cf: asm operand %%%d out of range", idx);
+            fputs(opreg[idx], out);
+        } else {
+            fputc('%', out);
+            fputc(*s, out);
+        }
+    }
+    fputc('\n', out);
+
+    /* 5. store outputs back from their operand registers */
+    for (k = 0; k < ai->noutputs; k++) {
+        struct ir_asm_op *op = &ai->ops[k];
+        int home = fn->temp_reg[op->temp];
+
+        if (forced[k]) {
+            if (home >= 0)
+                fprintf(out, "\tmove.l %s, %s\n", opreg[k], dregs[home]);
+            else
+                fprintf(out, "\tmove.l %s, %d(%%fp)\n",
+                    opreg[k], spill_byte_offset(fn, op->temp));
+        } else {
+            wd(out, fn, op->temp, opreg[k]);
+        }
+    }
+}
+
 static void
 emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
 {
@@ -540,6 +1055,10 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
 
     case IR_ASM:
+        if (i->asm_info) {
+            emit_asm_ext(out, fn, i);
+            break;
+        }
         /* basic inline asm: the string is emitted verbatim */
         fprintf(out, "%s\n", i->sym);
         break;
@@ -583,6 +1102,9 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_ADD:  emit_binop(out, fn, i, "add.l");  break;
     case IR_SUB:  emit_binop(out, fn, i, "sub.l");  break;
     case IR_MUL:  emit_binop(out, fn, i, "muls.l"); break;
+    case IR_ADDO:
+    case IR_SUBO:
+    case IR_MULO: emit_overflow(out, fn, i); break;
     case IR_AND:  emit_binop(out, fn, i, "and.l");  break;
     case IR_OR:   emit_binop(out, fn, i, "or.l");   break;
     case IR_XOR:  emit_binop(out, fn, i, "eor.l");  break;
@@ -590,8 +1112,8 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_SHRS: emit_binop(out, fn, i, "asr.l");  break;
     case IR_SHRU: emit_binop(out, fn, i, "lsr.l");  break;
 
-    case IR_DIVS: emit_binop(out, fn, i, "divs.l"); break;
-    case IR_DIVU: emit_binop(out, fn, i, "divu.l"); break;
+    case IR_DIVS: emit_div(out, fn, i, "divs.l", 1); break;
+    case IR_DIVU: emit_div(out, fn, i, "divu.l", 0); break;
 
     case IR_MODS:
     case IR_MODU: {
@@ -603,6 +1125,8 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
             fprintf(out, "\tmove.l %s, %%d1\n", sb);
             sb = "%d1";
         }
+        emit_divzero_guard(out, sb);
+        emit_divovf_guard(out, sa, sb, i->op == IR_MODS);   /* before the divide */
         /* remainder = dividend - (dividend / divisor) * divisor.  The quotient
            and product are built in %d0; the dividend must survive until the
            final subtract, so it is saved and restored into %d1 (the divisor in
@@ -735,6 +1259,13 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         emit_tailcall_flush(out, fn, i, 1);
         break;
 
+    case IR_CALL2:
+        emit_call_flush(out, fn, i, 0);
+        break;
+    case IR_CALLI2:
+        emit_call_flush(out, fn, i, 1);
+        break;
+
     case IR_RET:
         emit_epilogue(out, fn);
         break;
@@ -742,6 +1273,19 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         const char *sa = rs(out, fn, i->a, 0);
         if (strcmp(sa, "%d0") != 0)
             fprintf(out, "\tmove.l %s, %%d0\n", sa);
+        emit_epilogue(out, fn);
+        break;
+    }
+    case IR_RETV2: {
+        /* the value in the first return register (d0), the error signal in the
+           second (d1), then return (the failable-routine ABI). */
+        const char *sa = rs(out, fn, i->a, 0);
+        const char *sb;
+        if (strcmp(sa, "%d0") != 0)
+            fprintf(out, "\tmove.l %s, %%d0\n", sa);
+        sb = rs(out, fn, i->b, 1);
+        if (strcmp(sb, "%d1") != 0)
+            fprintf(out, "\tmove.l %s, %%d1\n", sb);
         emit_epilogue(out, fn);
         break;
     }
@@ -816,6 +1360,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_FDIV: emit_fbinop(out, fn, i, "fdiv.x"); break;
     case IR_FNEG: emit_funop(out, fn, i, "fneg.x"); break;
     case IR_FABS: emit_funop(out, fn, i, "fabs.x"); break;
+    case IR_FSQRT: emit_funop(out, fn, i, "fsqrt.x"); break;
 
     case IR_FCMPEQ:
     case IR_FCMPLT:
@@ -855,6 +1400,17 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         const char *sd = rd(fn, i->dst, 0);
         fprintf(out, "\tfintrz.x %s, %%fp0\n", sa);
         fprintf(out, "\tfmove.l %%fp0, %s\n", sd);
+        wd(out, fn, i->dst, sd);
+        break;
+    }
+
+    case IR_FROUND: {
+        /* f64 -> i32, round to nearest even: fmove.l to an integer destination
+           converts under the FPCR rounding mode, which the runtime leaves at
+           the default round-to-nearest-even. */
+        const char *sa = frs(out, fn, i->a, 0);
+        const char *sd = rd(fn, i->dst, 0);
+        fprintf(out, "\tfmove.l %s, %s\n", sa, sd);
         wd(out, fn, i->dst, sd);
         break;
     }
@@ -1050,6 +1606,40 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
     }
 
+    case IR_DIVS64:
+    case IR_DIVU64:
+    case IR_MODS64:
+    case IR_MODU64: {
+        int ahi, alo, bhi, blo, dhi, dlo;
+        const char *helper =
+            i->op == IR_DIVS64 ? "__divdi3" :
+            i->op == IR_DIVU64 ? "__udivdi3" :
+            i->op == IR_MODS64 ? "__moddi3" : "__umoddi3";
+
+        i64_rs(out, fn, i->a, &ahi, &alo);
+        i64_rs(out, fn, i->b, &bhi, &blo);
+        i64_rd(fn, i->dst, &dhi, &dlo);
+        /*
+         * 64-bit divide and modulo through the soft64 helper family
+         * (__divdi3 / __udivdi3 / __moddi3 / __umoddi3), which take the same
+         * stack ABI as __muldi3 above (a_hi, a_lo, b_hi, b_lo) and return the
+         * result in d0:d1.  soft64.c's C helpers are ABI-compatible as emitted
+         * since the toolkit stack convention is the m68k C ABI.
+         */
+        fprintf(out, "\tmove.l %s, -(%%sp)\n", dregs[blo]);
+        fprintf(out, "\tmove.l %s, -(%%sp)\n", dregs[bhi]);
+        fprintf(out, "\tmove.l %s, -(%%sp)\n", dregs[alo]);
+        fprintf(out, "\tmove.l %s, -(%%sp)\n", dregs[ahi]);
+        fprintf(out, "\tjsr %s\n", helper);
+        fprintf(out, "\tlea 16(%%sp), %%sp\n");
+        if (dhi != 0)
+            fprintf(out, "\tmove.l %%d0, %s\n", dregs[dhi]);
+        if (dlo != 1)
+            fprintf(out, "\tmove.l %%d1, %s\n", dregs[dlo]);
+        i64_wd(out, fn, i->dst, dhi, dlo);
+        break;
+    }
+
     case IR_AND64: {
         int ahi, alo, bhi, blo, dhi, dlo;
 
@@ -1104,6 +1694,17 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         int ahi, alo, dhi, dlo;
         const char *sb;
         const char *func;
+        int cc;
+
+        /* A constant count is inlined: the shift helpers in soft64.c shift a
+           64-bit value by a constant, so routing that back through the helper
+           would make each one recurse into itself. */
+        if (i64_const_shift_count(fn, i->b, &cc)) {
+            i64_rs(out, fn, i->a, &ahi, &alo);
+            i64_rd(fn, i->dst, &dhi, &dlo);
+            emit_i64_shift_const(out, fn, i, ahi, alo, dhi, dlo, cc);
+            break;
+        }
 
         i64_rs(out, fn, i->a, &ahi, &alo);
         sb = rs(out, fn, i->b, 1);
@@ -1144,188 +1745,201 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
 
     case IR_CMP64EQ:
     case IR_CMP64NE: {
-        int ahi, alo, bhi, blo;
-        const char *sd;
+        const char *ra, *rb, *sd;
         int id = i64cmp_serial++;
+        int eq = (i->op == IR_CMP64EQ);
 
-        i64_rs(out, fn, i->a, &ahi, &alo);
-        i64_rs(out, fn, i->b, &bhi, &blo);
+        /* Write the result only after both compares consume the operand
+           registers: a spilled operand is loaded into the d0/d1 scratch pair,
+           which the result register (sd) can also be, so materialising sd before
+           the compares would clobber the operand's word. */
+        i64_cmp_words(out, fn, i->a, i->b, 1, &ra, &rb);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
+        fprintf(out, "\tbne .Li64c%d_ne\n", id);
+        i64_cmp_words(out, fn, i->a, i->b, 0, &ra, &rb);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
+        fprintf(out, "\tbne .Li64c%d_ne\n", id);
         sd = rd(fn, i->dst, 0);
-        fprintf(out, "\tmoveq #0, %s\n", sd);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[bhi], dregs[ahi]);
-        fprintf(out, "\tbne .Li64c%d\n", id);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[blo], dregs[alo]);
-        fprintf(out, ".Li64c%d:\n", id);
-        fprintf(out, "\t%s %s\n",
-            i->op == IR_CMP64EQ ? "seq" : "sne", sd);
-        fprintf(out, "\tand.l #1, %s\n", sd);      /* 0x00/0xFF -> 0/1, CF-legal */
+        fprintf(out, "\tmoveq #%d, %s\n", eq ? 1 : 0, sd);
+        fprintf(out, "\tbra .Li64c%d_d\n", id);
+        fprintf(out, ".Li64c%d_ne:\n", id);
+        fprintf(out, "\tmoveq #%d, %s\n", eq ? 0 : 1, sd);
+        fprintf(out, ".Li64c%d_d:\n", id);
         wd(out, fn, i->dst, sd);
         break;
     }
 
     case IR_CMP64LTS: {
-        int ahi, alo, bhi, blo;
-        const char *sd;
+        const char *ra, *rb, *sd;
         int id = i64cmp_serial++;
 
-        i64_rs(out, fn, i->a, &ahi, &alo);
-        i64_rs(out, fn, i->b, &bhi, &blo);
+        i64_cmp_words(out, fn, i->a, i->b, 1, &ra, &rb);
         sd = rd(fn, i->dst, 0);
-        fprintf(out, "\tmoveq #0, %s\n", sd);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[bhi], dregs[ahi]);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
         fprintf(out, "\tblt .Li64c%d_t\n", id);
-        fprintf(out, "\tbgt .Li64c%d_d\n", id);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[blo], dregs[alo]);
-        fprintf(out, "\tbcc .Li64c%d_d\n", id);
+        fprintf(out, "\tbgt .Li64c%d_f\n", id);
+        i64_cmp_words(out, fn, i->a, i->b, 0, &ra, &rb);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
+        fprintf(out, "\tbcc .Li64c%d_f\n", id);
         fprintf(out, ".Li64c%d_t:\n", id);
         fprintf(out, "\tmoveq #1, %s\n", sd);
+        fprintf(out, "\tbra .Li64c%d_d\n", id);
+        fprintf(out, ".Li64c%d_f:\n", id);
+        fprintf(out, "\tmoveq #0, %s\n", sd);
         fprintf(out, ".Li64c%d_d:\n", id);
         wd(out, fn, i->dst, sd);
         break;
     }
 
     case IR_CMP64LES: {
-        int ahi, alo, bhi, blo;
-        const char *sd;
+        const char *ra, *rb, *sd;
         int id = i64cmp_serial++;
 
-        i64_rs(out, fn, i->a, &ahi, &alo);
-        i64_rs(out, fn, i->b, &bhi, &blo);
+        i64_cmp_words(out, fn, i->a, i->b, 1, &ra, &rb);
         sd = rd(fn, i->dst, 0);
-        fprintf(out, "\tmoveq #0, %s\n", sd);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[bhi], dregs[ahi]);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
         fprintf(out, "\tblt .Li64c%d_t\n", id);
-        fprintf(out, "\tbgt .Li64c%d_d\n", id);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[blo], dregs[alo]);
-        fprintf(out, "\tbhi .Li64c%d_d\n", id);
+        fprintf(out, "\tbgt .Li64c%d_f\n", id);
+        i64_cmp_words(out, fn, i->a, i->b, 0, &ra, &rb);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
+        fprintf(out, "\tbhi .Li64c%d_f\n", id);
         fprintf(out, ".Li64c%d_t:\n", id);
         fprintf(out, "\tmoveq #1, %s\n", sd);
+        fprintf(out, "\tbra .Li64c%d_d\n", id);
+        fprintf(out, ".Li64c%d_f:\n", id);
+        fprintf(out, "\tmoveq #0, %s\n", sd);
         fprintf(out, ".Li64c%d_d:\n", id);
         wd(out, fn, i->dst, sd);
         break;
     }
 
     case IR_CMP64GTS: {
-        int ahi, alo, bhi, blo;
-        const char *sd;
+        const char *ra, *rb, *sd;
         int id = i64cmp_serial++;
 
-        i64_rs(out, fn, i->a, &ahi, &alo);
-        i64_rs(out, fn, i->b, &bhi, &blo);
+        i64_cmp_words(out, fn, i->a, i->b, 1, &ra, &rb);
         sd = rd(fn, i->dst, 0);
-        fprintf(out, "\tmoveq #0, %s\n", sd);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[bhi], dregs[ahi]);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
         fprintf(out, "\tbgt .Li64c%d_t\n", id);
-        fprintf(out, "\tblt .Li64c%d_d\n", id);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[blo], dregs[alo]);
-        fprintf(out, "\tbls .Li64c%d_d\n", id);
+        fprintf(out, "\tblt .Li64c%d_f\n", id);
+        i64_cmp_words(out, fn, i->a, i->b, 0, &ra, &rb);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
+        fprintf(out, "\tbls .Li64c%d_f\n", id);
         fprintf(out, ".Li64c%d_t:\n", id);
         fprintf(out, "\tmoveq #1, %s\n", sd);
+        fprintf(out, "\tbra .Li64c%d_d\n", id);
+        fprintf(out, ".Li64c%d_f:\n", id);
+        fprintf(out, "\tmoveq #0, %s\n", sd);
         fprintf(out, ".Li64c%d_d:\n", id);
         wd(out, fn, i->dst, sd);
         break;
     }
 
     case IR_CMP64GES: {
-        int ahi, alo, bhi, blo;
-        const char *sd;
+        const char *ra, *rb, *sd;
         int id = i64cmp_serial++;
 
-        i64_rs(out, fn, i->a, &ahi, &alo);
-        i64_rs(out, fn, i->b, &bhi, &blo);
+        i64_cmp_words(out, fn, i->a, i->b, 1, &ra, &rb);
         sd = rd(fn, i->dst, 0);
-        fprintf(out, "\tmoveq #0, %s\n", sd);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[bhi], dregs[ahi]);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
         fprintf(out, "\tbgt .Li64c%d_t\n", id);
-        fprintf(out, "\tblt .Li64c%d_d\n", id);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[blo], dregs[alo]);
-        fprintf(out, "\tbcs .Li64c%d_d\n", id);
+        fprintf(out, "\tblt .Li64c%d_f\n", id);
+        i64_cmp_words(out, fn, i->a, i->b, 0, &ra, &rb);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
+        fprintf(out, "\tbcs .Li64c%d_f\n", id);
         fprintf(out, ".Li64c%d_t:\n", id);
         fprintf(out, "\tmoveq #1, %s\n", sd);
+        fprintf(out, "\tbra .Li64c%d_d\n", id);
+        fprintf(out, ".Li64c%d_f:\n", id);
+        fprintf(out, "\tmoveq #0, %s\n", sd);
         fprintf(out, ".Li64c%d_d:\n", id);
         wd(out, fn, i->dst, sd);
         break;
     }
 
     case IR_CMP64LTU: {
-        int ahi, alo, bhi, blo;
-        const char *sd;
+        const char *ra, *rb, *sd;
         int id = i64cmp_serial++;
 
-        i64_rs(out, fn, i->a, &ahi, &alo);
-        i64_rs(out, fn, i->b, &bhi, &blo);
+        i64_cmp_words(out, fn, i->a, i->b, 1, &ra, &rb);
         sd = rd(fn, i->dst, 0);
-        fprintf(out, "\tmoveq #0, %s\n", sd);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[bhi], dregs[ahi]);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
         fprintf(out, "\tbcs .Li64c%d_t\n", id);
-        fprintf(out, "\tbhi .Li64c%d_d\n", id);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[blo], dregs[alo]);
-        fprintf(out, "\tbcc .Li64c%d_d\n", id);
+        fprintf(out, "\tbhi .Li64c%d_f\n", id);
+        i64_cmp_words(out, fn, i->a, i->b, 0, &ra, &rb);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
+        fprintf(out, "\tbcc .Li64c%d_f\n", id);
         fprintf(out, ".Li64c%d_t:\n", id);
         fprintf(out, "\tmoveq #1, %s\n", sd);
+        fprintf(out, "\tbra .Li64c%d_d\n", id);
+        fprintf(out, ".Li64c%d_f:\n", id);
+        fprintf(out, "\tmoveq #0, %s\n", sd);
         fprintf(out, ".Li64c%d_d:\n", id);
         wd(out, fn, i->dst, sd);
         break;
     }
 
     case IR_CMP64LEU: {
-        int ahi, alo, bhi, blo;
-        const char *sd;
+        const char *ra, *rb, *sd;
         int id = i64cmp_serial++;
 
-        i64_rs(out, fn, i->a, &ahi, &alo);
-        i64_rs(out, fn, i->b, &bhi, &blo);
+        i64_cmp_words(out, fn, i->a, i->b, 1, &ra, &rb);
         sd = rd(fn, i->dst, 0);
-        fprintf(out, "\tmoveq #0, %s\n", sd);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[bhi], dregs[ahi]);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
         fprintf(out, "\tbcs .Li64c%d_t\n", id);
-        fprintf(out, "\tbhi .Li64c%d_d\n", id);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[blo], dregs[alo]);
-        fprintf(out, "\tbhi .Li64c%d_d\n", id);
+        fprintf(out, "\tbhi .Li64c%d_f\n", id);
+        i64_cmp_words(out, fn, i->a, i->b, 0, &ra, &rb);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
+        fprintf(out, "\tbhi .Li64c%d_f\n", id);
         fprintf(out, ".Li64c%d_t:\n", id);
         fprintf(out, "\tmoveq #1, %s\n", sd);
+        fprintf(out, "\tbra .Li64c%d_d\n", id);
+        fprintf(out, ".Li64c%d_f:\n", id);
+        fprintf(out, "\tmoveq #0, %s\n", sd);
         fprintf(out, ".Li64c%d_d:\n", id);
         wd(out, fn, i->dst, sd);
         break;
     }
 
     case IR_CMP64GTU: {
-        int ahi, alo, bhi, blo;
-        const char *sd;
+        const char *ra, *rb, *sd;
         int id = i64cmp_serial++;
 
-        i64_rs(out, fn, i->a, &ahi, &alo);
-        i64_rs(out, fn, i->b, &bhi, &blo);
+        i64_cmp_words(out, fn, i->a, i->b, 1, &ra, &rb);
         sd = rd(fn, i->dst, 0);
-        fprintf(out, "\tmoveq #0, %s\n", sd);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[bhi], dregs[ahi]);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
         fprintf(out, "\tbhi .Li64c%d_t\n", id);
-        fprintf(out, "\tbcs .Li64c%d_d\n", id);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[blo], dregs[alo]);
-        fprintf(out, "\tbls .Li64c%d_d\n", id);
+        fprintf(out, "\tbcs .Li64c%d_f\n", id);
+        i64_cmp_words(out, fn, i->a, i->b, 0, &ra, &rb);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
+        fprintf(out, "\tbls .Li64c%d_f\n", id);
         fprintf(out, ".Li64c%d_t:\n", id);
         fprintf(out, "\tmoveq #1, %s\n", sd);
+        fprintf(out, "\tbra .Li64c%d_d\n", id);
+        fprintf(out, ".Li64c%d_f:\n", id);
+        fprintf(out, "\tmoveq #0, %s\n", sd);
         fprintf(out, ".Li64c%d_d:\n", id);
         wd(out, fn, i->dst, sd);
         break;
     }
 
     case IR_CMP64GEU: {
-        int ahi, alo, bhi, blo;
-        const char *sd;
+        const char *ra, *rb, *sd;
         int id = i64cmp_serial++;
 
-        i64_rs(out, fn, i->a, &ahi, &alo);
-        i64_rs(out, fn, i->b, &bhi, &blo);
+        i64_cmp_words(out, fn, i->a, i->b, 1, &ra, &rb);
         sd = rd(fn, i->dst, 0);
-        fprintf(out, "\tmoveq #0, %s\n", sd);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[bhi], dregs[ahi]);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
         fprintf(out, "\tbhi .Li64c%d_t\n", id);
-        fprintf(out, "\tbcs .Li64c%d_d\n", id);
-        fprintf(out, "\tcmp.l %s, %s\n", dregs[blo], dregs[alo]);
-        fprintf(out, "\tbcs .Li64c%d_d\n", id);
+        fprintf(out, "\tbcs .Li64c%d_f\n", id);
+        i64_cmp_words(out, fn, i->a, i->b, 0, &ra, &rb);
+        fprintf(out, "\tcmp.l %s, %s\n", rb, ra);
+        fprintf(out, "\tbcs .Li64c%d_f\n", id);
         fprintf(out, ".Li64c%d_t:\n", id);
         fprintf(out, "\tmoveq #1, %s\n", sd);
+        fprintf(out, "\tbra .Li64c%d_d\n", id);
+        fprintf(out, ".Li64c%d_f:\n", id);
+        fprintf(out, "\tmoveq #0, %s\n", sd);
         fprintf(out, ".Li64c%d_d:\n", id);
         wd(out, fn, i->dst, sd);
         break;
@@ -1349,8 +1963,8 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         const char *sa;
 
         sa = rs(out, fn, i->a, 0);
-        i64_rs(out, fn, i->b, &bhi, &blo);
         fprintf(out, "\tmovea.l %s, %%a0\n", sa);
+        i64_rs(out, fn, i->b, &bhi, &blo);
         fprintf(out, "\tmove.l %s, (%%a0)\n", dregs[bhi]);
         fprintf(out, "\tmove.l %s, 4(%%a0)\n", dregs[blo]);
         break;
@@ -1639,7 +2253,19 @@ emit_globals(FILE *out, struct ir_program *prog)
             continue;
         }
         emit_global_head(out, g);
-        if (g->inits) {
+        if (g->is_strobj) {
+            /* A static Kobold string object: the {refcount, kind, len} header
+               in target endianness, then the text and a trailing NUL.  Emitting
+               the header words as .long keeps them big-endian on ColdFire, where
+               str_core.c reads them with native loads (a header baked into the
+               KPM as little-endian bytes would be byte-swapped). */
+            fprintf(out, "\t.long 0x%08x\n", 0xffffffffu);  /* KP_RC_STATIC */
+            fprintf(out, "\t.long 0x%08x\n", 1u);           /* KP_OBJ_STRING */
+            fprintf(out, "\t.long %d\n", g->init_strlen);   /* byte length */
+            if (g->init_strlen > 0)
+                emit_string_bytes(out, g->init_string, g->init_strlen);
+            fprintf(out, "\t.byte 0\n");                    /* trailing NUL */
+        } else if (g->inits) {
             emit_init_image(out, g);
         } else if (g->init_string) {
             emit_string_bytes(out, g->init_string,

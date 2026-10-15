@@ -270,6 +270,24 @@ kp_co_new(kp_vm *vm, void *entry, const void *args, int nargs)
         base[0] = (uintptr_t)co_trampoline;   /* ra at word 0 */
         co->ctx.sp = base;
     }
+#elif defined(__m68k__)
+    /* ColdFire/m68k co_switch restores d2-d7 and a2-a6 then fp2-fp7 from a
+       96-byte block, with the return address sitting just above it at offset 96
+       (the rts pops it). Reserve 100 bytes so that slot is included, zero the
+       block, and set the return-address slot (word 24) to the trampoline; after
+       the restore and the rts sp = top, the 16-aligned entry top. Matches
+       co_switch_cf.S. */
+    (void)sp;
+    {
+        uintptr_t *base;
+
+        top -= 100;
+        base = (uintptr_t *)top;
+        for (i = 0; i < 25; i++)
+            base[i] = 0;
+        base[24] = (uintptr_t)co_trampoline;   /* ra just above the 96-byte block */
+        co->ctx.sp = base;
+    }
 #else
     /* x86-64 co_switch pops rbp,rbx,r12-r15 then rets. One pad word keeps the
        trampoline's entry rsp at 8 mod 16, as SysV expects just after a call. */

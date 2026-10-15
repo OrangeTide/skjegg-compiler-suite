@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 /****************************************************************
  * Sparse memory
@@ -355,6 +356,7 @@ gm_read_out(guest_mem *m, uint32_t addr, void *dst, uint32_t len)
  * a guest-visible error rather than a silent success.
  ****************************************************************/
 
+#define GUEST_ENOENT    2
 #define GUEST_EBADF     9
 #define GUEST_ENOMEM    12
 #define GUEST_EFAULT    14
@@ -382,8 +384,6 @@ sys_write(guest *g, uint32_t fd, uint32_t buf, uint32_t len)
     uint8_t tmp[4096];
     uint32_t done = 0;
 
-    if (fd != 1 && fd != 2)
-        return -GUEST_EBADF;
     while (done < len) {
         uint32_t chunk = len - done;
         ssize_t n;
@@ -391,7 +391,8 @@ sys_write(guest *g, uint32_t fd, uint32_t buf, uint32_t len)
             chunk = sizeof(tmp);
         if (!copy_from_guest(g, buf + done, tmp, chunk))
             return -GUEST_EFAULT;
-        if (g->quiet) {
+        /* --quiet suppresses only the console streams, not a real file. */
+        if (g->quiet && (fd == 1 || fd == 2)) {
             done += chunk;
             continue;
         }
@@ -409,17 +410,44 @@ sys_read(guest *g, uint32_t fd, uint32_t buf, uint32_t len)
     uint8_t tmp[4096];
     ssize_t n;
 
-    if (fd != 0)
-        return -GUEST_EBADF;
     if (len > sizeof(tmp))
         len = sizeof(tmp);
-    n = read(0, tmp, len);
+    n = read((int)fd, tmp, len);
     if (n < 0)
         return -GUEST_EBADF;
     gm_write(&g->mem, buf, tmp, (uint32_t)n);
     if (g->mem.fault)
         return -GUEST_EFAULT;
     return (int32_t)n;
+}
+
+/* Host file access for the guest.  skj-run is a user-mode development
+ * emulator, like qemu-user, so a guest may open real files with the invoking
+ * user's own permissions; this is what lets a guest compiler such as kpcom
+ * read its source and write its output.  The open flags and mode are the
+ * asm-generic Linux values both the m68k and rv guests use, which match the
+ * host's, so they pass through unchanged.  An opened descriptor is the host
+ * fd, used directly by sys_read / sys_write / close. */
+static int32_t
+sys_open(guest *g, uint32_t pathp, uint32_t flags, uint32_t mode)
+{
+    char path[1024];
+    uint32_t i;
+    int fd;
+
+    for (i = 0; i < sizeof(path) - 1; i++) {
+        uint8_t *p = gm_page(&g->mem, pathp + i, 0);
+        if (!p)
+            return -GUEST_EFAULT;
+        path[i] = (char)p[(pathp + i) & (GM_PAGE_SIZE - 1)];
+        if (path[i] == '\0')
+            break;
+    }
+    path[i] = '\0';
+    fd = open(path, (int)flags, mode);
+    if (fd < 0)
+        return -GUEST_ENOENT;
+    return (int32_t)fd;
 }
 
 /* Linux brk: return the new break, or the current one when the request
@@ -483,7 +511,13 @@ guest_syscall(guest *g, int sys, uint32_t a0, uint32_t a1, uint32_t a2,
     case GSYS_BRK:
         return sys_brk(g, a0);
 
+    case GSYS_OPEN:
+        return sys_open(g, a0, a1, a2);
+
     case GSYS_CLOSE:
+        /* Keep the standard streams open; close a real file. */
+        if (a0 > 2)
+            return close((int)a0) == 0 ? 0 : -GUEST_EBADF;
         return 0;
 
     case GSYS_LSEEK:

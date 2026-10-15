@@ -5,8 +5,12 @@ C host: how values are represented, how the guest calls the host, how handles li
 and die, and how a host loads and runs a program. It is the companion to
 `kp-module-format.md` (the serialized IR) and `kobold.md` (the architecture).
 
-The ABI targets **x86-64** first. The design is settled; the C names below are the
-proposed spelling and may still be adjusted during implementation.
+Kobold compiles to four backends: **x86-64**, **AArch64**, **RISC-V RV32**, and
+**ColdFire** (m68k). The ABI is defined for all four. The value representation, the
+handle model, the value-stack FFI, the lifetime rules, and the trap model are
+identical on every target; only the register-level calling convention differs. This
+document describes x86-64 in most detail as the reference, and collects the
+per-backend differences under "The guest-internal convention across backends" below.
 
 Much of this borrows Skjegg's Excelsior runtime (`runtime/libexc.h` in the Skjegg
 suite): handles as object-table indices, a length+bytes string, stackful coroutines
@@ -18,8 +22,12 @@ There are two distinct call conventions, and keeping them apart is the key to th
 whole ABI:
 
 - **Guest-internal calls** (Kobold routine to Kobold routine) use the **native
-  x86-64 SysV** convention, because that is what `regalloc_x86` and the JIT emit:
-  integer/handle args in `rdi, rsi, …`, `real` in `xmm0..7`, results in `rax`/`xmm0`.
+  calling convention of the target**: the platform psABI on x86-64 (System V),
+  AArch64 (AAPCS64), and RISC-V RV32 (ILP32), and the toolkit stack convention on
+  ColdFire. On x86-64 that is integer/handle args in `rdi, rsi, …`, `real` in
+  `xmm0..7`, results in `rax`/`xmm0`, which is what `regalloc_x86` and the JIT emit.
+  The per-target registers are tabulated under "The guest-internal convention across
+  backends" below.
 - **Guest-to-host calls** (imports and methods) use a **value-stack FFI**, Lua in
   spirit: the guest pushes typed arguments onto a VM value stack, calls a uniform
   host entry, and reads results back off the stack. This is the single mechanism for
@@ -29,7 +37,11 @@ Runtime helpers the compiler emits (retain/release, string ops, coroutine
 spawn/resume/yield/drop) are part of the backend runtime and are called natively, not
 through the value stack. Only host-provided code uses the value stack.
 
-### Arguments past the registers, and float-argument staging
+### Arguments past the registers, and float-argument staging (x86-64)
+
+This subsection details the x86-64 stack-overflow and float-staging handling. The
+equivalent rules for the other backends are summarized under "The guest-internal
+convention across backends" below.
 
 The SysV register sequences are six integer/handle registers and eight `xmm`
 registers. A call with more integer or float arguments than that passes the
@@ -57,6 +69,63 @@ before it is overwritten, and break any cycle with a single scratch register
 throughput ever matters; the staging approach was chosen first for being
 obviously correct. The logic lives in `marshal` in `src/jit_x86.c`.
 
+## The guest-internal convention across backends
+
+A guest-internal call uses the target's native convention. The four backends assign
+registers as follows:
+
+| Target   | integer / handle args          | `int64` arg        | `real` arg          | int result | float result   | `int64` result |
+|----------|--------------------------------|--------------------|---------------------|------------|----------------|----------------|
+| x86-64   | `rdi rsi rdx rcx r8 r9`         | one register       | `xmm0`-`xmm7`       | `rax`      | `xmm0`         | `rax`          |
+| AArch64  | `x0`-`x7`                       | one register       | `d0`-`d7`           | `x0`       | `d0`           | `x0`           |
+| RV32     | `a0`-`a7`                       | register pair      | integer regs (note) | `a0`       | `a0` / `a0:a1` | `a0:a1`        |
+| ColdFire | stack (caller pops)             | two stack words    | stack               | `d0`       | `fp0`          | `d0:d1`        |
+
+**Arguments past the registers.** On the register targets, arguments beyond the
+listed registers go on the stack in source order, lowest address leftmost, in a
+caller-reserved, suitably aligned block the caller releases after the call. ColdFire
+passes every argument on the stack, right to left, 32 bits each. In all cases the
+caller pops.
+
+**`int64`.** On x86-64 and AArch64 an `int64` is one native register. On RV32 it is
+a pair of the next two argument registers, low word first, with no even-register
+alignment, splitting low-in-register and high-on-stack when only one register
+remains; the result is `a0:a1`. On ColdFire it is two stack words, the high word at
+the lower address; the result is `d0:d1`.
+
+**`real`.** x86-64 and AArch64 pass and return a `real` in a float register. RV32
+does **not** use its float argument registers on this path: a `real` (f64) is moved
+through a memory stage slot into the integer argument pair, and returned the same way
+through `a0:a1`, because RV32 cannot move the halves of an f-register to integer
+registers directly; a `single` rides one integer register (its bits moved with
+`fmv.x.w`), and a `single` result comes back in `a0`. ColdFire passes a `real` on
+the stack (`fmove.d`) and returns it in `fp0`.
+
+**Aggregates.** A record, fixed array, or large set is passed **by reference**: the
+caller passes its address as an ordinary integer argument. It is returned through a
+hidden, caller-allocated buffer whose address is passed as the **trailing** ordinary
+integer argument. This is the same mechanism on every target. Kobold does not use the
+platform's by-value struct classification (the System V eightbyte rules or the
+AArch64 homogeneous-aggregate rules) even where the C compiler for the same target
+does; in particular AArch64 passes the sret pointer as an ordinary `x`-register
+argument, never in `x8`. A failable routine with a wide result (a `real`, an
+`int64`, or a record) returns the value through this same buffer, with the error in
+the integer return register (see "Declaring failability" in `kp-errors.md`).
+
+**The failable register pair.** An integer-class failable result returns the value
+and the error signal in two registers: `rax`/`rdx` (x86-64), `x0`/`x1` (AArch64),
+`a0`/`a1` (RV32), `d0`/`d1` (ColdFire). The error is a plain register value the
+caller branches on, never a condition flag. The full rule, including the wide-result
+path above, is in `kp-errors.md`, "The ABI across backends".
+
+**Float-argument staging** is an x86-64 concern only. Its float temp homes
+(`xmm1`-`xmm7`) overlap the `xmm0`-`xmm7` argument registers, so a call with two or
+more float register arguments stages them through scratch, as described above.
+AArch64's argument registers (`x0`-`x7`, `d0`-`d7`) are disjoint from its
+callee-saved temp homes (`x19`-`x28`, `d8`-`d15`), so float arguments move in place;
+RV32 and ColdFire carry floats through integer registers or the stack, so neither
+stages.
+
 ## Value representation
 
 Every Kobold value has a fixed machine width. There are no runtime type tags.
@@ -74,6 +143,12 @@ Every Kobold value has a fixed machine width. There are no runtime type tags.
 `boolean` is 0/1; `char` is a byte in a 32-bit word. Structured values (arrays,
 records, large sets) are passed and returned by reference. By-value structured FFI
 is deferred until the language needs it.
+
+A handle and a pointer are 32-bit on every target. On the 64-bit targets (x86-64 and
+AArch64) the toolkit is ILP32-style: a 32-bit handle or address occupies the low half
+of a 64-bit register (a 32-bit write zeroes the upper half), and the runtime keeps all
+guest memory below 4 GB so every address fits. On RV32 and ColdFire the registers are
+natively 32-bit.
 
 ## The value-stack FFI
 
@@ -407,11 +482,11 @@ sees every module and registration. A module names its imports in its table
 (`kp-module-format.md`), so `kp_link` reports a missing import rather than crashing at
 a call.
 
-A guest-to-host call keeps the JIT's ordinary SysV register call: the compiled code
-does not carry a `vm` pointer. Instead `kp_link` binds each import name to a small
-generated thunk that supplies `vm` (baked as an immediate). A func import's thunk
-marshals the register arguments onto the value stack, calls `kp_call_host`, and takes
-the result; a helper import's thunk prepends `vm` and tail-jumps to the runtime helper.
+A guest-to-host call keeps the JIT's ordinary native register call (the target's
+convention from the table above): the compiled code does not carry a `vm` pointer.
+Instead `kp_link` binds each import name to a small generated thunk that supplies `vm`
+(baked as an immediate). A func import's thunk marshals the register arguments onto
+the value stack, calls `kp_call_host`, and takes the result; a helper import's thunk prepends `vm` and tail-jumps to the runtime helper.
 
 A cross-module call (a bare call to a name another module exports) is also a direct
 machine call. Because the JIT bakes an absolute callee address that is not known until
@@ -423,10 +498,11 @@ program's own `main`, which the host reaches by module, not by cross-call) bind 
 first module loaded; a cross-call to an ambiguous name is not well-defined.
 
 A host-to-guest call is the mirror of the import thunk. The host pushes the arguments onto
-the value stack, and `kp_call` marshals them into the SysV registers the guest reads
-(integer and handle cells into the integer registers, float cells into the xmm registers,
-in declared order, taken from the export's parameter classes) and runs the entry on the
-module's low-2GB execution stack through the reusable `kp_call_guest` trampoline. The guest
+the value stack, and `kp_call` marshals them into the native registers the guest reads
+(integer and handle cells into the integer registers, float cells into the float registers,
+in declared order, taken from the export's parameter classes, following the target's
+convention from the table above) and runs the entry on the module's low-2GB execution stack
+through the reusable `kp_call_guest` trampoline. The guest
 runs there because it stores addresses of locals in 32-bit slots. The return value is left
 on the value stack for the host to take, so a call is: push arguments, `kp_call`, take the
 result.
@@ -533,10 +609,21 @@ access with the range-check state at its source position and lowers a stamped ac
 a per-dimension bounds check that calls the `kp_trap_index` runtime helper on failure;
 it is off by default (trusted-now). `OVERFLOW` is live under `{$Q+}`: the front end stamps
 each add, subtract, and multiply with the overflow-check state at its source position and
-lowers a stamped operation to a checked opcode (`ADDO`, `SUBO`, `MULO`). These are Kobold IR
-opcodes layered above the vendored skjegg set, so the vendored sources stay unedited. The JIT
+lowers a stamped operation to a checked opcode (`ADDO`, `SUBO`, `MULO`). These are part of
+the shared skjegg IR opcode set (specified in `doc/internals/ir.md`). The JIT
 runs a checked operation 32-bit and, on the CPU overflow flag, calls the `kp_trap_overflow`
 helper through a vm-baked thunk `kp_link` provides; it is off by default (trusted-now).
+The `{$Q+}` checks cover 32-bit add, subtract, and multiply only: `int64`
+arithmetic and unary negation are never checked. Integer division has one
+overflow case, the most negative 32-bit value divided by `-1` (true quotient
+2^31, unrepresentable), and that `OVERFLOW` is **always checked**, independent
+of `{$Q+}`, like divide-by-zero: under the guarded policy every backend tests
+the operand pair before the signed divide (or its `mod`) and calls
+`kp_trap_overflow`, since the hardware behavior is unusable (x86 `#DE`,
+qemu-m68k `SIGFPE` on the divide, arm64/rv return the wrapped value). The one
+case still unguarded is the `int64` minimum divided by `-1`: it is
+target-dependent, faulting the process on one target and yielding an unspecified
+value on another, so a program must avoid it. See `kp-evaluation.md`.
 `STACK_OVERFLOW` is live and always on: each coroutine's private stack has a `PROT_NONE`
 guard page at its low end, and a `SIGSEGV` handler on a `sigaltstack` (installed with the
 first coroutine) recognizes a fault inside the running coroutine's guard page and unwinds it

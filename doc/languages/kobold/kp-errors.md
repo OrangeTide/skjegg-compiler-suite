@@ -167,7 +167,16 @@ A routine opts into failure in its signature, with `fails` after the result:
 ```pascal
 function parse(s: string): integer fails;
 procedure commit(c: Change) fails;
+function midpoint for (seg: Segment): Point fails;   { a method, result is a record }
 ```
+
+A method (a routine with a `for` receiver) is failable the same way, and the
+result of a failable function or method may be any value type: an ordinal, a
+real, an `int64`, a string or other handle, or a record. An ordinal-class result
+rides beside the error in a second register; a wider result (a real, an `int64`,
+or a record) returns through a hidden caller buffer with the error alone in the
+register, the mechanism described under "The ABI across backends" below. The
+handling forms are identical whatever the result width.
 
 Failability is part of the one true signature. It is serialized into the KPM1 interface and
 contributes to the interface fingerprint, so a caller in another unit sees it and a change to
@@ -313,17 +322,25 @@ crosses the host FFI with no deviation:
 | aarch64 | X0 (V0 float)    | X1        | same, returned in X0:X1              |
 | rv32    | a0 (fa0 float)   | a1        | same, returned in a0:a1              |
 
-A failable function with a float value is also C-classed: the value returns in the float
-return register and the error in the first integer return register, which is how the SysV and
-AAPCS rules class `struct { double value; long err; }`.
+The register pair above carries an integer-class value (an integer, char, boolean, enum,
+pointer, or string handle). A failable **plain function** whose result is a real, an int64, or
+a record returns the value through a hidden caller buffer instead, with the error alone in the
+first integer return register. This is the C classing for a result past two words (`struct { T
+value; long err; }` where `T` does not fit the value slot): the caller allocates the buffer,
+passes its address as a hidden final argument, makes an ordinary call to read the error, and
+reads the value from the buffer. A record already returns through that buffer (the sret path a
+record result uses anyway), so only the error channel changes. A failable **method** takes the
+same two paths: its receiver is an ordinary leading parameter and the hidden buffer the trailing
+one, so a method whose result is a real, an int64, or a record returns the value through the
+buffer with the error in the first integer return register, exactly as a plain function does.
 
 The IR carries returns as an N-ary, class-tagged list of operands (integer or float), not a
 hardcoded pair, the same way arguments are already staged by class. The register assignment is
-wired for two returns now, which covers failable. Going to three or four returns later is a
-register-assignment change rather than an IR redesign, but it is where the convention would
-leave the C ABI (C uses a hidden sret pointer past two words), so it stays deferred and would
-need a documented reason. Failable is a special case of this general multi-return: a routine
-whose last result is an `error`, with the type system requiring that result to be consumed.
+wired for two returns now, which covers the integer-class failable case for both a plain function
+and a method. A wider value takes the hidden-buffer path above rather than a third return
+register, which is where the C ABI also leaves the two-word convention. Failable is a special case of this general multi-return: a
+routine whose last result is an `error`, with the type system requiring that result to be
+consumed.
 
 General tuple returns in the source (`function f: (integer, integer)` with `a, b := f()`) are a
 separate language question that this note does not open; the 2026-09-25 decision to prefer
@@ -408,6 +425,8 @@ Non-goals, deliberately not built:
 ## See also
 
 - `kp-abi.md` for the trap axis, the landing pad, and the host boundary.
+- `kp-evaluation.md` for the run-time behavior of traps (exit status) and the
+  arithmetic faults (divide by zero) that sit on the trap axis, not this one.
 - `kobold.md` for the decisions this builds on: no `Result[T, E]`, no generics, multiple
   returns in registers, the trusted-now trap model.
 - `kp-units.md` for interface fingerprints, which absorb the representation migration.

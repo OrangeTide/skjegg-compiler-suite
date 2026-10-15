@@ -286,9 +286,17 @@ KP_HDRS_A64 := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_
                jit/emit_arm64.h jit/code.h backend/arm64_mc.h backend/arm64_select.h ir/ir.h
 KP_CFLAGS_A64 := $(CFLAGS) -DKP_FREESTANDING -DKP_REAL=double -Iir -Ijit -Ibackend -Ikobold
 
+## ColdFire shares the arm64/rv flag set (no -DX86_BITS); it cross-builds the
+## hosted Kobold runtime for big-endian m68k with the glibc m68k toolchain.
+KP_CFLAGS_CF := $(CFLAGS) -DKP_FREESTANDING -DKP_REAL=double -Iir -Ijit -Ibackend -Ikobold
+
 ## co.c built for arm64 with the same vendored-warning set as the x86 kp_co.o.
 build/kp_co_a64.o: kobold/co.c kobold/co.h kobold/handle.h kobold/lowmem.h Makefile | build
 	$(A64_CC) -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter -Iir -Ijit -Ibackend -Ikobold -c kobold/co.c -o $@
+
+## co.c built for ColdFire/m68k with the same vendored-warning set as kp_co.o.
+build/kp_co_cf.o: kobold/co.c kobold/co.h kobold/handle.h kobold/lowmem.h Makefile | build
+	$(M68K_CC) -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter -Iir -Ijit -Ibackend -Ikobold -c kobold/co.c -o $@
 
 build/skj-kp-jit-arm64: kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c $(KP_RT_A64) build/kp_co_a64.o kobold/frontend.h $(KP_HDRS_A64) Makefile | build
 	$(A64_CC) $(KP_CFLAGS_A64) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c $(KP_RT_A64) build/kp_co_a64.o -lm
@@ -351,6 +359,17 @@ build/skj-kp-arm64: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_A64_SEL) kobol
 	$(CC) $(CFLAGS) -Iir -Ibackend -Ikobold -o $@ \
 	    kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_A64_SEL)
 
+## skj-kp-cf: the ColdFire ahead-of-time compiler for Kobold modules, the AOT
+## counterpart over the classic ColdFire backend (BE_CF: regalloc_cf + cf_emit).
+## aot_main.c is arch-neutral and takes no -DKP_AOT_RV here (the rv guest-name
+## remap is the soft-float bridge that ColdFire does not need).  cf_emit is the
+## classic emitter, not a selector, so it ignores aot_main.c's guarded-trap flag:
+## Kobold's integer-overflow traps are not enforced on ColdFire for now, which is
+## off the kpcom bootstrap critical path.  Output is GAS assembly for skj-as.
+build/skj-kp-cf: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_CF) kobold/kpm.h ir/ir.h Makefile | build
+	$(CC) $(CFLAGS) -Iir -Ibackend -Ikobold -o $@ \
+	    kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_CF)
+
 ## libkpaot-rv.a / libkpaot-arm64.a: the target runtimes an AOT program links
 ## against, the cross-compiled siblings of libkpaot.a.  Same sources (the ported
 ## runtime plus the aot_rt.c start file) built with the target toolchain and its
@@ -382,6 +401,27 @@ build/libkpaot-arm64.a: $(KP_AOT_RT_A64) build/kp_co_a64.o $(KP_HDRS_A64) Makefi
 	    $(A64_CC) $(KP_CFLAGS_A64) -c $$f -o $$o || exit 1; \
 	done
 	$(AR) rcs $@ build/aot-arm64/*.o build/kp_co_a64.o
+
+## libkpaot-cf.a: the hosted ColdFire runtime an AOT program links against, the
+## big-endian m68k sibling of libkpaot-rv.a / libkpaot-arm64.a.  Same sources (the
+## ported runtime plus the aot_rt.c start file) built with the glibc m68k toolchain,
+## with the ColdFire coroutine switch (co_switch_cf.S) and a ColdFire call_guest
+## trampoline.  ColdFire is natively 32-bit and the toolkit call convention is the
+## guest entry's, so the trampoline only switches to the low execution stack and runs
+## the parameterless entry.  Unlike the freestanding libkpaot-cf-free.a (a no-libc
+## boris tier over skj-run), this links against glibc and runs under qemu-m68k, which
+## is what the behavioral corpus (tests/kp-corpus) needs for its emit* externals.
+KP_AOT_RT_CF := kobold/aot_rt.c kobold/kp_host.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
+                kobold/map.c kobold/rt_host.c kobold/co_shim.c \
+                runtime/co_switch_cf.S jit/call_guest_cf.S
+build/libkpaot-cf.a: $(KP_AOT_RT_CF) build/kp_co_cf.o $(KP_HDRS) Makefile | build
+	@rm -rf build/aot-cf && mkdir -p build/aot-cf
+	@for f in $(KP_AOT_RT_CF); do \
+	    o=build/aot-cf/`basename $$f | sed 's/\.[cS]$$/.o/'`; \
+	    echo "  CFCC $$f"; \
+	    $(M68K_CC) $(KP_CFLAGS_CF) -c $$f -o $$o || exit 1; \
+	done
+	$(AR) rcs $@ build/aot-cf/*.o build/kp_co_cf.o
 
 ## skj-kpc / skj-kpc-rv / skj-kpc-arm64: the Kobold-Pascal front end as a native
 ## binary.  Each is the self-host bootstrap seed (prebuild/kpcom.kpm) AOT-compiled
@@ -586,6 +626,20 @@ check-kp-corpus-arm64: build/skj-kpc build/skj-kp-arm64 build/libkpaot-arm64.a
 	    KPAOTCC="$(A64_CC)" KPAOTQEMU="$(QEMU_A64)" \
 	    sh tests/run-kp-src-tests.sh
 
+## The ColdFire corpus runs the hosted AOT path under qemu-m68k: skj-kp-cf emits
+## big-endian m68k asm from the agnostic seed, the glibc m68k gcc assembles and
+## links it against libkpaot-cf.a, and qemu-m68k runs the program.  This is the
+## big-endian cross-check of the whole corpus, the hosted sibling of the
+## freestanding check-kp-free-cf (which runs the smaller kp-src set on skj-run).
+## Linked -static: the glibc m68k driver would otherwise produce a dynamic ELF
+## needing /lib/ld.so.1, which qemu-m68k has no sysroot for (every other
+## qemu-m68k suite here is static/freestanding).  A static link needs no loader.
+check-kp-corpus-cf: build/skj-kpc build/skj-kp-cf build/libkpaot-cf.a
+	@KP_SRCDIR=tests/kp-corpus MODE=aot FRONTEND=build/skj-kpc \
+	    KPAOT=build/skj-kp-cf KPAOTLIB=build/libkpaot-cf.a \
+	    KPAOTCC="$(M68K_CC) -static" KPAOTQEMU="$(QEMU)" \
+	    sh tests/run-kp-src-tests.sh
+
 ## ---- the multi-unit corpus (tests/kp-multi) ----
 ## Programs that `uses` units, the one behavioral surface the single-module corpus
 ## cannot reach: cross-unit calls, a unit const, a unit's mutable global and shared
@@ -703,16 +757,26 @@ check-kp-inc-free: build/skj-kpc build/skj-kp-rv build/skj-as-rv build/skj-ld-rv
 ## -mno-relax so skj-ld-rv links it, double reals to match skj-kp-rv, and
 ## KP_FREESTANDING for the glue.
 # Deferred (=, not :=) because RV_RT_CFLAGS is defined further down the Makefile.
-KPFREE_RV_CFLAGS = $(RV_RT_CFLAGS) -fno-pic -mno-relax -DKP_FREESTANDING -DKP_REAL=double -Ikobold
+# The C runtime is compiled by skj-cc-rv to GAS asm and assembled by skj-as-rv,
+# so the tier needs no external toolchain (smolmoo/aldeby self-build it from the
+# skj toolchain alone), matching the ColdFire tier.  skj-cc-rv ignores the
+# gcc-style flags, so only the defines and the include path carry over; it emits
+# the RISC-V ILP32 psABI, which the hand-written .S pieces below also use.
+KPFREE_RV_SKJFLAGS := -DKP_FREESTANDING -DKP_REAL=double -Ikobold
 
 build/kpfree-rv:
 	mkdir -p build/kpfree-rv
 
-build/kpfree-rv/%.o: kobold/%.c $(KP_HDRS_RV) Makefile | build/kpfree-rv
-	$(RV_CC) $(KPFREE_RV_CFLAGS) -c -o $@ $<
+build/kpfree-rv/%.o: kobold/%.c $(KP_HDRS_RV) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	./build/skj-cc-rv $(KPFREE_RV_SKJFLAGS) -o $(@:.o=.s) $<
+	./build/skj-as-rv -o $@ $(@:.o=.s)
 
-build/kpfree-rv/soft64.o: runtime/soft64.c Makefile | build/kpfree-rv
-	$(RV_CC) $(RV_RT_CFLAGS) -fno-pic -mno-relax -DSOFT64_NO_MULSHIFT -c -o $@ $<
+# soft64.c supplies only the 64-bit divide family here (-DSOFT64_NO_MULSHIFT);
+# the mul/shift helpers are the hand-written .S aliases below, which the rv
+# backend's internal stack ABI calls.
+build/kpfree-rv/soft64.o: runtime/soft64.c build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	./build/skj-cc-rv $(KPFREE_RV_SKJFLAGS) -DSOFT64_NO_MULSHIFT -o $(@:.o=.s) runtime/soft64.c
+	./build/skj-as-rv -o $@ $(@:.o=.s)
 
 build/kpfree-rv/kp_crt_rv.o: kobold/kp_crt_rv.S build/skj-as-rv | build/kpfree-rv
 	./build/skj-as-rv -o $@ $<
@@ -731,7 +795,13 @@ build/kpfree-rv/rv_jit_i64.o: jit/rv_jit_i64.S | build/kpfree-rv
 build/kpfree-rv/co_switch_rv.o: runtime/co_switch_rv.S | build/kpfree-rv
 	$(RV_CC) $(RV_ARCH) -fno-pic -mno-relax -c -o $@ $<
 
+# The host-seam syscall wrappers (ecall) live in asm rather than io_free.c, so a
+# compiler without extended inline asm (skj-cc-rv) can build the console C.
+build/kpfree-rv/io_free_rv.o: runtime/io_free_rv.S build/skj-as-rv | build/kpfree-rv
+	./build/skj-as-rv -o $@ $<
+
 KPFREE_RV_ARCHIVE := build/kpfree-rv/rt_free.o build/kpfree-rv/io_free.o \
+                     build/kpfree-rv/io_free_rv.o \
                      build/kpfree-rv/str_core.o build/kpfree-rv/dynarr.o \
                      build/kpfree-rv/map.o build/kpfree-rv/soft64.o \
                      build/kpfree-rv/rv_i64_aot_alias.o build/kpfree-rv/rv_jit_i64.o \
@@ -740,6 +810,70 @@ KPFREE_RV_ARCHIVE := build/kpfree-rv/rt_free.o build/kpfree-rv/io_free.o \
 
 build/libkpaot-rv-free.a: $(KPFREE_RV_ARCHIVE) | build/kpfree-rv
 	$(AR) rcs $@ $(KPFREE_RV_ARCHIVE)
+
+## ---- the freestanding guest runtime tier for ColdFire (downstream host: boris) ----
+## libkpaot-cf-free.a is the ColdFire sibling of libkpaot-rv-free.a: the same
+## compute runtime (str_core/dynarr/map) and freestanding platform (rt_free.c, the
+## guest heap over a handed-in region) over a ColdFire console/exit seam, for a host
+## whose seam to the guest is only write/read/exit.  Two things differ from the rv
+## tier.  First, the 64-bit integer helpers are soft64.c alone, built WITHOUT
+## -DSOFT64_NO_MULSHIFT: cf_emit emits jsr __muldi3 and the shift family under the
+## toolkit stack convention, which is the m68k C ABI, so soft64.c's C helpers are
+## ABI-compatible as emitted and need no stack-ABI alias (the rv tier's alias .S is
+## a soft-float ilp32 quirk that does not arise here).  Second, the crt and the
+## syscall seam are ColdFire: TRAP #0 with the number in d0 (write 4, read 3,
+## exit 1).  Built strict-ColdFire (-mcpu=5475) with M68K_CC so skj-run's CFV4e
+## core runs it, and assembled by skj-as to keep the path binutils-free.
+# Deferred (=, not :=): CF_RT_CFLAGS is defined further down the Makefile.
+KP_HDRS_CF := kobold/str.h kobold/dynarr.h kobold/map.h kobold/obj.h kobold/co.h \
+              kobold/handle.h kobold/lowmem.h kobold/rt_glue.h kobold/kp_abi.h
+# The C runtime is compiled by skj-cc (the in-tree C compiler) to GAS asm and
+# assembled by skj-as, so the ColdFire kp runtime is built with no external
+# toolchain (the host-seam syscalls and the fp0 math shim are already skj-as .S).
+# skj-cc ignores the gcc-style flags, so only the defines and the include path
+# carry over; strict-ColdFire is implicit (the backend targets ColdFire/m68k).
+KPFREE_CF_SKJFLAGS := -DKP_FREESTANDING -DKP_REAL=double -Ikobold
+
+build/kpfree-cf:
+	mkdir -p build/kpfree-cf
+
+build/kpfree-cf/%.o: kobold/%.c $(KP_HDRS_CF) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	./build/skj-cc $(KPFREE_CF_SKJFLAGS) -o $(@:.o=.s) $<
+	./build/skj-as -o $@ $(@:.o=.s)
+
+# soft64.c carries the full 64-bit helper set for ColdFire (mul/shift/div); skj-cc
+# emits the toolkit stack convention, which is the m68k C ABI the backend's
+# __muldi3 helper calls use, so no -DSOFT64_NO_MULSHIFT and no alias is needed.
+build/kpfree-cf/soft64.o: runtime/soft64.c build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	./build/skj-cc $(KPFREE_CF_SKJFLAGS) -o $(@:.o=.s) runtime/soft64.c
+	./build/skj-as -o $@ $(@:.o=.s)
+
+# The crt is assembled by skj-as (binutils-free), like the rv tier's skj-as-rv.
+# It is the start file, linked alongside the archive, not a member of it.
+build/kpfree-cf/kp_crt_cf.o: kobold/kp_crt_cf.S build/skj-as | build/kpfree-cf
+	./build/skj-as -o $@ $<
+
+# The coroutine context switch has an existing skj-as rule (build/co_switch_cf.o),
+# reused here.  math_free supplies the transcendentals: its double-math core (my_*)
+# is shared with the rv tier, and its ColdFire h_* entries are plain C wrappers
+# (skj-cc returns a double in fp0, the convention the kp call reads), so no asm
+# shim is needed (the kpcom seed imports none, so this only matters to the
+# transcendental corpus).
+
+# The host-seam syscall wrappers (trap #0) live in asm rather than io_free.c, so
+# a compiler without extended inline asm (skj-cc) can build the console C.
+build/kpfree-cf/io_free_cf.o: runtime/io_free_cf.S build/skj-as | build/kpfree-cf
+	./build/skj-as -o $@ $<
+
+KPFREE_CF_ARCHIVE := build/kpfree-cf/rt_free.o build/kpfree-cf/io_free.o \
+                     build/kpfree-cf/io_free_cf.o \
+                     build/kpfree-cf/str_core.o build/kpfree-cf/dynarr.o \
+                     build/kpfree-cf/map.o build/kpfree-cf/soft64.o \
+                     build/kpfree-cf/co_free.o build/kpfree-cf/math_free.o \
+                     build/co_switch_cf.o
+
+build/libkpaot-cf-free.a: $(KPFREE_CF_ARCHIVE) | build/kpfree-cf
+	$(AR) rcs $@ $(KPFREE_CF_ARCHIVE)
 
 ## check-kp-free: the boris definition-of-done pipeline, from Kobold source to a
 ## freestanding rv32 ELF, with nothing but the skj toolchain past the front end.
@@ -753,6 +887,22 @@ check-kp-free: build/skj-kpc build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
 	    KPRV=build/skj-kp-rv KPAS=build/skj-as-rv KPLD=build/skj-ld-rv \
 	    KPCRT=build/kpfree-rv/kp_crt_rv.o KPLIB=build/libkpaot-rv-free.a \
 	    QEMU="$(QEMU_RV)" \
+	    sh tests/run-kp-src-tests.sh
+
+## The ColdFire freestanding kp AOT path, run on the in-tree emulator (qemu does
+## not model CFV4e).  skj-kp-cf emits big-endian ColdFire asm from the one
+## agnostic seed, skj-as/skj-ld (over kp_cf.ld, a 32M-RAM script the crt needs)
+## build the ELF, and skj-run executes it.  This is what proves a boris host can
+## compile Kobold to native ColdFire from the seed alone, and the endian-neutral
+## constant emission (strobj, typed .init word arrays) running big-endian.  The
+## full kp-src set passes: coroutines (the ColdFire co_free seed and the argument
+## liveness fix) and the transcendentals (math_free's ColdFire h_* shims) included.
+check-kp-free-cf: build/skj-kpc build/skj-kp-cf build/skj-as build/skj-ld \
+                  build/skj-run build/kpfree-cf/kp_crt_cf.o build/libkpaot-cf-free.a
+	@MODE=free FRONTEND=build/skj-kpc \
+	    KPRV=build/skj-kp-cf KPAS=build/skj-as KPLD="build/skj-ld -T kobold/kp_cf.ld" \
+	    KPCRT=build/kpfree-cf/kp_crt_cf.o KPLIB=build/libkpaot-cf-free.a \
+	    QEMU=build/skj-run \
 	    sh tests/run-kp-src-tests.sh
 
 ## skj-jit-arm64: the in-process AArch64 JIT.  Same driver and shared core as
@@ -3719,6 +3869,94 @@ test-mips-archive: build/skj-cc-mips build/skj-as-mips build/skj-ld-mips build/s
 	 if [ $$ec -eq 42 ]; then echo "PASS: mips archive link (skj-ar built, member pulled from .a, unused skipped, exit 42)"; \
 	 else echo "FAIL: mips archive link (exit $$ec, expected 42)"; exit 1; fi
 
+## Extended inline asm on MIPS: skj-cc's asm(template : outputs : inputs :
+## clobbers).  mips_asm_ext exercises generic "r"/"=r"/"+r" operands (each
+## placed in an allocated $s-register or a pool $t-register), mips_asm_syscall
+## exercises register pinning through GNU local register variables (operands
+## bound to $v0/$a0..$a2 for a real write(2) syscall).  Each is built and run
+## under both the default scheduler and the .set noreorder one, since the
+## user's instructions must survive delay-slot scheduling untouched.  The
+## binaries go in build/mips-asm/, not build/mips/, so the generic MIPS test
+## runner (which auto-discovers build/mips/<name> against tests/<name>.*) does
+## not pick them up and run them with the wrong expected exit code.
+test-cc-mips-asm: build/skj-cc-mips build/skj-as-mips build/skj-ld-mips build/mips/start.o build/mips/half.o | build/mips-asm
+	@for t in "mips_asm_ext 42" "mips_asm_syscall 22"; do \
+	    set -- $$t; name=$$1; want=$$2; \
+	    for sched in reorder noreorder; do \
+	        if [ $$sched = noreorder ]; then nr=SKJ_MIPS_NOREORDER=1; else nr=; fi; \
+	        env $$nr ./build/skj-cc-mips -o build/mips-asm/$$name.s tests/$$name.c || exit 1; \
+	        ./build/skj-as-mips -o build/mips-asm/$$name.o build/mips-asm/$$name.s || exit 1; \
+	        ./build/skj-ld-mips -o build/mips-asm/$$name build/mips/start.o \
+	            build/mips/half.o build/mips-asm/$$name.o || exit 1; \
+	        $(QEMU_MIPS) ./build/mips-asm/$$name; ec=$$?; \
+	        if [ $$ec -eq $$want ]; then \
+	            echo "PASS: $$name ($$sched, exit $$ec)"; \
+	        else \
+	            echo "FAIL: $$name ($$sched, exit $$ec, expected $$want)"; exit 1; \
+	        fi; \
+	    done; \
+	 done
+
+## Extended inline asm on ColdFire: skj-cc's asm(template : outputs : inputs :
+## clobbers) through skj-as/skj-ld on qemu-m68k.  Generic "r"/"=r"/"+r"
+## operands and register pinning through GNU local register variables (pins on
+## the non-allocatable scratch %d0/%d1).  Built in build/cf-asm/ so the generic
+## ColdFire test runner does not pick it up with the wrong expected exit code.
+test-cc-cf-asm: build/skj-cc build/skj-as build/skj-ld build/start.o build/half.o | build/cf-asm
+	@for t in "cf_asm_ext 42" "cf_asm_syscall 22"; do \
+	    set -- $$t; name=$$1; want=$$2; \
+	    ./build/skj-cc -o build/cf-asm/$$name.s tests/$$name.c || exit 1; \
+	    ./build/skj-as -o build/cf-asm/$$name.o build/cf-asm/$$name.s || exit 1; \
+	    ./build/skj-ld -o build/cf-asm/$$name build/start.o build/half.o \
+	        build/cf-asm/$$name.o || exit 1; \
+	    $(QEMU) ./build/cf-asm/$$name; ec=$$?; \
+	    if [ $$ec -eq $$want ]; then echo "PASS: $$name (exit $$ec)"; \
+	    else echo "FAIL: $$name (exit $$ec, expected $$want)"; exit 1; fi; \
+	 done
+
+## Extended inline asm on RISC-V: skj-cc-rv through skj-as-rv/skj-ld-rv on
+## qemu-riscv32.  Generic "r"/"=r"/"+r" operands and register pinning through
+## GNU local register variables, exercised by a real write(2) ecall (a7/a0..a2
+## pinned).  Built in build/rv-asm/.
+test-cc-rv-asm: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv/start.o | build/rv-asm
+	@./build/skj-cc-rv -o build/rv-asm/rv_asm_ext.s tests/rv_asm_ext.c
+	@./build/skj-as-rv -o build/rv-asm/rv_asm_ext.o build/rv-asm/rv_asm_ext.s
+	@./build/skj-ld-rv -o build/rv-asm/rv_asm_ext build/rv/start.o \
+	    build/rv-asm/rv_asm_ext.o
+	@$(QEMU_RV) ./build/rv-asm/rv_asm_ext; ec=$$?; \
+	 if [ $$ec -eq 42 ]; then echo "PASS: rv_asm_ext (exit $$ec)"; \
+	 else echo "FAIL: rv_asm_ext (exit $$ec, expected 42)"; exit 1; fi
+
+## Extended inline asm on x86-64: skj-cc-x86-64 through nasm/ld on qemu-x86_64.
+## Generic "r"/"=r"/"+r" operands (names at the operand width, eax vs rax) and
+## register pinning through GNU local register variables, exercised by a real
+## write(2) syscall (rax/rdi/rsi/rdx pinned).  Built in build/x86-asm/.
+test-cc-x86-64-asm: build/skj-cc-x86-64 build/x86_64/start_sysv.o build/x86_64/half.o build/x86_64/va.o | build/x86-asm
+	@for t in "x86_asm_ext 42" "x86_asm_syscall 22"; do \
+	    set -- $$t; name=$$1; want=$$2; \
+	    ./build/skj-cc-x86-64 -o build/x86-asm/$$name.s tests/$$name.c || exit 1; \
+	    $(X64_ASM) -f elf64 -o build/x86-asm/$$name.o build/x86-asm/$$name.s || exit 1; \
+	    $(X64_LD) -m elf_x86_64 -o build/x86-asm/$$name \
+	        build/x86_64/start_sysv.o build/x86_64/half.o build/x86_64/va.o \
+	        build/x86-asm/$$name.o || exit 1; \
+	    $(QEMU_X64) ./build/x86-asm/$$name; ec=$$?; \
+	    if [ $$ec -eq $$want ]; then echo "PASS: $$name (exit $$ec)"; \
+	    else echo "FAIL: $$name (exit $$ec, expected $$want)"; exit 1; fi; \
+	 done
+
+## Extended inline asm on AArch64: skj-cc-arm64 through the GNU assembler/linker
+## on qemu-aarch64.  Generic "r"/"=r"/"+r" operands (names at the operand width,
+## w vs x) and register pinning through GNU local register variables, exercised
+## by a real write(2) svc (x8/x0/x1/x2 pinned).  Built in build/arm64-asm/.
+test-cc-arm64-asm: build/skj-cc-arm64 build/arm64/start_aapcs.o build/arm64/va.o | build/arm64-asm
+	@./build/skj-cc-arm64 -o build/arm64-asm/arm64_asm_ext.s tests/arm64_asm_ext.c
+	@$(A64_AS) -o build/arm64-asm/arm64_asm_ext.o build/arm64-asm/arm64_asm_ext.s
+	@$(A64_LD) -o build/arm64-asm/arm64_asm_ext \
+	    build/arm64/start_aapcs.o build/arm64/va.o build/arm64-asm/arm64_asm_ext.o
+	@$(QEMU_A64) ./build/arm64-asm/arm64_asm_ext; ec=$$?; \
+	 if [ $$ec -eq 42 ]; then echo "PASS: arm64_asm_ext (exit $$ec)"; \
+	 else echo "FAIL: arm64_asm_ext (exit $$ec, expected 42)"; exit 1; fi
+
 ## PlayStation PS-EXE output: skj-ld-mips -f ps-exe writes the "PS-X EXE"
 ## container the console loads, based at the PlayStation RAM address 0x80010000,
 ## with the BIOS-TTY crt (start_psx.o).  No in-tree simulator loads a PS-EXE and
@@ -3802,6 +4040,21 @@ build/mips-nr/%: build/mips-nr/%.o build/mips-nr/start.o
 build/mips-nr:
 	mkdir -p build/mips-nr
 
+build/mips-asm:
+	mkdir -p build/mips-asm
+
+build/cf-asm:
+	mkdir -p build/cf-asm
+
+build/rv-asm:
+	mkdir -p build/rv-asm
+
+build/x86-asm:
+	mkdir -p build/x86-asm
+
+build/arm64-asm:
+	mkdir -p build/arm64-asm
+
 check-mips-noreorder: build/skj-tinc-mips build/skj-sc-mips $(MIPS_TESTS:tests/%.tc=build/mips-nr/%) $(MIPS_SCM_TESTS:tests/%.scm=build/mips-nr/%)
 	@sh tests/run-tests.sh "$(QEMU_MIPS)" build/mips-nr
 
@@ -3884,7 +4137,7 @@ check-mips-all: check-mips check-mips-noreorder \
                 check-cc-mips check-cc-mips-noreorder \
                 check-exc-mips check-exc-mips-noreorder \
                 check-mipsas check-cc-mips-skj test-mips-archive test-mips-psexe \
-                check-mips-sf
+                test-cc-mips-asm check-mips-sf
 	@echo "All MIPS test suites passed."
 
 check-cpp: build/skj-cpp
@@ -3915,6 +4168,7 @@ check-rvas: build/skj-as-rv build/skj-ld-rv build/skj-run
 ## ColdFire (qemu-m68k), RISC-V (qemu-riscv32, hardware float), x86-64
 ## (qemu-x86_64), AArch64 (qemu-aarch64).
 check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc \
+           test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm \
            check-exc-x86-64-asm check-exc-arm64-asm \
            check-rv check-x86-64 check-arm64 \
            check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 \
@@ -3931,7 +4185,7 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp c
            test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive \
            test-cc-rv-psabi-struct test-cc-driver check-libc \
            check-kp check-kpcom \
-           check-kp-frontend check-kp-jit check-kp-aot check-kp-corpus check-kp-multi check-kp-io check-kp-inc
+           check-kp-frontend check-kp-jit check-kp-aot check-kp-corpus check-kp-corpus-cf check-kp-multi check-kp-io check-kp-inc
 	@echo "All architecture test suites passed."
 
 clean:
@@ -3950,4 +4204,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-exc-rv-emu check-exc-rv-emu-san test-exc-coro-overflow check-emu check-rv-emu check-exc-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-exc-x86-64-asm check-exc-arm64-asm check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj check-mips-all check-smoke check-exc-jit-arm64 test-gc test-coro test-threads test-libexc-guest32 test-jit-arena test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-corpus check-kp-corpus-rv check-kp-corpus-arm64 check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free coverage-codegen clean FORCE
+.PHONY: all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-exc-rv-emu check-exc-rv-emu-san test-exc-coro-overflow check-emu check-rv-emu check-exc-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-exc-x86-64-asm check-exc-arm64-asm check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke check-exc-jit-arm64 test-gc test-coro test-threads test-libexc-guest32 test-jit-arena test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free coverage-codegen clean FORCE

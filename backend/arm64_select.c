@@ -571,6 +571,237 @@ div_guard(struct mc64 *m, int tp, int sf, int divisor)
     }
 }
 
+/* Guard INT_MIN / -1 (and its modulo) for the guarded trap policy: a 32-bit
+   sdiv yields INT_MIN silently, whose true result is unrepresentable, so raise
+   OVERFLOW.  Only the 32-bit signed div/mod needs it.  SCQ is free here (the
+   divide writes it afterward); AArch64 has no b.cond-to-label, so the compare
+   is cmp + cset + cbnz, as the overflow path does. */
+static void
+div_overflow_guard(struct mc64 *m, int tp, int sa, int sb)
+{
+    if (tp == ARM64_TRAP_GUARDED) {
+        int ok = mc64_new_label(m);
+        mc64_movimm(m, 0, SCQ, 0xFFFFFFFFu);   /* -1 */
+        mc64_cmp(m, 0, sb, SCQ);
+        mc64_cset(m, 0, SCQ, MC64_NE);
+        mc64_cbnz(m, 0, SCQ, ok);              /* divisor != -1: cannot overflow */
+        mc64_movimm(m, 0, SCQ, 0x80000000u);   /* INT_MIN */
+        mc64_cmp(m, 0, sa, SCQ);
+        mc64_cset(m, 0, SCQ, MC64_NE);
+        mc64_cbnz(m, 0, SCQ, ok);              /* dividend != INT_MIN: no overflow */
+        mc64_trap_overflow(m);
+        mc64_label(m, ok);
+    }
+}
+
+/* A pin/clobber register name ("x8", "w0", "fp", "lr") to its hardware number,
+   or -1.  w and x share a number; the width comes from the operand size. */
+static int
+a64_name_to_hw(const char *name)
+{
+    if (strcmp(name, "fp") == 0) return 29;
+    if (strcmp(name, "lr") == 0) return 30;
+    if ((name[0] == 'x' || name[0] == 'w') && name[1]) {
+        int h = 0;
+        const char *p = name + 1;
+        while (*p >= '0' && *p <= '9')
+            h = h * 10 + (*p++ - '0');
+        if (*p == '\0' && h <= 30)
+            return h;
+    }
+    return -1;
+}
+
+static int
+asm_hw_clobbered(struct ir_asm_info *ai, int h)
+{
+    int k;
+    for (k = 0; k < ai->nclobbers; k++)
+        if (a64_name_to_hw(ai->clobbers[k]) == h)
+            return 1;
+    return 0;
+}
+
+static int
+asm_hw_pinned(struct ir_asm_info *ai, int h)
+{
+    int k, n = ai->noutputs + ai->ninputs;
+    for (k = 0; k < n; k++)
+        if (ai->ops[k].pin_reg && a64_name_to_hw(ai->ops[k].pin_reg) == h)
+            return 1;
+    return 0;
+}
+
+/* The allocator index (temp_reg value) of hardware register `h`, or -1 if `h`
+   is not allocatable. */
+static int
+a64_hw_to_index(int h)
+{
+    int k;
+    for (k = 2; k < (int)(sizeof xreg / sizeof xreg[0]); k++)
+        if (xreg[k] == h)
+            return k;
+    return -1;
+}
+
+/* Fill out[] (capacity max) with the allocator indices of the allocatable
+   registers any extended asm in fn pins or clobbers, deduplicated. */
+int
+arm64_asm_reserved_regs(struct ir_func *fn, int *out, int max)
+{
+    struct ir_insn *i;
+    int n = 0, k, j;
+
+    for (i = fn->head; i; i = i->next) {
+        struct ir_asm_info *ai = i->asm_info;
+        if (i->op != IR_ASM || !ai)
+            continue;
+        for (k = 0; k < ai->noutputs + ai->ninputs; k++) {
+            int h, idx;
+            if (!ai->ops[k].pin_reg)
+                continue;
+            h = a64_name_to_hw(ai->ops[k].pin_reg);
+            idx = h < 0 ? -1 : a64_hw_to_index(h);
+            if (idx < 0)
+                continue;
+            for (j = 0; j < n && out[j] != idx; j++)
+                ;
+            if (j == n && n < max)
+                out[n++] = idx;
+        }
+        for (k = 0; k < ai->nclobbers; k++) {
+            int h = a64_name_to_hw(ai->clobbers[k]);
+            int idx = h < 0 ? -1 : a64_hw_to_index(h);
+            if (idx < 0)
+                continue;
+            for (j = 0; j < n && out[j] != idx; j++)
+                ;
+            if (j == n && n < max)
+                out[n++] = idx;
+        }
+    }
+    return n;
+}
+
+/* Extended inline asm.  A generic "r" operand goes in its allocated x-register
+ * or a scratch materialised from the spill slot; a pinned operand goes in the
+ * named physical register (its value moved in from the operand temp's home and,
+ * for an output, back out).  Each %N is substituted with the register name at
+ * the operand's width (x8 for an 8-byte operand, w8 for a 4-byte one) and the
+ * template is emitted as one blob.  This is the syscall case: x0..x8 are not
+ * allocatable, so the pins are free. */
+static void
+emit_asm_ext(struct mc64 *m, struct ir_func *fn, struct ir_insn *i)
+{
+    struct ir_asm_info *ai = i->asm_info;
+    int n = ai->noutputs + ai->ninputs;
+    static const int pool[] = { 9, 10, 11, 12, 13, 14 };
+    int npool = (int)(sizeof pool / sizeof pool[0]);
+    int ophw[32];
+    int next = 0, k;
+    const char *s;
+    char buf[1024];
+    size_t bp = 0;
+
+    if (n > 32)
+        die("arm64: too many asm operands");
+
+    for (k = 0; k < n; k++) {
+        struct ir_asm_op *op = &ai->ops[k];
+
+        if (op->pin_reg) {
+            int j, h = a64_name_to_hw(op->pin_reg);
+            if (h < 0)
+                die("arm64: unknown asm register %s", op->pin_reg);
+            /* an allocatable pin is fine: the allocator reserved it (see
+               arm64_asm_reserved_regs), so no temp lives there across the asm */
+            for (j = 0; j < k; j++)
+                if (ai->ops[j].pin_reg &&
+                    a64_name_to_hw(ai->ops[j].pin_reg) == h)
+                    die("arm64: two asm operands pinned to %s", op->pin_reg);
+            ophw[k] = h;
+        } else if (fn->temp_reg[op->temp] >= 0) {
+            ophw[k] = xreg[fn->temp_reg[op->temp]];
+        } else {
+            ophw[k] = -1;
+        }
+    }
+    for (k = 0; k < n; k++) {
+        if (ophw[k] >= 0)
+            continue;
+        while (next < npool && (asm_hw_pinned(ai, pool[next]) ||
+                                asm_hw_clobbered(ai, pool[next])))
+            next++;
+        if (next >= npool)
+            die("arm64: too many spilled asm operands");
+        ophw[k] = pool[next++];
+    }
+
+    /* materialise input values (home is 64-bit; use 64-bit moves/loads) */
+    for (k = 0; k < n; k++) {
+        struct ir_asm_op *op = &ai->ops[k];
+        int home = fn->temp_reg[op->temp];
+
+        if (op->is_output && !op->is_inout)
+            continue;
+        if (op->pin_reg) {
+            if (home >= 0)
+                mc64_mov(m, 1, ophw[k], xreg[home]);
+            else
+                mc64_ldrx(m, ophw[k], MC64_FP, spill_off(fn, op->temp));
+        } else if (home < 0) {
+            mc64_ldrx(m, ophw[k], MC64_FP, spill_off(fn, op->temp));
+        }
+    }
+
+    /* build the template with %N substituted (width from the operand size) */
+    for (s = i->sym; *s && bp + 1 < sizeof buf; s++) {
+        if (*s != '%') {
+            buf[bp++] = *s;
+            continue;
+        }
+        s++;
+        if (*s == '%') {
+            buf[bp++] = '%';
+        } else if (*s >= '0' && *s <= '9') {
+            int idx = 0;
+            char rn[8];
+            const char *nm;
+            while (*s >= '0' && *s <= '9')
+                idx = idx * 10 + (*s++ - '0');
+            s--;
+            if (idx >= n)
+                die("arm64: asm operand %%%d out of range", idx);
+            snprintf(rn, sizeof rn, "%c%d",
+                     ai->ops[idx].size >= 8 ? 'x' : 'w', ophw[idx]);
+            nm = rn;
+            while (*nm && bp + 1 < sizeof buf)
+                buf[bp++] = *nm++;
+        } else {
+            buf[bp++] = '%';
+            if (bp + 1 < sizeof buf)
+                buf[bp++] = *s;
+        }
+    }
+    buf[bp] = '\0';
+    mc64_asm(m, buf);
+
+    /* store outputs back */
+    for (k = 0; k < ai->noutputs; k++) {
+        struct ir_asm_op *op = &ai->ops[k];
+        int home = fn->temp_reg[op->temp];
+
+        if (op->pin_reg) {
+            if (home >= 0)
+                mc64_mov(m, 1, xreg[home], ophw[k]);
+            else
+                mc64_strx(m, ophw[k], MC64_FP, spill_off(fn, op->temp));
+        } else if (home < 0) {
+            mc64_strx(m, ophw[k], MC64_FP, spill_off(fn, op->temp));
+        }
+    }
+}
+
 int
 arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
                   char *err, size_t errlen)
@@ -742,14 +973,20 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
             case IR_SUBO: mc64_sub(m, 1, SC0, SC0, SC1); break;
             case IR_MULO: mc64_mul(m, 1, SC0, SC0, SC1); break;
             }
-            if (tp == ARM64_TRAP_GUARDED) {
-                int ok = mc64_new_label(m);
+            if (in->label >= 0 || tp == ARM64_TRAP_GUARDED) {
                 mc64_sxtw(m, SCQ, SC0);          /* sign-extend low 32 of result */
                 mc64_cmp(m, 1, SC0, SCQ);
                 mc64_cset(m, 0, SCQ, MC64_NE);   /* SCQ = 1 on overflow */
-                mc64_cbz(m, 0, SCQ, ok);         /* no overflow: skip the trap */
-                mc64_trap_overflow(m);
-                mc64_label(m, ok);
+                if (in->label >= 0) {
+                    /* explicit per-site trap (Excelsior's cold __exc_trap
+                       trampoline): branch there on overflow. */
+                    mc64_cbnz(m, 0, SCQ, il(m, lbl, in->label));
+                } else {
+                    int ok = mc64_new_label(m);
+                    mc64_cbz(m, 0, SCQ, ok);     /* no overflow: skip the trap */
+                    mc64_trap_overflow(m);
+                    mc64_label(m, ok);
+                }
             }
             mc64_mov(m, 0, sd, SC0);
             wd32(m, fn, in->dst, sd);
@@ -779,6 +1016,7 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
             int sb = w64 ? rsx(m, fn, in->b, SC1) : rs(m, fn, in->b, SC1);
             int sd = rd(fn, in->dst, SC0);
             div_guard(m, tp, sf, sb);
+            if (!uns && !w64) div_overflow_guard(m, tp, sa, sb);
             if (uns) mc64_udiv(m, sf, sd, sa, sb); else mc64_sdiv(m, sf, sd, sa, sb);
             if (w64) wd64(m, fn, in->dst, sd); else wd32(m, fn, in->dst, sd);
             break;
@@ -792,6 +1030,7 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
             int sb = w64 ? rsx(m, fn, in->b, SC1) : rs(m, fn, in->b, SC1);
             int sd = rd(fn, in->dst, SC0);
             div_guard(m, tp, sf, sb);
+            if (!uns && !w64) div_overflow_guard(m, tp, sa, sb);
             if (uns) mc64_udiv(m, sf, SCQ, sa, sb); else mc64_sdiv(m, sf, SCQ, sa, sb);
             mc64_msub(m, sf, sd, SCQ, sb, sa);      /* sd = sa - (sa/sb)*sb */
             if (w64) wd64(m, fn, in->dst, sd); else wd32(m, fn, in->dst, sd);
@@ -1037,6 +1276,10 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
             break;
         }
         case IR_ASM:
+            if (in->asm_info) {
+                emit_asm_ext(m, fn, in);
+                break;
+            }
             mc64_asm(m, in->sym);
             break;
         case IR_RET:

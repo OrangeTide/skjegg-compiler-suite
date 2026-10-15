@@ -37,6 +37,10 @@
 
 #include <stdlib.h>  /* qsort */
 
+/* arm64_select.c: the allocator-index (temp_reg value) of each integer register
+   an extended asm pins or clobbers; the allocator reserves them. */
+int arm64_asm_reserved_regs(struct ir_func *fn, int *out, int max);
+
 #define INT_NUM_REGS  10
 #define INT_FIRST_REG 2
 
@@ -69,7 +73,7 @@ sort_by_start(const void *pa, const void *pb)
 static int
 linscan(struct ir_func *fn, int *first_def, int *last_use,
         int *is_class, int num_regs, int first_reg, int spill_size,
-        int *force_spill)
+        int *force_spill, const int *reserved)
 {
     struct interval *ivs;
     struct interval **active;
@@ -113,7 +117,7 @@ linscan(struct ir_func *fn, int *first_def, int *last_use,
 
     int pool[num_regs];
     for (k = 0; k < num_regs; k++)
-        pool[k] = 1;
+        pool[k] = (reserved && reserved[k]) ? 0 : 1;
 
     active = arena_alloc(fn->arena, (num_regs + 1) * sizeof(*active));
     nactive = 0;
@@ -286,6 +290,21 @@ regalloc(struct ir_func *fn)
             last_use[i->a] = pos;
         if (i->b >= 0 && i->b < ntemps && last_use[i->b] < pos)
             last_use[i->b] = pos;
+        /* Extended inline asm operands live in asm_info, not i->a/i->b: an
+           output is a def, an input a use, an in-out operand both. */
+        if (i->op == IR_ASM && i->asm_info) {
+            int k, nops = i->asm_info->noutputs + i->asm_info->ninputs;
+            for (k = 0; k < nops; k++) {
+                int at = i->asm_info->ops[k].temp;
+                if (at < 0 || at >= ntemps)
+                    continue;
+                if ((i->asm_info->ops[k].is_output ||
+                     i->asm_info->ops[k].is_inout) && first_def[at] < 0)
+                    first_def[at] = pos;
+                if (last_use[at] < pos)
+                    last_use[at] = pos;
+            }
+        }
 
         if (i->op == IR_ARG || i->op == IR_ARG64 || i->op == IR_ARG_X8 ||
             i->op == IR_ARG_MEM) {
@@ -312,18 +331,32 @@ regalloc(struct ir_func *fn)
 
     mark_float_cross(fn, first_def, last_use, is_float, call_pos, ncall,
                      float_cross);
+
+    /* Reserve any integer register an extended asm pins or clobbers.  i32 and
+       i64 share one integer pool here, so reserving it covers both. */
+    int reserved[INT_NUM_REGS];
+    int pinned[INT_NUM_REGS], npinned, pk, rk;
+    for (rk = 0; rk < INT_NUM_REGS; rk++)
+        reserved[rk] = 0;
+    npinned = arm64_asm_reserved_regs(fn, pinned, INT_NUM_REGS);
+    for (pk = 0; pk < npinned; pk++) {
+        int slot = pinned[pk] - INT_FIRST_REG;
+        if (slot >= 0 && slot < INT_NUM_REGS)
+            reserved[slot] = 1;
+    }
+
     fn->nspills = linscan(fn, first_def, last_use,
-                  is_int, INT_NUM_REGS, INT_FIRST_REG, 8, NULL);
+                  is_int, INT_NUM_REGS, INT_FIRST_REG, 8, NULL, reserved);
 #ifdef CC_PSABI
     /* the prologue saves d8-d15, so a float temp may keep a callee-saved
        register across a call: no force-spill needed (unlike the stack-
        convention build, which does not preserve d8-d15) */
     (void)float_cross;
     fn->nfspills = linscan(fn, first_def, last_use,
-                   is_float, FP_NUM_REGS, FP_FIRST_REG, 8, NULL);
+                   is_float, FP_NUM_REGS, FP_FIRST_REG, 8, NULL, NULL);
 #else
     fn->nfspills = linscan(fn, first_def, last_use,
-                   is_float, FP_NUM_REGS, FP_FIRST_REG, 8, float_cross);
+                   is_float, FP_NUM_REGS, FP_FIRST_REG, 8, float_cross, NULL);
 #endif
     fn->ni64spills = 0;
 

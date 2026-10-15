@@ -1026,6 +1026,10 @@ do_encode(struct assembler *a, const char *mnemonic, int size,
         return encode_branch(a, 0x6200, op1, emit);
     if (strcmp(mnemonic, "bls") == 0)
         return encode_branch(a, 0x6300, op1, emit);
+    if (strcmp(mnemonic, "bvc") == 0)
+        return encode_branch(a, 0x6800, op1, emit);
+    if (strcmp(mnemonic, "bvs") == 0)
+        return encode_branch(a, 0x6900, op1, emit);
 
     if (mnemonic[0] == 's') {
         int cc = cc_code(mnemonic + 1);

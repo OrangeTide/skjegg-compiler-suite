@@ -206,6 +206,31 @@ enum ir_op {
  * IR data structures
  ****************************************************************/
 
+/* Extended inline asm operand (cc: asm(template : outputs : inputs : clobbers)).
+   The template in ir_insn.sym references operand N as %N, outputs numbered
+   first, then inputs.  A plain "r"-class operand is materialised in any GP
+   register; a name in braces ("{$v0}") pins it to that physical register. */
+struct ir_asm_op {
+    char *constraint;   /* "=r", "r", "+r", "0", "i", "{$reg}" */
+    char *pin_reg;      /* physical register to pin to, or NULL for any GP reg;
+                           set from a "{$reg}" constraint or a register-bound
+                           local variable (register T x __asm__("$reg")) */
+    int temp;           /* input value temp, or output result temp */
+    int size;           /* operand width in bytes (the C type size); the 64-bit
+                           backends pick a 32- or 64-bit register name by it */
+    int is_output;
+    int is_inout;       /* "+": read and written (one operand) */
+};
+
+struct ir_asm_info {
+    int noutputs;
+    int ninputs;                /* ops[] holds noutputs outputs then ninputs inputs */
+    struct ir_asm_op *ops;
+    char **clobbers;
+    int nclobbers;
+    int is_volatile;
+};
+
 struct ir_insn {
     int op;
     int dst;
@@ -213,6 +238,7 @@ struct ir_insn {
     int64_t imm;        /* 64-bit: holds a LIC64 value or an f64's bits, which do
                            not fit a 32-bit long on an ILP32 host (rv32) */
     char *sym;
+    struct ir_asm_info *asm_info;  /* IR_ASM only: NULL = basic (verbatim sym) */
     int slot;
     int label;
     int nargs;
@@ -307,6 +333,11 @@ struct ir_global {
     int is_local;
     int is_export;      /* a unit's exported var: visible to other modules at link */
     int is_rodata;      /* an immutable global (string literal, real pool, const): read-only */
+    int is_strobj;      /* a static string object: the backend emits the {refcount,kind,len}
+                           header in target endianness, then init_string as the text + NUL.
+                           Keeps the Kobold string descriptor endian-correct on a big-endian
+                           target (ColdFire), where a baked little-endian header would be
+                           byte-swapped.  base_type stays IR_I8; init_strlen is the text length. */
     int64_t *init_ivals;
     char **init_syms;
     int init_count;

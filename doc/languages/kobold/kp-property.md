@@ -5,11 +5,19 @@ every use site but is implemented by routines. It follows the uniform access pri
 so a consumer cannot tell, and does not need to know, whether it is reading a stored cell
 or a computed value.
 
-> Status: proposed, deferred, not yet built. This is an independent language feature,
-> judged on its own merits. It was split out of the units design (`kp-units.md`), where
-> earlier drafts folded it in. Units do not require it: a unit exports plain `var` and
-> `const`, and can use a `property` once this feature exists. The `property`, `read`, and
-> `write` words are already reserved in the lexer (see `kp-grammar.md`).
+> Status: implemented (routine-reference accessors), scalar-value types for now. The
+> declaration-level property and the computed record field both work: a read becomes a call
+> to the getter, a write a call to the setter, and a property with only `read` is read-only.
+> This is an independent language feature, judged on its own merits. It was split out of the
+> units design (`kp-units.md`), where earlier drafts folded it in. Units do not require it: a
+> unit exports plain `var` and `const`, and can use a `property` once this feature exists.
+>
+> Deferred: a property whose type is a handle or aggregate (string, record, dynamic array),
+> since the accessor result would need ARC ownership and sret handling; a property in a
+> unit's exported interface (cross-module, which needs interface emission and inlining); and
+> the inline accessor syntax below. The accessors are a parameterless getter and a one-argument
+> setter; for a computed field they are methods of the record, resolved at the use site like
+> any method, so an accessor may be declared after the field.
 
 ## Why a separate feature
 
@@ -84,7 +92,12 @@ for the cases that genuinely need an accessor.
 
 - **Inline accessor syntax.** The routine-reference form (`read getX write setX`) is the
   surface now; an inline, likely lambda-shaped form is a later addition.
-- **Scheduling.** This feature is unscheduled and independent of the units milestone.
+- **Handle and aggregate property types.** A property or computed field carries a simple
+  value for now (an ordinal, a real, or a 64-bit integer). A string, record, or dynamic-array
+  property needs the accessor result handled with ARC ownership and sret, which is deferred.
+- **Cross-module properties.** A property in a unit's exported interface needs the interface
+  emission and inlining described above; for now a property is module-private. The accessor
+  bodies live in the same program or unit as the property.
 
 ## See also
 

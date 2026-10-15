@@ -1121,12 +1121,19 @@ static void exec_group4(cf_cpu *cpu, uint16_t op)
         uint32_t src = read_ea(cpu, &loc, SZ_LONG);
         uint32_t dst = cpu->d[dst_reg];
         uint32_t res;
-        if (is_signed)
-            res = (uint32_t)((int32_t)dst * (int32_t)src);
-        else
-            res = dst * src;
+        int ovf;
+        if (is_signed) {
+            int64_t prod = (int64_t)(int32_t)dst * (int64_t)(int32_t)src;
+            res = (uint32_t)prod;
+            ovf = prod != (int64_t)(int32_t)res;   /* result does not fit 32 bits */
+        } else {
+            uint64_t prod = (uint64_t)dst * (uint64_t)src;
+            res = (uint32_t)prod;
+            ovf = (prod >> 32) != 0;
+        }
         cpu->d[dst_reg] = res;
-        set_flags_move(cpu, res, SZ_LONG);
+        set_flags_move(cpu, res, SZ_LONG);      /* N/Z from the low 32 bits; clears V/C */
+        set_flag(cpu, CF_SR_V, ovf);            /* V set when the product overflowed */
         return;
     }
 

@@ -92,6 +92,29 @@ jobs:
       - name: Toolchain sanitizer slice
         run: make check-san-tools QEMU="qemu-m68k"
 
+  # The deep-recovery fpc path: re-mint the Kobold stage0 seed from source with
+  # Free Pascal alone, no skjegg tool and no committed seed, and assert it
+  # reproduces prebuild/kpcom.kpm byte for byte.  This is the safety net if the
+  # seed were ever lost or suspect: the self-hosting front end (kobold/kpcom.pas)
+  # can be rebuilt from source with a stock Pascal compiler.  Byte-identity also
+  # proves the front end stays compiler-independent, since the module kpcom emits
+  # is fixed by its own logic, not by which compiler built it (fpc here, the
+  # committed seed via skj elsewhere).  Needs no cross toolchain or qemu: fpc
+  # builds kpcom and the resulting binary emits the module natively on the host.
+  bootstrap-fpc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Free Pascal
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fpc
+      - name: Re-mint the seed from source with fpc
+        run: make bootstrap-fpc
+      - name: Assert the fpc seed reproduces the committed seed
+        run: cmp build/kpcom.kpm.fpc prebuild/kpcom.kpm
+
   # MIPS: the whole MIPS tier under qemu-mipsel.  check-all only touches MIPS
   # through test-f32-diff-mips, so every MIPS suite ran outside CI before this.
   # The GNU mipsel binutils (as / ld / objcopy) replace the Makefile's default

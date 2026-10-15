@@ -404,7 +404,9 @@ that unit's interface as the consumer saw it. A unit's own `.interface` records 
 current fingerprint. At link the loader compares the fingerprint a consumer expects for a
 dependency with the dependency's actual fingerprint. A mismatch is a diagnostic that
 names the stale consumer and the dependency, never a silent link against the wrong
-interface.
+interface. The exact hash function and the canonical ordering of the entries it covers are
+specified in `kp-module-format.md` (the fingerprint hash), so a second implementation
+computes the same value.
 
 The fingerprint covers the parts a consumer bakes in or binds to: exported routine and
 method headings, exported type names and any transparent definitions, exported const

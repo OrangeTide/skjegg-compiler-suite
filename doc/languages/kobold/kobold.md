@@ -399,7 +399,7 @@ raises it, and the checked ops never appear in C.
   `tests/kp-src` is the portable set: every mode, including the freestanding one,
   runs it, so it stays to integer, string, int64, and parameters.
 - **In-tree, behavioral corpus**: `tests/kp-corpus` is the broader behavioral set,
-  64 real Kobold programs. Each `<name>.expected` is the program's stdout as
+  71 real Kobold programs. Each `<name>.expected` is the program's stdout as
   produced by the **independent** reference VM `kprun`, not by a skjegg tool, so
   the corpus is an oracle, not a self-comparison. It covers arithmetic, records,
   arrays, maps, dynamic arrays, strings, enums, sets, coroutines, reals and
@@ -408,9 +408,35 @@ raises it, and the checked ops never appear in C.
   arm64 AOT paths at once, so it also checks that every backend agrees.
   `make check-kp-corpus` runs the x86 JIT and AOT (in `check-all`);
   `check-kp-corpus-rv` and `check-kp-corpus-arm64` run the AOT path under qemu (in
-  `check-emu-all`). The corpus is 64 programs, the failable two-return (`CALL2`)
-  cases `failforms`/`failmethod`/`failmanaged` among them (see the reader note
-  below); `failmanaged` covers `or else` recovering a managed result.
+  `check-emu-all`); `check-kp-corpus-cf` runs the ColdFire AOT path under qemu-m68k
+  (in `check-all`), the big-endian cross-check, linking the hosted ColdFire runtime
+  `libkpaot-cf.a` statically. The corpus is 83 programs, the failable two-return
+  (`CALL2`) cases `failforms`/`failmethod`/`failmanaged` among them (see the reader
+  note below); `failmanaged` covers `or else` recovering a managed result, and
+  `failmethodwide` covers a failable method returning a wide value (real, int64,
+  record) through the hidden caller buffer, the same sret path a failable free
+  function uses reached through a by-reference receiver. `setelem` covers a set as
+  a dynamic-array element and a map value, both a small set (the i64 scalar slot)
+  and a large set (the inline blit slot). The ten `conf_*` programs are a
+  conformance set pinning documented corner cases across all four backends:
+  `conf_divmod` (div/mod truncate toward zero, mod takes the dividend's sign),
+  `conf_wrap` (two's-complement overflow wrap with no `Q+` switch), `conf_strcmp`
+  (unsigned bytewise string order, shorter prefix first), `conf_setrel` (set
+  subset/superset relations and union/difference/intersection), `conf_defaults`
+  (a global reads as the zero of its type), and `conf_evalorder` (operands left
+  to right, call arguments right to left). Six `conf_trap_*` programs pin the
+  fault exit code (70, empty stdout, through a per-fixture `.exitcode` file):
+  `conf_trap_divzero` (integer divide by zero, always checked), `conf_trap_mapkey`
+  (a missing map key), `conf_trap_range` (an out-of-bounds index under `{$R+}`),
+  `conf_trap_overflow` (a signed add past `maxint` under `{$Q+}`), and
+  `conf_trap_divovf`/`conf_trap_modovf` (the most negative integer `div`/`mod`
+  `-1`, whose unrepresentable quotient always traps `OVERFLOW`). The
+  divide-by-zero and signed-overflow division cases are clean traps on every
+  backend: the hardware behavior is unusable (RV32 divide returns the wrapped
+  value with no fault, the m68k exception surfaces as a raw signal or SIGFPEs
+  under qemu), so the backend synthesises a divisor guard and an INT_MIN/-1
+  guard under the guarded trap policy on each (x86-64 and arm64 already had the
+  divisor guard).
 - **In-tree, multi-unit corpus**: `tests/kp-multi` is the cross-module set, the
   one behavioral surface the single-module corpus cannot reach. A fixture is told
   apart by its first keyword: `program NAME;` is a test (paired with
@@ -462,6 +488,13 @@ are specified by the companion documents in this directory:
 - `kp-language.md` — the language reference: types, statements, routines, and
   built-ins.
 - `kp-grammar.md` — the surface grammar (EBNF).
+- `kp-semantics.md` — the static semantics: type identity, compatibility and
+  conversion rules, expression typing, overload resolution, and storage layout.
+- `kp-builtins.md` — the signature reference for the predefined routines:
+  argument rules, result types, and trap behavior.
+- `kp-evaluation.md` — the dynamic semantics: evaluation order, integer
+  division and overflow, string and set comparison, default and
+  uninitialized values, traps and exit status, and real output.
 - `kp-units.md` — units and separate compilation: `uses`, interface
   fingerprints, and guest-record traits.
 - `kp-module-format.md` — the KPM1 serialized-IR format in full (this file
@@ -474,7 +507,8 @@ are specified by the companion documents in this directory:
 - `kp-conformance.md` — the map against ISO 7185 / 10206 and the dialect
   extensions.
 - `kp-hardening.md` — the plan for running untrusted scripts safely.
-- `kp-property.md` — the deferred uniform-access (`property`) feature.
+- `kp-property.md` — the uniform-access (`property`) feature: accessor-backed
+  declarations and computed record fields.
 
 ## See also
 

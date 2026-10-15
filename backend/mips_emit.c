@@ -574,10 +574,265 @@ static int arg_align8[MIPS_MAX_ARGS]; /* 1: start this arg on an even word (the
 static int narg;
 static int *temp_is_i64;         /* per-temp map, built per function */
 static int label_prefix;
+static int ovf_label_ctr;        /* unique locals for label-less overflow traps */
 #ifndef MIPS_SOFTFLOAT
 static int fcmp_serial;
 #endif
 static int i64cmp_serial;
+
+/* Overflow-checked signed 32-bit arithmetic (IR_ADDO/SUBO/MULO).  MIPS I has no
+ * hardware overflow flag reachable here (the trapping add/sub raise a CPU
+ * exception, not our handler), so the overflow is tested directly, as on RISC-V:
+ * add/sub by the operand sign bits, multiply by comparing the signed high half
+ * against the low half's sign extension.  i->label >= 0 is an explicit per-site
+ * trap (Excelsior's cold __exc_trap trampoline); otherwise (Kobold) the runtime
+ * kp_trap_overflow is called.  $t2/$t3 are scratch outside the allocator pool. */
+static void
+emit_overflow(FILE *out, struct ir_func *fn, struct ir_insn *i)
+{
+    const char *sa = rs(out, fn, i->a, 0);
+    const char *sb = rs(out, fn, i->b, 1);
+    const char *sd = rd(fn, i->dst, 0);
+    const char *cmp_eq;             /* branch condition that means "no overflow" */
+    const char *cmp_ne;             /* branch condition that means "overflow" */
+    const char *lhs, *rhs;
+
+    if (i->op == IR_MULO) {
+        fprintf(out, "\tmult %s, %s\n", sa, sb);   /* hi:lo = signed product */
+        fprintf(out, "\tmfhi $t2\n");              /* high 32 */
+        fprintf(out, "\tmflo %s\n", sd);           /* low 32 = result */
+        fprintf(out, "\tsra $t3, %s, 31\n", sd);   /* sign extension high must equal */
+        lhs = "$t2"; rhs = "$t3";
+        cmp_eq = "beq"; cmp_ne = "bne";
+    } else {
+        const char *mn = i->op == IR_ADDO ? "addu" : "subu";
+        if (i->op == IR_ADDO) {
+            fprintf(out, "\taddu $t2, %s, %s\n", sa, sb);  /* sum (scratch) */
+            fprintf(out, "\txor $t3, %s, $t2\n", sa);      /* a ^ sum */
+            fprintf(out, "\txor $t2, %s, $t2\n", sb);      /* b ^ sum */
+        } else {
+            fprintf(out, "\tsubu $t2, %s, %s\n", sa, sb);  /* diff (scratch) */
+            fprintf(out, "\txor $t3, %s, %s\n", sa, sb);   /* a ^ b */
+            fprintf(out, "\txor $t2, %s, $t2\n", sa);      /* a ^ diff */
+        }
+        fprintf(out, "\tand $t3, $t3, $t2\n");     /* sign bit set iff overflow */
+        fprintf(out, "\t%s %s, %s, %s\n", mn, sd, sa, sb); /* result (sa,sb last read) */
+        lhs = "$t3"; rhs = NULL;
+        cmp_eq = "bgez"; cmp_ne = "bltz";
+    }
+
+    if (i->label >= 0) {
+        if (rhs)
+            fprintf(out, "\t%s %s, %s, .L%d_%d\n", cmp_ne, lhs, rhs,
+                label_prefix, i->label);
+        else
+            fprintf(out, "\t%s %s, .L%d_%d\n", cmp_ne, lhs,
+                label_prefix, i->label);
+    } else {
+        int k = ovf_label_ctr++;
+        if (rhs)
+            fprintf(out, "\t%s %s, %s, .Lovfok%d\n", cmp_eq, lhs, rhs, k);
+        else
+            fprintf(out, "\t%s %s, .Lovfok%d\n", cmp_eq, lhs, k);
+        fprintf(out, "\tjal kp_trap_overflow\n");
+        fprintf(out, ".Lovfok%d:\n", k);
+    }
+    wd(out, fn, i->dst, sd);
+}
+
+/* Is physical register `name` named in the asm's clobber list? */
+static int
+asm_reg_clobbered(struct ir_asm_info *ai, const char *name)
+{
+    int k;
+    for (k = 0; k < ai->nclobbers; k++)
+        if (strcmp(ai->clobbers[k], name) == 0)
+            return 1;
+    return 0;
+}
+
+/* The regs[] index of register `name`, or -1.  Indices 2..7 ($s0..$s7) are the
+   allocatable registers; the allocator reserves any an asm pins or clobbers. */
+static int
+mips_regindex(const char *name)
+{
+    int t;
+    for (t = 0; t < (int)(sizeof regs / sizeof regs[0]); t++)
+        if (strcmp(regs[t], name) == 0)
+            return t;
+    return -1;
+}
+
+/* Fill out[] (capacity max) with the allocator indices of the allocatable
+   registers any extended asm in fn pins or clobbers, deduplicated. */
+int
+mips_asm_reserved_regs(struct ir_func *fn, int *out, int max)
+{
+    struct ir_insn *i;
+    int n = 0, k, j;
+
+    for (i = fn->head; i; i = i->next) {
+        struct ir_asm_info *ai = i->asm_info;
+        if (i->op != IR_ASM || !ai)
+            continue;
+        for (k = 0; k < ai->noutputs + ai->ninputs; k++) {
+            int idx = ai->ops[k].pin_reg ? mips_regindex(ai->ops[k].pin_reg) : -1;
+            if (idx < 2)
+                continue;
+            for (j = 0; j < n && out[j] != idx; j++)
+                ;
+            if (j == n && n < max)
+                out[n++] = idx;
+        }
+        for (k = 0; k < ai->nclobbers; k++) {
+            int idx = mips_regindex(ai->clobbers[k]);
+            if (idx < 2)
+                continue;
+            for (j = 0; j < n && out[j] != idx; j++)
+                ;
+            if (j == n && n < max)
+                out[n++] = idx;
+        }
+    }
+    return n;
+}
+
+/* Is physical register `name` the pin target of any operand in this asm? */
+static int
+asm_reg_pinned(struct ir_asm_info *ai, const char *name)
+{
+    int k, n = ai->noutputs + ai->ninputs;
+    for (k = 0; k < n; k++)
+        if (ai->ops[k].pin_reg && strcmp(ai->ops[k].pin_reg, name) == 0)
+            return 1;
+    return 0;
+}
+
+/* Extended inline asm (cc's asm(template : outputs : inputs : clobbers)).
+ * A generic "r"-class operand goes in any GP register: its allocated
+ * $s-register, or a $t-register materialised from the spill slot.  A pinned
+ * operand (pin_reg, from a "{$reg}" constraint or a GNU local register
+ * variable) goes in that physical register, its value moved in from the
+ * operand temp's home (register or spill slot) and, for an output, moved back
+ * out afterward.  This is the syscall case: the arguments land in
+ * $v0/$a0..$a3.  The template's %N are substituted.  Operand loads and stores
+ * sit outside the asm bracket so the noreorder scheduler fills their delay
+ * slots; the template itself is bracketed so the scheduler leaves the user's
+ * instructions untouched. */
+static void
+emit_asm_ext(FILE *out, struct ir_func *fn, struct ir_insn *i)
+{
+    struct ir_asm_info *ai = i->asm_info;
+    int n = ai->noutputs + ai->ninputs;
+    const char *pool[] = { "$t0", "$t1", "$t2", "$t3",
+                           "$t4", "$t5", "$t6", "$t7" };
+    int npool = (int)(sizeof pool / sizeof pool[0]);
+    const char *opreg[32];
+    int next = 0, k;
+    const char *s;
+
+    if (n > 32)
+        die("mips: too many asm operands");
+
+    /* 1. name each operand's register: its pin, its allocated $s-register,
+          or (deferred) a pool $t-register for a spilled generic operand */
+    for (k = 0; k < n; k++) {
+        struct ir_asm_op *op = &ai->ops[k];
+
+        if (op->pin_reg) {
+            int j;
+            /* an allocatable pin is fine: the allocator reserved it (see
+               mips_asm_reserved_regs), so no temp lives there across the asm */
+            for (j = 0; j < k; j++)
+                if (ai->ops[j].pin_reg &&
+                    strcmp(ai->ops[j].pin_reg, op->pin_reg) == 0)
+                    die("mips: two asm operands pinned to %s", op->pin_reg);
+            opreg[k] = op->pin_reg;
+        } else if (fn->temp_reg[op->temp] >= 0) {
+            opreg[k] = regs[fn->temp_reg[op->temp]];
+        } else {
+            opreg[k] = NULL;    /* a pool reg, assigned next */
+        }
+    }
+    /* 2. hand the spilled generic operands a pool register each, skipping any
+          clobbered by the asm or pinned by another operand */
+    for (k = 0; k < n; k++) {
+        if (opreg[k])
+            continue;
+        while (next < npool && (asm_reg_clobbered(ai, pool[next]) ||
+                                asm_reg_pinned(ai, pool[next])))
+            next++;
+        if (next >= npool)
+            die("mips: too many spilled asm operands");
+        opreg[k] = pool[next++];
+    }
+
+    /* 3. materialise input values into their operand registers */
+    for (k = 0; k < n; k++) {
+        struct ir_asm_op *op = &ai->ops[k];
+        int home = fn->temp_reg[op->temp];
+
+        if (op->is_output && !op->is_inout)
+            continue;                   /* write-only: no value in */
+        if (op->pin_reg) {
+            if (home >= 0)
+                fprintf(out, "\tmove %s, %s\n", opreg[k], regs[home]);
+            else
+                fprintf(out, "\tlw %s, %d($fp)\n",
+                    opreg[k], spill_byte_offset(fn, op->temp));
+        } else if (home < 0) {
+            fprintf(out, "\tlw %s, %d($fp)\n",
+                opreg[k], spill_byte_offset(fn, op->temp));
+        }
+        /* generic allocated: opreg[k] is the home reg, value already there */
+    }
+
+    /* the template, %N substituted, bracketed so the scheduler leaves it */
+    if (g_noreorder)
+        fprintf(out, "#skj-asm-begin\n");
+    for (s = i->sym; *s; s++) {
+        if (*s != '%') {
+            fputc(*s, out);
+            continue;
+        }
+        s++;
+        if (*s == '%') {
+            fputc('%', out);
+        } else if (*s >= '0' && *s <= '9') {
+            int idx = 0;
+            while (*s >= '0' && *s <= '9')
+                idx = idx * 10 + (*s++ - '0');
+            s--;
+            if (idx >= n)
+                die("mips: asm operand %%%d out of range", idx);
+            fputs(opreg[idx], out);
+        } else {
+            fputc('%', out);
+            fputc(*s, out);
+        }
+    }
+    fputc('\n', out);
+    if (g_noreorder)
+        fprintf(out, "#skj-asm-end\n");
+
+    /* store outputs back from their operand registers.  A pinned output is
+       moved to its temp's home (register or slot); a generic output uses wd,
+       a no-op when the temp was allocated a register. */
+    for (k = 0; k < ai->noutputs; k++) {
+        struct ir_asm_op *op = &ai->ops[k];
+        int home = fn->temp_reg[op->temp];
+
+        if (op->pin_reg) {
+            if (home >= 0)
+                fprintf(out, "\tmove %s, %s\n", regs[home], opreg[k]);
+            else
+                fprintf(out, "\tsw %s, %d($fp)\n",
+                    opreg[k], spill_byte_offset(fn, op->temp));
+        } else {
+            wd(out, fn, op->temp, opreg[k]);
+        }
+    }
+}
 
 static void
 emit_load(FILE *out, struct ir_func *fn, struct ir_insn *i,
@@ -946,6 +1201,10 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
            .set noreorder the scheduler must not fill or reorder around the
            user's own delay slots, so bracket the text with sentinels that
            sched_emit copies through untouched (see sched_emit). */
+        if (i->asm_info) {
+            emit_asm_ext(out, fn, i);
+            break;
+        }
         if (g_noreorder)
             fprintf(out, "#skj-asm-begin\n%s\n#skj-asm-end\n", i->sym);
         else
@@ -986,6 +1245,9 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_ADD:  emit_binop(out, fn, i, "addu"); break;
     case IR_SUB:  emit_binop(out, fn, i, "subu"); break;
     case IR_MUL:  emit_binop(out, fn, i, "mul");  break;   /* macro: mult+mflo */
+    case IR_ADDO:
+    case IR_SUBO:
+    case IR_MULO: emit_overflow(out, fn, i); break;
     case IR_AND:  emit_binop(out, fn, i, "and");  break;
     case IR_OR:   emit_binop(out, fn, i, "or");   break;
     case IR_XOR:  emit_binop(out, fn, i, "xor");  break;
@@ -2209,6 +2471,7 @@ emit_globals(FILE *out, struct ir_program *prog)
 
 static const char *const CT_SET[] = {
     "j", "jal", "jalr", "jr", "b", "beq", "bne", "beqz", "bnez",
+    "bltz", "bgez", "blez", "bgtz",
     "bc1f", "bc1t", NULL,
 };
 static const char *const HOIST_SET[] = {

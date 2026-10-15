@@ -1734,6 +1734,20 @@ emit_globals(FILE *out, struct ir_program *prog)
     }
 }
 
+/* Extended inline asm (an IR_ASM carrying asm_info) is produced only by cc,
+   which uses the arm64_select backend; this stack-convention backend never
+   sees one, so no register is reserved.  The stub keeps regalloc_arm64.c
+   (shared with arm64_select) linkable in the tinc/scheme tools that take
+   arm64_emit. */
+int
+arm64_asm_reserved_regs(struct ir_func *fn, int *out, int max)
+{
+    (void)fn;
+    (void)out;
+    (void)max;
+    return 0;
+}
+
 /****************************************************************
  * Entry point
  ****************************************************************/

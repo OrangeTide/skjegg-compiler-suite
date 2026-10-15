@@ -356,7 +356,18 @@ emit_globals(FILE *out, struct ir_program *prog)
             continue;
         }
         emit_global_head(out, g);
-        if (g->inits) {
+        if (g->is_strobj) {
+            /* A static Kobold string object: the {refcount, kind, len} header
+               in target endianness, then the text and a trailing NUL.  The
+               header words assemble per-target (little-endian here), where
+               str_core.c reads them with native loads. */
+            fprintf(out, "\t.word 0x%08x\n", 0xffffffffu);  /* KP_RC_STATIC */
+            fprintf(out, "\t.word 0x%08x\n", 1u);           /* KP_OBJ_STRING */
+            fprintf(out, "\t.word %d\n", g->init_strlen);   /* byte length */
+            if (g->init_strlen > 0)
+                emit_string_bytes(out, g->init_string, g->init_strlen);
+            fprintf(out, "\t.byte 0\n");                    /* trailing NUL */
+        } else if (g->inits) {
             emit_init_image(out, g);
         } else if (g->init_string) {
             emit_string_bytes(out, g->init_string, g->init_strlen);
@@ -427,7 +438,10 @@ target_emit(FILE *out, struct ir_program *prog)
         fprintf(out, "%s:\n", fn->name);
 
         rvt_begin_func(m, ++serial);
-        if (rv_select_func(m, fn, err, sizeof err) != 0) {
+        if (rv_select_func(m, fn,
+                           target_aot_trap_guarded ? RV_TRAP_GUARDED
+                                                   : RV_TRAP_HARDWARE,
+                           err, sizeof err) != 0) {
             fprintf(stderr, "rv_mc_text: %s\n", err);
             exit(1);
         }

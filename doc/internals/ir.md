@@ -136,6 +136,8 @@ Notation: `d` = `dst`, `a` = `a` operand, `b` = `b` operand,
 | `FUNC`   | nargs           | Function entry marker                 |
 | `ENDF`   | (none)          | Function end marker                   |
 | `LABEL`  | L               | Branch target                         |
+| `LOC`    | imm             | Source-line marker (imm = line); emits no code and defines no value; a backend that tracks debug info maps the current output position to the line |
+| `ASM`    | sym             | Emit the verbatim assembly text in `sym`; an opaque barrier, not register-allocated or scheduled. Extended-asm operands and clobbers, when present, ride in the instruction's `asm_info` |
 
 ### Constants and Addresses
 
@@ -165,6 +167,18 @@ Notation: `d` = `dst`, `a` = `a` operand, `b` = `b` operand,
 | `SHRU`   | d, a, b         | d = a >> b (logical)                  |
 | `NEG`    | d, a            | d = -a                                |
 | `NOT`    | d, a            | d = ~a (bitwise)                      |
+
+### Overflow-Checked Arithmetic
+
+Checked signed 32-bit forms that trap (raising the target's overflow
+policy) when the result does not fit, instead of wrapping. Used when a
+front end turns on overflow checking.
+
+| Opcode   | Operands        | Description                           |
+|----------|-----------------|---------------------------------------|
+| `ADDO`   | d, a, b         | d = a + b, trap on signed overflow    |
+| `SUBO`   | d, a, b         | d = a - b, trap on signed overflow    |
+| `MULO`   | d, a, b         | d = a * b, trap on signed overflow    |
 
 ### Memory Access
 
@@ -236,6 +250,25 @@ the caller pops them after the call returns. Maximum 16 arguments.
 The `d` field of call instructions is -1 when the return value is
 discarded.
 
+### Extended Calls, Returns, and ABI Staging
+
+The two-register failable forms carry a value and an error signal
+together (see `doc/languages/kobold/kp-errors.md`). The aggregate forms
+return or receive a struct by value per the platform psABI. The staging
+forms pass by-value structs and variadic state.
+
+| Opcode       | Operands              | Description                      |
+|--------------|-----------------------|----------------------------------|
+| `RETV2`      | a, b                  | Return two integer registers: the value a and the error signal b |
+| `CALL2`      | d, sym, nargs, slot   | Call sym; the value lands in d (-1 if discarded) and the error signal is stored into local slot `slot` |
+| `CALLI2`     | d, a, nargs, slot     | As `CALL2`, indirect through a   |
+| `RETV_AGG`   | a                     | Pack the struct at [a] into the return registers per the function's return class, then return |
+| `CALL_AGG`   | sym, nargs, slot, imm | Call sym; store the returned eightbytes into local slot `slot`; imm encodes the eightbyte count and classes |
+| `CALLI_AGG`  | a, nargs, slot, imm   | As `CALL_AGG`, indirect through a |
+| `VA_START`   | a                     | Initialize the `va_list` at [a] from the current function's register-save area and stack arguments; defines no value |
+| `ARG_MEM`    | a, imm                | Stage a by-value memory-class struct argument: a = its address, imm = its byte size; the caller copies it to the outgoing area |
+| `ARG_X8`     | a                     | Place the indirect result-area pointer a in the struct-return register (AArch64 x8) |
+
 ### Continuations
 
 Used by TinScheme for delimited continuations (shift/reset). The runtime
@@ -243,9 +276,10 @@ provides `__cont_capture` and `__cont_resume`.
 
 | Opcode    | Operands         | Description                         |
 |-----------|------------------|-------------------------------------|
-| `MARK`    | d, slot, L       | Save frame to slot (12 bytes: fp, sp, resume PC); d = 0 on first entry, nonzero on resume via shift |
+| `MARK`    | d, slot, L       | Save frame to slot (16 bytes: fp, sp, resume PC, continuation-arena high-water mark); d = 0 on first entry, nonzero on resume via shift |
 | `CAPTURE` | d                | Capture current continuation; d = buffer pointer |
 | `RESUME`  | a, b             | Resume continuation a with value b (does not return) |
+| `CONT_UNWIND` | slot         | Restore the continuation arena pointer to the high-water mark the matching `MARK` saved in `slot`, reclaiming buffers captured in the closing reset extent; defines no value |
 
 ### Floating-Point Arithmetic
 
@@ -260,6 +294,7 @@ xmm1-xmm7 on x86-32; not yet implemented on RISC-V).
 | `FDIV`    | d, a, b         | d = a / b (f64)                      |
 | `FNEG`    | d, a            | d = -a (f64)                         |
 | `FABS`    | d, a            | d = |a| (f64)                        |
+| `FSQRT`   | d, a            | d = sqrt(a) (f64)                    |
 
 ### Floating-Point Comparison
 
@@ -281,6 +316,9 @@ Produce 1 for true, 0 for false (unlike integer compares which produce
 |-----------|-----------------|--------------------------------------|
 | `ITOF`    | d, a            | d = (double)a (i32 to f64)           |
 | `FTOI`    | d, a            | d = (int)a (f64 to i32, truncate)    |
+| `FROUND`  | d, a            | d = round a to the nearest integer (f64 to i32) |
+| `F32TOF64`| d, a            | d = widen a from f32 to f64          |
+| `F64TOF32`| d, a            | d = narrow a from f64 to f32         |
 
 ### Floating-Point Memory
 
@@ -292,6 +330,8 @@ Produce 1 for true, 0 for false (unlike integer compares which produce
 | `FSD`     | a, b            | store b as float64 to [a]            |
 | `FLDL`    | d, slot         | d = load float64 from local slot     |
 | `FSTL`    | a, slot         | store float64 a into local slot      |
+| `FLH`     | d, a            | d = load float16 from [a], widen to f64 |
+| `FSH`     | a, b            | store b as float16 to [a]            |
 
 ### 64-bit Integer Operations
 
@@ -306,6 +346,10 @@ esi/edi). Complex operations (multiply, shifts) call library helpers
 | `ADD64`     | d, a, b         | d = a + b (i64)                    |
 | `SUB64`     | d, a, b         | d = a - b (i64)                    |
 | `MUL64`     | d, a, b         | d = a * b (i64, via __muldi3)      |
+| `DIVS64`    | d, a, b         | d = a / b (i64, signed)           |
+| `DIVU64`    | d, a, b         | d = a / b (i64, unsigned)         |
+| `MODS64`    | d, a, b         | d = a % b (i64, signed)           |
+| `MODU64`    | d, a, b         | d = a % b (i64, unsigned)         |
 | `AND64`     | d, a, b         | d = a & b (i64)                    |
 | `OR64`      | d, a, b         | d = a \| b (i64)                   |
 | `XOR64`     | d, a, b         | d = a ^ b (i64)                    |

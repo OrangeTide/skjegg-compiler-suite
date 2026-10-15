@@ -117,7 +117,13 @@ lex_ident(struct lexer *l, int dot_prefix)
     else
         start = l->pos;
 
-    while (is_ident_char(*l->pos) || *l->pos == '.')
+    /* '$' is a symbol continuation char where it is not the register sigil
+       (ColdFire and RISC-V use % / plain names for registers, so dollar_reg is
+       off there).  Mangled Kobold names such as AddMember$0 carry it, and GNU as
+       accepts it in a symbol; MIPS keeps '$' for its register sigil, handled
+       separately, so it is excluded here. */
+    while (is_ident_char(*l->pos) || *l->pos == '.' ||
+           (*l->pos == '$' && !l->dollar_reg))
         l->pos++;
 
     len = (int)(l->pos - start);

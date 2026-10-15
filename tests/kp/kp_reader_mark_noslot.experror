@@ -1,0 +1,5 @@
+# MARK indexes a continuation frame through its slot operand (the backend reads
+# slot_offset(fn, slot)), so a MARK with no slot field must be rejected rather
+# than reaching the backend with the -1 default and indexing out of bounds.
+# CONT_UNWIND is the same: both are now in op_needs_slot.
+line 3: missing slot operand

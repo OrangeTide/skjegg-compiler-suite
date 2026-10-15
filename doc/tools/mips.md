@@ -389,14 +389,13 @@ hoist changes a result and fails under qemu regardless of interlocks.
 `skj-cc` has a basic inline-assembly statement: `asm("...")` and `asm
 volatile("...")` (with the `__asm__` and `__asm` spellings) emit their string
 into the generated assembly verbatim. Adjacent string literals concatenate,
-and the usual escapes (`\n`, `\t`) let one statement carry several lines. This
-is basic asm only: no operand constraints, no `%0` substitution, and no
-file-scope asm. The `volatile` qualifier is accepted and, since basic asm is
-already an ordered barrier, has no further effect.
+and the usual escapes (`\n`, `\t`) let one statement carry several lines. The
+`volatile` qualifier is accepted and, since basic asm is already an ordered
+barrier, has no further effect.
 
-The statement lowers to one `IR_ASM` instruction carrying the text, which
-every backend emits as-is; it is not the MIPS backend's feature alone. What is
-specific to MIPS is its place in the `noreorder` scheduler. Under `.set
+The basic statement lowers to one `IR_ASM` instruction carrying the text,
+which every backend emits as-is; it is not the MIPS backend's feature alone.
+What is specific to MIPS is its place in the `noreorder` scheduler. Under `.set
 noreorder` the programmer owns the delay slots inside the block, so the
 scheduler must not fill or reorder around them. The emitter brackets the text
 with `#skj-asm-begin` / `#skj-asm-end` sentinels, and `sched_emit` copies that
@@ -408,6 +407,44 @@ plainly and the assembler treats it like any other code.
 
 This is what a `noreorder` ISR body or a boot sequence needs: hand-written
 MIPS that the toolchain passes through exactly as written.
+
+### Extended asm
+
+MIPS also has the GCC extended form, `asm[volatile](template : outputs :
+inputs : clobbers)`. The template references operands as `%N`, outputs
+numbered first; each output is `"constraint"(lvalue)` and each input
+`"constraint"(expr)`; a clobber is a bare string. `IR_ASM` grows an operand
+array (`struct ir_asm_info`), and the backend assigns each operand a register,
+substitutes `%N`, and loads inputs and stores outputs around the template.
+
+An operand's register comes from its constraint:
+
+- A generic `"r"` / `"=r"` / `"+r"` operand goes in any GP register: the
+  `$s`-register the allocator gave the operand's temp, or, when the temp was
+  spilled, a scratch `$t`-register loaded from (and, for an output, stored
+  back to) the spill slot. `=` is write-only, `+` is read-and-written.
+- A pinned operand lands in one named physical register. The register is named
+  either by a `"{$reg}"` constraint or, the GCC spelling, by a local register
+  variable the operand refers to: `register long v0 __asm__("$v0") = 4004;`.
+  The value is moved in from the operand temp's home (register or slot) just
+  before the template and, for an output, moved back out after.
+
+Pinning is the syscall case. The Linux o32 convention wants the call number in
+`$v0` and the arguments in `$a0..$a3`, so a `write(2)` wrapper is a handful of
+local register variables and one `asm volatile("syscall" ...)`. Those
+registers are caller-saved and the allocator never uses them, so no allocator
+cooperation is needed; a pin to an allocatable `$s0..$s7` is rejected for now
+(that would need the allocator to hold the register live). Because the operand
+temps live in `asm_info` rather than the instruction's `a`/`b` fields, the MIPS
+register allocator's liveness pass was taught to read them, so it does not
+hand one register to two operands that are live at the same asm.
+
+The operand loads and stores sit outside the `#skj-asm-begin` / `#skj-asm-end`
+bracket, so the `noreorder` scheduler fills their delay slots while leaving the
+user's own instructions untouched. `make test-cc-mips-asm` covers both the
+generic operands and a real syscall, under `.set reorder` and `.set
+noreorder`. Extended asm is MIPS-only so far; the other backends report a clear
+error and take the basic form.
 
 ## Soft-float (PlayStation)
 

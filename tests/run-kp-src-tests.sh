@@ -83,6 +83,12 @@ run_one() {
     args=""
     [ -f "$SRCDIR/$name.args" ] && args=$(cat "$SRCDIR/$name.args")
 
+    # Optional expected exit code (default 0).  A trap/fault fixture pins a
+    # nonzero code (70 for a Kobold runtime trap) alongside its .expected stdout
+    # (empty when the program traps before emitting anything).
+    expcode=0
+    [ -f "$SRCDIR/$name.exitcode" ] && expcode=$(cat "$SRCDIR/$name.exitcode")
+
     case "$MODE" in
     frontend)
         set +e
@@ -100,8 +106,8 @@ run_one() {
         $QEMU "$JIT" "$pas" $args >"$out" 2>"$err" <"$stdin_src"
         got=$?
         set -e
-        if [ "$got" -ne 0 ]; then
-            ok=0; reason="run exit $got"
+        if [ "$got" -ne "$expcode" ]; then
+            ok=0; reason="run exit $got, expected $expcode"
         elif ! cmp -s "$out" "$exp"; then
             ok=0; reason="stdout differs from $name.expected"
         fi
@@ -118,8 +124,8 @@ run_one() {
             sh "$ROOT/kobold/aot-run.sh" "$BDIR/$name.kpm" $args >"$out" 2>>"$err" <"$stdin_src"
             got=$?
             set -e
-            if [ "$got" -ne 0 ]; then
-                ok=0; reason="aot run exit $got"
+            if [ "$got" -ne "$expcode" ]; then
+                ok=0; reason="aot run exit $got, expected $expcode"
             elif ! cmp -s "$out" "$exp"; then
                 ok=0; reason="stdout differs from $name.expected"
             fi
@@ -140,8 +146,8 @@ run_one() {
             $QEMU "$BDIR/$name.elf" $args >"$out" 2>>"$err" <"$stdin_src"
             got=$?
             set -e
-            if [ "$got" -ne 0 ]; then
-                ok=0; reason="run exit $got"
+            if [ "$got" -ne "$expcode" ]; then
+                ok=0; reason="run exit $got, expected $expcode"
             elif ! cmp -s "$out" "$exp"; then
                 ok=0; reason="stdout differs from $name.expected"
             fi

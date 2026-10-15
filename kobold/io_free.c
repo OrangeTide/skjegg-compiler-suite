@@ -8,11 +8,14 @@
    same approach as the upstream sandbox); the real side arrives with the
    soft-float layer.
 
-   The syscall wrappers are the one target-specific piece, issued through inline
-   asm; the crt (kp_crt_rv.S) also exposes kp_sys_write/exit under these names for
-   rt_free.c's trap.  Streams: fd 1 is standard output, fd 2 standard error. */
+   The syscall wrappers are the one target-specific piece.  Each is a single trap
+   (trap #0 on ColdFire, ecall on rv32) with register-bound operands, which needs
+   extended inline asm, so they live in per-target assembly beside this file
+   (runtime/io_free_cf.S, runtime/io_free_rv.S) and are declared here.  Streams:
+   fd 1 is standard output, fd 2 standard error. */
 
 #include "str.h"
+#include "rt_glue.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -21,49 +24,24 @@
  * The host seam: write, read, exit
  ****************************************************************/
 
-#if defined(__riscv) && __riscv_xlen == 32
-
-#define SYS_read   63
-#define SYS_write  64
-#define SYS_exit   93
-
-static long
-syscall3(long n, long a0, long a1, long a2)
-{
-    register long r_a7 __asm__("a7") = n;
-    register long r_a0 __asm__("a0") = a0;
-    register long r_a1 __asm__("a1") = a1;
-    register long r_a2 __asm__("a2") = a2;
-
-    __asm__ volatile("ecall"
-                     : "+r"(r_a0)
-                     : "r"(r_a7), "r"(r_a1), "r"(r_a2)
-                     : "memory");
-    return r_a0;
-}
-
-long
-kp_sys_write(long fd, const void *buf, long len)
-{
-    return syscall3(SYS_write, fd, (long)buf, len);
-}
-
-long
-kp_sys_read(long fd, void *buf, long len)
-{
-    return syscall3(SYS_read, fd, (long)buf, len);
-}
-
-void
-kp_sys_exit(int code)
-{
-    syscall3(SYS_exit, code, 0, 0);
-    for (;;)
-        ;
-}
-
+/* The wrappers are defined in the per-target syscall assembly
+   (runtime/io_free_cf.S, runtime/io_free_rv.S).  ColdFire additionally has
+   open/close, so it enables the file-I/O surface at the end of this file; the
+   rv32 console seam has write/read/exit only. */
+#if (defined(__riscv) && __riscv_xlen == 32) || defined(__skj_riscv__)
+/* rv32: console seam only. */
+#elif defined(__mcoldfire__) || defined(__skj_m68k__)
+#define KP_HAVE_FILE_IO 1
 #else
-#error "io_free.c is the freestanding rv32 console; build it with the rv32 toolchain"
+#error "io_free.c is a freestanding console; build it with the rv32 or ColdFire toolchain"
+#endif
+
+long kp_sys_write(long fd, const void *buf, long len);
+long kp_sys_read(long fd, void *buf, long len);
+void kp_sys_exit(int code);
+#ifdef KP_HAVE_FILE_IO
+long kp_sys_open(const char *path, long flags, long mode);
+long kp_sys_close(long fd);
 #endif
 
 /****************************************************************
@@ -359,6 +337,29 @@ kp_str_val_int64(uint32_t s)
     return iv;
 }
 
+static double scan_real(const char *b, int32_t len);   /* defined below */
+
+/* Pascal Val's error code: 0 for a fully valid parse, else the 1-based offset of
+   the offending character (kind 0 int32, 1 real, 2 int64).  This tier's scan_real
+   is lenient and reports no code, so a real parse is taken as valid, matching the
+   tier's existing real handling. */
+int32_t
+kp_str_valcode(uint32_t s, int32_t kind)
+{
+    int64_t iv;
+    int32_t code;
+
+    if (kind == 1) {
+        (void)scan_real(kp_str_bytes(s), kp_str_len(s));
+        return 0;
+    }
+    if (kind == 2)
+        scan_int64(kp_str_bytes(s), kp_str_len(s), &iv, &code);
+    else
+        scan_int(kp_str_bytes(s), kp_str_len(s), &iv, &code);
+    return code;
+}
+
 /****************************************************************
  * Reals: formatting, parsing, and the rv soft-float bit bridge
  *
@@ -370,6 +371,7 @@ kp_str_val_int64(uint32_t s)
  * through the brv_* bridge, which converts the bits to a double and back.
  ****************************************************************/
 
+#if (defined(__riscv) && __riscv_xlen == 32) || defined(__skj_riscv__)
 static double
 b2d(uint64_t b)
 {
@@ -385,6 +387,7 @@ d2b(double d)
     memcpy(&b, &d, sizeof b);
     return b;
 }
+#endif
 
 /* Format v like C's "%g" with the default precision of six significant digits:
    round to six, then render in fixed notation when the exponent is in [-4, 6)
@@ -513,10 +516,14 @@ io_read_real(void)
     return scan_real(tok, n);
 }
 
-/* The rv soft-float bridges: a double rides a call as its 64-bit bits. */
+/* The rv soft-float bridges: a double rides a call as its 64-bit bits.  Only the
+   rv tier remaps the guest's real calls onto these; a target that passes a real
+   in a float register (ColdFire) calls io_write_real / kp_str_val_real directly. */
+#if (defined(__riscv) && __riscv_xlen == 32) || defined(__skj_riscv__)
 void     brv_write_real(int fd, uint64_t x) { io_write_real(fd, b2d(x)); }
 uint64_t brv_read_real(void)                { return d2b(io_read_real()); }
 uint64_t brv_val_real(uint32_t s)           { return d2b(kp_str_val_real(s)); }
+#endif
 
 /****************************************************************
  * Program arguments (ParamCount / ParamStr over the entry argv)
@@ -562,3 +569,82 @@ rt_param_str(int i)
         n++;
     return kp_str_new(p, n);
 }
+
+#ifdef KP_HAVE_FILE_IO
+/****************************************************************
+ * File I/O (ReadFileStr / WriteFileStr)
+ *
+ * A guest compiler such as kpcom reads its source file by path and writes its
+ * output, so the freestanding tier needs file access the console seam does not
+ * give.  The host open/read/close syscalls back these; skj-run reads at most a
+ * page per read and has no lseek, so ReadFileStr grows a guest-heap buffer and
+ * reads until EOF.  Both accept a NUL-terminated path copied out of the guest
+ * string.  kp_sys_open / kp_sys_close are the per-target syscall wrappers above.
+ ****************************************************************/
+
+/* asm-generic open flags, shared by the guest and the host. */
+#define KP_O_RDONLY  0
+#define KP_O_WRONLY  1
+#define KP_O_CREAT   0x40
+#define KP_O_TRUNC   0x200
+
+uint32_t
+ReadFileStr(uint32_t pathstr)
+{
+    char path[1024];
+    int plen = kp_str_len(pathstr);
+    uint32_t cap = 262144, len = 0, buf;
+    uint32_t s;
+    int fd;
+    long n;
+
+    if (plen < 0 || plen >= (int)sizeof path)
+        return kp_str_new("", 0);
+    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
+    path[plen] = '\0';
+
+    fd = (int)kp_sys_open(path, KP_O_RDONLY, 0);
+    if (fd < 0)
+        return kp_str_new("", 0);
+
+    buf = gheap_alloc(cap);
+    for (;;) {
+        if (len == cap) {
+            cap *= 2;
+            buf = gheap_realloc(buf, cap);
+        }
+        n = kp_sys_read(fd, (void *)(uintptr_t)(buf + len), (long)(cap - len));
+        if (n <= 0)
+            break;
+        len += (uint32_t)n;
+    }
+    kp_sys_close(fd);
+
+    s = kp_str_new_guest(buf, (int)len);
+    gheap_free(buf);
+    return s;
+}
+
+int
+WriteFileStr(uint32_t pathstr, uint32_t datastr)
+{
+    char path[1024];
+    int plen = kp_str_len(pathstr);
+    uint32_t len;
+    int fd;
+    long n;
+
+    if (plen < 0 || plen >= (int)sizeof path)
+        return 0;
+    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
+    path[plen] = '\0';
+
+    fd = (int)kp_sys_open(path, KP_O_WRONLY | KP_O_CREAT | KP_O_TRUNC, 0644);
+    if (fd < 0)
+        return 0;
+    len = (uint32_t)kp_str_len(datastr);
+    n = kp_sys_write(fd, kp_str_bytes(datastr), (long)len);
+    kp_sys_close(fd);
+    return n == (long)len;
+}
+#endif /* KP_HAVE_FILE_IO */

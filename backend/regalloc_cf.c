@@ -39,6 +39,10 @@
 
 #include <stdlib.h>  /* qsort */
 
+/* cf_emit.c: the allocator-index (temp_reg value) of each integer register an
+   extended asm pins or clobbers; the allocator reserves them. */
+int cf_asm_reserved_regs(struct ir_func *fn, int *out, int max);
+
 #define INT_NUM_REGS  6
 #define INT_FIRST_REG 2
 
@@ -67,9 +71,12 @@ sort_by_start(const void *pa, const void *pb)
     return a->end - b->end;
 }
 
+/* reserved (or NULL): length num_regs, 1 = this pool slot is withheld from
+   allocation (an extended-asm operand is pinned or clobbered there). */
 static int
 linscan(struct ir_func *fn, int *first_def, int *last_use,
-        int *is_class, int num_regs, int first_reg, int spill_size)
+        int *is_class, int num_regs, int first_reg, int spill_size,
+        const int *reserved)
 {
     struct interval *ivs;
     struct interval **active;
@@ -113,7 +120,7 @@ linscan(struct ir_func *fn, int *first_def, int *last_use,
 
     int pool[num_regs];
     for (k = 0; k < num_regs; k++)
-        pool[k] = 1;
+        pool[k] = (reserved && reserved[k]) ? 0 : 1;
 
     active = arena_alloc(fn->arena, (num_regs + 1) * sizeof(*active));
     nactive = 0;
@@ -231,6 +238,17 @@ regalloc(struct ir_func *fn)
         last_use[t] = -1;
     }
 
+    /* cf_emit defers an argument's stack push from the IR_ARG to the consuming
+       call (it records the arg temps and pushes them all at the call), so an
+       IR_ARG operand is live until that call, not just until the ARG. Extend each
+       pending argument's live range to its call, otherwise a temp defined between
+       the ARG and the call (e.g. an IR_LEA entry address or another argument's
+       constant) could be allocated the argument's register and clobber it before
+       the push. Same latent gap the 64-bit backends close. */
+    enum { RA_MAX_ARGS = 32 };      /* matches cf_emit.c's CF_MAX_ARGS cap */
+    int pending[RA_MAX_ARGS];
+    int npending = 0;
+
     pos = 0;
     for (i = fn->head; i; i = i->next, pos++) {
         if (i->dst >= 0 && i->dst < ntemps) {
@@ -247,10 +265,42 @@ regalloc(struct ir_func *fn)
             last_use[i->a] = pos;
         if (i->b >= 0 && i->b < ntemps && last_use[i->b] < pos)
             last_use[i->b] = pos;
+        /* Extended inline asm: the operand temps live in asm_info, not in
+           i->a/i->b.  Register an output as a def, an input as a use, an
+           in-out operand as both, so two operands live at one asm never share
+           a register. */
+        if (i->op == IR_ASM && i->asm_info) {
+            int k, nops = i->asm_info->noutputs + i->asm_info->ninputs;
+            for (k = 0; k < nops; k++) {
+                int t = i->asm_info->ops[k].temp;
+                if (t < 0 || t >= ntemps)
+                    continue;
+                if ((i->asm_info->ops[k].is_output ||
+                     i->asm_info->ops[k].is_inout) && first_def[t] < 0)
+                    first_def[t] = pos;
+                if (last_use[t] < pos)
+                    last_use[t] = pos;
+            }
+        }
+
+        if (i->op == IR_ARG || i->op == IR_FARG || i->op == IR_ARG64) {
+            if (npending < RA_MAX_ARGS)
+                pending[npending++] = i->a;
+        } else if (i->op == IR_CALL || i->op == IR_CALLI ||
+                   i->op == IR_FCALL || i->op == IR_FCALLI ||
+                   i->op == IR_TAILCALL || i->op == IR_TAILCALLI ||
+                   i->op == IR_CALL64 || i->op == IR_CALLI64) {
+            int k;
+            for (k = 0; k < npending; k++)
+                if (pending[k] >= 0 && pending[k] < ntemps &&
+                    last_use[pending[k]] < pos)
+                    last_use[pending[k]] = pos;
+            npending = 0;
+        }
     }
 
     fn->ni64spills = linscan(fn, first_def, last_use,
-                 is_i64, I64_NUM_PAIRS, I64_FIRST_PAIR, 8);
+                 is_i64, I64_NUM_PAIRS, I64_FIRST_PAIR, 8, NULL);
 
     max_pair = -1;
     for (t = 0; t < ntemps; t++) {
@@ -264,10 +314,29 @@ regalloc(struct ir_func *fn)
     for (t = 0; t < ntemps; t++)
         is_int[t] = !is_float[t] && !is_i64[t];
 
+    /* Reserve any integer register an extended-asm operand pins or clobbers,
+       so no temp lives there across the asm.  A pin to the i64-pair region is
+       unsupported (the pair pool is carved from the same registers), so a
+       function that both pins an allocatable register and uses 64-bit integers
+       is rejected rather than miscompiled. */
+    int reserved[INT_NUM_REGS];
+    int pinned[INT_NUM_REGS], npinned, pk, rk;
+    for (rk = 0; rk < INT_NUM_REGS; rk++)
+        reserved[rk] = 0;
+    npinned = cf_asm_reserved_regs(fn, pinned, INT_NUM_REGS);
+    for (pk = 0; pk < npinned; pk++) {
+        int slot = pinned[pk] - INT_FIRST_REG;
+        if (max_pair >= 0)
+            die("cf: asm pin to an allocatable register in a function that "
+                "uses 64-bit integers is not supported");
+        if (slot >= 0 && slot < int_num_regs)
+            reserved[slot] = 1;
+    }
+
     fn->nspills = linscan(fn, first_def, last_use,
-                  is_int, int_num_regs, INT_FIRST_REG, 4);
+                  is_int, int_num_regs, INT_FIRST_REG, 4, reserved);
     fn->nfspills = linscan(fn, first_def, last_use,
-                   is_float, FP_NUM_REGS, FP_FIRST_REG, 8);
+                   is_float, FP_NUM_REGS, FP_FIRST_REG, 8, NULL);
 
     arena_release(fn->arena, m);
 }

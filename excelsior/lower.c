@@ -1384,6 +1384,22 @@ div_checks(struct node *n, int l, int r)
     emit_label(lok);
 }
 
+/* Overflow-checked signed arithmetic: IR_ADDO/SUBO/MULO carry a per-site trap
+ * label, so the backend branches to this site's cold __exc_trap trampoline when
+ * the operation overflows (runtime-errors.md: int and decimal overflow is an
+ * OVERFLOW fault, never consumable). Used for int add, subtract, multiply and
+ * unary minus, and for decimal add/subtract (the scaled int can leave range). */
+static int
+emit_checked(struct node *n, int irop, int l, int r)
+{
+    struct ir_insn *ins = emit(irop);
+    ins->dst = new_temp();
+    ins->a = l;
+    ins->b = r;
+    ins->label = trap_site(EXC_TRAP_OVERFLOW, n, NULL, -1, -1, 0);
+    return ins->dst;
+}
+
 /* an int-valued 0/1 from a boolean expression via the condition path */
 static int
 lower_bool(struct node *n)
@@ -2058,8 +2074,8 @@ lower_decbinop(struct node *n)
         div_checks(n, l, r);
         irop = IR_MODS;
         break;
-    case T_PLUS:    irop = IR_ADD;   break;
-    case T_MINUS:   irop = IR_SUB;   break;
+    case T_PLUS:    return emit_checked(n, IR_ADDO, l, r);
+    case T_MINUS:   return emit_checked(n, IR_SUBO, l, r);
     case T_EQ:      irop = IR_CMPEQ; break;
     case T_NE:      irop = IR_CMPNE; break;
     case T_LT:      irop = IR_CMPLTS; break;
@@ -2437,9 +2453,9 @@ lower_binop(struct node *n)
     if (n->op == T_SLASH || n->op == T_PERCENT)
         div_checks(n, l, r);
     switch (n->op) {
-    case T_PLUS:    irop = IR_ADD;   break;
-    case T_MINUS:   irop = IR_SUB;   break;
-    case T_STAR:    irop = IR_MUL;   break;
+    case T_PLUS:    return emit_checked(n, IR_ADDO, l, r);
+    case T_MINUS:   return emit_checked(n, IR_SUBO, l, r);
+    case T_STAR:    return emit_checked(n, IR_MULO, l, r);
     case T_SLASH:   irop = IR_DIVS;  break;
     case T_PERCENT: irop = IR_MODS;  break;
     case T_EQ:      irop = IR_CMPEQ; break;
@@ -3158,10 +3174,14 @@ lower_expr(struct node *n)
         if (n->op == T_NOT)
             return lower_bool(n);
         t = lower_expr(n->a);
-        ins = emit(node_is_float(n) ? IR_FNEG : IR_NEG);   /* unary minus */
-        ins->dst = new_temp();
-        ins->a = t;
-        return ins->dst;
+        if (node_is_float(n)) {
+            ins = emit(IR_FNEG);                           /* unary minus */
+            ins->dst = new_temp();
+            ins->a = t;
+            return ins->dst;
+        }
+        /* int/decimal negate is 0 - x, checked: -INT_MIN overflows */
+        return emit_checked(n, IR_SUBO, lower_const(0), t);
     case N_CALL:
         return lower_call(n);
     case N_FLOAT:

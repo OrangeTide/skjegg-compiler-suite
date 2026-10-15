@@ -84,6 +84,11 @@ static int t_is_i64(int t) { return g_is_i64 && t >= 0 && g_is_i64[t]; }
 static const unsigned char *g_f32;
 static int src_is_f32(int t) { return g_f32 && t >= 0 && g_f32[t]; }
 
+/* Divide-by-zero trap policy for this function (RV_TRAP_*).  Set per function in
+   rv_select_func.  RV_TRAP_GUARDED makes a 32-bit div/mod guard its divisor and
+   call kp_trap_div_zero, since RV32 divide does not fault by hardware. */
+static int g_trap_policy;
+
 /****************************************************************
  * The RISC-V ILP32 calling convention (pure computation, ported verbatim)
  ****************************************************************/
@@ -486,6 +491,42 @@ emit_binop(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, rrr_fn op)
     wd(m, fn, i->dst, sd);
 }
 
+/* 32-bit integer divide/remainder.  RV32 does not fault on a zero divisor (it
+   returns -1 for div, the dividend for rem), so under RV_TRAP_GUARDED (Kobold)
+   a zero divisor is tested and kp_trap_div_zero is called before the divide.
+   The call sits on the divisor-is-zero path, which never returns, so it does
+   not matter that it may clobber sa/sb: the divide is reached only on the
+   fall-through where the divisor is nonzero and the operands are still live.
+   For a signed op a second guard catches INT_MIN / -1 (and its modulo), whose
+   mathematical result is unrepresentable: RV32 returns INT_MIN silently, so
+   Kobold traps OVERFLOW instead.  T2 is named scratch outside the allocator's
+   pool (as emit_overflow uses it), so the compares never disturb sa/sb/sd. */
+static void
+emit_div(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, rrr_fn op,
+         int is_signed)
+{
+    int sa = rs(m, fn, i->a, 0);
+    int sb = rs(m, fn, i->b, 1);
+    int sd = rd(fn, i->dst, 0);
+    if (g_trap_policy == RV_TRAP_GUARDED) {
+        int ok = rv_mc_new_label(m);
+        rv_mc_bnez(m, sb, ok);           /* divisor nonzero: skip the trap */
+        rv_mc_call(m, "kp_trap_div_zero");
+        rv_mc_label(m, ok);
+        if (is_signed) {
+            int ok2 = rv_mc_new_label(m);
+            rv_mc_li(m, T2, -1);
+            rv_mc_bne(m, sb, T2, ok2);   /* divisor != -1: cannot overflow */
+            rv_mc_li(m, T2, -2147483647L - 1);   /* INT_MIN */
+            rv_mc_bne(m, sa, T2, ok2);   /* dividend != INT_MIN: no overflow */
+            rv_mc_call(m, "kp_trap_overflow");
+            rv_mc_label(m, ok2);
+        }
+    }
+    op(m, sd, sa, sb);
+    wd(m, fn, i->dst, sd);
+}
+
 /* Overflow-checked 32-bit signed arithmetic (IR_ADDO/SUBO/MULO).  RV32 has no
    hardware overflow flag, so the result's validity is tested directly and a
    failure calls kp_trap_overflow.  For add/sub the sign bits decide it; for
@@ -493,13 +534,14 @@ emit_binop(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, rrr_fn op)
    half.  T2 and T6 are named scratch outside the allocator's register pool, so
    the source registers (sa, sb) are only ever read and the result (sd) is
    written last, which stays correct even when sd aliases sa or sb. */
+static int il(struct rv_mc *m, int *lbl, int n);   /* defined below */
+
 static void
-emit_overflow(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i)
+emit_overflow(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl)
 {
     int sa = rs(m, fn, i->a, 0);
     int sb = rs(m, fn, i->b, 1);
     int sd = rd(fn, i->dst, 0);
-    int ok = rv_mc_new_label(m);
     int flag;
 
     if (i->op == IR_MULO) {
@@ -526,9 +568,17 @@ emit_overflow(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i)
         flag = T6;
     }
 
-    rv_mc_beqz(m, flag, ok);             /* no overflow: skip the trap */
-    rv_mc_call(m, "kp_trap_overflow");
-    rv_mc_label(m, ok);
+    if (i->label >= 0) {
+        /* explicit per-site trap target (Excelsior's cold __exc_trap
+           trampoline): branch there on overflow. */
+        rv_mc_bnez(m, flag, il(m, lbl, i->label));
+    } else {
+        /* label-less (Kobold): call the runtime overflow handler. */
+        int ok = rv_mc_new_label(m);
+        rv_mc_beqz(m, flag, ok);         /* no overflow: skip the trap */
+        rv_mc_call(m, "kp_trap_overflow");
+        rv_mc_label(m, ok);
+    }
     wd(m, fn, i->dst, sd);
 }
 
@@ -967,6 +1017,219 @@ il(struct rv_mc *m, int *lbl, int n)
     return lbl[n];
 }
 
+/* RISC-V ABI register names, indexed by hardware number (x0..x31). */
+static const char *rv_abi_name[32] = {
+    "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2",
+    "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
+    "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7",
+    "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6",
+};
+
+/* name -> hardware number, or -1 (accepts "fp" as an alias for s0). */
+static int
+rv_reg_num(const char *name)
+{
+    int h;
+    if (strcmp(name, "fp") == 0)
+        return 8;
+    for (h = 0; h < 32; h++)
+        if (strcmp(rv_abi_name[h], name) == 0)
+            return h;
+    return -1;
+}
+
+
+static int
+asm_reg_clobbered(struct ir_asm_info *ai, const char *name)
+{
+    int k;
+    for (k = 0; k < ai->nclobbers; k++)
+        if (strcmp(ai->clobbers[k], name) == 0)
+            return 1;
+    return 0;
+}
+
+/* The allocator index (temp_reg value) of hardware register `h`, or -1 if `h`
+   is not an allocatable register. */
+static int
+rv_hw_to_index(int h)
+{
+    int k;
+    for (k = 2; k < (int)(sizeof reg / sizeof reg[0]); k++)
+        if (reg[k] == h)
+            return k;
+    return -1;
+}
+
+/* Fill out[] (capacity max) with the allocator indices of the allocatable
+   registers any extended asm in fn pins or clobbers, deduplicated. */
+int
+rv_asm_reserved_regs(struct ir_func *fn, int *out, int max)
+{
+    struct ir_insn *i;
+    int n = 0, k, j;
+
+    for (i = fn->head; i; i = i->next) {
+        struct ir_asm_info *ai = i->asm_info;
+        if (i->op != IR_ASM || !ai)
+            continue;
+        for (k = 0; k < ai->noutputs + ai->ninputs; k++) {
+            int h, idx;
+            if (!ai->ops[k].pin_reg)
+                continue;
+            h = rv_reg_num(ai->ops[k].pin_reg);
+            idx = h < 0 ? -1 : rv_hw_to_index(h);
+            if (idx < 0)
+                continue;
+            for (j = 0; j < n && out[j] != idx; j++)
+                ;
+            if (j == n && n < max)
+                out[n++] = idx;
+        }
+        for (k = 0; k < ai->nclobbers; k++) {
+            int h = rv_reg_num(ai->clobbers[k]);
+            int idx = h < 0 ? -1 : rv_hw_to_index(h);
+            if (idx < 0)
+                continue;
+            for (j = 0; j < n && out[j] != idx; j++)
+                ;
+            if (j == n && n < max)
+                out[n++] = idx;
+        }
+    }
+    return n;
+}
+
+static int
+asm_reg_pinned(struct ir_asm_info *ai, const char *name)
+{
+    int k, n = ai->noutputs + ai->ninputs;
+    for (k = 0; k < n; k++)
+        if (ai->ops[k].pin_reg && strcmp(ai->ops[k].pin_reg, name) == 0)
+            return 1;
+    return 0;
+}
+
+/* Extended inline asm.  A generic "r" operand goes in its allocated s-register
+ * or a t-register materialised from the spill slot; a pinned operand goes in
+ * the named physical register (its value moved in from the operand temp's home
+ * and, for an output, back out).  The template's %N are substituted with the
+ * register's ABI name and emitted as one text blob through rv_mc_asm; the
+ * surrounding loads and stores go through the ordinary sink.  This is the
+ * syscall case: a7/a0..a5 are not allocatable, so a pin to them is free. */
+static void
+emit_asm_ext(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i)
+{
+    struct ir_asm_info *ai = i->asm_info;
+    int n = ai->noutputs + ai->ninputs;
+    static const int pool[] = { 5, 6, 7, 28, 29, 30 };  /* t0,t1,t2,t3,t4,t5 */
+    int npool = (int)(sizeof pool / sizeof pool[0]);
+    int ophw[32];               /* each operand's hardware register number */
+    int next = 0, k;
+    const char *s;
+    char buf[1024];
+    size_t bp = 0;
+
+    if (n > 32)
+        die("rv: too many asm operands");
+
+    /* 1. name each operand's register */
+    for (k = 0; k < n; k++) {
+        struct ir_asm_op *op = &ai->ops[k];
+
+        if (t_is_i64(op->temp))
+            die("rv: 64-bit asm operand not supported yet");
+        if (op->pin_reg) {
+            int j, h = rv_reg_num(op->pin_reg);
+            if (h < 0)
+                die("rv: unknown asm register %s", op->pin_reg);
+            /* an allocatable pin is fine: the allocator reserved it (see
+               rv_asm_reserved_regs), so no temp lives there across the asm */
+            for (j = 0; j < k; j++)
+                if (ai->ops[j].pin_reg &&
+                    strcmp(ai->ops[j].pin_reg, op->pin_reg) == 0)
+                    die("rv: two asm operands pinned to %s", op->pin_reg);
+            ophw[k] = h;
+        } else if (fn->temp_reg[op->temp] >= 0) {
+            ophw[k] = reg[fn->temp_reg[op->temp]];
+        } else {
+            ophw[k] = -1;       /* a pool reg, assigned next */
+        }
+    }
+    /* 2. hand spilled generic operands a pool register each */
+    for (k = 0; k < n; k++) {
+        if (ophw[k] >= 0)
+            continue;
+        while (next < npool && (asm_reg_clobbered(ai, rv_abi_name[pool[next]]) ||
+                                asm_reg_pinned(ai, rv_abi_name[pool[next]])))
+            next++;
+        if (next >= npool)
+            die("rv: too many spilled asm operands");
+        ophw[k] = pool[next++];
+    }
+
+    /* 3. materialise input values into their operand registers */
+    for (k = 0; k < n; k++) {
+        struct ir_asm_op *op = &ai->ops[k];
+        int home = fn->temp_reg[op->temp];
+
+        if (op->is_output && !op->is_inout)
+            continue;
+        if (op->pin_reg) {
+            if (home >= 0)
+                rv_mc_mv(m, ophw[k], reg[home]);
+            else
+                rv_mc_lw(m, ophw[k], FP, spill_byte_offset(fn, op->temp));
+        } else if (home < 0) {
+            rv_mc_lw(m, ophw[k], FP, spill_byte_offset(fn, op->temp));
+        }
+    }
+
+    /* 4. build the template with %N substituted, then emit it as one blob */
+    for (s = i->sym; *s && bp + 1 < sizeof buf; s++) {
+        if (*s != '%') {
+            buf[bp++] = *s;
+            continue;
+        }
+        s++;
+        if (*s == '%') {
+            buf[bp++] = '%';
+        } else if (*s >= '0' && *s <= '9') {
+            int idx = 0;
+            const char *nm;
+            while (*s >= '0' && *s <= '9')
+                idx = idx * 10 + (*s++ - '0');
+            s--;
+            if (idx >= n)
+                die("rv: asm operand %%%d out of range", idx);
+            nm = rv_abi_name[ophw[idx]];
+            while (*nm && bp + 1 < sizeof buf)
+                buf[bp++] = *nm++;
+        } else {
+            buf[bp++] = '%';
+            if (bp + 1 < sizeof buf)
+                buf[bp++] = *s;
+        }
+    }
+    buf[bp] = '\0';
+    rv_mc_asm(m, buf);
+
+    /* 5. store outputs back from their operand registers */
+    for (k = 0; k < ai->noutputs; k++) {
+        struct ir_asm_op *op = &ai->ops[k];
+        int home = fn->temp_reg[op->temp];
+
+        if (op->pin_reg) {
+            if (home >= 0)
+                rv_mc_mv(m, reg[home], ophw[k]);
+            else
+                rv_mc_sw(m, ophw[k], FP, spill_byte_offset(fn, op->temp));
+        } else {
+            wd(m, fn, op->temp, ophw[k]);
+        }
+    }
+}
+
 static int
 emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
           char *err, size_t errlen)
@@ -976,6 +1239,10 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
         break;
 
     case IR_ASM:
+        if (i->asm_info) {
+            emit_asm_ext(m, fn, i);
+            break;
+        }
         rv_mc_asm(m, i->sym);
         break;
 
@@ -1012,17 +1279,17 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
     case IR_ADD:  emit_binop(m, fn, i, rv_mc_add);  break;
     case IR_SUB:  emit_binop(m, fn, i, rv_mc_sub);  break;
     case IR_MUL:  emit_binop(m, fn, i, rv_mc_mul);  break;
-    case IR_ADDO: case IR_SUBO: case IR_MULO: emit_overflow(m, fn, i); break;
+    case IR_ADDO: case IR_SUBO: case IR_MULO: emit_overflow(m, fn, i, lbl); break;
     case IR_AND:  emit_binop(m, fn, i, rv_mc_and);  break;
     case IR_OR:   emit_binop(m, fn, i, rv_mc_or);   break;
     case IR_XOR:  emit_binop(m, fn, i, rv_mc_xor);  break;
     case IR_SHL:  emit_binop(m, fn, i, rv_mc_sll);  break;
     case IR_SHRS: emit_binop(m, fn, i, rv_mc_sra);  break;
     case IR_SHRU: emit_binop(m, fn, i, rv_mc_srl);  break;
-    case IR_DIVS: emit_binop(m, fn, i, rv_mc_div);  break;
-    case IR_DIVU: emit_binop(m, fn, i, rv_mc_divu); break;
-    case IR_MODS: emit_binop(m, fn, i, rv_mc_rem);  break;
-    case IR_MODU: emit_binop(m, fn, i, rv_mc_remu); break;
+    case IR_DIVS: emit_div(m, fn, i, rv_mc_div,  1); break;
+    case IR_DIVU: emit_div(m, fn, i, rv_mc_divu, 0); break;
+    case IR_MODS: emit_div(m, fn, i, rv_mc_rem,  1); break;
+    case IR_MODU: emit_div(m, fn, i, rv_mc_remu, 0); break;
 
     case IR_NEG: emit_unop(m, fn, i, rv_mc_neg); break;
     case IR_NOT: emit_unop(m, fn, i, rv_mc_not); break;
@@ -1867,7 +2134,8 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
  ****************************************************************/
 
 int
-rv_select_func(struct rv_mc *m, struct ir_func *fn, char *err, size_t errlen)
+rv_select_func(struct rv_mc *m, struct ir_func *fn, int tp,
+               char *err, size_t errlen)
 {
     struct ir_insn *i;
     struct ir_insn *last = NULL;
@@ -1876,6 +2144,7 @@ rv_select_func(struct rv_mc *m, struct ir_func *fn, char *err, size_t errlen)
     unsigned char *f32fmt;
     int k;
 
+    g_trap_policy = tp;
     narg = 0;
     compute_used_fregs(fn);
 

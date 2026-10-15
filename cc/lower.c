@@ -108,6 +108,7 @@ struct local {
     int slot;
     struct cc_type *type;
     char *static_name;
+    char *asm_reg;      /* GNU local register variable binding, or NULL */
 };
 
 static struct local *locals;
@@ -125,6 +126,7 @@ add_local(const char *name, int slot, struct cc_type *type)
     locals[nlocals].slot = slot;
     locals[nlocals].type = type;
     locals[nlocals].static_name = NULL;
+    locals[nlocals].asm_reg = NULL;
     nlocals++;
 }
 
@@ -134,6 +136,30 @@ find_local(const char *name)
     for (int i = nlocals - 1; i >= 0; i--)
         if (strcmp(locals[i].name, name) == 0)
             return &locals[i];
+    return NULL;
+}
+
+/* The physical register an extended-asm operand is pinned to, or NULL for a
+   generic register operand.  A "{$reg}" constraint names it explicitly; a
+   bare "r"/"=r"/"+r" operand whose expression is a GNU local register
+   variable (register T x __asm__("$reg")) carries it on the variable. */
+static char *
+asm_operand_pin(struct cc_node *op)
+{
+    int i;
+
+    for (i = 0; i < op->slen; i++)
+        if (op->sval[i] == '{') {
+            int j = i + 1, n = 0;
+            while (j + n < op->slen && op->sval[j + n] != '}')
+                n++;
+            return arena_strndup(lower_arena, op->sval + j, n);
+        }
+    if (op->a && op->a->kind == ND_VAR) {
+        struct local *lc = find_local(op->a->name);
+        if (lc && lc->asm_reg)
+            return lc->asm_reg;
+    }
     return NULL;
 }
 
@@ -3939,6 +3965,12 @@ lower_local_decl(struct cc_node *n)
     if (t->kind == TY_ARRAY && t->array_len < 0 && n->a &&
         n->a->kind == ND_INIT_LIST)
         t->array_len = infer_array_len(n->a);
+    /* char m[] = "..."  : the length is the string plus its terminating NUL
+       (mirrors the global path).  Without this the array keeps length -1, so
+       sizeof is wrong and the slot is mis-sized. */
+    if (t->kind == TY_ARRAY && t->array_len < 0 && n->a &&
+        n->a->kind == ND_STRLIT)
+        t->array_len = n->a->slen + 1;
 
     int sz = cc_type_size(t);
     if (is_float_type(t) && sz < 8)
@@ -3946,8 +3978,12 @@ lower_local_decl(struct cc_node *n)
     if (is_i64_type(t) && sz < 8)
         sz = 8;
     int slot = alloc_slot(sz, cc_type_align(t));
-    if (n->name)
+    if (n->name) {
         add_local(n->name, slot, t);
+        if (n->sval)            /* GNU local register variable binding */
+            locals[nlocals - 1].asm_reg =
+                arena_strndup(lower_arena, n->sval, n->slen);
+    }
 
     if (!n->a)
         return;
@@ -3962,6 +3998,18 @@ lower_local_decl(struct cc_node *n)
         emit_zero_fill(base_addr, cc_type_size(t));
         struct init_cursor cur = { n->a->body };
         store_init(t, &cur, base_addr, 0);
+    } else if (n->a->kind == ND_STRLIT && is_aggregate(t)) {
+        /* char array initialized from a string literal: zero the slot, then
+           copy the string bytes (including the NUL, truncated if the array is
+           shorter, e.g. char m[3] = "abcd").  char m[10] = "abc" leaves the
+           tail zero. */
+        int base_addr = emit_addr_slot(slot);
+        int total = cc_type_size(t);
+        int nbytes = n->a->slen + 1;
+        if (nbytes > total)
+            nbytes = total;
+        emit_zero_fill(base_addr, total);
+        emit_aggregate_copy(base_addr, lower_expr(n->a), nbytes);
     } else {
         int val = lower_expr(n->a);
         if (is_aggregate(t)) {
@@ -4267,8 +4315,91 @@ lower_stmt(struct cc_node *n)
         return;
 
     case ND_ASM: {
-        struct ir_insn *ins = emit(IR_ASM);
-        ins->sym = arena_strndup(lower_arena, n->sval, n->slen);
+        struct ir_insn *ins;
+        struct cc_node *o;
+        char *templ = arena_strndup(lower_arena, n->sval, n->slen);
+
+        if (!n->a && !n->b && !n->c) {          /* basic asm: verbatim */
+            ins = emit(IR_ASM);
+            ins->sym = templ;
+            return;
+        }
+#if !defined(CC_MIPS) && !defined(CC_M68K) && !defined(CC_RISCV) && \
+    !defined(X86_BITS) && !defined(CC_ARM64)
+        /* Extended asm (operand constraints and %N substitution) is
+           implemented per backend; a target not yet covered takes only the
+           basic (verbatim) form. */
+        die("lower:%d: extended inline asm is not supported on this target yet",
+            n->line);
+#endif
+        /* extended asm: count operands, lower each, then emit the asm with a
+           descriptor the backend uses to substitute %0.. and place operands. */
+        {
+            int no = 0, ni = 0, nc = 0, k;
+            int out_addr[16];
+            struct cc_type *out_ty[16];
+            struct ir_asm_info *info;
+            for (o = n->a; o; o = o->next) no++;
+            for (o = n->b; o; o = o->next) ni++;
+            for (o = n->c; o; o = o->next) nc++;
+            if (no > 16)
+                die("lower:%d: too many asm outputs", n->line);
+            info = arena_alloc(lower_arena, sizeof *info);
+            info->noutputs = no;
+            info->ninputs = ni;
+            info->nclobbers = nc;
+            info->is_volatile = (int)n->ival;
+            info->ops = arena_alloc(lower_arena,
+                                    (size_t)(no + ni) * sizeof *info->ops);
+            info->clobbers = nc ? arena_alloc(lower_arena,
+                                    (size_t)nc * sizeof *info->clobbers) : NULL;
+            /* outputs: an lvalue; "+..." is read-write so the current value is
+               loaded first, otherwise a fresh result temp. The store back to
+               the lvalue happens after the asm. */
+            k = 0;
+            for (o = n->a; o; o = o->next, k++) {
+                int inout = (o->slen >= 1 && o->sval[0] == '+');
+                out_addr[k] = lower_addr(o->a);
+                out_ty[k] = lvalue_type(o->a);
+                /* a float asm operand would live in a float register, which
+                   the backends' operand placement does not handle yet (they
+                   index the integer register tables by temp_reg); reject it
+                   rather than miscompile. */
+                if (is_float_type(out_ty[k]))
+                    die("lower:%d: a float extended-asm operand is not "
+                        "supported yet", n->line);
+                info->ops[k].constraint =
+                    arena_strndup(lower_arena, o->sval, o->slen);
+                info->ops[k].pin_reg = asm_operand_pin(o);
+                info->ops[k].size = cc_type_size(out_ty[k]);
+                info->ops[k].is_output = 1;
+                info->ops[k].is_inout = inout;
+                info->ops[k].temp = inout ? lower_expr(o->a) : new_temp();
+            }
+            /* inputs */
+            for (o = n->b; o; o = o->next, k++) {
+                if (is_float_type(lvalue_type(o->a)))
+                    die("lower:%d: a float extended-asm operand is not "
+                        "supported yet", n->line);
+                info->ops[k].constraint =
+                    arena_strndup(lower_arena, o->sval, o->slen);
+                info->ops[k].pin_reg = asm_operand_pin(o);
+                info->ops[k].size = cc_type_size(lvalue_type(o->a));
+                info->ops[k].is_output = 0;
+                info->ops[k].is_inout = 0;
+                info->ops[k].temp = lower_expr(o->a);
+            }
+            k = 0;
+            for (o = n->c; o; o = o->next, k++)
+                info->clobbers[k] = arena_strndup(lower_arena, o->sval, o->slen);
+
+            ins = emit(IR_ASM);
+            ins->sym = templ;
+            ins->asm_info = info;
+
+            for (k = 0; k < no; k++)
+                emit_store(out_addr[k], info->ops[k].temp, out_ty[k]);
+        }
         return;
     }
 

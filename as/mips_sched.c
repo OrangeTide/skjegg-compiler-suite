@@ -28,6 +28,7 @@
 
 static const char *const CT_SET[] = {
     "j", "jal", "jalr", "jr", "b", "beq", "bne", "beqz", "bnez",
+    "bltz", "bgez", "blez", "bgtz",
     "bc1f", "bc1t", NULL,
 };
 static const char *const HOIST_SET[] = {

@@ -9,12 +9,13 @@
    this tier is fatal, so there is no landing pad; that collapses the resume path
    to a bare save-switch-restore of the running-coroutine pointer.
 
-   The context switch itself is guest code (co_switch, the ILP32D co_switch_rv.S),
-   whose 160-byte / 40-word saved block this file seeds.  The entry and value ABI
-   match what skj-kp-rv emits: kp_co_new(entry, argsp, nargs) with 8-byte argument
-   cells, a 32-bit resume/yield value, and the body entry taking (vm, argsp,
-   nargs).  The guest reaches these through the _g names skj-kp-rv's remap gives
-   the coroutine operators. */
+   The context switch itself is guest code (co_switch, the per-target
+   co_switch_*.S), whose saved register block this file seeds; the block size and
+   the return-address position are target-specific (see kp_co_new_g).  The entry
+   and value ABI match what the backend emits: kp_co_new(entry, argsp, nargs) with
+   8-byte argument cells, a 32-bit resume/yield value, and the body entry taking
+   (vm, argsp, nargs).  The guest reaches these through the _g names the backend's
+   remap gives the coroutine operators. */
 
 #include "obj.h"
 
@@ -116,7 +117,7 @@ kp_co_new_g(u32 entry, u32 argsp, i32 nargs)
     struct coro *co = coro_ptr(a);
     uint8_t *top;
     u32 *base;
-    int i;
+    u32 reserve, ra_off;
 
     rt_register_final(KP_OBJ_CORO, co_final);   /* idempotent */
     memset(co, 0, sizeof *co);
@@ -150,15 +151,28 @@ kp_co_new_g(u32 entry, u32 argsp, i32 nargs)
         co->argbuf = (u32)(uintptr_t)top;
     }
 
-    /* Seed the switch block so the first co_switch restores a zeroed set of
-       callee-saved slots and returns into the trampoline.  co_switch_rv.S saves a
-       160-byte / 40-word block with ra at word 0, so after the restore sp = top,
-       the 16-aligned entry sp the psABI expects. */
-    top -= 160;
+    /* Seed the switch block so the first co_switch restores a zeroed callee-saved
+       set and lands in the trampoline, leaving sp back at the 16-aligned entry
+       top.  The block size and where the return address sits differ per target,
+       matching that target's co_switch (co_switch_*.S):
+         RV32  a 160-byte block, ra restored from word 0 into the ra register;
+         MIPS  a 96-byte block, ra restored from offset 36 into $ra;
+         CF    a 96-byte block, ra sitting just above it at offset 96, popped by
+               the rts after the block (so the reserve is 100).
+       The one shared 4-aligned access is reading this zeroed block on the first
+       switch into a fresh coroutine; its restored fp slots are dead (the body
+       sets them before use), and sp is 16-aligned for every switch thereafter. */
+#if defined(__mcoldfire__) || defined(__skj_m68k__)
+    reserve = 100; ra_off = 96;
+#elif defined(__mips__) || defined(__skj_mips__)
+    reserve = 96;  ra_off = 36;
+#else /* __riscv */
+    reserve = 160; ra_off = 0;
+#endif
+    top -= reserve;
     base = (u32 *)top;
-    for (i = 0; i < 40; i++)
-        base[i] = 0;
-    base[0] = (u32)(uintptr_t)&co_trampoline;   /* ra at word 0 */
+    memset(base, 0, reserve);
+    base[ra_off / 4] = (u32)(uintptr_t)&co_trampoline;
     co->ctx.sp = (u32)(uintptr_t)base;
 
     return a;

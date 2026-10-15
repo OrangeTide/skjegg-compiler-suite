@@ -108,6 +108,7 @@ op_needs_slot(int op)
     case IR_FLDL: case IR_FSTL:
     case IR_CALL2: case IR_CALLI2:
     case IR_CALL_AGG: case IR_CALLI_AGG:
+    case IR_MARK: case IR_CONT_UNWIND:
         return 1;
     default:
         return 0;
@@ -414,6 +415,8 @@ read_global(struct reader *r, struct ir_global *g)
             g->is_export = 1;
         else if (strcmp(tok[k], "rodata") == 0)
             g->is_rodata = 1;
+        else if (strcmp(tok[k], "strobj") == 0)
+            g->is_strobj = 1;
         else if (strcmp(tok[k], "from") == 0 && k + 1 < n)
             g->from_unit = arena_strdup(a, tok[++k]);
     }

@@ -99,7 +99,9 @@ type
     nkImplement,
     { failable call-site forms (doc/languages/kobold/kp-errors.md): the `fails [e]` postfix test, the
       `or else EXPR` / `or else ignore` recover, and the `or exit|break|continue|fail` divert }
-    nkFailsTest, nkOrElse, nkOrDivert
+    nkFailsTest, nkOrElse, nkOrDivert,
+    { accessor-backed value with uniform access (doc/languages/kobold/kp-property.md) }
+    nkPropertyDecl
   );
 
   TNode = record
@@ -135,6 +137,8 @@ type
     Names: array of string;     { enum literals, record fields, or interface methods }
     Subs: array of LongInt;     { record field types, interface method types, array index types }
     MemberOff: array of LongInt; { record field byte offsets; variants overlay at one offset }
+    PropGet: array of string;   { computed-field getter method name per member, else '' }
+    PropSet: array of string;   { computed-field setter method name per member, else '' (read-only) }
     ParamTypes: array of LongInt;
     ParamModes: array of LongInt;  { 0 value, 1 var, 2 const }
     RetType: LongInt;           { -1 for a procedure }
@@ -194,6 +198,7 @@ type
   end;
 
   TIntArray = array of LongInt;
+  TInt64Array = array of Int64;       { a typed word-array global's init values }
   TSetWords = array[0..3] of Int64;   { a set value's up to four 64-bit words }
 
   TScope = record
@@ -311,7 +316,8 @@ const
     'Unit', 'Uses', 'UsesItem', 'ImportItem',
     'Interface', 'Implementation', 'Reexport', 'ReexportItem',
     'Implement',
-    'FailsTest', 'OrElse', 'OrDivert'
+    'FailsTest', 'OrElse', 'OrDivert',
+    'PropertyDecl'
   );
 
   { Token-kind sets the parser tests against. }
@@ -320,7 +326,7 @@ const
   MulOps:       set of TTokenKind =
     [tkStar, tkSlash, tkDiv, tkMod, tkAnd, tkShl, tkShr];
   DeclStart:    set of TTokenKind =
-    [tkConst, tkType, tkVar, tkProcedure, tkFunction, tkImplement];
+    [tkConst, tkType, tkVar, tkProcedure, tkFunction, tkImplement, tkProperty];
   StmtStart:    set of TTokenKind =
     [tkBegin, tkIf, tkWhile, tkFor, tkRepeat, tkCase, tkWith, tkStart, tkBind,
      tkYield, tkBreak, tkContinue, tkIdent];
@@ -1258,6 +1264,8 @@ procedure ParseStmtSeq(owner: LongInt); forward;
 function ParseCompound: LongInt; forward;
 function ParseBlock: LongInt; forward;
 function ParseProcOrFunc: LongInt; forward;
+procedure ParseAccessorSpec(d: LongInt); forward;
+function IsDirective(const w: string): Boolean; forward;
 function ParseUsesClause: LongInt; forward;
 
 procedure ParseErrAt(line, col: LongInt; const msg: string);
@@ -1813,6 +1821,14 @@ begin
     ParseIdentList(f);
     Expect(tkColon);
     Nodes[f].A := ParseType;
+    if IsDirective('read') then begin
+      { a computed field: `name: Type read getX [write setX]` (doc/languages/kobold/kp-property.md).
+        Only a single-name field may be computed. }
+      if High(Nodes[f].Kids) <> 0 then
+        ParseErr('a computed field names one field only');
+      Nodes[f].Flag := 1;
+      ParseAccessorSpec(f);
+    end;
     AddKid(r, f);
     if not Accept(tkSemicolon) then Break;
   end;
@@ -2183,6 +2199,45 @@ begin
   ParseImplement := n;
 end;
 
+procedure ParseAccessorSpec(d: LongInt);
+{ AccessorSpec = 'read' Identifier [ 'write' Identifier ] (doc/languages/kobold/kp-property.md).
+  `read` and `write` are contextual words, so they stay usable as the ordinary built-in
+  procedures elsewhere. The getter ident node is stored in Nodes[d].B and an optional setter
+  ident node in Nodes[d].C (-1 when the property is read-only). }
+var
+  w: LongInt;
+begin
+  if not IsDirective('read') then
+    ParseErr('a property needs a ''read'' accessor');
+  NextToken;
+  w := NewNode(nkIdent);
+  Nodes[w].Text := EatIdent('a getter routine name');
+  Nodes[d].B := w;
+  if IsDirective('write') then begin
+    NextToken;
+    w := NewNode(nkIdent);
+    Nodes[w].Text := EatIdent('a setter routine name');
+    Nodes[d].C := w;
+  end;
+end;
+
+function ParsePropertyDecl: LongInt;
+{ PropertyDecl = 'property' Identifier ':' Type AccessorSpec ';' (doc/languages/kobold/kp-property.md).
+  Text is the property name, A the type node, B the getter ident node, C the setter ident
+  node or -1. }
+var
+  d: LongInt;
+begin
+  d := NewNode(nkPropertyDecl);
+  Expect(tkProperty);
+  Nodes[d].Text := EatIdent('a property name');
+  Expect(tkColon);
+  Nodes[d].A := ParseType;
+  ParseAccessorSpec(d);
+  Expect(tkSemicolon);
+  ParsePropertyDecl := d;
+end;
+
 function ParseBlock: LongInt;
 var
   b: LongInt;
@@ -2195,6 +2250,7 @@ begin
       tkVar: ParseVarPart(b);
       tkProcedure, tkFunction: AddKid(b, ParseProcOrFunc);
       tkImplement: AddKid(b, ParseImplement);
+      tkProperty: AddKid(b, ParsePropertyDecl);
     end;
   AddKid(b, ParseCompound);
   ParseBlock := b;
@@ -2575,6 +2631,8 @@ function ConstGlobalName(s: LongInt): string; forward;
 procedure ProcessReexports(intf: LongInt); forward;
 function EvalConst(node: LongInt): TConstVal; forward;
 function RealLitBits(const s: string): Int64; forward;
+function RealBitsFromConst(valNode: LongInt): Int64; forward;
+procedure CopyAggregateManaged(dstAddr, srcAddr, ty: LongInt); forward;
 procedure CheckRecordLit(lit, recTy: LongInt); forward;
 procedure CheckConstValue(valNode, ty: LongInt); forward;
 procedure CheckConstArray(arrTy, dim, node: LongInt); forward;
@@ -2591,6 +2649,7 @@ function IsMap(ty: LongInt): Boolean; forward;
 function BufRank(ty: LongInt): LongInt; forward;
 function IsSingle(ty: LongInt): Boolean; forward;
 function IsInt64(ty: LongInt): Boolean; forward;
+function Wide64(ty: LongInt): Boolean; forward;
 function IsRealType(ty: LongInt): Boolean; forward;
 function IsAggregate(ty: LongInt): Boolean; forward;
 function IsHandle(ty: LongInt): Boolean; forward;
@@ -2765,6 +2824,30 @@ end;
 function IsSet(ty: LongInt): Boolean;
 begin
   IsSet := (ty >= 0) and (ty < SemCount) and (SemTypes[ty].Kind = skSet);
+end;
+
+function IsPropertyValueType(ty: LongInt): Boolean;
+{ A property (declaration-level or a computed record field) is backed by accessor calls and
+  carries a simple value for now: an ordinal, a real/single, or a 64-bit integer. Handle and
+  aggregate property types (string, record, dynamic array) are deferred, since their accessor
+  result would need ARC ownership and sret handling (doc/languages/kobold/kp-property.md). }
+begin
+  IsPropertyValueType := IsOrdinalType(ty) or IsRealType(ty) or IsSingle(ty) or IsInt64(ty);
+end;
+
+function PropSetterName(node: LongInt): string;
+{ The setter routine name of a property/computed-field node, or '' when read-only. }
+begin
+  if Nodes[node].C >= 0 then PropSetterName := Nodes[Nodes[node].C].Text
+  else PropSetterName := '';
+end;
+
+function IsPropertySym(s: LongInt): Boolean;
+{ True when symbol s is a declaration-level property (a syVar whose Node is an nkPropertyDecl),
+  rather than a stored variable. }
+begin
+  IsPropertySym := (s >= 0) and (Syms[s].Kind = syVar) and (Syms[s].Node >= 0) and
+    (Nodes[Syms[s].Node].Kind = nkPropertyDecl);
 end;
 
 { ---- scopes and symbols ---- }
@@ -3148,8 +3231,23 @@ begin
   n := Length(SemTypes[ty].Names);
   SetLength(SemTypes[ty].Names, n + 1);
   SetLength(SemTypes[ty].Subs, n + 1);
+  SetLength(SemTypes[ty].PropGet, n + 1);
+  SetLength(SemTypes[ty].PropSet, n + 1);
   SemTypes[ty].Names[n] := nm;
   SemTypes[ty].Subs[n] := mty;
+  SemTypes[ty].PropGet[n] := '';
+  SemTypes[ty].PropSet[n] := '';
+end;
+
+procedure SetMemberProp(ty: LongInt; const g, s: string);
+{ Mark the most recently added member of record ty as a computed field backed by getter
+  method `g` and optional setter method `s` ('' = read-only). }
+var
+  n: LongInt;
+begin
+  n := High(SemTypes[ty].Names);
+  SemTypes[ty].PropGet[n] := g;
+  SemTypes[ty].PropSet[n] := s;
 end;
 
 procedure SetMemberOff(ty, off: LongInt);
@@ -3234,6 +3332,10 @@ begin
               EvalConst.Ok := True; EvalConst.Ty := Syms[s].TypeId;
               if Syms[s].ConstIsStr then begin
                 EvalConst.IsStr := True; EvalConst.S := Syms[s].ConstStr;
+              end
+              else if IsRealType(Syms[s].TypeId) then begin
+                { a real or single const holds its f64 bit pattern in Ordinal }
+                EvalConst.IsReal := True; EvalConst.RBits := Syms[s].Ordinal;
               end
               else EvalConst.I := Syms[s].Ordinal;
             end;
@@ -3524,15 +3626,17 @@ begin
       end;
       if Length(SemTypes[ty].Subs) = 0 then begin
         { a dynamic array; element types are ordinals, reals, whole handles (strings,
-          interfaces, processes, nested dynamic arrays), and records or fixed arrays,
-          including those with handle fields. A set element is not yet supported. }
+          interfaces, processes, nested dynamic arrays), sets, and records or fixed arrays,
+          including those with handle fields. A set is reference-free, so it carries no
+          per-element handle layout: a small set rides the 64-bit scalar slot, a large set
+          blits like any inline aggregate. }
         s := SemTypes[ty].Base;
         if not ((s >= 0) and (s < SemCount) and
                 ((SemTypes[s].Kind in [skInteger, skBoolean, skChar, skEnum, skSubrange,
-                                       skReal, skRecord, skArray]) or
+                                       skReal, skRecord, skArray, skSet]) or
                  TypeIsHandleSem(s))) then
           SemErr(node, 'a dynamic array element must be an ordinal, real, handle, ' +
-            'record, or array (a set element is not yet supported)');
+            'set, record, or array');
       end;
       ResolveType := ty;
     end;
@@ -3543,16 +3647,17 @@ begin
     end;
     nkMapType: begin
       { `map of T`: a string-keyed associative array. Base is the value type T. The value is
-        managed like a dynamic-array element (ordinal, real, whole handle, record, or fixed
-        array), so the same handle-field layout reclaims managed values. }
+        managed like a dynamic-array element (ordinal, real, whole handle, set, record, or
+        fixed array), so the same handle-field layout reclaims managed values. A set is
+        reference-free, so its slot needs no handle layout. }
       ty := NewSemType(skMap);
       SemTypes[ty].Base := ResolveType(Nodes[node].A);
       s := SemTypes[ty].Base;
       if not ((s >= 0) and (s < SemCount) and
               ((SemTypes[s].Kind in [skInteger, skBoolean, skChar, skEnum, skSubrange,
-                                     skReal, skRecord, skArray]) or
+                                     skReal, skRecord, skArray, skSet]) or
                TypeIsHandleSem(s))) then
-        SemErr(node, 'a map value must be an ordinal, real, handle, record, or array');
+        SemErr(node, 'a map value must be an ordinal, real, handle, set, record, or array');
       ResolveType := ty;
     end;
     nkRecordType: begin
@@ -3562,12 +3667,23 @@ begin
         f := Nodes[node].Kids[i];
         if Nodes[f].Kind = nkFieldDecl then begin
           fld := ResolveType(Nodes[f].A);
-          for v := 0 to High(Nodes[f].Kids) do begin
-            cur := RoundUp(cur, TypeAlign(fld));
-            AddMember(rec, Nodes[Nodes[f].Kids[v]].Text, fld);
-            SetMemberOff(rec, cur);
-            cur := cur + TypeSize(fld);
-          end;
+          if Nodes[f].Flag = 1 then begin
+            { a computed field: accessor-backed, no storage (doc/languages/kobold/kp-property.md).
+              Its accessors are methods of this record, resolved at the use site like any
+              method, so a forward reference to an accessor declared later is fine. }
+            if not IsPropertyValueType(fld) then
+              SemErr(f, 'a computed field must be a simple value (integer, real, or enum) for now');
+            AddMember(rec, Nodes[Nodes[f].Kids[0]].Text, fld);
+            SetMemberOff(rec, -1);
+            SetMemberProp(rec, Nodes[Nodes[f].B].Text, PropSetterName(f));
+          end
+          else
+            for v := 0 to High(Nodes[f].Kids) do begin
+              cur := RoundUp(cur, TypeAlign(fld));
+              AddMember(rec, Nodes[Nodes[f].Kids[v]].Text, fld);
+              SetMemberOff(rec, cur);
+              cur := cur + TypeSize(fld);
+            end;
         end
         else if Nodes[f].Kind = nkVariantPart then begin
           vp := f;
@@ -3859,7 +3975,19 @@ begin
   case SemTypes[bt].Kind of
     skRecord: begin
       m := FindMember(bt, Nodes[node].Text);
-      if m >= 0 then AnalyzeField := SemTypes[bt].Subs[m]
+      if m >= 0 then begin
+        AnalyzeField := SemTypes[bt].Subs[m];
+        { a computed field is backed by accessor methods on the record; check the getter
+          (and setter, when present) exist (doc/languages/kobold/kp-property.md) }
+        if SemTypes[bt].PropGet[m] <> '' then begin
+          if FindMethod(bt, SemTypes[bt].PropGet[m]) < 0 then
+            SemErr(node, 'computed field ''' + Nodes[node].Text +
+              ''' needs a ''' + SemTypes[bt].PropGet[m] + ''' method on ' + TypeName(bt));
+          if (SemTypes[bt].PropSet[m] <> '') and (FindMethod(bt, SemTypes[bt].PropSet[m]) < 0) then
+            SemErr(node, 'computed field ''' + Nodes[node].Text +
+              ''' needs a ''' + SemTypes[bt].PropSet[m] + ''' method on ' + TypeName(bt));
+        end;
+      end
       else begin
         sig := FindMethod(bt, Nodes[node].Text);
         if sig >= 0 then AnalyzeField := sig
@@ -4418,6 +4546,9 @@ begin
     end
     else case Syms[s].Kind of
       syVar, syParam: begin
+        if IsPropertySym(s) and (Nodes[Syms[s].Node].C < 0) then
+          SemErr(node, 'cannot assign to read-only property ''' + Nodes[node].Text +
+            ''' (it has no ''write'' accessor)');
         MarkCapture(s);
         Nodes[node].Ty := Syms[s].TypeId;
         AnalyzeLValue := Syms[s].TypeId;
@@ -4509,10 +4640,21 @@ end;
 
 procedure AnalyzeAssign(node: LongInt);
 var
-  tt, vt, lhs, bt: LongInt;
+  tt, vt, lhs, bt, m: LongInt;
 begin
   tt := AnalyzeLValue(Nodes[node].A);
   vt := AnalyzeExpr(Nodes[node].B);
+  { a read-only computed record field (a `read` accessor and no `write`) rejects assignment }
+  lhs := Nodes[node].A;
+  if Nodes[lhs].Kind = nkField then begin
+    bt := Nodes[Nodes[lhs].A].Ty;
+    if (bt >= 0) and (bt < SemCount) and (SemTypes[bt].Kind = skRecord) then begin
+      m := FindMember(bt, Nodes[lhs].Text);
+      if (m >= 0) and (SemTypes[bt].PropGet[m] <> '') and (SemTypes[bt].PropSet[m] = '') then
+        SemErr(node, 'cannot assign to read-only computed field ''' + Nodes[lhs].Text +
+          ''' (it has no ''write'' accessor)');
+    end;
+  end;
   { A string is immutable: reject element assignment s[i] := c. The character read s[i]
     stays legal; only writing an element is banned. }
   lhs := Nodes[node].A;
@@ -4554,17 +4696,21 @@ begin
 end;
 
 procedure AnalyzeCase(node: LongInt);
-{ The selector's type drives the labels. A case selector must be an ordinal type; a string
-  selector is not supported (match a string with an if-else chain instead). Labels follow the
-  selector: a one-character string literal is a char only when the selector is a char, and every
+{ The selector's type drives the labels. A case selector is an ordinal type (integer, char,
+  boolean, or enumeration) or a string. A string selector carries string labels matched by
+  value; an ordinal selector carries ordinal labels. Labels follow the selector: a
+  one-character string literal is a char only when the selector is a char, and every ordinal
   label must share the selector's type. There is no coercion of the selector itself, so a char
-  case cannot carry string labels and vice versa. }
+  case cannot carry string labels and vice versa, and a string case cannot carry a label range
+  (the labels are discrete strings). }
 var
   i, j, k, ll, lab, st: LongInt;
+  strSel: Boolean;
 
   procedure CheckLabel(lb: LongInt);
-  { Validate one label endpoint against the selector type st, coercing a one-character string
-    literal to char when st is a char so it is matched by its character code. }
+  { Validate one label endpoint against the selector type st. For an ordinal selector a
+    one-character string literal is coerced to char when st is a char so it is matched by its
+    character code; for a string selector the label must itself be a string constant. }
   var
     cv: TConstVal;
     lty: LongInt;
@@ -4572,6 +4718,10 @@ var
     CoerceCharLit(lb, st);
     cv := EvalConst(lb);
     if not cv.Ok then begin SemErr(lb, 'case label is not constant'); Exit; end;
+    if strSel then begin
+      if not cv.IsStr then SemErr(lb, 'a string case label is required');
+      Exit;
+    end;
     if cv.IsStr then begin
       if Length(cv.S) = 1 then lty := tyChar else lty := tyStr;
     end
@@ -4582,9 +4732,10 @@ var
 
 begin
   st := AnalyzeExpr(Nodes[node].A);
-  if (st <> tyErr) and not IsOrdinalType(st) then
+  strSel := (st >= 0) and (st < SemCount) and (SemTypes[st].Kind = skString);
+  if (st <> tyErr) and not IsOrdinalType(st) and not strSel then
     SemErr(Nodes[node].A, 'case selector must be an ordinal type (integer, char, boolean, ' +
-      'or enumeration); a string selector is not supported');
+      'or enumeration) or a string');
   for i := 0 to High(Nodes[node].Kids) do begin
     k := Nodes[node].Kids[i];
     if Nodes[k].Kind = nkCaseElement then begin
@@ -4592,7 +4743,12 @@ begin
       for j := 0 to High(Nodes[ll].Kids) do begin
         lab := Nodes[ll].Kids[j];
         CheckLabel(Nodes[lab].A);
-        if Nodes[lab].B >= 0 then CheckLabel(Nodes[lab].B);
+        if Nodes[lab].B >= 0 then begin
+          if strSel then
+            SemErr(Nodes[lab].B, 'a string case label cannot be a range')
+          else
+            CheckLabel(Nodes[lab].B);
+        end;
       end;
       AnalyzeStmt(Nodes[k].B);
     end
@@ -4630,15 +4786,35 @@ begin
       end;
     end;
     nkFailsTest, nkOrElse, nkOrDivert: AnalyzeFailForm(node);
-    nkIf: begin
-      ct := AnalyzeExpr(Nodes[node].A); CheckBool(node, ct, 'if condition');
-      AnalyzeStmt(Nodes[node].B);
-      AnalyzeStmt(Nodes[node].C);
-    end;
-    nkWhile: begin
-      ct := AnalyzeExpr(Nodes[node].A); CheckBool(node, ct, 'while condition');
-      Inc(LoopDepth); AnalyzeStmt(Nodes[node].B); Dec(LoopDepth);
-    end;
+    nkIf:
+      { a `fails e` binder in the condition is scoped to the then-branch, like a for-counter to
+        its body: the binder lives in a fresh scope so a sibling `fails e` (or an outer variable
+        of the same name) does not resolve to it. FindLocal returns the first symbol by position,
+        so an unscoped binder added after a same-named one would never be found again. }
+      if (Nodes[Nodes[node].A].Kind = nkFailsTest) and (Nodes[Nodes[node].A].Text <> '') then begin
+        OpenScope;
+        ct := AnalyzeExpr(Nodes[node].A); CheckBool(node, ct, 'if condition');
+        AnalyzeStmt(Nodes[node].B);
+        CloseScope;
+        AnalyzeStmt(Nodes[node].C);
+      end
+      else begin
+        ct := AnalyzeExpr(Nodes[node].A); CheckBool(node, ct, 'if condition');
+        AnalyzeStmt(Nodes[node].B);
+        AnalyzeStmt(Nodes[node].C);
+      end;
+    nkWhile:
+      { the `fails e` binder is scoped to the loop body for the same reason as the if-branch }
+      if (Nodes[Nodes[node].A].Kind = nkFailsTest) and (Nodes[Nodes[node].A].Text <> '') then begin
+        OpenScope;
+        ct := AnalyzeExpr(Nodes[node].A); CheckBool(node, ct, 'while condition');
+        Inc(LoopDepth); AnalyzeStmt(Nodes[node].B); Dec(LoopDepth);
+        CloseScope;
+      end
+      else begin
+        ct := AnalyzeExpr(Nodes[node].A); CheckBool(node, ct, 'while condition');
+        Inc(LoopDepth); AnalyzeStmt(Nodes[node].B); Dec(LoopDepth);
+      end;
     nkFor: begin
       s := Lookup(Nodes[node].Text);
       Nodes[node].Sym := s;
@@ -4707,9 +4883,8 @@ begin
   if SemTypes[ty].Kind = skString then begin
     if not ev.IsStr then SemErr(valNode, 'a string constant is required');
   end
-  else if IsSingle(ty) then
-    SemErr(valNode, 'a single-precision constant is not supported yet')
   else if IsRealType(ty) then begin
+    { real (f64) and single (f32) share this check; a single is narrowed where it is stored }
     if ev.IsStr then SemErr(valNode, 'a real constant is required');
   end
   else if IsInt64(ty) then begin
@@ -4900,10 +5075,7 @@ begin
     Exit;
   end;
   cv := EvalConst(Nodes[node].B);
-  if not cv.Ok then SemErr(node, 'constant expression expected')
-  else if cv.IsReal then
-    SemErr(node, 'a real scalar constant is not supported yet; ' +
-      'use the value inside a record or array constant');
+  if not cv.Ok then SemErr(node, 'constant expression expected');
   { complete a link-time const the interface declared value-less: the implementation supplies
     its value on the same symbol rather than declaring a second one (like an opaque type). }
   s := Lookup(Nodes[node].Text);
@@ -4914,7 +5086,7 @@ begin
       if not cv.IsStr then SemErr(node, 'string constant expected')
       else begin Syms[s].ConstIsStr := True; Syms[s].ConstStr := cv.S; end;
     end
-    else if cv.IsStr then
+    else if cv.IsStr or cv.IsReal then
       SemErr(node, 'a link-time constant must be an ordinal, int64, or string scalar')
     else Syms[s].Ordinal := cv.I;
     Exit;
@@ -4926,6 +5098,12 @@ begin
   if cv.IsStr then begin
     Syms[s].ConstIsStr := True; Syms[s].ConstStr := cv.S;
   end
+  { a real or single const stores its f64 bit pattern in Ordinal (an int value given a real
+    type is promoted to those bits); a real value given a non-real type is a mismatch }
+  else if IsRealType(Syms[s].TypeId) then
+    Syms[s].Ordinal := RealBitsFromConst(Nodes[node].B)
+  else if cv.IsReal then
+    SemErr(node, 'a real constant value needs a real or single type')
   else Syms[s].Ordinal := cv.I;
 end;
 
@@ -4982,6 +5160,61 @@ begin
     Nodes[Nodes[node].Kids[i]].Sym := s;
   end;
   if Nodes[node].B >= 0 then AnalyzeExpr(Nodes[node].B);
+end;
+
+procedure DeclProperty(node: LongInt);
+{ A declaration-level property (doc/languages/kobold/kp-property.md): a value-typed symbol whose
+  reads and writes become calls to free-routine accessors. It is a syVar whose Node is the
+  nkPropertyDecl, so IsPropertySym can tell it from a stored variable; it is given no storage
+  (LowerGlobalVars and AssignBlockSlots skip the property node). The accessors are resolved
+  after the whole declaration part, so a property may name an accessor declared later. }
+var
+  ty, s: LongInt;
+begin
+  ty := ResolveType(Nodes[node].A);
+  if not IsPropertyValueType(ty) then
+    SemErr(node, 'a property must be a simple value (integer, real, or enum) for now');
+  s := Declare(Nodes[node].Text, syVar, node);
+  Syms[s].TypeId := ty;
+  Nodes[node].Sym := s;
+end;
+
+procedure ResolvePropertyAccessors(node: LongInt);
+{ Resolve and check a property's read/write accessors once every routine in the declaration
+  part is declared. The getter is a parameterless function of the property type; the setter,
+  when present, a procedure taking one argument of that type. }
+var
+  ty, g, st, sig: LongInt;
+begin
+  ty := Syms[Nodes[node].Sym].TypeId;
+  g := Lookup(Nodes[Nodes[node].B].Text);
+  if g < 0 then
+    SemErr(node, 'undeclared getter ''' + Nodes[Nodes[node].B].Text + '''')
+  else if Syms[g].Kind <> syFunc then
+    SemErr(node, 'property getter ''' + Nodes[g].Text + ''' must be a function')
+  else begin
+    Nodes[Nodes[node].B].Sym := g;
+    sig := Syms[g].TypeId;
+    if Length(SemTypes[sig].ParamTypes) <> 0 then
+      SemErr(node, 'property getter ''' + Syms[g].Name + ''' must take no arguments')
+    else if not AssignCompatible(ty, SemTypes[sig].RetType) then
+      SemErr(node, 'property getter ''' + Syms[g].Name + ''' must return ' + TypeName(ty));
+  end;
+  if Nodes[node].C >= 0 then begin
+    st := Lookup(Nodes[Nodes[node].C].Text);
+    if st < 0 then
+      SemErr(node, 'undeclared setter ''' + Nodes[Nodes[node].C].Text + '''')
+    else if Syms[st].Kind <> syProc then
+      SemErr(node, 'property setter ''' + Nodes[st].Text + ''' must be a procedure')
+    else begin
+      Nodes[Nodes[node].C].Sym := st;
+      sig := Syms[st].TypeId;
+      if Length(SemTypes[sig].ParamTypes) <> 1 then
+        SemErr(node, 'property setter ''' + Syms[st].Name + ''' must take one argument')
+      else if not AssignCompatible(SemTypes[sig].ParamTypes[0], ty) then
+        SemErr(node, 'property setter ''' + Syms[st].Name + ''' must take ' + TypeName(ty));
+    end;
+  end;
 end;
 
 function SameParamType(x, y: LongInt): Boolean;
@@ -5113,14 +5346,11 @@ begin
   if isFunc then SemTypes[sig].RetType := ResolveType(Nodes[node].B)
   else SemTypes[sig].RetType := -1;
   SemTypes[sig].Failable := Nodes[node].Failable = 1;
-  { a failable function's value returns in the integer result register, with the error beside
-    it; real, int64, and aggregate results would need a wider return pair, deferred for now
-    (doc/languages/kobold/kp-errors.md) }
-  if (Nodes[node].Failable = 1) and isFunc and (SemTypes[sig].RetType >= 0) and
-     (IsRealType(SemTypes[sig].RetType) or IsInt64(SemTypes[sig].RetType) or
-      IsAggregate(SemTypes[sig].RetType)) then
-    SemErrName(node, 'a failable function result must be an integer-class value for now ' +
-      '(real, int64, and record results are not yet supported)');
+  { a failable routine returns its value through a hidden caller buffer (sret) and the error in
+    the integer register, so a real, int64, or record result works; an integer-class result
+    keeps the two-register RETV2/CALL2 fast path. This holds for a method too: its receiver is
+    an ordinary leading parameter and the sret pointer the trailing one, so the same wide path
+    serves both (doc/languages/kobold/kp-errors.md). }
 
   { resolve a method's receiver type early: method completion and interface emission both
     need it, and it is recorded on the receiver node for later reads }
@@ -5220,8 +5450,16 @@ begin
       nkTypeDecl:  DeclType(k);
       nkVarDecl:   DeclVar(k);
       nkProcDecl, nkFuncDecl: DeclRoutine(k);
+      nkPropertyDecl: DeclProperty(k);
       nkCompound:  AnalyzeStmt(k);
     end;
+  end;
+  { a property may name an accessor declared later in the same part, so resolve them after
+    every routine symbol in this part exists }
+  for i := 0 to High(Nodes[node].Kids) do begin
+    k := Nodes[node].Kids[i];
+    if (Nodes[k].Kind = nkPropertyDecl) and (Nodes[k].Sym >= 0) then
+      ResolvePropertyAccessors(k);
   end;
 end;
 
@@ -6047,6 +6285,12 @@ type
     InitBits: Int64;                { the f64 bit pattern when HasInit }
     HasStr: Boolean;                { a string-literal byte blob }
     InitStr: string;                { the literal bytes when HasStr }
+    IsStrObj: Boolean;              { a static string object: the backend emits the
+                                      refcount/kind/len header in target endianness, then
+                                      InitStr as the text.  Keeps the descriptor endian-correct
+                                      on a big-endian target rather than baking it here. }
+    InitVals: TInt64Array;          { a typed word array: one .init per value, emitted at
+                                      BaseType's width in target endianness }
     Exported: Boolean;              { a unit's exported var, visible to other modules at link }
     ReadOnly: Boolean;             { an immutable global: laid out in a read-only region }
   end;
@@ -6147,6 +6391,10 @@ function LowerSetValue(node: LongInt): LongInt; forward;
 function LowerSetAddr(node: LongInt): LongInt; forward;
 procedure LowerStmt(node: LongInt); forward;
 function EmittedRoutineName(s: LongInt): string; forward;
+function LowerDirectCall(s: LongInt; const argNodes: array of LongInt;
+  wantVal: Boolean): LongInt; forward;
+function LowerMethodCall(field: LongInt; const argNodes: array of LongInt;
+  wantVal: Boolean): LongInt; forward;
 
 function PadOp(const op: string): string;
 begin
@@ -6484,6 +6732,21 @@ begin
      ((SemTypes[ty].Kind = skSet) and (SetWords(ty) > 1)));
 end;
 
+function FailWideResult(sig: LongInt): Boolean;
+{ True when a failable routine's result is returned through caller storage (an sret-style
+  hidden pointer) rather than the integer value register: a real, a 64-bit value (int64 or a
+  small set), or an aggregate (record, fixed array, or large set). The error then returns in
+  the ordinary integer register and the value lands in the caller's buffer. An integer-class
+  result keeps the two-register RETV2/CALL2 fast path (doc/languages/kobold/kp-errors.md). }
+begin
+  FailWideResult := False;
+  if (sig < 0) or (sig >= SemCount) or (SemTypes[sig].Kind <> skProc) or
+     not SemTypes[sig].Failable then Exit;
+  if SemTypes[sig].RetType < 0 then Exit;
+  FailWideResult := IsRealType(SemTypes[sig].RetType) or Wide64(SemTypes[sig].RetType) or
+    IsAggregate(SemTypes[sig].RetType);
+end;
+
 function ParamByRef(s: LongInt): Boolean;
 { True when parameter s occupies a pointer slot rather than holding its value: an
   aggregate (addressed in place), or a scalar `var`/`out` parameter (mode 1 or 3). }
@@ -6521,7 +6784,9 @@ begin
     skRecord: begin
       m := 4;
       for i := 0 to High(SemTypes[ty].Subs) do
-        if TypeAlign(SemTypes[ty].Subs[i]) > m then m := TypeAlign(SemTypes[ty].Subs[i]);
+        if ((i > High(SemTypes[ty].PropGet)) or (SemTypes[ty].PropGet[i] = '')) and
+           (TypeAlign(SemTypes[ty].Subs[i]) > m) then   { a computed field has no storage }
+          m := TypeAlign(SemTypes[ty].Subs[i]);
       TypeAlign := m;
     end;
   else
@@ -6556,10 +6821,11 @@ begin
         summing sizes would overcount, so use each field's stored offset plus its size }
       off := 0;
       if Length(SemTypes[ty].MemberOff) = Length(SemTypes[ty].Subs) then begin
-        for i := 0 to High(SemTypes[ty].Subs) do begin
-          sub := SemTypes[ty].MemberOff[i] + TypeSize(SemTypes[ty].Subs[i]);
-          if sub > off then off := sub;
-        end;
+        for i := 0 to High(SemTypes[ty].Subs) do
+          if SemTypes[ty].MemberOff[i] >= 0 then begin   { a computed field has no storage }
+            sub := SemTypes[ty].MemberOff[i] + TypeSize(SemTypes[ty].Subs[i]);
+            if sub > off then off := sub;
+          end;
       end
       else
         for i := 0 to High(SemTypes[ty].Subs) do begin
@@ -6925,6 +7191,8 @@ begin
   IrGlobals[n].InitBits := 0;
   IrGlobals[n].HasStr := False;
   IrGlobals[n].InitStr := '';
+  IrGlobals[n].IsStrObj := False;
+  SetLength(IrGlobals[n].InitVals, 0);
   IrGlobals[n].Exported := False;
   IrGlobals[n].ReadOnly := False;
   Inc(IrGlobalCount);
@@ -6935,33 +7203,32 @@ begin
   AddIrGlobalArr(name, baseType, 0);
 end;
 
-function AddIrStringGlobal(const bytes: string): string;
-{ Reserve a byte blob holding a string literal and return its symbol name. }
+function AddIrWordArray(const baseType: string; const vals: TInt64Array): string;
+{ Reserve a read-only typed word-array global and return its symbol name. Each value is
+  emitted as one .init at baseType's width, so the assembler encodes it in the target's
+  endianness. This is the endian-correct replacement for packing LE bytes into a .string
+  blob, used for the constant-array, large-set, and array-layout images. }
 var
-  n: LongInt;
+  n, i: LongInt;
   nm: string;
 begin
   n := IrGlobalCount;
-  nm := '_str' + IntToStr(n);
+  nm := '_warr' + IntToStr(n);
   SetLength(IrGlobals, n + 1);
   IrGlobals[n].Name := nm;
-  IrGlobals[n].BaseType := 'i8';
-  IrGlobals[n].ArrSize := Length(bytes);
+  IrGlobals[n].BaseType := baseType;
+  IrGlobals[n].ArrSize := Length(vals);
   IrGlobals[n].HasInit := False;
   IrGlobals[n].InitBits := 0;
-  IrGlobals[n].HasStr := True;
-  IrGlobals[n].InitStr := bytes;
+  IrGlobals[n].HasStr := False;
+  IrGlobals[n].InitStr := '';
+  IrGlobals[n].IsStrObj := False;
+  SetLength(IrGlobals[n].InitVals, Length(vals));
+  for i := 0 to High(vals) do IrGlobals[n].InitVals[i] := vals[i];
   IrGlobals[n].Exported := False;
-  IrGlobals[n].ReadOnly := False;
+  IrGlobals[n].ReadOnly := True;
   Inc(IrGlobalCount);
-  AddIrStringGlobal := nm;
-end;
-
-function LE32Str(v: Int64): string;
-{ Four bytes of v, little-endian: the on-disk order of a 32-bit field in a data image. }
-begin
-  LE32Str := Chr(v and $FF) + Chr((v shr 8) and $FF) +
-             Chr((v shr 16) and $FF) + Chr((v shr 24) and $FF);
+  AddIrWordArray := nm;
 end;
 
 function AddIrStaticStringImage(const name, bytes: string; exported: Boolean): string;
@@ -6976,21 +7243,19 @@ function AddIrStaticStringImage(const name, bytes: string; exported: Boolean): s
   const so a consumer references it by name. }
 var
   n: LongInt;
-  image: string;
 begin
   n := IrGlobalCount;
-  image := LE32Str($FFFFFFFF)         { refcount = KP_RC_STATIC }
-         + LE32Str(1)                 { kind = KP_OBJ_STRING }
-         + LE32Str(Length(bytes))     { len }
-         + bytes + Chr(0);            { the bytes then a trailing NUL }
   SetLength(IrGlobals, n + 1);
   IrGlobals[n].Name := name;
   IrGlobals[n].BaseType := 'i8';
-  IrGlobals[n].ArrSize := Length(image);
+  IrGlobals[n].ArrSize := 0;          { size is implicit in the strobj descriptor }
   IrGlobals[n].HasInit := False;
   IrGlobals[n].InitBits := 0;
-  IrGlobals[n].HasStr := True;
-  IrGlobals[n].InitStr := image;
+  IrGlobals[n].HasStr := True;        { InitStr holds the text; the header is strobj's }
+  IrGlobals[n].InitStr := bytes;
+  IrGlobals[n].IsStrObj := True;      { the backend emits the refcount/kind/len header in
+                                        target endianness, then the text and a trailing NUL }
+  SetLength(IrGlobals[n].InitVals, 0);
   IrGlobals[n].Exported := exported;
   IrGlobals[n].ReadOnly := True;    { a static string is immutable: never written at run time }
   Inc(IrGlobalCount);
@@ -7003,12 +7268,12 @@ begin
   AddIrStaticString := AddIrStaticStringImage('_sstr' + IntToStr(IrGlobalCount), bytes, False);
 end;
 
-function EmitRealConst(const litText: string): LongInt;
-{ Materialize a real literal through an f64 constant-pool global, loaded by FLD.
-  The version 1 opcode subset has no float immediate, so a literal lives in a
-  read-only global initialized with its bit pattern. The bit pattern is computed
-  from the literal text in integer arithmetic (RealLitBits), not from a host
-  Double, so it is identical on every backend including the single-float tier. }
+function EmitRealConstBits(bits: Int64): LongInt;
+{ Materialize an f64 value from a precomputed bit pattern through an f64 constant-pool
+  global, loaded by FLD. The version 1 opcode subset has no float immediate, so the value
+  lives in a read-only global initialized with its bits. A single-precision value shares
+  this path, since computation is done in the f64 held in a register; the narrowing to f32
+  happens only at a store to a single-typed location (FSS). }
 var
   n, addr: LongInt;
   nm: string;
@@ -7020,14 +7285,24 @@ begin
   IrGlobals[n].BaseType := 'f64';
   IrGlobals[n].ArrSize := 0;
   IrGlobals[n].HasInit := True;
-  IrGlobals[n].InitBits := RealLitBits(litText);
+  IrGlobals[n].InitBits := bits;
   IrGlobals[n].HasStr := False;
   IrGlobals[n].InitStr := '';
+  IrGlobals[n].IsStrObj := False;
+  SetLength(IrGlobals[n].InitVals, 0);
   IrGlobals[n].Exported := False;
   IrGlobals[n].ReadOnly := True;    { the f64 constant pool is load-only }
   Inc(IrGlobalCount);
   addr := EmitLEA(nm);
-  EmitRealConst := EmitFLD(addr);
+  EmitRealConstBits := EmitFLD(addr);
+end;
+
+function EmitRealConst(const litText: string): LongInt;
+{ Materialize a real literal. The bit pattern is computed from the literal text in integer
+  arithmetic (RealLitBits), not from a host Double, so it is identical on every backend
+  including the single-float tier. }
+begin
+  EmitRealConst := EmitRealConstBits(RealLitBits(litText));
 end;
 
 function ClassOf(ty: LongInt): string;
@@ -7458,6 +7733,11 @@ function LoadSym(s: LongInt): LongInt;
 var
   addr, ty: LongInt;
 begin
+  { a declaration-level property read is a call to its getter (doc/languages/kobold/kp-property.md) }
+  if IsPropertySym(s) then begin
+    LoadSym := LowerDirectCall(Nodes[Nodes[Syms[s].Node].B].Sym, [], True);
+    Exit;
+  end;
   if Syms[s].Kind in [syConst, syEnumLit] then begin
     if Syms[s].ConstIsStr then LoadSym := EmitStringValue(Syms[s].ConstStr)
     { an imported link-time const has no value here: it is an exported read-only global in the
@@ -7475,6 +7755,10 @@ begin
     else if (Syms[s].Kind = syConst)
             and (IsOrdinalType(Syms[s].TypeId) or Wide64(Syms[s].TypeId)) then
       LoadSym := EmitLoadScalar(EmitLEA(ConstGlobalName(s)), Syms[s].TypeId)
+    { a real or single const holds its f64 bit pattern in Ordinal; load it as an f64 value
+      from the constant pool (a single is narrowed only where it is stored) }
+    else if IsRealType(Syms[s].TypeId) then
+      LoadSym := EmitRealConstBits(Syms[s].Ordinal)
     else if Wide64(Syms[s].TypeId) then LoadSym := EmitLIC64(Syms[s].Ordinal)
     else LoadSym := EmitLIC(Syms[s].Ordinal);
     Exit;
@@ -7651,8 +7935,10 @@ function LowerMethodCall(field: LongInt; const argNodes: array of LongInt;
   vtable entry of the same name, which is how a script method wins. }
 var
   recv, bt, m, sig, scriptSig, na, i, ret, d, r0, ownRecv, errSlot: LongInt;
+  retbuf, z: LongInt;
+  aggRet, wideFail: Boolean;
   argt, argk: array of LongInt;
-  owned: TIntArray;
+  owned, roffs: TIntArray;
   args, symName: string;
 begin
   LowerMethodCall := -1;
@@ -7706,8 +7992,43 @@ begin
   EmitArg(r0);   { the receiver is argument 0 }
   EmitStagedArgs(argt, argk);
   ret := SemTypes[sig].RetType;
-  args := 'sym=' + symName + ' nargs=' + IntToStr(na + 1);
-  if errSlot >= 0 then begin
+  { a record result returns through caller storage (sret); a failable real, int64, or record
+    result does the same, the error then in the integer return register rather than CALL2's
+    second register. The sret buffer is the trailing argument, after the receiver and the
+    declared ones, matching the callee's hidden pointer parameter (so a method reaches the same
+    wide path a free function does, LowerDirectCall). }
+  aggRet := (ret >= 0) and IsAggregate(ret);
+  wideFail := (errSlot >= 0) and FailWideResult(sig);
+  retbuf := -1;
+  if aggRet then begin
+    retbuf := NewSlot(TypeSize(ret));
+    SetLength(roffs, 0);
+    CollectHandleOffsets(ret, 0, roffs);
+    if Length(roffs) > 0 then begin
+      z := EmitLIC(0);
+      for i := 0 to High(roffs) do
+        EmitSW(AddOff(EmitADL(retbuf), roffs[i]), z);
+    end;
+  end
+  else if wideFail then
+    retbuf := NewSlot(TypeSize(ret));   { a real or 64-bit value buffer (no handle fields) }
+  if aggRet or wideFail then EmitArg(EmitADL(retbuf));
+  if aggRet or wideFail then
+    args := 'sym=' + symName + ' nargs=' + IntToStr(na + 2)
+  else
+    args := 'sym=' + symName + ' nargs=' + IntToStr(na + 1);
+  if wideFail then begin
+    { ordinary call: the integer return register holds the error, the value is in retbuf }
+    d := NewTemp;
+    PushInsn('CALL', 'dst=' + IntToStr(d) + ' ' + args);
+    EmitSTL(d, errSlot);
+    if wantVal and (ret >= 0) then begin
+      if aggRet then LowerMethodCall := EmitADL(retbuf)
+      else LowerMethodCall := EmitLoadScalar(EmitADL(retbuf), ret);
+    end;
+  end
+  else if errSlot >= 0 then begin
+    { failable integer-class: CALL2 puts the value in dst and the error into errSlot }
     if wantVal and (ret >= 0) then begin
       d := NewTemp;
       PushInsn('CALL2', 'dst=' + IntToStr(d) + ' slot=' + IntToStr(errSlot) + ' ' + args);
@@ -7715,6 +8036,10 @@ begin
     end
     else
       PushInsn('CALL2', 'dst=-1 slot=' + IntToStr(errSlot) + ' ' + args);
+  end
+  else if aggRet then begin
+    PushInsn('CALL', args);        { the callee fills the buffer; its value is the buffer }
+    LowerMethodCall := EmitADL(retbuf);
   end
   else if wantVal and (ret >= 0) then begin
     d := NewTemp;
@@ -7794,34 +8119,13 @@ begin
   if m >= 0 then ProcFieldSig := SemTypes[bt].Subs[m];
 end;
 
-function LE32(x: LongInt): string;
-{ A LongInt as four little-endian bytes, for a layout blob. }
-begin
-  LE32 := Chr(x and $FF) + Chr((x shr 8) and $FF) +
-          Chr((x shr 16) and $FF) + Chr((x shr 24) and $FF);
-end;
-
-function LE64(x: Int64): string;
-{ An Int64 as eight little-endian bytes, for a set image blob. }
-var
-  i: LongInt;
-  s: string;
-begin
-  s := '';
-  for i := 0 to 7 do begin
-    s := s + Chr(x and $FF);
-    x := x shr 8;
-  end;
-  LE64 := s;
-end;
-
 function EmitArrLayout(elem: LongInt): LongInt;
 { The layout argument for kp_arr_setlen: 0 when the element holds no handles, else the
   address of a blob (a count then that many handle-field byte offsets) the runtime reads to
   release element handle fields on shrink and reclaim. }
 var
   offs: TIntArray;
-  blob: string;
+  vals: TInt64Array;
   i: LongInt;
 begin
   offs := nil;
@@ -7830,9 +8134,10 @@ begin
     EmitArrLayout := EmitLIC(0);
     Exit;
   end;
-  blob := LE32(Length(offs));
-  for i := 0 to High(offs) do blob := blob + LE32(offs[i]);
-  EmitArrLayout := EmitLEA(AddIrStringGlobal(blob));
+  SetLength(vals, Length(offs) + 1);
+  vals[0] := Length(offs);
+  for i := 0 to High(offs) do vals[i + 1] := offs[i];
+  EmitArrLayout := EmitLEA(AddIrWordArray('i32', vals));
 end;
 
 procedure LowerSetLength(target, lenNode: LongInt);
@@ -8522,7 +8827,7 @@ function LowerDirectCall(s: LongInt; const argNodes: array of LongInt;
   variables passed as hidden by-pointer arguments, and result-class call emission. }
 var
   i, sig, ret, d, na, retbuf, z, extra, errSlot: LongInt;
-  aggRet: Boolean;
+  aggRet, wideFail: Boolean;
   roffs, owned: TIntArray;
   args: string;
 begin
@@ -8550,6 +8855,9 @@ begin
     as a hidden final argument, and let the call evaluate to that address (an aggregate value
     is its address) }
   aggRet := (ret >= 0) and IsAggregate(ret);
+  { a failable real, 64-bit, or record result returns through the same caller buffer (sret),
+    with the error in the integer return register rather than the CALL2 second register }
+  wideFail := (errSlot >= 0) and FailWideResult(sig);
   retbuf := -1;
   if aggRet then begin
     retbuf := NewSlot(TypeSize(ret));
@@ -8560,14 +8868,26 @@ begin
       for i := 0 to High(roffs) do
         EmitSW(AddOff(EmitADL(retbuf), roffs[i]), z);
     end;
-  end;
+  end
+  else if wideFail then
+    retbuf := NewSlot(TypeSize(ret));   { a real or 64-bit value buffer (no handle fields) }
   StageArgs(sig, argNodes, owned);
   { a nested routine's captured variables follow as hidden by-pointer arguments }
   for i := 0 to High(RoutineCaptures[s]) do EmitArg(VarAddr(RoutineCaptures[s][i]));
   extra := Length(RoutineCaptures[s]);
-  if aggRet then begin EmitArg(EmitADL(retbuf)); Inc(extra); end;
+  if aggRet or wideFail then begin EmitArg(EmitADL(retbuf)); Inc(extra); end;
   args := 'sym=' + EmittedRoutineName(s) + ' nargs=' + IntToStr(na + extra);
-  if errSlot >= 0 then begin
+  if wideFail then begin
+    { ordinary call: the integer return register holds the error, the value is in retbuf }
+    d := NewTemp;
+    PushInsn('CALL', 'dst=' + IntToStr(d) + ' ' + args);
+    EmitSTL(d, errSlot);
+    if wantVal and (ret >= 0) then begin
+      if aggRet then LowerDirectCall := EmitADL(retbuf)
+      else LowerDirectCall := EmitLoadScalar(EmitADL(retbuf), ret);
+    end;
+  end
+  else if errSlot >= 0 then begin
     { failable: CALL2 puts the value in dst (integer-class) and the error into errSlot }
     if wantVal and (ret >= 0) then begin
       d := NewTemp;
@@ -8734,30 +9054,56 @@ begin
       if Nodes[node].Flag = 1 then
         LowerFailableCall(Nodes[node].A, False, err)   { or else ignore: drop value and error }
       else begin
-        { or else EXPR: the value on success, the fallback (evaluated only on failure) otherwise.
-          The result round-trips through a slot and flows out as an owned transfer (IsOwnedExpr),
-          so both paths must leave an owned (+1) reference in it when the type is managed: the
-          success value is the callee's owned result, and a borrowed fallback is made owned the
-          same way an assignment does (clone a value array/map, retain a reference handle). On
-          failure the callee returns a nil value, so overwriting the slot leaks nothing. }
         oty := Nodes[node].Ty;
-        rslot := NewSlot(4);
-        v := LowerFailableCall(Nodes[node].A, True, err);
-        EmitSTL(v, rslot);
-        lEnd := NewLabel;
-        EmitBZ(err, lEnd);
-        fb := LowerExpr(Nodes[node].B);
-        if not IsOwnedExpr(Nodes[node].B) then begin
-          if IsDynArray(oty) and not IsBuffer(oty) then
-            fb := EmitStrCall1('kp_arr_clone', fb)
-          else if IsMap(oty) then
-            fb := EmitStrCall1('kp_map_clone', fb)
-          else if IsHandle(oty) or (oty = tyStr) then
-            EmitRetain(fb);
+        if IsAggregate(oty) then begin
+          { a record (or large-set) result: the success value is already in the callee's buffer,
+            addressed by v. On failure, copy the fallback record into that same buffer with the
+            managed-copy ownership an assignment uses, so the buffer holds an owned value on both
+            paths and the result (its address) flows out like a plain aggregate return. }
+          v := LowerFailableCall(Nodes[node].A, True, err);
+          lEnd := NewLabel;
+          EmitBZ(err, lEnd);
+          CopyAggregateManaged(v, LowerExpr(Nodes[node].B), oty);
+          EmitLabel(lEnd);
+          LowerFailForm := v;
+        end
+        else if IsRealType(oty) or Wide64(oty) then begin
+          { a real or 64-bit result: both paths round-trip through a value slot of the result's
+            width, stored and loaded by class (no managed handles in these types) }
+          rslot := NewSlot(TypeSize(oty));
+          v := LowerFailableCall(Nodes[node].A, True, err);
+          EmitStoreScalar(EmitADL(rslot), v, oty);
+          lEnd := NewLabel;
+          EmitBZ(err, lEnd);
+          EmitStoreScalar(EmitADL(rslot), LowerExpr(Nodes[node].B), oty);
+          EmitLabel(lEnd);
+          LowerFailForm := EmitLoadScalar(EmitADL(rslot), oty);
+        end
+        else begin
+          { or else EXPR: the value on success, the fallback (evaluated only on failure) otherwise.
+            The result round-trips through a slot and flows out as an owned transfer (IsOwnedExpr),
+            so both paths must leave an owned (+1) reference in it when the type is managed: the
+            success value is the callee's owned result, and a borrowed fallback is made owned the
+            same way an assignment does (clone a value array/map, retain a reference handle). On
+            failure the callee returns a nil value, so overwriting the slot leaks nothing. }
+          rslot := NewSlot(4);
+          v := LowerFailableCall(Nodes[node].A, True, err);
+          EmitSTL(v, rslot);
+          lEnd := NewLabel;
+          EmitBZ(err, lEnd);
+          fb := LowerExpr(Nodes[node].B);
+          if not IsOwnedExpr(Nodes[node].B) then begin
+            if IsDynArray(oty) and not IsBuffer(oty) then
+              fb := EmitStrCall1('kp_arr_clone', fb)
+            else if IsMap(oty) then
+              fb := EmitStrCall1('kp_map_clone', fb)
+            else if IsHandle(oty) or (oty = tyStr) then
+              EmitRetain(fb);
+          end;
+          EmitSTL(fb, rslot);
+          EmitLabel(lEnd);
+          LowerFailForm := EmitLDL(rslot);
         end;
-        EmitSTL(fb, rslot);
-        EmitLabel(lEnd);
-        LowerFailForm := EmitLDL(rslot);
       end;
     nkOrDivert: begin
       v := LowerFailableCall(Nodes[node].A, wantVal, err);
@@ -9089,6 +9435,32 @@ begin
   LowerShortCircuit := EmitLDL(sl);
 end;
 
+function ComputedFieldGetter(node: LongInt): string;
+{ The getter method name if nkField `node` reads a computed record field, else ''
+  (doc/languages/kobold/kp-property.md). }
+var
+  rt, m: LongInt;
+begin
+  ComputedFieldGetter := '';
+  if (Nodes[node].Kind <> nkField) or (Nodes[node].Flag = 1) then Exit;
+  rt := Nodes[Nodes[node].A].Ty;
+  if (rt < 0) or (rt >= SemCount) or (SemTypes[rt].Kind <> skRecord) then Exit;
+  m := FindMember(rt, Nodes[node].Text);
+  if (m >= 0) and (SemTypes[rt].PropGet[m] <> '') then
+    ComputedFieldGetter := SemTypes[rt].PropGet[m];
+end;
+
+function LowerComputedFieldRead(node: LongInt; const getter: string): LongInt;
+{ Read a computed record field by calling its getter method: synthesize rec.getter(). }
+var
+  sf: LongInt;
+begin
+  sf := NewNode(nkField);
+  Nodes[sf].A := Nodes[node].A;
+  Nodes[sf].Text := getter;
+  LowerComputedFieldRead := LowerMethodCall(sf, [], True);
+end;
+
 function LowerExpr(node: LongInt): LongInt;
 var
   s, a, b, one, r: LongInt;
@@ -9138,6 +9510,9 @@ begin
         else
           LowerExpr := LoadSym(s);
       end
+      else if ComputedFieldGetter(node) <> '' then
+        { a computed record field reads through its getter method }
+        LowerExpr := LowerComputedFieldRead(node, ComputedFieldGetter(node))
       else if IsMethodField(node) then
         { a no-argument method named as a value auto-calls, e.g. ok := e.alive }
         LowerExpr := LowerMethodCall(node, [], True)
@@ -9292,34 +9667,35 @@ end;
 
 function ConstArrayGlobal(s: LongInt): string;
 { The read-only global holding a constant array's static image, built on first use. Each
-  element is an ordinal constant packed little-endian at its 4-byte width (this slice's
-  supported element kinds). }
+  element is an ordinal constant emitted as one i32 word (this slice's supported element
+  kinds), so the assembler encodes it in the target's endianness. }
 var
   agg, i: LongInt;
   ev: TConstVal;
-  blob: string;
+  vals: TInt64Array;
 begin
   if Syms[s].ConstAggName <> '' then begin
     ConstArrayGlobal := Syms[s].ConstAggName;
     Exit;
   end;
   agg := Nodes[Syms[s].Node].B;
-  blob := '';
+  SetLength(vals, Length(Nodes[agg].Kids));
   for i := 0 to High(Nodes[agg].Kids) do begin
     ev := EvalConst(Nodes[agg].Kids[i]);
-    blob := blob + LE32(LongInt(ev.I));
+    vals[i] := LongInt(ev.I);
   end;
-  Syms[s].ConstAggName := AddIrStringGlobal(blob);
+  Syms[s].ConstAggName := AddIrWordArray('i32', vals);
   ConstArrayGlobal := Syms[s].ConstAggName;
 end;
 
 function ConstSetGlobal(s: LongInt): string;
-{ The read-only global holding a large constant set's word image, built on first use. The
-  words are packed little-endian, one 64-bit word each, the layout the large-set path reads. }
+{ The read-only global holding a large constant set's word image, built on first use. Each
+  64-bit word is emitted as one i64 .init, the layout the large-set path reads, so the
+  assembler encodes it in the target's endianness. }
 var
   setTy, nw, i: LongInt;
   w: TSetWords;
-  blob: string;
+  vals: TInt64Array;
 begin
   if Syms[s].ConstAggName <> '' then begin
     ConstSetGlobal := Syms[s].ConstAggName;
@@ -9328,9 +9704,9 @@ begin
   setTy := Syms[s].TypeId;
   nw := SetWords(setTy);
   EvalConstSet(Nodes[Syms[s].Node].B, setTy, w);
-  blob := '';
-  for i := 0 to nw - 1 do blob := blob + LE64(w[i]);
-  Syms[s].ConstAggName := AddIrStringGlobal(blob);
+  SetLength(vals, nw);
+  for i := 0 to nw - 1 do vals[i] := w[i];
+  Syms[s].ConstAggName := AddIrWordArray('i64', vals);
   ConstSetGlobal := Syms[s].ConstAggName;
 end;
 
@@ -9449,7 +9825,13 @@ begin
   case Nodes[node].Kind of
     nkIdent: begin
       s := Nodes[node].Sym;
-      if s < 0 then AddrOf := EmitLIC(0)
+      if IsPropertySym(s) then begin
+        { a property is accessor-backed and has no address (doc/languages/kobold/kp-property.md) }
+        SemErr(node, 'a property has no address; it cannot be passed by reference or have its '
+          + 'address taken');
+        AddrOf := EmitLIC(0);
+      end
+      else if s < 0 then AddrOf := EmitLIC(0)
       else if (Syms[s].Kind = syConst) and (Syms[s].ConstAggName <> '') then
         AddrOf := EmitLEA(Syms[s].ConstAggName)  { a string array, filled when main started }
       else if (Syms[s].Kind = syConst) and (Syms[s].TypeId >= 0) and
@@ -9462,6 +9844,11 @@ begin
     nkField:
       if Nodes[node].Flag = 1 then
         AddrOf := VarAddr(Nodes[node].Sym)   { a unit-qualified var, addressed as a global }
+      else if ComputedFieldGetter(node) <> '' then begin
+        { a computed field is accessor-backed and has no storage }
+        SemErr(node, 'a computed field has no address; it cannot be passed by reference');
+        AddrOf := EmitLIC(0);
+      end
       else begin
         base := AddrOf(Nodes[node].A);
         recTy := Nodes[Nodes[node].A].Ty;
@@ -9611,6 +9998,40 @@ begin
           CollectHandleKinds(SemTypes[ty].Base, baseOff + i * stride, offs, kinds);
       end;
   end;
+end;
+
+procedure CopyAggregateManaged(dstAddr, srcAddr, ty: LongInt);
+{ Copy an aggregate value from srcAddr to dstAddr with managed-field ownership, the mirror of a
+  whole-aggregate assignment: a value field (dynamic array or map) is cloned so the destination
+  is independent, a reference field (string, interface, process) is shared by retaining the
+  source, and the destination's old fields are released first. A POD aggregate copies plainly.
+  dstAddr and srcAddr are temps holding the two addresses; the destination's old handle fields
+  must be valid (nil counts). }
+var
+  aoffs, akinds, clones: TIntArray;
+  i: LongInt;
+begin
+  aoffs := nil; akinds := nil;
+  CollectHandleKinds(ty, 0, aoffs, akinds);
+  if Length(aoffs) = 0 then begin
+    CopyAggregate(dstAddr, srcAddr, TypeSize(ty));
+    Exit;
+  end;
+  clones := nil;
+  SetLength(clones, Length(aoffs));
+  for i := 0 to High(aoffs) do
+    if akinds[i] = 1 then
+      clones[i] := EmitStrCall1('kp_arr_clone', EmitLW(AddOff(srcAddr, aoffs[i])))
+    else if akinds[i] = 2 then
+      clones[i] := EmitStrCall1('kp_map_clone', EmitLW(AddOff(srcAddr, aoffs[i])))
+    else begin
+      clones[i] := -1;
+      EmitRetain(EmitLW(AddOff(srcAddr, aoffs[i])));
+    end;
+  for i := 0 to High(aoffs) do EmitRelease(EmitLW(AddOff(dstAddr, aoffs[i])));
+  CopyAggregate(dstAddr, srcAddr, TypeSize(ty));
+  for i := 0 to High(aoffs) do
+    if akinds[i] <> 0 then EmitSW(AddOff(dstAddr, aoffs[i]), clones[i]);
 end;
 
 { ---- sets (a small set is an i64 bitmask; bit n = element with ordinal n) ---- }
@@ -9950,11 +10371,35 @@ end;
 
 procedure LowerAssign(node: LongInt);
 var
-  target, v, s, tt, addr, old, i: LongInt;
-  aoffs, akinds, clones: TIntArray;
+  target, v, s, tt, addr, old, i, rt, m, sf: LongInt;
+  aoffs, akinds, clones, argv: TIntArray;
 begin
   target := Nodes[node].A;
   tt := LValueType(target);
+  { a property write becomes a call to its setter accessor (doc/languages/kobold/kp-property.md).
+    A declaration-level property's setter is a free routine; a computed record field's is a
+    method of the record, synthesized here as rec.setter(value). }
+  if (Nodes[target].Kind = nkIdent) and IsPropertySym(Nodes[target].Sym) then begin
+    SetLength(argv, 1);
+    argv[0] := Nodes[node].B;
+    LowerDirectCall(Nodes[Nodes[Syms[Nodes[target].Sym].Node].C].Sym, argv, False);
+    Exit;
+  end;
+  if Nodes[target].Kind = nkField then begin
+    rt := Nodes[Nodes[target].A].Ty;
+    if (rt >= 0) and (rt < SemCount) and (SemTypes[rt].Kind = skRecord) then begin
+      m := FindMember(rt, Nodes[target].Text);
+      if (m >= 0) and (SemTypes[rt].PropGet[m] <> '') then begin
+        sf := NewNode(nkField);
+        Nodes[sf].A := Nodes[target].A;
+        Nodes[sf].Text := SemTypes[rt].PropSet[m];
+        SetLength(argv, 1);
+        argv[0] := Nodes[node].B;
+        LowerMethodCall(sf, argv, False);
+        Exit;
+      end;
+    end;
+  end;
   { a map element target inserts its key: mark the node so AddrOf uses kp_map_reserve for it
     (and kp_map_get for every other access, including a map read in the right-hand side) }
   if (Nodes[target].Kind = nkIndex) and IsMap(Nodes[Nodes[target].A].Ty) then
@@ -10168,10 +10613,17 @@ var
   sel, selSlot, lEnd, lDefault: LongInt;
   i, j, k, ll, lab, ne: LongInt;
   bodyL: array of LongInt;
-  lov, hiv, s2, c1, c2, cc, cv: LongInt;
+  lov, hiv, s2, c1, c2, cc, cv, labv, eq, selTy: LongInt;
   lo, hi: TConstVal;
+  strSel, ownedSel: Boolean;
 begin
+  selTy := Nodes[Nodes[node].A].Ty;
+  strSel := (selTy >= 0) and (selTy < SemCount) and (SemTypes[selTy].Kind = skString);
   sel := LowerExpr(Nodes[node].A);
+  { a string selector built by the selector expression (a call result, concatenation, or
+    literal) owns its reference and must be released once; a borrowed variable, field, or
+    constant is left alone (same rule as a string comparison operand). }
+  ownedSel := strSel and IsOwnedExpr(Nodes[node].A);
   selSlot := NewSlot(4);
   EmitSTL(sel, selSlot);
   ne := Length(Nodes[node].Kids);
@@ -10192,7 +10644,14 @@ begin
         lab := Nodes[ll].Kids[j];
         lo := EvalConst(Nodes[lab].A);
         cv := EmitLDL(selSlot);
-        if Nodes[lab].B >= 0 then begin
+        if strSel then begin
+          { a string label matches by value through kp_str_cmp (sign, 0 on equal). The label
+            is a static string, so it is not owned and needs no release. }
+          labv := EmitStringValue(lo.S);
+          eq := EmitBin('CMPEQ', EmitStrCall2('kp_str_cmp', cv, labv), EmitLIC(0));
+          EmitBNZ(eq, bodyL[i]);
+        end
+        else if Nodes[lab].B >= 0 then begin
           hi := EvalConst(Nodes[lab].B);
           lov := EmitLIC(lo.I);
           hiv := EmitLIC(hi.I);
@@ -10210,11 +10669,18 @@ begin
       end;
     end;
   end;
+  { no label matched: an owned string selector with no else block is released here, on the one
+    path that skips every body (each body releases it in its own prologue below, so there is
+    exactly one release per path) }
+  if ownedSel and (lDefault = lEnd) then EmitRelease(EmitLDL(selSlot));
   EmitJmp(lDefault);
   { bodies }
   for i := 0 to ne - 1 do begin
     k := Nodes[node].Kids[i];
     EmitLabel(bodyL[i]);
+    { release the owned string selector once, before the body runs, so an early break,
+      continue, return, or fail out of the body cannot leak it }
+    if ownedSel then EmitRelease(EmitLDL(selSlot));
     if Nodes[k].Kind = nkCaseElement then LowerStmt(Nodes[k].B)
     else LowerStmt(k);   { the else compound }
     EmitJmp(lEnd);
@@ -10395,8 +10861,8 @@ end;
 procedure LowerRoutine(node: LongInt);
 { node is nkProcDecl or nkFuncDecl with a body. }
 var
-  isFunc, realRet, wideRet, byref, failRet: Boolean;
-  s, i, j, prm, sym, sl, block, comp, pty, retTy, z, rsym, savedFunc: LongInt;
+  isFunc, realRet, wideRet, byref, failRet, failWide: Boolean;
+  s, i, j, prm, sym, sl, block, comp, pty, retTy, z, rsym, savedFunc, failPtrSlot: LongInt;
   fname: string;
   hslots, hoffs: TIntArray;
 begin
@@ -10412,6 +10878,10 @@ begin
   retTy := SemTypes[Syms[s].TypeId].RetType;
   realRet := IsRealType(retTy);
   wideRet := Wide64(retTy);   { a small set or an Int64: a 64-bit result }
+  { a failable function returns a real, 64-bit, or aggregate result through a hidden caller
+    buffer (sret); a non-aggregate wide result additionally keeps a local value slot that is
+    stored through the hidden pointer at the single return site (FailWideResult) }
+  failWide := isFunc and FailWideResult(Syms[s].TypeId);
   { a method is emitted as <ReceiverType>.<name>, matching its call sites and
     keeping it out of the free-function namespace }
   fname := RoutineLinkName(node);
@@ -10420,6 +10890,7 @@ begin
   CurFn := AddIrFunc(fname, True);
   CurResultSlot := -1;
   CurErrorSlot := -1;
+  failPtrSlot := -1;
   FailCaptureSlot := -1;
   LoopSP := 0;
   PendingMapInsert := -1;
@@ -10466,9 +10937,19 @@ begin
     Inc(prm);
   end;
   { an aggregate result is returned through caller storage (sret): a hidden final pointer
-    parameter carries the caller's buffer address, and the result is addressed through it }
+    parameter carries the caller's buffer address, and the result is addressed through it. A
+    failable real or 64-bit result takes the same hidden pointer (failPtrSlot), with its value
+    held in a local slot and stored through the pointer at the return. }
   if isFunc and IsAggregate(retTy) then begin
     CurResultSlot := NewSlot(4);
+    SetLength(IrFuncs[CurFn].ParamClass, prm + 1);
+    IrFuncs[CurFn].ParamClass[prm] := 0;
+    SetLength(IrFuncs[CurFn].ParamFW, prm + 1);
+    IrFuncs[CurFn].ParamFW[prm] := 0;
+    Inc(prm);
+  end
+  else if failWide then begin
+    failPtrSlot := NewSlot(4);
     SetLength(IrFuncs[CurFn].ParamClass, prm + 1);
     IrFuncs[CurFn].ParamClass[prm] := 0;
     SetLength(IrFuncs[CurFn].ParamFW, prm + 1);
@@ -10521,10 +11002,21 @@ begin
   for i := 0 to High(hslots) do
     if hoffs[i] = 0 then EmitRelease(EmitLDL(hslots[i]))
     else EmitRelease(EmitLW(AddOff(EmitADL(hslots[i]), hoffs[i])));
-  if failRet then
-    { return the value (integer-class) and the error together }
-    if isFunc then EmitRetv2(EmitLDL(CurResultSlot), EmitLDL(CurErrorSlot))
-    else EmitRetv2(EmitLIC(0), EmitLDL(CurErrorSlot))
+  if failRet then begin
+    if failWide then begin
+      { a real or 64-bit value is stored through the caller's hidden buffer pointer here; an
+        aggregate was already written through CurResultSlot (the hidden pointer). The error
+        then returns alone in the integer register. }
+      if not IsAggregate(retTy) then begin
+        if realRet then EmitStoreScalar(EmitLDL(failPtrSlot), EmitFLDL(CurResultSlot), retTy)
+        else EmitStoreScalar(EmitLDL(failPtrSlot), EmitLDL64(CurResultSlot), retTy);
+      end;
+      EmitRetv(EmitLDL(CurErrorSlot));
+    end
+    { an integer-class failable function returns the value and the error in the register pair }
+    else if isFunc then EmitRetv2(EmitLDL(CurResultSlot), EmitLDL(CurErrorSlot))
+    else EmitRetv2(EmitLIC(0), EmitLDL(CurErrorSlot));
+  end
   else if isFunc then
     if realRet then EmitFRetv(EmitFLDL(CurResultSlot), IsSingle(retTy))
     else if wideRet then EmitRetv64(EmitLDL64(CurResultSlot))
@@ -11051,6 +11543,12 @@ begin
     end
   else if (SemTypes[ty].Kind = skArray) and (Length(SemTypes[ty].Subs) > 0) then
     EmitConstArray(ty, 0, valNode, base, off)
+  else if IsSingle(ty) then begin
+    { a single element is 4 bytes: load the f64 value from the constant pool and store it
+      narrowed to f32 (FSS), the same narrowing a single store uses at runtime }
+    v := EmitRealConstBits(RealBitsFromConst(valNode));
+    EmitFSS(AddOff(base, off), v);
+  end
   else if IsRealType(ty) then begin
     v := EmitLIC64(RealBitsFromConst(valNode));
     EmitST64(AddOff(base, off), v);
@@ -11572,7 +12070,7 @@ var
 begin
   ModLineCount := 0;
   EmitLine('.kpm 1');
-  EmitLine('.target x86-64');
+  EmitLine('.target agnostic');
   { A compiled program is a linked executable image whose entry is `main`; a unit is an
     object module a consumer links against, with no entry. }
   if ModIsUnit then
@@ -11624,9 +12122,12 @@ begin
         line := line + ' array ' + IntToStr(IrGlobals[i].ArrSize);
       if IrGlobals[i].Exported then line := line + ' export';
       if IrGlobals[i].ReadOnly then line := line + ' rodata';
+      if IrGlobals[i].IsStrObj then line := line + ' strobj';
       EmitLine(line);
       if IrGlobals[i].HasInit then
         EmitLine('    .init ' + IntToStr(IrGlobals[i].InitBits));
+      for j := 0 to High(IrGlobals[i].InitVals) do
+        EmitLine('    .init ' + IntToStr(IrGlobals[i].InitVals[j]));
       if IrGlobals[i].HasStr then
         EmitLine('    .string ' + EscapeStr(IrGlobals[i].InitStr));
       EmitLine('.endglobal');

@@ -183,7 +183,11 @@ enum cc_node_kind {
     ND_LABEL,
     ND_EXPR_STMT,
     ND_LOCAL_DECL,
-    ND_ASM,         /* basic inline asm: verbatim text in sval/slen */
+    ND_ASM,         /* inline asm: template in sval/slen. Basic if a/b/c all
+                       null; extended carries output(a)/input(b)/clobber(c)
+                       operand lists (chained via ->next) and ival=is_volatile */
+    ND_ASM_OP,      /* one extended-asm operand: sval/slen=constraint, a=expr;
+                       or one clobber: sval/slen=clobber name, a=null */
 
     /* expressions */
     ND_BINOP,

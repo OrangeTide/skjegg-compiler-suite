@@ -37,6 +37,10 @@
 
 #include <stdlib.h>  /* qsort */
 
+/* rv_select.c: the allocator-index (temp_reg value) of each integer register an
+   extended asm pins or clobbers; the allocator reserves them. */
+int rv_asm_reserved_regs(struct ir_func *fn, int *out, int max);
+
 #define INT_NUM_REGS  11
 #define INT_FIRST_REG 2
 
@@ -69,7 +73,8 @@ sort_by_start(const void *pa, const void *pb)
 
 static int
 linscan(struct ir_func *fn, int *first_def, int *last_use,
-        int *is_class, int num_regs, int first_reg, int spill_size)
+        int *is_class, int num_regs, int first_reg, int spill_size,
+        const int *reserved)
 {
     struct interval *ivs;
     struct interval **active;
@@ -113,7 +118,7 @@ linscan(struct ir_func *fn, int *first_def, int *last_use,
 
     int pool[num_regs];
     for (k = 0; k < num_regs; k++)
-        pool[k] = 1;
+        pool[k] = (reserved && reserved[k]) ? 0 : 1;
 
     active = arena_alloc(fn->arena, (num_regs + 1) * sizeof(*active));
     nactive = 0;
@@ -255,6 +260,21 @@ regalloc(struct ir_func *fn)
             last_use[i->a] = pos;
         if (i->b >= 0 && i->b < ntemps && last_use[i->b] < pos)
             last_use[i->b] = pos;
+        /* Extended inline asm operands live in asm_info, not i->a/i->b: an
+           output is a def, an input a use, an in-out operand both. */
+        if (i->op == IR_ASM && i->asm_info) {
+            int k, nops = i->asm_info->noutputs + i->asm_info->ninputs;
+            for (k = 0; k < nops; k++) {
+                int at = i->asm_info->ops[k].temp;
+                if (at < 0 || at >= ntemps)
+                    continue;
+                if ((i->asm_info->ops[k].is_output ||
+                     i->asm_info->ops[k].is_inout) && first_def[at] < 0)
+                    first_def[at] = pos;
+                if (last_use[at] < pos)
+                    last_use[at] = pos;
+            }
+        }
 
         if (i->op == IR_ARG || i->op == IR_ARG64 || i->op == IR_FARG) {
             if (npending < 16)
@@ -274,7 +294,7 @@ regalloc(struct ir_func *fn)
     }
 
     fn->ni64spills = linscan(fn, first_def, last_use,
-                 is_i64, I64_NUM_PAIRS, I64_FIRST_PAIR, 8);
+                 is_i64, I64_NUM_PAIRS, I64_FIRST_PAIR, 8, NULL);
 
     max_pair = -1;
     for (t = 0; t < ntemps; t++) {
@@ -288,14 +308,31 @@ regalloc(struct ir_func *fn)
     for (t = 0; t < ntemps; t++)
         is_int[t] = !is_float[t] && !is_i64[t];
 
+    /* Reserve any integer register an extended asm pins or clobbers; a pin
+       into the i64-pair region is unsupported, so pinning an allocatable
+       register in a function that uses 64-bit integers is rejected. */
+    int reserved[INT_NUM_REGS];
+    int pinned[INT_NUM_REGS], npinned, pk, rk;
+    for (rk = 0; rk < INT_NUM_REGS; rk++)
+        reserved[rk] = 0;
+    npinned = rv_asm_reserved_regs(fn, pinned, INT_NUM_REGS);
+    for (pk = 0; pk < npinned; pk++) {
+        int slot = pinned[pk] - INT_FIRST_REG;
+        if (max_pair >= 0)
+            die("rv: asm pin to an allocatable register in a function that "
+                "uses 64-bit integers is not supported");
+        if (slot >= 0 && slot < int_num_regs)
+            reserved[slot] = 1;
+    }
+
     fn->nspills = linscan(fn, first_def, last_use,
-                  is_int, int_num_regs, INT_FIRST_REG, 4);
+                  is_int, int_num_regs, INT_FIRST_REG, 4, reserved);
 
     /* Float temps get their own callee-saved class (fs0..fs11), disjoint
        from the integer register file, so a float and an int temp may share
        an index without conflict. */
     fn->nfspills = linscan(fn, first_def, last_use,
-                   is_float, FP_NUM_REGS, FP_FIRST_REG, 8);
+                   is_float, FP_NUM_REGS, FP_FIRST_REG, 8, NULL);
 
     arena_release(fn->arena, m);
 }

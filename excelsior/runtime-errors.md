@@ -4,9 +4,10 @@ Status: decided and v1 implemented (2026-07), the pass on
 approachability.md's R1, with R2 (the silent match no-op) and R8
 (arithmetic failure) riding along as the priority section recommended.
 All six decisions at the end were confirmed; the v1 scope is in the
-tree (per-site descriptors, fallible divide/modulo, the divide-overflow
-and decimal-helper OVERFLOW faults, the message catalog in the test host,
-and the -t no-match trace event).
+tree (per-site descriptors, fallible divide/modulo, the divide-overflow,
+silent-family (add/subtract/multiply/negate), and decimal-helper OVERFLOW
+faults, the message catalog in the test host, and the -t no-match trace
+event).
 
 ## The problem
 
@@ -259,13 +260,13 @@ INT_MIN / -1) are explicit compares needing no IR change, and the
 decimal multiply/divide helpers already hold a 64-bit intermediate, so
 their range check is nearly free C. But add/subtract/multiply/negate
 checks want the target's overflow flag (one `bvs` to the cold
-trampoline per operation on ColdFire), and the IR has no
-overflow-checked ops to express that; synthesizing the check from
-plain IR costs several instructions per operation. So OVERFLOW checks
-for the silent family land when the IR grows checked variants (an
-ir/ design decision, recorded in open-questions.md); the divide
-family and the decimal helpers land in v1. Until then `INT_MIN * -1`
-keeps wrapping, documented as a known gap rather than a semantic.
+trampoline per operation on ColdFire), which plain IR cannot express
+without several instructions per operation. The IR therefore grew
+overflow-checked ops (`ADDO`/`SUBO`/`MULO`, an ir/ design decision
+recorded in open-questions.md), each carrying a per-site trap label the
+backend branches on. So the whole silent family now faults on overflow
+(add, subtract, and multiply directly, negate as the checked `0 - x`)
+alongside the divide family and the decimal helpers.
 
 Float is untouched throughout (IEEE gives inf/nan; float is
 mechanics-tier). Shift semantics belong to the bitwise-tier design.
@@ -309,14 +310,13 @@ In: the descriptor and the three-argument `__exc_trap`, per-site cold
 trampolines in non-fallible funcs, the chooser tail with the subject
 value, INDEX_RANGE / NO_BRANCH / UNCONSUMED kinds, DIV_ZERO via
 fallible divide and modulo, the OVERFLOW fault for divide overflow
-(explicit compare) and for decimal multiply/divide (range check in the
-64-bit helpers), the host-side message catalog with hints in the test
-host (stderr, exit 70), and the trace event for the no-match
+(explicit compare), for add/subtract/multiply/negate (the checked IR
+ops `ADDO`/`SUBO`/`MULO`), and for decimal multiply/divide (range check
+in the 64-bit helpers), the host-side message catalog with hints in the
+test host (stderr, exit 70), and the trace event for the no-match
 statement.
 
-Waiting: OVERFLOW checks for add/subtract/multiply/negate (blocked on
-overflow-checked IR ops, an ir/ decision in open-questions.md; until
-then the silent family wraps as a documented gap), the
+Waiting: the
 `__exc_fail_why` cause line, tracebacks and the code-range map, the
 real host's author-channel routing (owned by host-abi.md), turn abort
 semantics (owned by the brief), and any fault numbering (the Inform 7

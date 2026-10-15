@@ -218,10 +218,26 @@ imports, renames, re-export, cross-unit types and methods, exported globals,
 exported constants, and `implement I for R` trait conformance. `kpbundle` packages
 a program with its units into one self-contained module. The design is in `kp-units.md`.
 
+Observable-behavior pins. The `conf_*` programs in `tests/kp-corpus` are a
+conformance set that locks the documented corner cases in place: integer div/mod
+sign, two's-complement overflow wrap, unsigned bytewise string ordering, set
+subset/superset relations, global zero-initialization, and evaluation order. The
+`conf_trap_*` programs pin the faults: a divide by zero (always checked), a
+missing map key, an out-of-bounds index under `{$R+}`, a signed add overflow
+under `{$Q+}`, and the most negative integer `div`/`mod` `-1` (always checked)
+each trap and exit 70 with empty stdout. Each program runs on all
+four backends (the x86-64 JIT, and the x86-64, rv32, arm64, and ColdFire AOT
+paths), so a silent change in any backend, or a divergence from the behavior
+specified in `kp-semantics.md` and `kp-evaluation.md`, fails the build. They are
+the executable counterpart to those specifications and the seed of a fuller
+conformance suite.
+
 ## See also
 
 - `kp-language.md` the language reference (what the compiler accepts).
 - `kp-grammar.md` the full grammar in EBNF.
+- `kp-semantics.md` and `kp-evaluation.md` the static and dynamic semantics the
+  `conf_*` corpus pins.
 - `kobold.md` the compiler and runtime design and detailed status.
 - `kp-abi.md` the host ABI for `external` routines and handle types.
 - `kp-units.md` the design of the unit and separate-compilation system.

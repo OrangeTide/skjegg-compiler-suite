@@ -328,6 +328,28 @@ lex_token(void)
                 return t;
             }
         }
+        if (len == 13 && memcmp(start, "__attribute__", 13) == 0) {
+            /* GNU __attribute__((...)): skip it and its balanced parens so the
+               parser never sees it.  skj-cc honours no attributes, so dropping
+               them is safe; this lets it compile sources that carry hints like
+               __attribute__((noreturn)).  A run of attributes falls out of the
+               tail recursion.  String literals inside an attribute are rare and
+               not handled; the plain paren count suffices for the hints in use. */
+            skip_ws();
+            if (*p == '(') {
+                int depth = 0;
+                do {
+                    if (*p == '(')
+                        depth++;
+                    else if (*p == ')')
+                        depth--;
+                    else if (*p == '\n')
+                        line++;
+                    p++;
+                } while (*p && depth > 0);
+            }
+            return lex_token();
+        }
         t.kind = TOK_IDENT;
         t.sval = arena_strndup(lex_arena,start, len);
         t.slen = len;

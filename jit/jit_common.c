@@ -154,10 +154,16 @@ layout_data(struct kp_jit *j, struct ir_program *prog, char *err, size_t errlen)
            arr_size is only the outer dimension, so size to whichever is larger
            (otherwise m[2][2]'s 4 words overflow its 2-word slot into the next
            global) */
-        size_t count = (size_t)(g->arr_size > 0 ? g->arr_size : 1);
-        if ((size_t)g->init_count > count)
-            count = (size_t)g->init_count;
-        size_t sz = count * (size_t)base_size(g->base_type);
+        size_t sz;
+        if (g->is_strobj) {
+            /* {refcount, kind, len} header (3 words) + text + trailing NUL */
+            sz = 12 + (size_t)g->init_strlen + 1;
+        } else {
+            size_t count = (size_t)(g->arr_size > 0 ? g->arr_size : 1);
+            if ((size_t)g->init_count > count)
+                count = (size_t)g->init_count;
+            sz = count * (size_t)base_size(g->base_type);
+        }
         off = (off + 7) & ~(size_t)7;
         j->globals[i].name = g->name;
         j->globals[i].addr = (uint8_t *)off;   /* provisional: byte offset */
@@ -185,7 +191,16 @@ layout_data(struct kp_jit *j, struct ir_program *prog, char *err, size_t errlen)
     for (struct ir_global *g = prog->globals; g; g = g->next, i++) {
         uint8_t *a = j->data + (size_t)j->globals[i].addr;
         j->globals[i].addr = a;
-        if (g->inits) {
+        if (g->is_strobj) {
+            /* A static Kobold string object: {refcount, kind, len} header then
+               the text.  The host is little-endian and str_core.c reads the
+               header with native loads, so native uint32 stores are correct;
+               the trailing NUL is already zero from the anonymous mapping. */
+            uint32_t hdr[3] = { 0xffffffffu, 1u, (uint32_t)g->init_strlen };
+            memcpy(a, hdr, sizeof hdr);
+            if (g->init_strlen > 0)
+                memcpy(a + 12, g->init_string, (size_t)g->init_strlen);
+        } else if (g->inits) {
             /* An aggregate byte image (structs, designated/mixed initializers).
                Gaps stay zero from the anonymous mapping.  A scalar entry is
                written here little-endian; a symbol reference (it->sym) is a

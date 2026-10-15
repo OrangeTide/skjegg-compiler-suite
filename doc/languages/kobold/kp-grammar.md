@@ -2,12 +2,14 @@
 
 This document is the grammar of Kobold-Pascal, a subset of Pascal with no
 pointers, opaque host handles, Go-style methods, and stackful coroutines. For the
-rationale behind these choices see `kobold.md`.
+rationale behind these choices see `kobold.md`. The static-semantics rules the
+grammar does not capture (type identity, compatibility, conversions, expression
+typing, overload resolution, and storage layout) are in `kp-semantics.md`.
 
-> This grammar describes the intended language. The current `kpcom` prototype
-> implements only a fragment of it (see the design document's status section).
-> Productions that the prototype does not yet accept are still listed here so the
-> grammar describes the whole design.
+> This grammar tracks the language `kpcom` accepts. A few productions remain
+> ahead of the implementation; each is marked inline where it appears (for
+> example cross-module property export). See the design document's status
+> section for the current feature map.
 
 ## Notation
 
@@ -30,7 +32,9 @@ Block            = { DeclSection } StatementPart .
 DeclSection      = ConstDeclPart
                  | TypeDeclPart
                  | VarDeclPart
-                 | ProcOrFuncDecl .
+                 | ProcOrFuncDecl
+                 | PropertyDecl
+                 | ImplementDecl .
 
 StatementPart    = CompoundStmt .
 ```
@@ -63,14 +67,15 @@ InterfacePart    = 'interface' { InterfaceDecl } .
 InterfaceDecl    = ConstDeclPart
                  | ExportedTypeDeclPart
                  | VarDeclPart
-                 | PropertyDecl               (* deferred: the property feature, kp-property.md *)
+                 | PropertyDecl               (* cross-module property export is deferred, kp-property.md *)
                  | ReexportClause
                  | ProcOrFuncHeading ';' .
                  (* an exported routine or method is declared by heading only; its body
                     lives in the implementation part. An exported const is compile-time
                     inline, a link symbol rather than state; an exported var is a plain
-                    read-write cell. PropertyDecl belongs to the separately scheduled
-                    property feature (kp-property.md); units land without it. *)
+                    read-write cell. A PropertyDecl declared in a program or in a unit's
+                    implementation part is accepted; exporting a property across a unit
+                    interface is deferred (kp-property.md). *)
 
 ExportedTypeDeclPart = 'type' ExportedTypeDef { ExportedTypeDef } .
 ExportedTypeDef  = Identifier '=' Type ';'
@@ -85,9 +90,9 @@ AccessorSpec     = 'read' Identifier [ 'write' Identifier ] .
                  (* accessor-backed value with uniform access: 'read' names the getter,
                     optional 'write' the setter, so a property is read-only when 'write'
                     is omitted. A property may also be a record field (see RecordType).
-                    Inline accessor bodies are a deferred future form. This is the
-                    separately scheduled property feature (kp-property.md), independent of
-                    the units milestone; the words are reserved so it can land later. *)
+                    Implemented for scalar-value types (routine-reference accessors); inline
+                    accessor bodies, handle/aggregate types, and cross-module export are
+                    deferred (kp-property.md). *)
 
 ReexportClause   = 'reexport' ReexportItem { ',' ReexportItem } ';' .
 ReexportItem     = Identifier [ '(' Identifier { ',' Identifier } ')' ] .
@@ -206,8 +211,8 @@ FieldList        = [ FieldDecl { ';' FieldDecl } [ ';' ] ] .
 FieldDecl        = IdentList ':' Type
                  | Identifier ':' Type AccessorSpec .
                  (* the second form is a computed field: an accessor-backed property on
-                    the record, uniform with a stored field at the use site. Part of the
-                    deferred property feature (kp-property.md). *)
+                    the record, uniform with a stored field at the use site. The accessors
+                    are methods of the record (kp-property.md). *)
 VariantPart      = 'case' [ Identifier ':' ] TypeIdentifier 'of'
                    Variant { ';' Variant } .
 Variant          = CaseLabelList ':' '(' FieldList ')' .
@@ -280,6 +285,10 @@ A `set of T` is sized to its base type, up to 256 values, so at most 32 bytes. A
 set that fits in a machine integer is held in a register (`_smallSet`); a larger
 set is an array of integers (`_largeSet`). The `set` type wraps whichever applies;
 the distinction is not visible in the language.
+
+A set is a value and may be an element of any aggregate: a record field, a fixed
+or dynamic array element, or a map value. It carries no references, so a dynamic
+array or map of sets needs no per-element handle layout.
 
 ### The process type
 
@@ -629,12 +638,12 @@ the end of the line.
 ### Reserved words
 
 ```
-and       array     begin     bind      break     buffer    case
-const     continue  div       do        downto
+and       array     as        begin     bind      break     buffer
+case      const     continue  div       do        downto
 else      end       external  for       forward
 function  if        implement implementation     in        interface
 map       mod       nil       not       of        or        procedure
-program   property  record    ref       repeat    set
+program   property  record    reexport  ref       repeat    set
 shared    shl       shr       slice     start     string
 then      to        type      unit      until     uses
 var       while     with      yield
@@ -655,18 +664,17 @@ whole-array reference counterpart to the value-typed `array of T`); that type wa
 keep the array surface to two cases, value arrays and host buffers. `slice` is held for a
 possible future windowed view (a subrange `a[lo..hi]` sharing backing).
 
-`unit`, `uses`, `implementation`, and `shared` are part of the implemented units surface (see
-the Compilation units section), as is `implement` for guest-record trait conformance
-(`implement I for R`, a static conformance check). `property` remains reserved for the
-separately scheduled property feature (`kp-property.md`), which `kpcom` does not yet parse.
-All are described in the decision log in `kobold.md`. `property` is reserved so a program
-cannot use it as an identifier and later break when that feature lands.
+`unit`, `uses`, `reexport`, `implementation`, and `shared` are part of the implemented units
+surface (see the Compilation units section), as is `implement` for guest-record trait
+conformance (`implement I for R`, a static conformance check). `as` is the import alias in a
+`uses` clause. `property` declares an accessor-backed value (`kp-property.md`); `kpcom` parses
+it in a program or in a unit's implementation part, with cross-module property export still
+deferred. All are described in the decision log in `kobold.md`.
 
 `out` (a parameter mode), `cdecl` (a calling convention on a host import),
-`export` (a module entry), `as` (an import alias in a `uses` clause), `read` and
-`write` (property accessors), `reexport` (a re-export clause), and `fails` (the
+`export` (a module entry), `read` and `write` (property accessors), and `fails` (the
 failable signature marker and postfix test) are contextual: they act as keywords
-only where a routine, property, `uses`, `reexport`, or failable form expects them,
+only where a routine, property, or failable form expects them,
 so an ordinary identifier may still carry one of these names. `exit` and `fail`
 likewise stay ordinary (a builtin and the failure constructor): after `or`, a
 one-token lookahead selects the failable divert, so `or exit` and `or fail` parse

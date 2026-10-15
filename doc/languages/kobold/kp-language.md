@@ -7,6 +7,11 @@ language as the compiler implements it, not a superset.
 Related documents:
 
 - `kp-grammar.md` gives the full grammar in EBNF. This reference is the prose companion.
+- `kp-semantics.md` gives the static-semantics rules: type identity, compatibility,
+  conversions, expression typing, overload resolution, and storage layout.
+- `kp-builtins.md` gives the signature reference for the predefined routines.
+- `kp-evaluation.md` gives the dynamic semantics: evaluation order, arithmetic
+  behavior, comparison, default values, traps, and output formatting.
 - `kobold.md` explains how the compiler and runtime work, and how the language lowers.
 - `kp-abi.md` specifies the host boundary that `external` routines and handle types cross.
 - `kp-module-format.md` specifies the KPM1 module the front end emits.
@@ -50,17 +55,19 @@ the same name, and `Begin` is the keyword `begin`.
 Reserved words:
 
 ```
-and array begin bind break buffer case const continue div do downto else end
-external for forward function if implement implementation in interface mod nil
-not of or procedure program property record ref repeat set shared shl shr slice
-start string then to type unit until uses var while with yield
+and array as begin bind break buffer case const continue div do downto else end
+external for forward function if implement implementation in interface map mod
+nil not of or procedure program property record reexport ref repeat set shared
+shl shr slice start string then to type unit until uses var while with yield
 ```
 
-`ref`, `slice`, and `property` are reserved but not parsed: `ref` named a dropped reference
-array, `slice` is held for a future windowed view, and `property` belongs to a separately
-scheduled feature. `out`, `cdecl`, `export`, `as`, `read`, `write`, and `reexport` are
-contextual: they act as keywords only where a routine, `uses`, or property declaration expects
-them, so an ordinary identifier may still carry one of these names.
+`ref` and `slice` are reserved but not parsed: `ref` named a dropped reference array and
+`slice` is held for a future windowed view. `map` opens `map of T`, `as` is the import alias
+in a `uses` clause, and `reexport` names a unit's re-exported surface. `property` declares an
+accessor-backed value with uniform access, as a declaration or a computed record field (see
+`kp-property.md`). `out`, `cdecl`, `export`, `read`, and `write` are contextual: they act as
+keywords only where a routine or property declaration expects them, so an ordinary
+identifier may still carry one of these names.
 
 ## Constants and literals
 
@@ -99,8 +106,9 @@ const
 Each value is a constant expression. An ordinal value may use the usual constant arithmetic
 (`+`, `-`, `*`, `div`, `mod`, shifts, and bitwise operators); a real value must be a signed
 literal, since real constant arithmetic is not folded. A value cannot call a function. A real
-constant is allowed as a record field or an array element, but a plain scalar real constant
-is not supported yet.
+or single-precision constant is allowed as a plain scalar, as a record field, and as an array
+element. A scalar real or single const reads as its value wherever the type is expected; an
+integer value given a real type is promoted (`const Tau: real = 6` is 6.0).
 
 ## Types
 
@@ -257,6 +265,24 @@ end;
 The fields of the largest variant determine the record's size, and the variant fields
 share the same offset.
 
+A **computed field** reads and writes like a stored field but runs accessor methods of
+the record. It names a getter and, optionally, a setter; with only a getter it is read-only:
+
+```pascal
+type Temp = record
+  c: integer;
+  f: integer read getF write setF;   { Fahrenheit over a Celsius cell }
+end;
+
+function getF for (t: Temp): integer;
+begin getF := t.c * 9 div 5 + 32; end;
+
+procedure setF for (t: Temp)(v: integer);
+begin t.c := (v - 32) * 5 div 9; end;
+```
+
+See [Properties](#properties) and `kp-property.md`.
+
 ### Sets
 
 A set holds a subset of a small ordinal base type:
@@ -270,6 +296,13 @@ if c in ['a'..'z'] then ...
 Set operators are `+` (union), `-` (difference), `*` (intersection), and `in`
 (membership). A set literal is written with brackets, and `[]` is the empty set.
 
+A set is a value, so it can be a record field, a fixed-array element, a
+dynamic-array element, or a map value. A set carries no references, so a
+dynamic array or map of sets needs no per-element handle tracking: a small set
+(up to 64 values, one machine word) is stored like any ordinal, a larger set is
+blitted into its slot like a record. Assignment copies the set by value, so a
+set read out of or written into a collection is independent of the source.
+
 ### Handle and interface types
 
 An `interface` type is a handle: an opaque reference to a host-owned object, reached
@@ -281,6 +314,34 @@ explicitly. Handle types and their methods are provided by the host and specifie
 ### The process type
 
 `process` is the handle type of a coroutine. See [Coroutines](#coroutines).
+
+## Properties
+
+A `property` presents as a value but reads and writes through accessor routines (uniform
+access). A read calls the getter; a write calls the setter; with only a `read` accessor it
+is read-only:
+
+```pascal
+var backingVol: integer;
+function getVolume: integer;
+begin getVolume := backingVol; end;
+procedure setVolume(v: integer);
+begin backingVol := v; end;
+
+property volume: integer read getVolume write setVolume;
+property maxVolume: integer read getMax;   { read-only: no write accessor }
+```
+
+A declaration-level property's accessors are free routines: a parameterless function of the
+property type, and a one-argument procedure taking that type. A property may name an
+accessor declared later in the same part. A property is not a stored cell, so it has no
+address: it cannot be passed by reference or have its address taken. A record may carry a
+computed field with the same form, where the accessors are methods of the record (see
+[Records](#records)).
+
+For now a property carries a simple value (an ordinal, a real, or a 64-bit integer).
+Handle and aggregate property types, cross-module (unit interface) properties, and inline
+accessor bodies are deferred. See `kp-property.md`.
 
 ## Expressions and operators
 
@@ -312,8 +373,8 @@ so the self-hosted and native compilers emit identical code.
   parentheses.
 - **Compound.** `begin ... end` groups a sequence separated by semicolons.
 - **if.** `if cond then stmt` with an optional `else stmt`.
-- **case.** Selects on an ordinal value; labels may be single values or ranges, with an
-  optional `else` branch:
+- **case.** Selects on an ordinal value or a string; labels may be single values or, for an
+  ordinal selector, ranges, with an optional `else` branch:
 
   ```pascal
   case c of
@@ -321,6 +382,18 @@ so the self-hosted and native compilers emit identical code.
     '0'..'9': writeln('digit');
   else
     writeln('other');
+  end;
+  ```
+
+  A string selector matches each label by value, so a whole word can drive the selection.
+  String labels are discrete values, not ranges:
+
+  ```pascal
+  case command of
+    'north', 'n': go(dirNorth);
+    'quit': done := true;
+  else
+    writeln('unknown command');
   end;
   ```
 
@@ -429,6 +502,8 @@ host calls into a module without running `main`. See the two-stage boot in `kobo
 ## Built-in routines
 
 These names are predefined. They are not reserved words, so a program may shadow them.
+The table below is a quick index; `kp-builtins.md` is the signature reference, with
+each routine's argument rules, result type, and trap behavior.
 
 | Routine | Purpose |
 |---|---|
@@ -452,7 +527,7 @@ These names are predefined. They are not reserved words, so a program may shadow
 | `tryget(m, k, v)` | if key `k` is in map `m`, copy its value to `v` and return true, else false |
 | `mapfirst(m)` | a `mapiter` cursor over map `m` |
 | `mapnext(it, k, v)` | write the next entry's key and value through the cursor; false at the end |
-| `str(x, s)` | format `x` (integer or real) into string `s` |
+| `str(x, s)` | format an integer (or int64) `x` into string `s` |
 | `val(s, x, code)` | parse `s` into `x`; `code` is 0 on success, else the error position |
 | `inc(x [, d])` / `dec(x [, d])` | add or subtract 1 (or `d`) in place |
 | `exit` / `exit(v)` | return from the current routine, optionally with a result |

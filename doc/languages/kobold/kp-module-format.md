@@ -293,13 +293,20 @@ subset:
 The front end now lowers the whole language, so the memory, real, 64-bit, and
 call opcodes above are all emitted, not just the initial integer subset.
 
-**Kobold extension opcodes.** A few opcodes sit above the vendored Skjegg set,
-defined in `src/kpm.h` so the vendored sources stay unedited:
+**Overflow, debug, and failable opcodes.** These are part of the shared Skjegg IR
+(the `ir.h` opcode enum, not a layered Kobold-only set), and `ir.md` specifies them
+with the rest. The ones the Kobold front end emits beyond the plain integer, memory,
+real, 64-bit, and call opcodes are:
 
-- `ADDO SUBO MULO`: checked add, subtract, and multiply. Emitted under `{$Q+}`;
-  the JIT traps `OVERFLOW` on signed 32-bit overflow.
-- `LOC imm=<line>`: a source-line marker emitted under `-g`. It produces no code;
-  the JIT records it in the module's address-to-line table.
+- `ADDO SUBO MULO`: checked add, subtract, and multiply. The front end emits them
+  under `{$Q+}`; the JIT traps `OVERFLOW` on signed 32-bit overflow.
+- `LOC imm=<line>`: a source-line marker the front end emits under `-g`. It produces
+  no code; the JIT records it in the module's address-to-line table.
+- `CALL2 CALLI2 RETV2`: the two-register failable call and return forms. A `fails`
+  routine with an ordinal-class result returns its value and the error signal in two
+  registers (`RETV2`); a failable call delivers the value in `dst` and stores the
+  error signal into the given `slot` (`CALL2`/`CALLI2`). The failable error model is
+  in `kp-errors.md` and the ABI in `kp-abi.md`.
 
 Coroutines add no opcodes: `start`/`yield`/`bind`/resume/`release` lower to ordinary
 `CALL`/`CALLI` to the coroutine runtime helpers (`kp-abi.md`), so the reader needs no
@@ -442,19 +449,47 @@ The declaration lines emitted so far, one entry per exported item, are:
 .type <name> enum <member>...
 .type <name> opaque <size> <align>
 .type <name> record <size> <align> ( <field-name> <type> <offset>... )
-.type <name> handle ( <method-name> ( <mode> <type>... ) -> <type>... )
+.type <name> handle ( <method-name> <signature>... )
 .const <name> <type> <value>
 .const <name> <type>                  # a link-time constant: value in an exported read-only global
 .var <name> <type> [shared]
-.routine <name> ( <mode> <type>... ) -> <type>
-.method <receiver-type> <name> ( <mode> <type>... ) -> <type>   # receiver-type is <type> or <unit>.<type>
+.routine <name> <signature>
+.method <receiver-type> <name> <signature>   # receiver-type is <type> or <unit>.<type>
 ```
 
-A `<type>` is a built-in scalar by name (`integer`, `int64`, `boolean`, `char`, `string`,
-`real`, `single`, `void`), an exported type by its own name (an `enum` or `record`), or, for
-a type with no interface form yet (a handle, array, set, or subrange), a fall-back
-ABI class (`int`, `int64`, `float`) a consumer reads as the integer or real class. A
-`<mode>` is `val`, `var`, `const`, or `out`. Type entries are emitted before the entries
+**Signatures.** A routine, a method, and a handle type's method share one signature
+form: a parenthesized parameter list, an arrow, the result type, and an optional
+failability marker.
+
+```
+<signature> = '(' { <mode> <type> } ')' '->' <type> [ 'fails' ]
+```
+
+The `fails` marker is present exactly when the routine or method is failable (see
+`kp-errors.md`); its absence means infallible, and it is part of the interface
+fingerprint. The result type is `void` for a procedure. A `<mode>` is the parameter
+passing mode: `val` (by value, the default), `var` (by reference, read-write), `const`
+(by reference, read-only), or `out` (by reference, write).
+
+**Type tokens.** A `<type>` renders by one of these rules, in order:
+
+```
+<type> = 'integer' | 'int64' | 'boolean' | 'char' | 'string' | 'real' | 'single' | 'void'
+       | <name>                        # an exported enum, record, or handle (interface) type
+       | 'int' | 'int64' | 'float'     # the ABI-class fallback for any other type
+```
+
+A built-in scalar renders as its own keyword, and `void` is the result of a procedure.
+A named exported `enum`, `record`, or `handle` (interface) type renders as that type's
+own name, which the reader resolves against the `.type` entries read earlier. Every
+other type, one with no named interface form, renders as its fallback ABI class:
+`float` for a real, `int64` for a 64-bit integer, and `int` for everything else, which
+in practice means a dynamic array, a map, a set, a subrange, or a fixed array. The
+fallback carries only the value's ABI width, not its structural shape, so a consumer
+binds to it as the integer or real class and cannot reconstruct the original element,
+bound, or member type. This is the one lossy point in the interface: a parameter or
+result whose exact type a consumer must name should use a named exported type. Type
+entries are emitted before the entries
 that reference them, so a consumer reading the section top to bottom resolves a forward
 type reference. A `.type ... enum` lists its members in order, each a compile-time constant
 of that type. A `.type ... record` gives an exported record's size, alignment, and each
@@ -498,10 +533,45 @@ binding a method thunk that calls `kp_dispatch_to`. There is no runtime-typed di
 slot is resolved at link with `kp_type_method`, so `kp_dispatch_to` is the only dispatch path.
 
 A consumer reads only the interface to type-check against the unit; the backend that
-links or loads it reads the `functions` bodies. The interface also carries a fingerprint, a
-32-bit hash over the rendered entry lines, and a consumer records the fingerprint it saw
+links or loads it reads the `functions` bodies. The interface also carries a fingerprint,
+a 32-bit hash over the rendered entry lines, and a consumer records the fingerprint it saw
 for each dependency, so the loader rejects a stale consumer rather than linking against the
 wrong interface. The unit design that drives the interface is in `kp-units.md`.
+
+**The fingerprint hash.** The value on the `.interface fingerprint` line is computed as
+follows, so a clean-room reader can reproduce it exactly.
+
+The input is the block of entry lines in a fixed canonical order, independent of source
+order. The entries are emitted in two passes: the first pass emits every `.type` entry,
+and the second emits the `.const`, `.var`, `.routine`, and `.method` entries. Within each
+pass the entries follow the unit's source declaration order, and the names re-exported
+from a dependency follow the unit's own entries of that pass. Types come first so that a
+later entry referencing an exported type resolves when the section is read top to bottom.
+The hashed input (the "blob") is the concatenation of these entry lines, **each followed
+by a single newline byte** (`0x0A`), in that order. The `.interface fingerprint` line
+itself and the closing `.endinterface` are not part of the blob, and no separator other
+than the per-entry newline is added.
+
+The hash is a 32-bit unsigned rolling hash with the structure of FNV-1a but using addition
+in place of exclusive-or (the dialect that implements the compiler has no `xor` operator).
+Starting from `h = 2166136261` (the FNV-1a 32-bit offset basis), for each byte `b` of the
+blob, taken as its unsigned 0..255 value:
+
+```
+h = (h * 16777619 + b) mod 2^32
+```
+
+where `16777619` is the FNV-1a 32-bit prime. The final `h` is written as an unsigned
+decimal integer. Masking every step to 32 bits makes the value identical on any host.
+
+Because each entry renders a routine or method signature as parameter modes and types with
+no parameter names, renaming a parameter leaves the fingerprint unchanged. A link-time
+constant's value is carried by an exported global, not the interface, so changing that
+value does not move the fingerprint. Private declarations and function bodies are not in
+the interface and never affect it. Changing an exported name, an exported type's shape
+(including a transparent record's size, alignment, or field layout), a signature, a mode,
+an exported var's type, or an inline const's value does change the rendered entry and so
+changes the fingerprint.
 
 **Skipping unknown sections.** For forward compatibility, an extensible section is a
 self-delimiting block introduced by a marked directive:
