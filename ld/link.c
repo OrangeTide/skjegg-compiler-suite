@@ -390,6 +390,89 @@ ld_check_undefined(struct linker *ld)
     }
 }
 
+/* Order two global symbols for the map: by address, then by name.  Shared. */
+static int
+map_sym_cmp(const void *pa, const void *pb)
+{
+    const struct ld_symbol *a = *(const struct ld_symbol *const *)pa;
+    const struct ld_symbol *b = *(const struct ld_symbol *const *)pb;
+    if (a->value < b->value) return -1;
+    if (a->value > b->value) return 1;
+    return strcmp(a->name, b->name);
+}
+
+/* Write a link map: the entry point, the memory regions, each output section
+ * with the input sections that built it, and the defined global symbols by
+ * address.  Called after the link (addresses are final).  Shared by every
+ * target, since it reads only the arch-neutral layout result.  Shared. */
+void
+ld_write_map(struct linker *ld, const char *path)
+{
+    FILE *f = fopen(path, "w");
+    if (!f)
+        die("cannot create %s", path);
+
+    struct ld_script *sc = &ld->script;
+
+    fprintf(f, "Skjegg link map\n\n");
+    fprintf(f, "Entry point: 0x%08x\n\n", ld->entry_vaddr);
+
+    if (sc->nregions > 0) {
+        fprintf(f, "Memory configuration:\n");
+        for (int r = 0; r < sc->nregions; r++) {
+            struct ld_mem_region *mr = &sc->regions[r];
+            fprintf(f, "  %-12s origin 0x%08x  length 0x%08x (%u bytes)\n",
+                    mr->name, mr->origin, mr->length, mr->length);
+        }
+        fprintf(f, "\n");
+    }
+
+    fprintf(f, "Output sections:\n");
+    for (int s = 0; s < sc->nsections; s++) {
+        struct ld_output_sec *os = &sc->sections[s];
+        if (os->discard || os->size == 0)
+            continue;
+        fprintf(f, "  %-12s 0x%08x  0x%08x%s\n", os->name, os->vaddr,
+                os->size, os->nobits ? "  (nobits)" : "");
+        /* the input sections that landed in this output section */
+        for (int o = 0; o < ld->nobjs; o++) {
+            struct ld_object *obj = &ld->objs[o];
+            for (int i = 0; i < obj->nsections; i++) {
+                struct ld_input_sec *isec = &obj->sections[i];
+                if (!isec->matched)
+                    continue;
+                if (ld_find_output_sec(ld, isec) != os)
+                    continue;
+                fprintf(f, "    0x%08x  0x%08x  %s(%s)\n",
+                        isec->assigned_vaddr, isec->size, obj->path,
+                        isec->name);
+            }
+        }
+    }
+    fprintf(f, "\n");
+
+    /* defined global symbols, by address */
+    const struct ld_symbol **order =
+        arena_alloc(&ld->arena, (size_t)ld->nsyms * sizeof *order);
+    int n = 0;
+    for (int i = 0; i < ld->nsyms; i++) {
+        if (ld->syms[i].defined && ld->syms[i].name[0] != '\0')
+            order[n++] = &ld->syms[i];
+    }
+    qsort(order, (size_t)n, sizeof *order, map_sym_cmp);
+
+    fprintf(f, "Symbols:\n");
+    for (int i = 0; i < n; i++) {
+        const struct ld_symbol *sym = order[i];
+        const char *from = "";
+        if (sym->obj_idx >= 0 && sym->obj_idx < ld->nobjs)
+            from = ld->objs[sym->obj_idx].path;
+        fprintf(f, "  0x%08x  %-24s %s\n", sym->value, sym->name, from);
+    }
+
+    fclose(f);
+}
+
 int
 ld_link(struct linker *ld)
 {

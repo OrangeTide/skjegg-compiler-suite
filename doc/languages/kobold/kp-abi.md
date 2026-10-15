@@ -56,7 +56,7 @@ arguments one at a time would clobber a source that a later argument still
 needs. (Integer arguments never hit this: the integer temp homes `rbx,r12..r15`
 are disjoint from the argument registers `rdi..r9`.) The current backend handles
 it the simple way: when a call has two or more float register arguments, it
-**stages them through a small scratch area** on the stack (reserved just above
+stages them through a small scratch area on the stack (reserved just above
 the overflow arguments). Each float source is read into `xmm8` and stored to
 that scratch before any `xmm0..7` argument register is written, then the
 argument registers are loaded back from the scratch. A single float register
@@ -616,7 +616,7 @@ helper through a vm-baked thunk `kp_link` provides; it is off by default (truste
 The `{$Q+}` checks cover 32-bit add, subtract, and multiply only: `int64`
 arithmetic and unary negation are never checked. Integer division has one
 overflow case, the most negative 32-bit value divided by `-1` (true quotient
-2^31, unrepresentable), and that `OVERFLOW` is **always checked**, independent
+2^31, unrepresentable), and that `OVERFLOW` is always checked, independent
 of `{$Q+}`, like divide-by-zero: under the guarded policy every backend tests
 the operand pair before the signed divide (or its `mod`) and calls
 `kp_trap_overflow`, since the hardware behavior is unusable (x86 `#DE`,

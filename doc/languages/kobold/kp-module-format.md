@@ -364,8 +364,8 @@ version may change the encoding (for example a binary form) or extend the tables
 a backend refuses a version it does not implement, and the front end writes the
 lowest version that expresses the program.
 
-**Version 1 text is the format, and a binary version 2 is indefinitely deferred, not
-planned.** Modules are small and loaded once at startup, so parse speed and byte size
+Version 1 text is the format, and a binary version 2 is indefinitely deferred, not
+planned. Modules are small and loaded once at startup, so parse speed and byte size
 are not bottlenecks, and the text form is readable, diffable, and fuzz-hardened. A
 binary form would add a second serializer and reader to maintain and fuzz for wins
 that do not matter at this scale. Format growth within version 1 rides the reserved

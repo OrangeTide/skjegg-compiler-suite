@@ -781,19 +781,18 @@ build/kpfree-rv/soft64.o: runtime/soft64.c build/skj-cc-rv build/skj-as-rv Makef
 build/kpfree-rv/kp_crt_rv.o: kobold/kp_crt_rv.S build/skj-as-rv | build/kpfree-rv
 	./build/skj-as-rv -o $@ $<
 
-# The i64 helpers use GNU pseudo-ops (tail) skj-as-rv does not have; they are
-# prebuilt library pieces, so the rv cross assembler builds them (the hosted
-# archive assembles the same sources with its cross assembler).
-build/kpfree-rv/rv_i64_aot_alias.o: kobold/rv_i64_aot_alias.S | build/kpfree-rv
-	$(RV_CC) $(RV_ARCH) -fno-pic -mno-relax -c -o $@ $<
+# The i64 helpers (tail-jumps into the skj_jit_* routines) and the coroutine
+# context switch (fsd/fld) assemble with skj-as-rv: it has the tail pseudo and
+# the double float/store forms, so the freestanding tier needs no external
+# toolchain (co_free.c goes through the generic C rule above).
+build/kpfree-rv/rv_i64_aot_alias.o: kobold/rv_i64_aot_alias.S build/skj-as-rv | build/kpfree-rv
+	./build/skj-as-rv -o $@ $<
 
-build/kpfree-rv/rv_jit_i64.o: jit/rv_jit_i64.S | build/kpfree-rv
-	$(RV_CC) $(RV_ARCH) -fno-pic -mno-relax -c -o $@ $<
+build/kpfree-rv/rv_jit_i64.o: jit/rv_jit_i64.S build/skj-as-rv | build/kpfree-rv
+	./build/skj-as-rv -o $@ $<
 
-# The coroutine context switch uses fsd/fld, so the rv cross assembler builds it
-# (like the i64 helpers); co_free.c goes through the generic rule above.
-build/kpfree-rv/co_switch_rv.o: runtime/co_switch_rv.S | build/kpfree-rv
-	$(RV_CC) $(RV_ARCH) -fno-pic -mno-relax -c -o $@ $<
+build/kpfree-rv/co_switch_rv.o: runtime/co_switch_rv.S build/skj-as-rv | build/kpfree-rv
+	./build/skj-as-rv -o $@ $<
 
 # The host-seam syscall wrappers (ecall) live in asm rather than io_free.c, so a
 # compiler without extended inline asm (skj-cc-rv) can build the console C.

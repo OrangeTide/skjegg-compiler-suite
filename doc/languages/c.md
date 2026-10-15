@@ -214,7 +214,3 @@ Not yet implemented, with no fundamental obstacle:
 - `_Noreturn`.
 - The `_Pragma` operator.
 - Old-style (K&R) function definitions.
-- Every by-value struct pass and return is supported on every target, including
-  a struct with 8-byte-aligned members on MIPS o32 and a postfix `.member` /
-  `[index]` / address-of taken directly on a struct-returning call result.
-- Braced scalar initializers with more than one element.

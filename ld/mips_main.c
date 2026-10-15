@@ -17,7 +17,7 @@ usage(void)
 {
     fprintf(stderr,
             "usage: skj-ld-mips [-V] [-T script.ld] [-e entry] [-f fmt]"
-            " -o output input.o [...]\n"
+            " [-Map map] -o output input.o [...]\n"
             "\n"
             "MIPS I static linker.  Reads ELF32 little-endian EM_MIPS\n"
             "relocatable objects and writes an executable.\n"
@@ -34,6 +34,7 @@ main(int argc, char **argv)
     const char *script_path;
     const char *entry_override;
     const char *output_path;
+    const char *map_path;
     const char **inputs;
     int ninputs;
     int psexe;                  /* 0 ELF (default), 1 PS-EXE */
@@ -44,6 +45,7 @@ main(int argc, char **argv)
     script_path = NULL;
     entry_override = NULL;
     output_path = NULL;
+    map_path = NULL;
     inputs = NULL;
     ninputs = 0;
     psexe = 0;
@@ -68,6 +70,9 @@ main(int argc, char **argv)
         } else if (strcmp(argv[i], "-o") == 0) {
             if (++i >= argc) usage();
             output_path = argv[i];
+        } else if (strcmp(argv[i], "-Map") == 0) {
+            if (++i >= argc) usage();
+            map_path = argv[i];
         } else if (argv[i][0] == '-') {
             die("unknown option: %s", argv[i]);
         } else {
@@ -131,6 +136,8 @@ main(int argc, char **argv)
     free(archives);
 
     mips_ld_link(&ld);
+    if (map_path)
+        ld_write_map(&ld, map_path);
     if (psexe)
         mips_ld_write_psexe(&ld, output_path);
     else

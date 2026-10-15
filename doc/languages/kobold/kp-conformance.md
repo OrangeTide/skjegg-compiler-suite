@@ -212,11 +212,8 @@ clumsy and dropped on those grounds: the `write` / `read` field-width and precis
 formatting (`x:width[:decimals]`), where a script formats through the string builtins
 or a host routine instead.
 
-The unit and separate-compilation system is implemented. A program or `unit` compiles
-to a KPM1 module and links against precompiled units through `uses`, with selective
-imports, renames, re-export, cross-unit types and methods, exported globals,
-exported constants, and `implement I for R` trait conformance. `kpbundle` packages
-a program with its units into one self-contained module. The design is in `kp-units.md`.
+The unit and separate-compilation system is implemented; its design is in
+`kp-units.md`.
 
 Observable-behavior pins. The `conf_*` programs in `tests/kp-corpus` are a
 conformance set that locks the documented corner cases in place: integer div/mod

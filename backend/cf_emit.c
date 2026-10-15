@@ -2238,66 +2238,88 @@ emit_global_head(FILE *out, struct ir_global *g)
     fprintf(out, "%s:\n", g->name);
 }
 
+/* emit a global's initialized byte image (the content after its label). */
+static void
+emit_global_def(FILE *out, struct ir_global *g)
+{
+    int elsz = global_elsz(g);
+
+    if (g->is_strobj) {
+        /* A static Kobold string object: the {refcount, kind, len} header
+           in target endianness, then the text and a trailing NUL.  Emitting
+           the header words as .long keeps them big-endian on ColdFire, where
+           str_core.c reads them with native loads (a header baked into the
+           KPM as little-endian bytes would be byte-swapped). */
+        fprintf(out, "\t.long 0x%08x\n", 0xffffffffu);  /* KP_RC_STATIC */
+        fprintf(out, "\t.long 0x%08x\n", 1u);           /* KP_OBJ_STRING */
+        fprintf(out, "\t.long %d\n", g->init_strlen);   /* byte length */
+        if (g->init_strlen > 0)
+            emit_string_bytes(out, g->init_string, g->init_strlen);
+        fprintf(out, "\t.byte 0\n");                    /* trailing NUL */
+    } else if (g->inits) {
+        emit_init_image(out, g);
+    } else if (g->init_string) {
+        emit_string_bytes(out, g->init_string, g->init_strlen);
+    } else {
+        int k;
+        for (k = 0; k < g->init_count; k++) {
+            if (g->init_syms && g->init_syms[k]) {
+                char ref[160];
+                fprintf(out, "\t.long %s\n",
+                    sym_ref(ref, sizeof ref, g->init_syms[k],
+                            g->init_ivals[k]));
+            } else if (g->base_type == IR_F64 ||
+                 g->base_type == IR_I64) {
+                uint64_t bits = (uint64_t)g->init_ivals[k];
+                fprintf(out, "\t.long 0x%08x\n",
+                    (unsigned)(bits >> 32));
+                fprintf(out, "\t.long 0x%08x\n",
+                    (unsigned)(bits & 0xFFFFFFFF));
+            } else if (elsz == 1)
+                fprintf(out, "\t.byte %" PRId64 "\n",
+                    g->init_ivals[k]);
+            else if (elsz == 2)
+                fprintf(out, "\t.short %" PRId64 "\n",
+                    g->init_ivals[k]);
+            else
+                fprintf(out, "\t.long %" PRId64 "\n",
+                    g->init_ivals[k]);
+        }
+        if (g->arr_size > g->init_count)
+            fprintf(out, "\t.space %d\n",
+                (g->arr_size - g->init_count) * elsz);
+    }
+}
+
 static void
 emit_globals(FILE *out, struct ir_program *prog)
 {
     struct ir_global *g;
     int any_bss = 0;
+    int any_ro = 0;
 
     fputs("\n\t.data\n", out);
     for (g = prog->globals; g; g = g->next) {
-        int elsz = global_elsz(g);
-
         if (global_is_bss(g)) {
             any_bss = 1;
             continue;
         }
+        if (g->is_rodata) {
+            any_ro = 1;
+            continue;
+        }
         emit_global_head(out, g);
-        if (g->is_strobj) {
-            /* A static Kobold string object: the {refcount, kind, len} header
-               in target endianness, then the text and a trailing NUL.  Emitting
-               the header words as .long keeps them big-endian on ColdFire, where
-               str_core.c reads them with native loads (a header baked into the
-               KPM as little-endian bytes would be byte-swapped). */
-            fprintf(out, "\t.long 0x%08x\n", 0xffffffffu);  /* KP_RC_STATIC */
-            fprintf(out, "\t.long 0x%08x\n", 1u);           /* KP_OBJ_STRING */
-            fprintf(out, "\t.long %d\n", g->init_strlen);   /* byte length */
-            if (g->init_strlen > 0)
-                emit_string_bytes(out, g->init_string, g->init_strlen);
-            fprintf(out, "\t.byte 0\n");                    /* trailing NUL */
-        } else if (g->inits) {
-            emit_init_image(out, g);
-        } else if (g->init_string) {
-            emit_string_bytes(out, g->init_string,
-                      g->init_strlen);
-        } else {
-            int k;
-            for (k = 0; k < g->init_count; k++) {
-                if (g->init_syms && g->init_syms[k]) {
-                    char ref[160];
-                    fprintf(out, "\t.long %s\n",
-                        sym_ref(ref, sizeof ref, g->init_syms[k],
-                                g->init_ivals[k]));
-                } else if (g->base_type == IR_F64 ||
-                     g->base_type == IR_I64) {
-                    uint64_t bits = (uint64_t)g->init_ivals[k];
-                    fprintf(out, "\t.long 0x%08x\n",
-                        (unsigned)(bits >> 32));
-                    fprintf(out, "\t.long 0x%08x\n",
-                        (unsigned)(bits & 0xFFFFFFFF));
-                } else if (elsz == 1)
-                    fprintf(out, "\t.byte %" PRId64 "\n",
-                        g->init_ivals[k]);
-                else if (elsz == 2)
-                    fprintf(out, "\t.short %" PRId64 "\n",
-                        g->init_ivals[k]);
-                else
-                    fprintf(out, "\t.long %" PRId64 "\n",
-                        g->init_ivals[k]);
-            }
-            if (g->arr_size > g->init_count)
-                fprintf(out, "\t.space %d\n",
-                    (g->arr_size - g->init_count) * elsz);
+        emit_global_def(out, g);
+    }
+
+    /* initialized, read-only globals (const): same bytes, .rodata section */
+    if (any_ro) {
+        fputs("\n\t.section .rodata\n", out);
+        for (g = prog->globals; g; g = g->next) {
+            if (global_is_bss(g) || !g->is_rodata)
+                continue;
+            emit_global_head(out, g);
+            emit_global_def(out, g);
         }
     }
 

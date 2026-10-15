@@ -45,6 +45,7 @@ struct operand {
 enum section_id {
     SEC_TEXT,
     SEC_DATA,
+    SEC_RODATA,
     SEC_BSS,
     SEC_COUNT,
 };

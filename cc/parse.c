@@ -310,6 +310,20 @@ layout_union(struct cc_type *t)
     t->align = max_align;
 }
 
+/* Return a const-qualified copy of a type.  A copy, not an in-place stamp,
+   because the base scalars are shared singletons and a typedef or tag type is
+   shared through its table; qualifying one in place would qualify every use.
+   Type comparison in cc is structural (by kind and size), so the copy behaves
+   identically to the original apart from the qualifier. */
+static struct cc_type *
+cc_type_const(struct cc_type *t)
+{
+    struct cc_type *u = arena_alloc(parse_arena, sizeof *u);
+    *u = *t;
+    u->is_const = 1;
+    return u;
+}
+
 /* parse declaration specifiers (type + storage class) */
 static struct cc_type *
 parse_declspec(int *is_static, int *is_extern, int *is_typedef)
@@ -318,6 +332,7 @@ parse_declspec(int *is_static, int *is_extern, int *is_typedef)
     int is_unsigned = 0;
     int is_signed = 0;
     int is_bool = 0;
+    int saw_const = 0;
     int base = -1;
     int long_count = 0;
     struct cc_type *result = NULL;
@@ -350,7 +365,11 @@ parse_declspec(int *is_static, int *is_extern, int *is_typedef)
             next();
             declspec_inline = 1;        /* an inline definition may be omitted */
             continue;
-        case TOK_CONST: case TOK_VOLATILE:
+        case TOK_CONST:
+            next();
+            saw_const = 1;
+            continue;
+        case TOK_VOLATILE:
         case TOK_RESTRICT:
             next();
             continue;
@@ -549,6 +568,11 @@ done:
         result->is_unsigned = is_unsigned;
         result->is_bool = is_bool;
     }
+    /* a leading const (const int, const struct S, const T) qualifies the base;
+       a const after a * (int * const) is a pointer qualifier, in the
+       declarator */
+    if (saw_const)
+        result = cc_type_const(result);
     return result;
 }
 
@@ -670,10 +694,14 @@ parse_declarator(struct cc_type *base, char **name_out)
     /* pointer prefixes */
     while (consume(TOK_STAR)) {
         base = cc_type_ptr(parse_arena,base);
-        /* skip qualifiers after * */
+        /* qualifiers after a * apply to the pointer itself (int * const p is a
+           const pointer).  base is the fresh pointer type, safe to stamp. */
         while (peek().kind == TOK_CONST || peek().kind == TOK_VOLATILE ||
-               peek().kind == TOK_RESTRICT)
+               peek().kind == TOK_RESTRICT) {
+            if (peek().kind == TOK_CONST)
+                base->is_const = 1;
             next();
+        }
     }
 
     struct cc_type *inner = NULL;

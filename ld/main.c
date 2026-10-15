@@ -16,7 +16,7 @@ static void
 usage(void)
 {
     fprintf(stderr,
-            "usage: skj-ld [-V] [-T script.ld] [-e entry] -o output"
+            "usage: skj-ld [-V] [-T script.ld] [-e entry] [-Map map] -o output"
             " input.o [...]\n");
     exit(1);
 }
@@ -27,6 +27,7 @@ main(int argc, char **argv)
     const char *script_path;
     const char *entry_override;
     const char *output_path;
+    const char *map_path;
     const char **inputs;
     int ninputs;
     struct linker ld;
@@ -36,6 +37,7 @@ main(int argc, char **argv)
     script_path = NULL;
     entry_override = NULL;
     output_path = NULL;
+    map_path = NULL;
     inputs = NULL;
     ninputs = 0;
     for (int i = 1; i < argc; i++) {
@@ -51,6 +53,9 @@ main(int argc, char **argv)
         } else if (strcmp(argv[i], "-o") == 0) {
             if (++i >= argc) usage();
             output_path = argv[i];
+        } else if (strcmp(argv[i], "-Map") == 0) {
+            if (++i >= argc) usage();
+            map_path = argv[i];
         } else if (argv[i][0] == '-') {
             die("unknown option: %s", argv[i]);
         } else {
@@ -114,6 +119,10 @@ main(int argc, char **argv)
 
     /* link */
     ld_link(&ld);
+
+    /* write the link map before the executable, while the layout is live */
+    if (map_path)
+        ld_write_map(&ld, map_path);
 
     /* write executable */
     ld_write_exec(&ld, output_path);

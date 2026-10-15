@@ -1,0 +1,2 @@
+# A braced scalar initializer with excess elements must not compile.
+braced initializer for scalar type must hold a single value

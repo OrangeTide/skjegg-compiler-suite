@@ -21,21 +21,21 @@ run.
 with a C front end: it needs an existing Kobold compiler. That stage0 compiler is
 a committed, generated artifact under `prebuild/`:
 
-- `kpcom.kpm` — the seed (stage0): the KPM1 module (serialized shared IR) that
+- `kpcom.kpm`: the seed (stage0): the KPM1 module (serialized shared IR) that
   `kpcom` emits when it compiles its own source. It is a verified self-host fixed
   point (`make update-kpcom`: the stage-1 module and the stage-2 module re-emitted
   from it are byte-identical). It is the only prebuilt artifact in the Kobold path;
   everything else is source. It is what the Kobold tools JIT and AOT-compile.
-- `kpcom.manifest` — a source-based staleness fingerprint plus integrity data.
+- `kpcom.manifest`: a source-based staleness fingerprint plus integrity data.
   `fingerprint` is the SHA-256 over the emit inputs in order (`kpcom.pas`,
   `version.inc`, `stdlib.inc`); `emit-flags` are the `kpcom` arguments that wrote
   the seed (`--emit-kpm`); `kpm-sha256`/`kpm-bytes` are the seed's integrity.
 
 The front-end source itself lives in `kobold/`, beside the runtime and reader:
 
-- `kobold/kpcom.pas` — the whole front end (lexer, parser, semantics, IR, KPM1
+- `kobold/kpcom.pas`: the whole front end (lexer, parser, semantics, IR, KPM1
   writer), one Pascal file.
-- `kobold/version.inc`, `kobold/stdlib.inc` — the two `{$I ...}` includes
+- `kobold/version.inc`, `kobold/stdlib.inc`: the two `{$I ...}` includes
   `kpcom.pas` pulls in (`KP_VERSION`, `KP_STDLIB`). Their bytes are compiled into
   the IR as string constants (the stdlib path in particular), so the seed
   reproduces byte-identically only when regenerated against these same includes.
@@ -152,25 +152,25 @@ the header `.kpm 1`.
 
 ### Top-level directives
 
-- `.kpm 1` — header and version (required, first).
-- `.target <name>` — a target hint (optional).
-- `.module <kind> [name]` — `kind` is `object` (the default: a compiled unit
+- `.kpm 1`: header and version (required, first).
+- `.target <name>`: a target hint (optional).
+- `.module <kind> [name]`: `kind` is `object` (the default: a compiled unit
   for linking), `library`, or `executable`. An `object` carries its own unit
   name so a consumer's `.uses` can be matched against it.
-- `.entry <routine>` — the entry routine of an executable.
-- `.uses <name> [fingerprint <n>]` — a direct unit dependency and the interface
+- `.entry <routine>`: the entry routine of an executable.
+- `.uses <name> [fingerprint <n>]`: a direct unit dependency and the interface
   fingerprint it was compiled against. The linker checks the fingerprint
   against the loaded dependency's own, rejecting interface skew.
-- `.interface fingerprint <n> ... .endinterface` — a self-delimiting interface
+- `.interface fingerprint <n> ... .endinterface`: a self-delimiting interface
   block a consumer type-checks against. The reader records only the fingerprint
   and skips the body.
-- `.file "<path>"` — the debug source hint (`-g`).
-- `.import <kind> <name> ...` — a symbol the host must provide. `kind` is
+- `.file "<path>"`: the debug source hint (`-g`).
+- `.import <kind> <name> ...`: a symbol the host must provide. `kind` is
   `func` (a host function), `helper` (a compiler runtime helper), or `type` (a
   host handle type; carries `methods <n>` and a signature per vtable slot, as
   ABI class tokens).
-- `.export <name>` — a symbol this module exports.
-- `.global ...` and `.func ...` — see below.
+- `.export <name>`: a symbol this module exports.
+- `.global ...` and `.func ...`: see below.
 
 ### Globals
 
@@ -235,25 +235,25 @@ The runtime is the Kobold guest runtime, compiled freestanding with f64
 reals. It is shared between the JIT (bound as host symbols) and the AOT path
 (resolved by the linker).
 
-- `str_core.c`, `str_fmt.c` — the guest-owned string object and number
+- `str_core.c`, `str_fmt.c`: the guest-owned string object and number
   formatting/parsing (`Str`, `Val`).
-- `dynarr.c` — the guest-owned dynamic array (`array of T`).
-- `map.c` — the guest-owned string-keyed associative array (`map of T`).
-- `co.c`, `co_shim.c` — stackful coroutines (the coroutine runtime) and the
+- `dynarr.c`: the guest-owned dynamic array (`array of T`).
+- `map.c`: the guest-owned string-keyed associative array (`map of T`).
+- `co.c`, `co_shim.c`: stackful coroutines (the coroutine runtime) and the
   host primitives they need. The per-arch context switch is
   `runtime/co_switch_{x86,arm64,rv}.S`, shared with the libc coroutine
   primitive (`doc/tools/libc.md`).
-- `handle.h` — refcounted (ARC) opaque handles.
-- `rt_host.c` — the platform layer: the guest heap over a low-memory mmap (so a
+- `handle.h`: refcounted (ARC) opaque handles.
+- `rt_host.c`: the platform layer: the guest heap over a low-memory mmap (so a
   guest address fits the 32 bits the front end models), plus a live-bytes
   counter.
-- `kp_host.c`, `kp_host.h` — the standard host binding surface. An embedder
+- `kp_host.c`, `kp_host.h`: the standard host binding surface. An embedder
   calls `kp_install_runtime` to fill a `kp_binding` table (console I/O,
   strings, arrays, maps, coroutines, ARC, traps, and the 64-bit divide
   helpers), then binds its own host types, then calls `kp_jit`.
   `kp_io_set_args` records the command line for `ParamStr`/`ParamCount`, and
   `kp_handle_sweep` runs live handles' finalizers at teardown.
-- `aot_rt.c` — the C start file and link-time runtime surface for `skj-kp`
+- `aot_rt.c`: the C start file and link-time runtime surface for `skj-kp`
   output: process entry, a low execution stack, the traps, and the
   `ParamStr`/`ParamCount` surface.
 
@@ -280,10 +280,12 @@ differently.
 A downstream host (boris and the like) runs a Kobold guest with no host OS: its
 seam to the guest is only `write`, `read`, and `exit`, and it hands the guest its
 heap at entry rather than letting the runtime map memory. `libkpaot-rv-free.a` is
-the re-bottoming of the hosted `libkpaot-rv.a` for that seam. It is a
-re-bottoming, not a rewrite: the compute runtime (`str_core.c`, `dynarr.c`,
-`map.c`) is the same source, built with `KP_FREESTANDING`; only the platform
-underneath changes.
+the re-bottoming of the hosted `libkpaot-rv.a` for that seam. The compute
+runtime (`str_core.c`, `dynarr.c`, `map.c`) is the same source, built with
+`KP_FREESTANDING`; only the platform underneath changes.
+
+For the end-to-end commands that compile a `.pas` into a freestanding RV32 ELF
+and run it in the `skj-run` emulator, see `kp-sandbox.md`.
 
 - `kobold/rt_free.c` is the platform, the freestanding `rt_host.c`. The guest heap is
   the same binned allocator over a flat region, but the region is handed in by
@@ -485,34 +487,34 @@ This file is the in-tree reference for how the Kobold front end is built,
 bootstrapped, and run inside skjegg. The language itself and its host contract
 are specified by the companion documents in this directory:
 
-- `kp-language.md` — the language reference: types, statements, routines, and
+- `kp-language.md`: the language reference: types, statements, routines, and
   built-ins.
-- `kp-grammar.md` — the surface grammar (EBNF).
-- `kp-semantics.md` — the static semantics: type identity, compatibility and
+- `kp-grammar.md`: the surface grammar (EBNF).
+- `kp-semantics.md`: the static semantics: type identity, compatibility and
   conversion rules, expression typing, overload resolution, and storage layout.
-- `kp-builtins.md` — the signature reference for the predefined routines:
+- `kp-builtins.md`: the signature reference for the predefined routines:
   argument rules, result types, and trap behavior.
-- `kp-evaluation.md` — the dynamic semantics: evaluation order, integer
+- `kp-evaluation.md`: the dynamic semantics: evaluation order, integer
   division and overflow, string and set comparison, default and
   uninitialized values, traps and exit status, and real output.
-- `kp-units.md` — units and separate compilation: `uses`, interface
+- `kp-units.md`: units and separate compilation: `uses`, interface
   fingerprints, and guest-record traits.
-- `kp-module-format.md` — the KPM1 serialized-IR format in full (this file
+- `kp-module-format.md`: the KPM1 serialized-IR format in full (this file
   summarizes the subset the reader accepts).
-- `kp-errors.md` — the failable-routine model and the trap semantics.
-- `kp-diagnostics.md` — the compiler's diagnostic format and codes.
-- `kp-abi.md` — the host ABI: values, calls, handles, lifetime, and faults.
-- `kp-embedding.md` — the step-by-step guide to embedding the runtime in a C
+- `kp-errors.md`: the failable-routine model and the trap semantics.
+- `kp-diagnostics.md`: the compiler's diagnostic format and codes.
+- `kp-abi.md`: the host ABI: values, calls, handles, lifetime, and faults.
+- `kp-embedding.md`: the step-by-step guide to embedding the runtime in a C
   host.
-- `kp-conformance.md` — the map against ISO 7185 / 10206 and the dialect
+- `kp-conformance.md`: the map against ISO 7185 / 10206 and the dialect
   extensions.
-- `kp-hardening.md` — the plan for running untrusted scripts safely.
-- `kp-property.md` — the uniform-access (`property`) feature: accessor-backed
+- `kp-hardening.md`: the plan for running untrusted scripts safely.
+- `kp-property.md`: the uniform-access (`property`) feature: accessor-backed
   declarations and computed record fields.
 
 ## See also
 
-- `doc/tools/jit.md` — the shared in-process JIT the Kobold tools build on.
-- `doc/internals/ir.md` — the IR a KPM1 module is read into.
-- `PLAN.md`, "Kobold-Pascal in-process linking and lazy compilation" — the
+- `doc/tools/jit.md`: the shared in-process JIT the Kobold tools build on.
+- `doc/internals/ir.md`: the IR a KPM1 module is read into.
+- `PLAN.md`, "Kobold-Pascal in-process linking and lazy compilation": the
   deferred lazy-compilation work (Steps C and D) and why it waits.

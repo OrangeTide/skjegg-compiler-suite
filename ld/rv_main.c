@@ -16,8 +16,8 @@ static void
 usage(void)
 {
     fprintf(stderr,
-            "usage: skj-ld-rv [-V] [-T script.ld] [-e entry] -o output"
-            " input.o [...]\n"
+            "usage: skj-ld-rv [-V] [-T script.ld] [-e entry] [-Map map]"
+            " -o output input.o [...]\n"
             "\n"
             "RISC-V RV32 static linker.  Reads ELF32 little-endian EM_RISCV\n"
             "relocatable objects and writes an ET_EXEC based at 0x10000 for\n"
@@ -31,6 +31,7 @@ main(int argc, char **argv)
     const char *script_path;
     const char *entry_override;
     const char *output_path;
+    const char *map_path;
     const char **inputs;
     int ninputs;
     struct linker ld;
@@ -40,6 +41,7 @@ main(int argc, char **argv)
     script_path = NULL;
     entry_override = NULL;
     output_path = NULL;
+    map_path = NULL;
     inputs = NULL;
     ninputs = 0;
     for (int i = 1; i < argc; i++) {
@@ -55,6 +57,9 @@ main(int argc, char **argv)
         } else if (strcmp(argv[i], "-o") == 0) {
             if (++i >= argc) usage();
             output_path = argv[i];
+        } else if (strcmp(argv[i], "-Map") == 0) {
+            if (++i >= argc) usage();
+            map_path = argv[i];
         } else if (argv[i][0] == '-') {
             die("unknown option: %s", argv[i]);
         } else {
@@ -116,6 +121,8 @@ main(int argc, char **argv)
     free(archives);
 
     rv_ld_link(&ld);
+    if (map_path)
+        ld_write_map(&ld, map_path);
     rv_ld_write_exec(&ld, output_path);
 
     util_cleanup_run();

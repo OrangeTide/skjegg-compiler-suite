@@ -177,6 +177,21 @@ static struct global *globals;
 static int nglobals;
 static int global_cap;
 
+/* A read-only object belongs in .rodata.  A const scalar or aggregate is
+   read-only; an array is read-only when its element type is const (const char
+   s[]); a pointer is read-only only when the pointer itself is const
+   (int * const), which is_const marks, as opposed to a pointer to const
+   (const int *).  An uninitialized read-only global still answers true here;
+   the backend keeps it in .bss (no file image), so only initialized read-only
+   globals reach .rodata. */
+static int
+type_is_readonly(struct cc_type *t)
+{
+    while (t && t->kind == TY_ARRAY)
+        t = t->base;
+    return t && t->is_const;
+}
+
 static void
 add_global(const char *name, struct cc_type *type, int is_func)
 {
@@ -3836,6 +3851,12 @@ lower_local_decl(struct cc_node *n)
         n->a->body && !n->a->body->next && n->a->body->kind != ND_DESIG)
         n->a = n->a->body;
 
+    /* a braced initializer still on a scalar is ill-formed: excess elements
+       (int x = {1, 2}), empty (int x = {}), or a designator on a scalar */
+    if (n->a && n->a->kind == ND_INIT_LIST && !is_aggregate(t))
+        die("lower:%d: braced initializer for scalar type must hold a single value",
+            n->a->line);
+
     if (n->is_extern || t->kind == TY_FUNC) {
         add_global(n->name, t, t->kind == TY_FUNC);
         return;
@@ -3849,6 +3870,7 @@ lower_local_decl(struct cc_node *n)
         struct ir_global *g = arena_zalloc(lower_arena, sizeof *g);
         g->name = arena_strdup(lower_arena, mangled);
         g->is_local = 1;
+        g->is_rodata = type_is_readonly(t);
         g->base_type = type_to_ir(t);
         if (wants_image(t, n->a)) {
             /* aggregate (struct/union, or an array of one): a byte blob of the
@@ -4644,6 +4666,12 @@ lower_global_decl(struct cc_node *gn)
         gn->a->body && !gn->a->body->next && gn->a->body->kind != ND_DESIG)
         gn->a = gn->a->body;
 
+    /* a braced initializer still on a scalar is ill-formed: excess elements
+       (int x = {1, 2}), empty (int x = {}), or a designator on a scalar */
+    if (gn->a && gn->a->kind == ND_INIT_LIST && !is_aggregate(t))
+        die("lower:%d: braced initializer for scalar type must hold a single value",
+            gn->a->line);
+
     if (gn->is_extern) {
         add_global(gn->name, t, t->kind == TY_FUNC);
         return;
@@ -4655,6 +4683,7 @@ lower_global_decl(struct cc_node *gn)
 
     struct ir_global *g = arena_zalloc(lower_arena, sizeof *g);
     g->name = arena_strdup(lower_arena, gn->name);
+    g->is_rodata = type_is_readonly(t);
 
     if (wants_image(t, gn->a)) {
         /* an aggregate global (struct/union, or an array of one) is a byte

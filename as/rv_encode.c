@@ -974,6 +974,23 @@ enc_call(struct rv_asm *a, struct rv_operand *ops, int nops, int emit)
     return 8;
 }
 
+/* tail sym : auipc t1, 0 ; jalr x0, t1, 0  with one R_RISCV_CALL_PLT.  Like
+   call but the temporary is t1 (x6) and the jump does not link (rd x0), so it
+   is a tail call.  GNU as uses x6 for this pseudo; matching it keeps the
+   encoding byte-identical. */
+static int
+enc_tail(struct rv_asm *a, struct rv_operand *ops, int nops, int emit)
+{
+    NEED(nops == 1 && sym_target(&ops[0]));
+    if (emit) {
+        uint32_t off = (uint32_t)cur(a)->len;
+        reloc_sym(a, off, sym_target(&ops[0]), 0, R_RISCV_CALL_PLT);
+        emit_word(a, enc_u(0x17, 6, 0));                       /* auipc t1, 0 */
+        emit_word(a, enc_i(0x67, 0, 0, 6, 0));                 /* jalr x0, t1, 0 */
+    }
+    return 8;
+}
+
 /****************************************************************
  * Top-level dispatch
  ****************************************************************/
@@ -1052,6 +1069,7 @@ rv_encode(struct rv_asm *a, const char *m, struct rv_operand *ops, int nops,
     if (strcmp(m, "li") == 0)   return enc_li(a, ops, nops, emit);
     if (strcmp(m, "la") == 0)   return enc_la(a, ops, nops, emit);
     if (strcmp(m, "call") == 0) return enc_call(a, ops, nops, emit);
+    if (strcmp(m, "tail") == 0) return enc_tail(a, ops, nops, emit);
 
     if (strcmp(m, "ecall") == 0) {
         NEED(nops == 0);

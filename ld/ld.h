@@ -224,6 +224,8 @@ struct ld_object *ld_add_object(struct linker *ld);
 struct ld_output_sec *ld_find_output_sec(struct linker *ld,
                                          struct ld_input_sec *isec);
 void ld_check_undefined(struct linker *ld);
+/* write a link map (entry, regions, output sections, symbols) to a file */
+void ld_write_map(struct linker *ld, const char *path);
 
 /* elf_write.c */
 int ld_write_exec(struct linker *ld, const char *path);

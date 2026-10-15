@@ -2374,55 +2374,77 @@ emit_global_head(FILE *out, struct ir_global *g)
 }
 
 static void
+emit_global_def(FILE *out, struct ir_global *g)
+{
+    int elsz = global_elsz(g);
+
+    if (g->inits) {
+        emit_init_image(out, g);
+    } else if (g->init_string) {
+        emit_string_bytes(out, g->init_string,
+                  g->init_strlen);
+    } else {
+        int k;
+        for (k = 0; k < g->init_count; k++) {
+            if (g->init_syms && g->init_syms[k]) {
+                char ref[160];
+                fprintf(out, "\t.word %s\n",
+                    sym_ref(ref, sizeof ref, g->init_syms[k],
+                            g->init_ivals[k]));
+            } else if (g->base_type == IR_I64 ||
+                     g->base_type == IR_F64) {
+                /* little-endian: low word first (F64 holds the raw
+                   64-bit IEEE bit pattern in init_ivals) */
+                uint64_t bits = (uint64_t)g->init_ivals[k];
+                fprintf(out, "\t.word 0x%08x\n",
+                    (unsigned)(bits & 0xFFFFFFFF));
+                fprintf(out, "\t.word 0x%08x\n",
+                    (unsigned)(bits >> 32));
+            } else if (elsz == 1)
+                fprintf(out, "\t.byte %" PRId64 "\n",
+                    g->init_ivals[k]);
+            else if (elsz == 2)
+                fprintf(out, "\t.short %" PRId64 "\n",
+                    g->init_ivals[k]);
+            else
+                fprintf(out, "\t.word %" PRId64 "\n",
+                    g->init_ivals[k]);
+        }
+        if (g->arr_size > g->init_count)
+            fprintf(out, "\t.space %d\n",
+                (g->arr_size - g->init_count) * elsz);
+    }
+}
+
+static void
 emit_globals(FILE *out, struct ir_program *prog)
 {
     struct ir_global *g;
     int any_bss = 0;
+    int any_ro = 0;
 
     fputs("\n\t.data\n", out);
     for (g = prog->globals; g; g = g->next) {
-        int elsz = global_elsz(g);
-
         if (global_is_bss(g)) {
             any_bss = 1;
             continue;
         }
+        if (g->is_rodata) {
+            any_ro = 1;
+            continue;
+        }
         emit_global_head(out, g);
-        if (g->inits) {
-            emit_init_image(out, g);
-        } else if (g->init_string) {
-            emit_string_bytes(out, g->init_string,
-                      g->init_strlen);
-        } else {
-            int k;
-            for (k = 0; k < g->init_count; k++) {
-                if (g->init_syms && g->init_syms[k]) {
-                    char ref[160];
-                    fprintf(out, "\t.word %s\n",
-                        sym_ref(ref, sizeof ref, g->init_syms[k],
-                                g->init_ivals[k]));
-                } else if (g->base_type == IR_I64 ||
-                         g->base_type == IR_F64) {
-                    /* little-endian: low word first (F64 holds the raw
-                       64-bit IEEE bit pattern in init_ivals) */
-                    uint64_t bits = (uint64_t)g->init_ivals[k];
-                    fprintf(out, "\t.word 0x%08x\n",
-                        (unsigned)(bits & 0xFFFFFFFF));
-                    fprintf(out, "\t.word 0x%08x\n",
-                        (unsigned)(bits >> 32));
-                } else if (elsz == 1)
-                    fprintf(out, "\t.byte %" PRId64 "\n",
-                        g->init_ivals[k]);
-                else if (elsz == 2)
-                    fprintf(out, "\t.short %" PRId64 "\n",
-                        g->init_ivals[k]);
-                else
-                    fprintf(out, "\t.word %" PRId64 "\n",
-                        g->init_ivals[k]);
-            }
-            if (g->arr_size > g->init_count)
-                fprintf(out, "\t.space %d\n",
-                    (g->arr_size - g->init_count) * elsz);
+        emit_global_def(out, g);
+    }
+
+    /* initialized, read-only globals (const): same bytes, .rodata section */
+    if (any_ro) {
+        fputs("\n\t.section .rodata\n", out);
+        for (g = prog->globals; g; g = g->next) {
+            if (global_is_bss(g) || !g->is_rodata)
+                continue;
+            emit_global_head(out, g);
+            emit_global_def(out, g);
         }
     }
 

@@ -23,7 +23,7 @@ Kobold separates two kinds of failure, and does not let one mechanism serve both
   divide by zero, a bad index, or an explicit `panic`. It raises a trap, unwinds to the
   host's landing pad, and is the subject of `kp-abi.md`.
 
-Keeping them apart is a deliberate architectural choice, not just a stylistic one. The trap
+Keeping them apart is a deliberate architectural choice. The trap
 mechanism relies on a single VM-wide landing pad and the invariant that no landing pad spans
 a `yield` (see `kp-abi.md`). A value-returned error installs no pad and does no `longjmp`, so
 it composes with coroutines for free. Building a guest-side `try`/`except` that catches a

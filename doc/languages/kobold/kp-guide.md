@@ -198,5 +198,8 @@ feeding a cross build.
   compilation.
 - `kp-embedding.md` and `kp-abi.md` explain how to embed the runtime in a C host
   and the contract between the compiler and the host.
+- `kp-sandbox.md` walks through compiling a program to a freestanding RV32 ELF
+  and running it in the in-tree emulator (`skj-run`), the build a real RV32 VM
+  host would load.
 - `kobold.md` describes how the Kobold front end is built, bootstrapped, and run
   inside the skjegg tree.

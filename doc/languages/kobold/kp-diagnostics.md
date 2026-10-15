@@ -161,64 +161,48 @@ language-surface-adjacent work left before 1.0.
 Kobold-Pascal keeps the runtime small, so most run-time diagnostics live in the
 guest language rather than the C VM. The compiler self-hosts and the guest has full
 I/O, so assertions, tracing, and line coverage are ordinary Pascal that a program
-writes for itself. The VM adds only a few primitives that the guest cannot express
-on its own, because they reach into the runtime.
+writes for itself. The VM adds only one primitive that the guest cannot express
+on its own, because it reaches into the runtime.
 
-The worked example is `examples/diag.pas`, run by `runpas`. It is part of
-`make -C examples check`.
+The worked example is `tests/kp-corpus/strleak.pas`, run by `skj-kp-jit` (or
+built ahead of time through `kobold/aot-run.sh`). It runs as part of `make
+check-kp-corpus`.
 
-## The host primitives
+## The host primitive
 
-A guest program declares them as external functions:
+A guest program declares it as an external function:
 
 ```pascal
-procedure panic(msg: string); external;
-function liveHandles: integer; external;
 function heapLive: integer; external;
 ```
 
-`panic(msg)` raises a catchable trap (code `KP_TRAP_USER`, 9) carrying the
-message. It differs from `Halt` in two ways. It does not exit the process; it
-unwinds to the host's landing pad, and it fires the host trap hook first. An
-embedding host can therefore report the message, clean up, and keep running,
-which `Halt` does not allow. The `runpas` host prints the message and the source
-file, then exits non-zero:
+`heapLive` returns the live guest-heap bytes, the storage behind dynamic arrays
+and strings. On its own the number is not meaningful. The value of a call is the
+difference between two readings taken around a scope, which is how a guest checks
+that the scope frees everything it allocated. `tests/kp-corpus/strleak.pas` uses
+it this way: it records `heapLive`, runs a string-churning procedure a thousand
+times, and reads `heapLive` again, so a non-zero delta means an operation leaks
+an intermediate.
 
-```
-runpas: diag.pas: trap 9: negative misclassified
-```
-
-`liveHandles` returns the number of live handle-table objects: coroutines,
-strings, dynamic arrays, and host objects with a refcount of one or more.
-`heapLive` returns the live guest-heap bytes (the storage behind dynamic arrays
-and strings). On their own the numbers are not meaningful. The value of a call is
-the difference between two readings taken around a scope, which is how a guest
-checks that the scope frees everything it allocated. The two catch different
-leaks: `liveHandles` misses a handle that keeps a too-large block, and `heapLive`
-misses a handle that leaks with no bytes; a scope that leaks nothing leaves both
-where it found them.
-
-All three primitives are registered by `kp_register_io` in `src/rt.c`, so any
-host that wires up the standard I/O runtime gets them for free. The counts are
-`kp_live_handle_count` in `src/handle.c` and `kp_gheap_live` in `src/gheap.c`.
-
-For a whole-run figure rather than a scoped diff, run `kprun` with
-`KP_HEAP_STATS=1` in the environment; it prints the peak live bytes and the bytes
-still live at exit to standard error. A live count at exit far above what the
-program's globals hold is the first sign of a leak to chase with the scoped diffs
-above.
+`heapLive` is bound by `kp_install_runtime` (the `BIND` table) in
+`kobold/kp_host.c`, so any host that wires up the standard runtime gets it. The
+byte count is `kp_gheap_live`, defined in `kobold/rt_host.c` for a hosted build
+and `kobold/rt_free.c` for the freestanding tier.
 
 ## Building diagnostics on top
 
 Everything else is plain Pascal.
 
-**Assertions** are a wrapper over `panic`:
+**Assertions** are a wrapper over `WriteLn` and `halt`:
 
 ```pascal
 procedure Assert(cond: boolean; msg: string);
 begin
   if not cond then
-    panic(msg);
+  begin
+    WriteLn('assertion failed: ', msg);
+    halt(1);
+  end;
 end;
 ```
 
@@ -237,24 +221,25 @@ end;
 The line numbers are passed by hand here. A program instruments the points it
 cares about; there is no compiler pass injecting the calls.
 
-**Leak checking** reads `liveHandles` before and after a scope and compares:
+**Leak checking** reads `heapLive` before and after a scope and compares:
 
 ```pascal
-base := liveHandles;
-Churn;               { allocates and drops a dynamic array }
-after := liveHandles;
-WriteLn('leaked handles across Churn: ', after - base);
+base := heapLive;
+Churn;               { allocates and drops strings and a dynamic array }
+after := heapLive;
+WriteLn('leaked bytes across Churn: ', after - base);
 ```
 
-A dynamic array local is reclaimed when its procedure returns, so the delta is
-zero. A non-zero delta names a scope that holds onto a handle.
+A local string or dynamic array is reclaimed when its procedure returns, so the
+delta is zero. A non-zero delta names a scope that holds onto storage.
 
 ## One measurement pitfall
 
-Read `liveHandles` into a plain variable, not inside a `WriteLn` argument list.
-A string literal passed to the same call is itself a live handle at the moment of
-the call, so measuring in place counts it and reports a phantom leak of one. The
-example takes both readings into variables first for this reason.
+Read `heapLive` into a plain variable, not inside a `WriteLn` argument list.
+A string literal or other temporary passed to the same call is itself live
+storage at the moment of the call, so measuring in place counts it and reports a
+phantom leak. The example takes both readings into variables first for this
+reason.
 
 ## What the runtime does not do
 

@@ -341,7 +341,7 @@ unrelated.
 
 This is order-independent by construction. Whatever order definitions are visited in,
 the result is the same: one canonical body, or an error. "Keep the first" is therefore
-not a real choice, it is a fold, and it is safe only because a differing redefinition is
+a fold, and it is safe only because a differing redefinition is
 an error rather than a silent overwrite. That invariant, **duplicate implies identical
 or error**, is load-bearing. It must never relax to "take the first even if different",
 which would reintroduce a silent wrong-body hazard.

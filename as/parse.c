@@ -304,6 +304,24 @@ handle_directive(struct assembler *a, const char *dir)
         a->cur_section = SEC_BSS;
         return;
     }
+    if (strcmp(dir, ".rodata") == 0) {
+        a->cur_section = SEC_RODATA;
+        return;
+    }
+
+    if (strcmp(dir, ".section") == 0) {
+        lex_next(&a->lex);
+        if (a->lex.tok.type == T_DOT_IDENT || a->lex.tok.type == T_IDENT) {
+            const char *n = a->lex.tok.str;
+            if (strncmp(n, ".text", 5) == 0)        a->cur_section = SEC_TEXT;
+            else if (strncmp(n, ".rodata", 7) == 0) a->cur_section = SEC_RODATA;
+            else if (strncmp(n, ".data", 5) == 0)   a->cur_section = SEC_DATA;
+            else if (strncmp(n, ".bss", 4) == 0)    a->cur_section = SEC_BSS;
+            else a->cur_section = SEC_DATA;
+        }
+        skip_to_eol(&a->lex);
+        return;
+    }
 
     if (strcmp(dir, ".align") == 0) {
         lex_next(&a->lex);
