@@ -17,7 +17,11 @@ jobs:
   # backend, the IR-builder integration tests, the RV32 binutils-free
   # toolchain, the Excelsior codegen tiers, and the host/x86-64 Kobold tiers).
   build:
-    runs-on: ubuntu-latest
+    # Pin the runner image rather than ubuntu-latest: the label migrates to
+    # Ubuntu 26 from 2026-10-19, and a gradual rollout can land jobs of one run
+    # on different images. Pinning keeps the cross toolchains, QEMU, and the
+    # rest reproducible; bump this deliberately when moving to a newer image.
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     # check-all overrides the MIPS toolchain to the Debian mipsel-linux-gnu
     # binutils, since the Makefile defaults to a bare-metal mipsel-none-elf
@@ -102,7 +106,7 @@ jobs:
   # committed seed via skj elsewhere).  Needs no cross toolchain or qemu: fpc
   # builds kpcom and the resulting binary emits the module natively on the host.
   bootstrap-fpc:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -122,7 +126,7 @@ jobs:
   # against that assembler (the MIPS encoder's oracle) and its spim load-delay
   # tier needs spim.
   mips:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       MIPS_AS: mipsel-linux-gnu-as
@@ -145,7 +149,7 @@ jobs:
   # suites, the Excelsior and Kobold tiers on the RV32 and AArch64 emulators,
   # the sandbox, and the RV32 unit rig.  None of this runs in check-all.
   emulator:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
@@ -171,7 +175,7 @@ jobs:
   # unit and program rig.  These find divergences the value-checking suites
   # cannot, and never ran in CI.
   rv32-reference:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -197,7 +201,7 @@ jobs:
   # the suite (the old-framework-3.x branch, the one a binutils 2.42 assembler
   # handles) and installs qemu-system-riscv32.
   archtest:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
