@@ -47,7 +47,8 @@ jobs:
             gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             gcc-mipsel-linux-gnu binutils-mipsel-linux-gnu \
-            nasm qemu-user
+            nasm qemu-user \
+            llvm   # provides llvm-dwarfdump for the DWARF line-table tests
 
       # The RV32 JIT (skj-jit-rv) is cross-built for hosted rv32 with zig cc,
       # which is not preinstalled on the runner.

@@ -85,6 +85,7 @@ main(int argc, char **argv)
     util_cleanup_push(cleanup_rv, &a);
 
     rv_assemble(&a);
+    rv_emit_debug(&a);
 
     if (outpath) {
         out = fopen(outpath, "wb");

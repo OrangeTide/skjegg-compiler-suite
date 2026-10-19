@@ -18,6 +18,11 @@ static int cur_fn_ret_mem;             /* psABI: MEMORY struct return (hidden pt
 static int cur_fn_sret_slot;           /* slot holding the hidden result pointer */
 static struct cc_type *cur_fn_ret_type;
 
+/* Debug info (-g), see cc.h. */
+int cc_debug = 0;
+const char *cc_src_file = NULL;
+static int last_loc_line;               /* last line marked in this function */
+
 static struct ir_insn *
 emit(int op)
 {
@@ -4091,6 +4096,15 @@ lower_stmt(struct cc_node *n)
     if (!n)
         return;
 
+    /* Debug info (-g): mark the source line at the head of each statement, once
+       per distinct line, so the backend builds an address-to-line table.  A
+       block carries no line of its own; its inner statements each mark theirs. */
+    if (cc_debug && n->line > 0 && n->line != last_loc_line
+        && n->kind != ND_BLOCK) {
+        ir_loc(cur_fn, n->line);
+        last_loc_line = n->line;
+    }
+
     switch (n->kind) {
     case ND_BLOCK: {
         int saved_nlocals = nlocals;
@@ -4439,6 +4453,8 @@ lower_function(struct cc_node *fndef)
 {
     struct ir_func *fn = ir_new_func(lower_arena, fndef->name);
     fn->is_local = fndef->is_static;
+    fn->src_file = cc_debug ? cc_src_file : NULL;
+    last_loc_line = 0;
     cur_fn = fn;
     cur_fn_name = fndef->name;
     nloops = 0;

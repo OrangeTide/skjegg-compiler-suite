@@ -393,6 +393,8 @@ main(int argc, char **argv)
             return 0;
         } else if (strcmp(argv[i], "-t") == 0) {
             trace = 1;
+        } else if (strcmp(argv[i], "-g") == 0) {
+            exc_debug = 1;
         } else if (strcmp(argv[i], "--tokens") == 0) {
             tokens_only = 1;
         } else if (strcmp(argv[i], "--ast") == 0) {

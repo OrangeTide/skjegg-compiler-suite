@@ -123,4 +123,10 @@ struct node *parse_program(struct arena *a);
 
 struct ir_program *lower_program(struct arena *a, struct node *ast);
 
+/* Debug info (-g): when tinc_debug is set, lowering emits an IR_LOC per
+   statement and records tinc_src_file on each function for the line table.
+   Set by the driver before lower_program. */
+extern int tinc_debug;
+extern const char *tinc_src_file;
+
 #endif /* TINC_H */

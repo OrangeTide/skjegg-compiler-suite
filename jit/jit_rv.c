@@ -86,6 +86,10 @@ li32(struct code *c, int rd, uint32_t v)
  * Labels and branch fixups
  ****************************************************************/
 
+/* Debug info (-g): record the current code offset against the source line, for
+   the address-to-line table (jit/jit_common.c). */
+void rv_mc_loc(struct rv_mc *m, int line) { kp_add_line(m->e, m->c->len, line); }
+
 int
 rv_mc_new_label(struct rv_mc *m)
 {

@@ -58,6 +58,9 @@ sym_add(struct linker *ld, const char *name, uint32_t value,
     ld->syms[idx].weak = weak;
     ld->syms[idx].obj_idx = obj_idx;
     ld->syms[idx].sec_idx = sec_idx;
+    ld->syms[idx].type = STT_NOTYPE;
+    ld->syms[idx].size = 0;
+    ld->syms[idx].binding = STB_GLOBAL;
     return idx;
 }
 
@@ -79,6 +82,9 @@ collect_symbols(struct linker *ld)
             if (isym->binding == STB_LOCAL) {
                 int gidx = sym_add(ld, isym->name, isym->value,
                                    is_def, 0, oi, isym->shndx);
+                ld->syms[gidx].type = isym->type;
+                ld->syms[gidx].size = isym->size;
+                ld->syms[gidx].binding = STB_LOCAL;
                 obj->sym_map[si] = gidx;
                 continue;
             }
@@ -96,6 +102,8 @@ collect_symbols(struct linker *ld)
                             g->weak = 0;
                             g->obj_idx = oi;
                             g->sec_idx = isym->shndx;
+                            g->type = isym->type;
+                            g->size = isym->size;
                         } else if (!g->weak && !is_weak) {
                             die("duplicate symbol: %s", isym->name);
                         }
@@ -106,6 +114,8 @@ collect_symbols(struct linker *ld)
                         g->weak = is_weak;
                         g->obj_idx = oi;
                         g->sec_idx = isym->shndx;
+                        g->type = isym->type;
+                        g->size = isym->size;
                     }
                 } else if (!g->defined && !is_weak) {
                     /* a strong reference forces the symbol to be resolved */
@@ -115,6 +125,8 @@ collect_symbols(struct linker *ld)
             } else {
                 int gidx = sym_add(ld, isym->name, isym->value,
                                    is_def, is_weak, oi, isym->shndx);
+                ld->syms[gidx].type = isym->type;
+                ld->syms[gidx].size = isym->size;
                 obj->sym_map[si] = gidx;
             }
         }
@@ -376,6 +388,52 @@ ld_find_output_sec(struct linker *ld, struct ld_input_sec *isec)
             return candidate;
     }
     return NULL;
+}
+
+/* Merge the input non-alloc debug sections (.debug_*) by name into ld->debug[],
+ * concatenating same-named sections across objects.  Each input section's base
+ * offset within its merged section is recorded in isec->assigned_vaddr (debug
+ * sections are non-alloc, so that field is otherwise unused for them), which is
+ * what lets the arch linker place a reloc inside the merged buffer.  Shared. */
+void
+ld_build_debug(struct linker *ld)
+{
+    for (int oi = 0; oi < ld->nobjs; oi++) {
+        struct ld_object *obj = &ld->objs[oi];
+        for (int s = 0; s < obj->nsections; s++) {
+            struct ld_input_sec *isec = &obj->sections[s];
+            struct ld_debug_sec *d = NULL;
+
+            if (isec->type != SHT_PROGBITS)
+                continue;
+            if (strncmp(isec->name, ".debug_", 7) != 0)
+                continue;
+
+            for (int k = 0; k < ld->ndebug; k++) {
+                if (strcmp(ld->debug[k].name, isec->name) == 0) {
+                    d = &ld->debug[k];
+                    break;
+                }
+            }
+            if (!d) {
+                if (ld->ndebug >= MAX_DEBUG_SECS)
+                    die("too many debug sections (%s)", isec->name);
+                d = &ld->debug[ld->ndebug++];
+                d->name = isec->name;
+            }
+
+            if (d->size + isec->size > d->cap) {
+                d->cap = (d->size + isec->size) * 2;
+                d->data = realloc(d->data, d->cap);
+                if (!d->data)
+                    die("out of memory");
+            }
+            isec->assigned_vaddr = d->size;     /* base within merged buffer */
+            if (isec->size > 0)
+                memcpy(d->data + d->size, isec->data, isec->size);
+            d->size += isec->size;
+        }
+    }
 }
 
 /* Report any global symbol that stayed undefined after relocation.  Shared. */

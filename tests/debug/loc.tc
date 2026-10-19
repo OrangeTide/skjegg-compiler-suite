@@ -1,0 +1,17 @@
+// Fixture for test-tinc-loc: debug-info line markers (-g) on the TinC path.
+// Each statement sits on its own line so skj-tinc emits one IR_LOC per line and
+// the ColdFire backend records a "| line N" comment.  The test only inspects
+// the assembly, so the program need not do anything interesting.
+
+define add(int a, int b) -> int
+{
+    int s = a + b;
+    return s;
+}
+
+define main() -> int
+{
+    int x = add(2, 3);
+    x = x + 1;
+    return x;
+}

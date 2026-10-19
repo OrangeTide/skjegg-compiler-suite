@@ -381,6 +381,8 @@ main(int argc, char **argv)
             return 0;
         } else if (strcmp(argv[i], "-t") == 0) {
             trace = 1;
+        } else if (strcmp(argv[i], "-g") == 0) {
+            moo_debug = 1;
         } else if (strcmp(argv[i], "--tokens") == 0) {
             tokens_only = 1;
         } else if (strcmp(argv[i], "--ast") == 0) {
@@ -431,6 +433,8 @@ main(int argc, char **argv)
             struct ir_func *fn;
             FILE *out;
 
+            if (moo_debug)
+                moo_src_file = filename;
             prog = lower_program(&a, ast);
 
         for (fn = prog->funcs; fn; fn = fn->next)

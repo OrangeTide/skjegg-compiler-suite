@@ -2213,6 +2213,11 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_ENDF:
         break;
 
+    case IR_LOC:
+        /* debug-info line marker (-g); this direct emitter has no line table
+           yet, so skip it (the RISC-V path and the JITs record it). */
+        break;
+
     default:
         die("mips_emit: unhandled op %d", i->op);
     }

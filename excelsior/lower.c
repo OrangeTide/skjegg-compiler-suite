@@ -73,6 +73,11 @@
 
 static struct arena *la;
 static const char *efile;
+
+/* Debug info (-g), see excelsior.h. */
+int exc_debug = 0;
+static int last_loc_line;               /* last line marked in this function */
+
 static struct ir_func *cur_fn;
 static struct ir_program *cur_prog;
 static const char *cur_class;
@@ -3648,6 +3653,13 @@ lower_stmt(struct node *n)
      * shared label: a trap, or the fail epilogue in a fallible func */
     cur_fail = default_fail();
 
+    /* Debug info (-g): mark the source line at the head of each statement, once
+       per distinct line, so the backend builds an address-to-line table. */
+    if (exc_debug && n->line > 0 && n->line != last_loc_line) {
+        ir_loc(cur_fn, n->line);
+        last_loc_line = n->line;
+    }
+
     switch (n->kind) {
     case N_VAR: {
         struct sym *rec = type_record_sym(n->sym->type);
@@ -4222,6 +4234,8 @@ lower_member(struct node *cls, struct node *m)
 
     fn = ir_new_func(la, mangled);
     fn->is_local = !(m->flags & NF_PUBLIC);
+    fn->src_file = exc_debug ? efile : NULL;
+    last_loc_line = 0;
     cur_fn = fn;
     nslots = 0;
     nlslots = 0;
@@ -4305,6 +4319,8 @@ lower_funclit_fn(struct node *lit)
     int nparams = 0;
 
     fn->is_local = 1;
+    fn->src_file = exc_debug ? efile : NULL;
+    last_loc_line = 0;
     cur_fn = fn;
     /* the lambda's defining class (stashed at resolve): a bare sibling-func
      * call in the body mangles against it, so set cur_class here rather than
@@ -4408,6 +4424,8 @@ lower_source_member(struct node *cls, struct node *m)
     /* ---- the constructor, under the declared name ---- */
     ctor = ir_new_func(la, mangled);
     ctor->is_local = !(m->flags & NF_PUBLIC);
+    ctor->src_file = exc_debug ? efile : NULL;
+    last_loc_line = 0;
     cur_fn = ctor;
     nslots = 0;
     nlslots = 0;
@@ -4463,6 +4481,8 @@ lower_source_member(struct node *cls, struct node *m)
     /* ---- the body, run on the source's private stack ---- */
     body = ir_new_func(la, arena_strdup(la, bodyname));
     body->is_local = 1;
+    body->src_file = exc_debug ? efile : NULL;
+    last_loc_line = 0;
     cur_fn = body;
     nslots = 0;
     nlslots = 0;

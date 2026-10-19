@@ -114,6 +114,8 @@ sym_add(struct symtab *st, const char *name)
     st->syms[idx].global = 0;
     st->syms[idx].weak = 0;
     st->syms[idx].defined = 0;
+    st->syms[idx].is_func = 0;
+    st->syms[idx].size = 0;
     return idx;
 }
 
@@ -139,4 +141,20 @@ sym_set_weak(struct symtab *st, int idx)
 {
     st->syms[idx].global = 1;
     st->syms[idx].weak = 1;
+}
+
+/* .type sym,@function : the symbol names code, so the ELF writer types it
+   STT_FUNC.  A debugger's address-to-function map and a backtrace both read
+   this in .symtab; the DWARF line table (file:line) is separate. */
+void
+sym_set_func(struct symtab *st, int idx)
+{
+    st->syms[idx].is_func = 1;
+}
+
+/* .size sym,expr : the symbol's extent in bytes, written as st_size. */
+void
+sym_set_size(struct symtab *st, int idx, uint32_t size)
+{
+    st->syms[idx].size = size;
 }

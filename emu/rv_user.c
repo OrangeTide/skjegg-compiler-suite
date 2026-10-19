@@ -4,6 +4,21 @@
 #include "guest.h"
 #include "rv32.h"
 
+/* The DWARF backtrace symbolizer is an optional add-on: the in-tree skj-run
+ * build defines SKJ_DWARF_BACKTRACE and links dwarf/dwread.c + ir/arena.c, so a
+ * guest fault prints a symbolized backtrace.  A bare emu-rv vendoring without
+ * dwarf/ leaves it undefined and still builds, reporting the fault pc alone. */
+#ifdef SKJ_DWARF_BACKTRACE
+#include "dwread.h"
+#include "arena.h"
+#endif
+
+/* The GDB remote-protocol stub (--gdb PORT); the in-tree skj-run build defines
+ * SKJ_RV_GDB and links emu/rv_gdb.c.  Independent of the backtrace add-on. */
+#ifdef SKJ_RV_GDB
+#include "rv_gdb.h"
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -87,6 +102,12 @@ typedef struct sched {
     struct gm_pool pool;        /* aggregate memory budget shared by all processes */
     uint64_t insns;             /* instructions retired across all processes */
     int limited;                /* the global instruction budget was hit */
+#ifdef SKJ_DWARF_BACKTRACE
+    struct arena bt_arena;      /* holds the lazily built reader's tables */
+    struct dw_reader bt_reader; /* the root image's DWARF line + symbol tables */
+    uint8_t *bt_elf;            /* the root ELF bytes the reader points into */
+    int bt_state;               /* 0 untried, 1 ready, -1 unavailable */
+#endif
 } sched;
 
 #define PROC_HANDLE(slot, gen)  ((uint32_t)((slot) + 1) | ((uint32_t)(gen) << 8))
@@ -441,6 +462,92 @@ proc_new_mem(sched *S, const uint8_t *img, long len, const char *what)
 }
 
 /****************************************************************
+ * Fault backtrace (optional, SKJ_DWARF_BACKTRACE)
+ ****************************************************************/
+
+#ifdef SKJ_DWARF_BACKTRACE
+
+#define BT_MAX_FRAMES   32
+
+/* Guest-memory read adapter for dw_backtrace.  gm_read_out never faults (an
+ * unmapped byte reads as zero), so a frame pointer off the end of the stack
+ * yields a zero return address, which ends the walk. */
+static int
+bt_read(void *ctx, uint32_t addr, void *dst, uint32_t len)
+{
+    gm_read_out((guest_mem *)ctx, addr, dst, len);
+    return 1;
+}
+
+/* The DWARF reader over the root image, built once on the first fault.  Only
+ * the root (slot 0) is symbolized: a spawned child's image is not retained, so
+ * a child fault prints raw addresses (NULL reader).  Returns NULL when the
+ * image cannot be read or carries no debug info a reader can use. */
+static const struct dw_reader *
+root_reader(sched *S)
+{
+    FILE *f;
+    long n;
+    size_t got;
+
+    if (S->bt_state != 0)
+        return S->bt_state == 1 ? &S->bt_reader : NULL;
+    S->bt_state = -1;                   /* assume failure until built */
+
+    f = fopen(S->o->path, "rb");
+    if (!f)
+        return NULL;
+    if (fseek(f, 0, SEEK_END) != 0 || (n = ftell(f)) <= 0) {
+        fclose(f);
+        return NULL;
+    }
+    rewind(f);
+    S->bt_elf = malloc((size_t)n);
+    if (!S->bt_elf) {
+        fclose(f);
+        return NULL;
+    }
+    got = fread(S->bt_elf, 1, (size_t)n, f);
+    fclose(f);
+    if (got != (size_t)n) {
+        free(S->bt_elf);
+        S->bt_elf = NULL;
+        return NULL;
+    }
+
+    arena_init(&S->bt_arena);
+    if (dw_read_elf(&S->bt_arena, &S->bt_reader, S->bt_elf, (size_t)n) != 0) {
+        arena_free(&S->bt_arena);
+        free(S->bt_elf);
+        S->bt_elf = NULL;
+        return NULL;
+    }
+    S->bt_state = 1;
+    return &S->bt_reader;
+}
+
+/* Print a symbolized backtrace for a faulting process to stderr.  pc is the
+ * live instruction (the trap/fault pc); fp is the frame pointer (x8/s0). */
+static void
+print_backtrace(sched *S, proc *p, uint32_t pc)
+{
+    uint32_t pcs[BT_MAX_FRAMES];
+    const struct dw_reader *r = (p->slot == 0) ? root_reader(S) : NULL;
+    char buf[2048];
+    int n;
+
+    n = dw_backtrace(pc, p->cpu.x[8], bt_read, &p->g.mem, pcs, BT_MAX_FRAMES);
+    if (n <= 0)
+        return;
+    dw_backtrace_format(r, pcs, n, buf, sizeof buf);
+    fprintf(stderr, "skj-run: [proc %d] backtrace:\n%s", p->slot + 1, buf);
+}
+
+#else
+#define print_backtrace(S, p, pc)      ((void)0)
+#endif /* SKJ_DWARF_BACKTRACE */
+
+/****************************************************************
  * The scheduler
  ****************************************************************/
 
@@ -492,6 +599,7 @@ proc_slice(sched *S, proc *p)
                     p->g.mem.fault_addr, p->g.mem.fault_why, p->cpu.pc);
         if (o->trace)
             dump_trace(&p->cpu);
+        print_backtrace(S, p, p->cpu.pc);
         p->rc = 128 + 11;
         p->done = 1;
         return;
@@ -502,6 +610,7 @@ proc_slice(sched *S, proc *p)
                 p->cpu.mtval);
         if (o->trace)
             dump_trace(&p->cpu);
+        print_backtrace(S, p, p->cpu.mepc);
         p->rc = 128 + signal_of_cause(p->cpu.mcause);
         p->done = 1;
         return;
@@ -602,9 +711,24 @@ run_rv32(const run_opts *o, int *status)
     if (proc_new_file(&S, o->path) <= 0)        /* the root image failed to load */
         return -1;
 
-    run_scheduler(&S);
-
     rp = S.procs[0];
+#ifdef SKJ_RV_GDB
+    if (o->gdb_port > 0) {
+        /* Debug the root process under the GDB remote protocol instead of
+         * running the scheduler.  v1 is single-process: a guest that spawns
+         * while debugged leaves its child unscheduled. */
+        int ecode = 0;
+        rv_gdb_serve(&rp->cpu, &rp->g, o->gdb_port, &ecode);
+        rp->done = 1;
+        if (rp->g.exited)
+            rp->g.exit_code = ecode;
+    } else {
+        run_scheduler(&S);
+    }
+#else
+    run_scheduler(&S);
+#endif
+
     rc = rp->rc;
     if (S.limited && !rc)
         rc = 128 + 24;
@@ -624,5 +748,10 @@ run_rv32(const run_opts *o, int *status)
         gm_free(&S.procs[i]->g.mem);
         free(S.procs[i]);
     }
+#ifdef SKJ_DWARF_BACKTRACE
+    if (S.bt_state == 1)
+        arena_free(&S.bt_arena);
+    free(S.bt_elf);
+#endif
     return 0;
 }

@@ -272,6 +272,12 @@ long long cc_const_eval(struct cc_node *n);
 
 struct ir_program *cc_lower_program(struct arena *a, struct cc_node *ast);
 
+/* Debug info (-g): when cc_debug is set, lowering emits an IR_LOC per statement
+   and records cc_src_file on each function for the line table.  Set by the
+   driver before cc_lower_program. */
+extern int cc_debug;
+extern const char *cc_src_file;
+
 /****************************************************************
  * Type helpers
  ****************************************************************/

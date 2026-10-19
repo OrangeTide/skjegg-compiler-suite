@@ -28,6 +28,11 @@
 struct rv_mc;
 
 /* ---- Control flow by label id (forward references allowed). */
+/* Debug info (-g): a source-line marker.  The text sink records it as a
+   comment; the JIT byte sink records the current code offset against the line
+   for the address-to-line table. */
+void rv_mc_loc(struct rv_mc *m, int line);
+
 int rv_mc_new_label(struct rv_mc *m);
 void rv_mc_label(struct rv_mc *m, int id);
 void rv_mc_j(struct rv_mc *m, int id);

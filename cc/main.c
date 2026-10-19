@@ -100,6 +100,8 @@ main(int argc, char **argv)
             return 0;
         } else if (strcmp(argv[i], "-E") == 0) {
             preprocess_only = 1;
+        } else if (strcmp(argv[i], "-g") == 0) {
+            cc_debug = 1;
         } else if (argv[i][0] == '-') {
             /* ignore unknown options silently */
         } else {
@@ -162,6 +164,8 @@ main(int argc, char **argv)
     ast = cc_parse_program(&a);
 
     /* lower to IR */
+    if (cc_debug)
+        cc_src_file = inpath;
     prog = cc_lower_program(&a, ast);
 
     /* register allocation */

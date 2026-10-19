@@ -39,6 +39,7 @@
 #define STB_WEAK        2
 
 #define STT_NOTYPE      0
+#define STT_FUNC        2
 #define STT_SECTION     3
 
 #define SHN_UNDEF       0
@@ -86,6 +87,7 @@ struct ld_reloc {
 struct ld_input_sym {
     const char *name;
     uint32_t value;
+    uint32_t size;      /* st_size (STT_FUNC/OBJECT extent; 0 if unset) */
     int shndx;
     int binding;
     int type;
@@ -117,6 +119,9 @@ struct ld_symbol {
                            resolves to 0 instead of being an error */
     int obj_idx;
     int sec_idx;
+    int type;           /* ELF st_type from the winning definition (STT_FUNC) */
+    uint32_t size;      /* ELF st_size from the winning definition */
+    int binding;        /* STB_LOCAL or STB_GLOBAL, for the re-emitted .symtab */
 };
 
 /****************************************************************
@@ -186,6 +191,18 @@ struct ld_script {
  * Linker state
  ****************************************************************/
 
+/* A non-alloc debug section merged into the output (e.g. .debug_line).  These
+   carry no vaddr and ride beside the loadable sections; the RISC-V linker fills
+   them (ld_build_debug) and the RISC-V writer emits them. */
+struct ld_debug_sec {
+    const char *name;
+    uint8_t *data;
+    uint32_t size;
+    uint32_t cap;
+};
+
+#define MAX_DEBUG_SECS  4
+
 struct linker {
     struct ld_object *objs;
     int nobjs;
@@ -194,6 +211,8 @@ struct linker {
     int sym_cap;
     struct ld_script script;
     uint32_t entry_vaddr;
+    struct ld_debug_sec debug[MAX_DEBUG_SECS];
+    int ndebug;
     struct arena arena;
 };
 
@@ -224,6 +243,10 @@ struct ld_object *ld_add_object(struct linker *ld);
 struct ld_output_sec *ld_find_output_sec(struct linker *ld,
                                          struct ld_input_sec *isec);
 void ld_check_undefined(struct linker *ld);
+/* merge the input .debug_* sections into ld->debug[], recording each input
+   section's base offset within its merged section in isec->assigned_vaddr; the
+   arch linker then applies the relocations inside them */
+void ld_build_debug(struct linker *ld);
 /* write a link map (entry, regions, output sections, symbols) to a file */
 void ld_write_map(struct linker *ld, const char *path);
 

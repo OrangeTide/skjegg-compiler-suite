@@ -12,6 +12,11 @@
 
 static struct arena *lower_arena;
 static struct ir_func *cur_fn;
+
+/* Debug info (-g), see pascal.h. */
+int pascal_debug = 0;
+const char *pascal_src_file = NULL;
+static int last_loc_line;               /* last line marked in this function */
 static struct ir_program *cur_prog;
 static int is_string_type(struct node *n);
 static int is_set_type(struct node *n);
@@ -2414,6 +2419,16 @@ lower_stmt(struct node *n)
     if (!n)
         return;
 
+    /* Debug info (-g): mark the source line at the head of each statement, once
+       per distinct line, so the backend builds an address-to-line table.  A
+       compound carries no line of its own; its inner statements each mark
+       theirs. */
+    if (pascal_debug && n->line > 0 && n->line != last_loc_line
+        && n->kind != N_COMPOUND) {
+        ir_loc(cur_fn, n->line);
+        last_loc_line = n->line;
+    }
+
     switch (n->kind) {
     case N_COMPOUND:
         lower_stmts(n->a);
@@ -2952,6 +2967,8 @@ lower_function(struct node *decl, int is_func,
     }
 
     fn = ir_new_func(lower_arena, ir_name);
+    fn->src_file = pascal_debug ? pascal_src_file : NULL;
+    last_loc_line = 0;
     saved_fn = cur_fn;
     cur_fn = fn;
     saved_nloops = nloops;
@@ -3095,6 +3112,9 @@ lower_function(struct node *decl, int is_func,
     if (block && block->b)
         lower_var_inits(block->b);
 
+    /* reset again: a nested function lowered above shares last_loc_line, so
+       the body must start fresh to mark its first statement's line (-g). */
+    last_loc_line = 0;
     if (block && block->d)
         lower_stmt(block->d);
 
@@ -3293,6 +3313,8 @@ lower_program(struct arena *a, struct node *ast)
         struct ir_func *main_fn;
 
         main_fn = ir_new_func(lower_arena, "main");
+        main_fn->src_file = pascal_debug ? pascal_src_file : NULL;
+        last_loc_line = 0;
         cur_fn = main_fn;
         nloops = 0;
         nslots = 0;

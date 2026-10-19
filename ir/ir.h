@@ -184,7 +184,11 @@ enum ir_op {
 
     /* Source-line marker (imm = the line).  Produces no code and defines no
        value; a backend that tracks debug info records the current output
-       position against the line.  Not yet emitted or lowered. */
+       position against the line.  The source file is carried once per function
+       in ir_func.src_file, not repeated here.  Emitted by a front end under -g
+       (cc, kobold) and observed by every backend: the selector sinks record it
+       (a comment in the AOT text sink, an address-to-line entry in the JIT byte
+       sink), the direct ColdFire and MIPS emitters currently skip it. */
     IR_LOC,
 
     /* two-integer return: the value plus a second result (an error signal) in a
@@ -261,6 +265,10 @@ struct ir_func {
                            self-contained bundle, so the linker folds it against another
                            copy of the same symbol (identical, or a link error). NULL for a
                            module's own definition, which is unique. */
+    const char *src_file; /* source file this function was compiled from, set by a
+                             front end under -g for the debug-info line table; NULL
+                             when debug info is off.  The per-statement line lives
+                             on each IR_LOC marker (its imm). */
     int is_local;
     int nparams;
     int nslots;
@@ -359,6 +367,7 @@ struct ir_func *ir_new_func(struct arena *a, const char *name);
 int ir_new_temp(struct ir_func *fn);
 int ir_new_label(struct ir_func *fn);
 struct ir_insn *ir_emit(struct ir_func *fn, int op);
+struct ir_insn *ir_loc(struct ir_func *fn, int line);  /* IR_LOC marker (-g) */
 int ir_op_is_float_def(int op);
 int ir_op_is_i64_def(int op);
 

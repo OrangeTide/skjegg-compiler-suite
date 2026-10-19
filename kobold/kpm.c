@@ -889,6 +889,13 @@ kpm_read(struct kpm_module *m, const char *text, size_t len,
     m->nimports = iimp;
     m->nexports = iexp;
     m->ndeps = idep;
+
+    /* Debug info (-g): carry the .file hint onto each function for the line
+       table.  Done after the loop since .file and .func may arrive in either
+       order; it stays NULL (no .file emitted) when debug info is off. */
+    for (struct ir_func *fn = m->prog.funcs; fn; fn = fn->next)
+        fn->src_file = m->source_file;
+
     return 0;
 
 err:

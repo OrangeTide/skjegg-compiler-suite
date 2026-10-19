@@ -57,6 +57,7 @@ M68K_LD ?= m68k-linux-gnu-ld
 QEMU    ?= qemu-m68k
 RV_AS   ?= riscv64-linux-gnu-as
 RV_LD   ?= riscv64-linux-gnu-ld
+RV_ADDR2LINE ?= riscv64-linux-gnu-addr2line
 QEMU_RV ?= qemu-riscv32
 # The ISA the rv32.c emulator implements: RV32IMAFC + Zicsr/Zifencei (on in the
 # rv32 base CPU) plus Zba/Zbb/Zbs/Zcb (which the base CPU leaves off).  This is
@@ -122,6 +123,7 @@ TOOLS := build/skj-tinc build/skj-tinc-rv build/skj-tinc-mips build/skj-tinc-arm
          build/skj-as-rv build/skj-ld-rv build/skj-as-mips build/skj-ld-mips build/skj-ar \
          build/skj-cpp build/skj-cc build/skj-cc-x86-64 build/skj-cc-arm64 \
          build/skj-cc-rv build/skjcc build/skj-run \
+         build/skj-addr2line build/skj-dbg \
          build/skj-jit build/skj-kp-jit build/skj-kp-patrol \
          build/skj-kp build/libkpaot.a build/skj-kpc
 
@@ -1005,9 +1007,19 @@ endif
 ifeq ($(EMU_RV32),1)
 EMU_SRC += emu/rv32.c emu/rv_user.c
 EMU_HDR += emu/rv32.h
+## The RV32 skj-run links the shared DWARF reader so a guest fault prints a
+## symbolized backtrace (debugger item 5).  SKJ_DWARF_BACKTRACE gates the code
+## in rv_user.c; a bare emu-rv vendoring without dwarf/ leaves it undefined.
+EMU_SRC += dwarf/dwread.c ir/arena.c
+EMU_FLAGS += -DSKJ_DWARF_BACKTRACE -Idwarf -Iir
+## The GDB remote-protocol stub (debugger item 6, --gdb PORT), gated by
+## SKJ_RV_GDB; a bare emu-rv vendoring omits it.
+EMU_SRC += emu/rv_gdb.c
+EMU_HDR += emu/rv_gdb.h
+EMU_FLAGS += -DSKJ_RV_GDB
 endif
 
-build/skj-run: $(EMU_SRC) $(EMU_HDR) build/version.h | build
+build/skj-run: $(EMU_SRC) $(EMU_HDR) dwarf/dwread.h build/version.h | build
 	$(CC) $(CFLAGS) $(EMU_FLAGS) -Iemu -o $@ $(EMU_SRC) -lm
 
 ## ColdFire assembler
@@ -1019,10 +1031,11 @@ build/skj-as: $(AS_SRC) as/as.h as/asm_lex.h as/asm_obj.h | build
 
 ## RISC-V RV32 assembler (shares the lexer + object helpers with skj-as)
 AS_RV_SRC := as/rv_main.c as/asm_lex.c as/asm_obj.c as/rv_parse.c \
-             as/rv_encode.c as/rv_macro.c as/rv_elf.c ir/util.c ir/arena.c
+             as/rv_encode.c as/rv_macro.c as/rv_elf.c dwarf/dwarf.c \
+             ir/util.c ir/arena.c
 
-build/skj-as-rv: $(AS_RV_SRC) as/rv.h as/asm_lex.h as/asm_obj.h | build
-	$(CC) $(CFLAGS) -Ias -Iir -o $@ $(AS_RV_SRC)
+build/skj-as-rv: $(AS_RV_SRC) as/rv.h as/asm_lex.h as/asm_obj.h dwarf/dwarf.h | build
+	$(CC) $(CFLAGS) -Ias -Iir -Idwarf -o $@ $(AS_RV_SRC)
 
 ## MIPS I assembler (shares the lexer + object helpers with skj-as)
 ## Built up in steps; step 2 encodes the instruction set.  See doc/tools/mips.md.
@@ -1835,8 +1848,8 @@ build/san/skj-exc: excelsior/lex.c excelsior/parse.c excelsior/resolve.c \
                    | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Iexcelsior -Iir -o $@ $(EXC_SRC)
 
-build/san/skj-as-rv: $(AS_RV_SRC) as/rv.h as/asm_lex.h as/asm_obj.h build/version.h | build build/san
-	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Ias -Iir -o $@ $(AS_RV_SRC)
+build/san/skj-as-rv: $(AS_RV_SRC) as/rv.h as/asm_lex.h as/asm_obj.h dwarf/dwarf.h build/version.h | build build/san
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Ias -Iir -Idwarf -o $@ $(AS_RV_SRC)
 
 build/san/skj-ld-rv: $(LD_RV_SRC) ld/ld.h ld/rv_ld.h ld/mapfile.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Ild -Iir -o $@ $(LD_RV_SRC)
@@ -1873,8 +1886,8 @@ build/san/as-fuzz: as/as_fuzz.c $(AS_FUZZ_LIB) as/as.h as/asm_lex.h as/asm_obj.h
 	    as/as_fuzz.c $(AS_FUZZ_LIB)
 
 build/san/as-rv-fuzz: as/as_fuzz.c $(AS_RV_FUZZ_LIB) as/rv.h as/asm_lex.h as/asm_obj.h \
-                      tests/fuzz_mutate.h build/version.h | build build/san
-	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DASFUZZ_RV -Ias -Iir -Itests -o $@ \
+                      dwarf/dwarf.h tests/fuzz_mutate.h build/version.h | build build/san
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DASFUZZ_RV -Ias -Iir -Idwarf -Itests -o $@ \
 	    as/as_fuzz.c $(AS_RV_FUZZ_LIB)
 
 build/san/as-mips-fuzz: as/as_fuzz.c $(AS_MIPS_FUZZ_LIB) as/mips.h as/asm_lex.h as/asm_obj.h \
@@ -2985,6 +2998,393 @@ build/rv/i64_test: build/rv/i64_test.o build/rv/start.o
 test-i64-rv: build/rv/i64_test
 	@echo "Running I64 test under qemu-riscv32..."
 	@$(QEMU_RV) ./build/rv/i64_test && echo "PASS: i64_test (RISC-V)" || (echo "FAIL: i64_test (RISC-V)"; exit 1)
+
+## Debug-info line markers (-g, item 1 of doc/tools/debugger.md): cc emits an
+## IR_LOC per statement that the RISC-V backend records as a ".loc 1 N"
+## directive (which the assembler turns into .debug_line, item 3).
+## Assert the markers appear under -g, are absent without it, and that the -g
+## assembly still assembles with skj-as-rv.
+test-cc-rv-loc: build/skj-cc-rv build/skj-as-rv
+	@mkdir -p build/debug
+	@./build/skj-cc-rv -g -o build/debug/loc_g.s tests/debug/loc.c
+	@./build/skj-cc-rv    -o build/debug/loc_n.s tests/debug/loc.c
+	@g=`grep -c '\.loc' build/debug/loc_g.s`; \
+	 n=`grep -c '\.loc' build/debug/loc_n.s`; \
+	 if [ "$$g" -ge 4 ] && [ "$$n" -eq 0 ]; then \
+	     echo "PASS: cc-rv -g line markers ($$g with -g, $$n without)"; \
+	 else \
+	     echo "FAIL: cc-rv -g line markers ($$g with -g, $$n without)"; exit 1; \
+	 fi
+	@./build/skj-as-rv -o build/debug/loc_g.o build/debug/loc_g.s \
+	     && echo "PASS: cc-rv -g assembly assembles"
+
+## Debug-info line markers (-g) on the Kobold path: kpcom emits the .file hint
+## and a per-statement LOC, the KPM1 reader carries .file onto ir_func.src_file,
+## and the RISC-V backend records each as a ".loc 1 N" directive.  Same
+## assertions as test-cc-rv-loc.
+test-kp-rv-loc: build/skj-kpc build/skj-kp-rv build/skj-as-rv
+	@mkdir -p build/debug
+	@./build/skj-kpc --emit-kpm -g -o build/debug/kloc_g.kpm tests/debug/loc.pas
+	@./build/skj-kpc --emit-kpm    -o build/debug/kloc_n.kpm tests/debug/loc.pas
+	@./build/skj-kp-rv -o build/debug/kloc_g.s build/debug/kloc_g.kpm
+	@./build/skj-kp-rv -o build/debug/kloc_n.s build/debug/kloc_n.kpm
+	@g=`grep -c '\.loc' build/debug/kloc_g.s`; \
+	 n=`grep -c '\.loc' build/debug/kloc_n.s`; \
+	 if [ "$$g" -ge 3 ] && [ "$$n" -eq 0 ]; then \
+	     echo "PASS: kp-rv -g line markers ($$g with -g, $$n without)"; \
+	 else \
+	     echo "FAIL: kp-rv -g line markers ($$g with -g, $$n without)"; exit 1; \
+	 fi
+	@./build/skj-as-rv -o build/debug/kloc_g.o build/debug/kloc_g.s \
+	     && echo "PASS: kp-rv -g assembly assembles"
+
+## Debug-info line markers (-g) on the Compact Pascal path: skj-pc emits an
+## IR_LOC per statement and records the source file on each function; the
+## ColdFire backend records each marker as a "| line N" comment.  Assert the
+## markers appear under -g, are absent without it, and the -g assembly still
+## assembles with skj-as.
+test-pc-loc: build/skj-pc build/skj-as
+	@mkdir -p build/debug
+	@./build/skj-pc -g -o build/debug/pcloc_g.s tests/debug/loc_pc.pas
+	@./build/skj-pc    -o build/debug/pcloc_n.s tests/debug/loc_pc.pas
+	@g=`grep -c '| line' build/debug/pcloc_g.s`; \
+	 n=`grep -c '| line' build/debug/pcloc_n.s`; \
+	 if [ "$$g" -ge 3 ] && [ "$$n" -eq 0 ]; then \
+	     echo "PASS: pc -g line markers ($$g with -g, $$n without)"; \
+	 else \
+	     echo "FAIL: pc -g line markers ($$g with -g, $$n without)"; exit 1; \
+	 fi
+	@./build/skj-as -o build/debug/pcloc_g.o build/debug/pcloc_g.s \
+	     && echo "PASS: pc -g assembly assembles"
+
+## Debug-info line markers (-g) on the MooScript path: skj-mooc emits an IR_LOC
+## per statement and records the source file on each function; the ColdFire
+## backend records each marker as a "| line N" comment.  Assert the markers
+## appear under -g, are absent without it, and the -g assembly still assembles
+## with skj-as.
+test-moo-loc: build/skj-mooc build/skj-as
+	@mkdir -p build/debug
+	@./build/skj-mooc -g -o build/debug/mooloc_g.s tests/debug/loc.moo
+	@./build/skj-mooc    -o build/debug/mooloc_n.s tests/debug/loc.moo
+	@g=`grep -c '| line' build/debug/mooloc_g.s`; \
+	 n=`grep -c '| line' build/debug/mooloc_n.s`; \
+	 if [ "$$g" -ge 4 ] && [ "$$n" -eq 0 ]; then \
+	     echo "PASS: moo -g line markers ($$g with -g, $$n without)"; \
+	 else \
+	     echo "FAIL: moo -g line markers ($$g with -g, $$n without)"; exit 1; \
+	 fi
+	@./build/skj-as -o build/debug/mooloc_g.o build/debug/mooloc_g.s \
+	     && echo "PASS: moo -g assembly assembles"
+
+## Debug-info line markers (-g) on the TinC path: skj-tinc emits an IR_LOC per
+## statement and records the source file on each function; the ColdFire backend
+## records each marker as a "| line N" comment.  Assert the markers appear under
+## -g, are absent without it, and the -g assembly still assembles with skj-as.
+test-tinc-loc: build/skj-tinc build/skj-as
+	@mkdir -p build/debug
+	@./build/skj-tinc -g -o build/debug/tcloc_g.s tests/debug/loc.tc
+	@./build/skj-tinc    -o build/debug/tcloc_n.s tests/debug/loc.tc
+	@g=`grep -c '| line' build/debug/tcloc_g.s`; \
+	 n=`grep -c '| line' build/debug/tcloc_n.s`; \
+	 if [ "$$g" -ge 5 ] && [ "$$n" -eq 0 ]; then \
+	     echo "PASS: tinc -g line markers ($$g with -g, $$n without)"; \
+	 else \
+	     echo "FAIL: tinc -g line markers ($$g with -g, $$n without)"; exit 1; \
+	 fi
+	@./build/skj-as -o build/debug/tcloc_g.o build/debug/tcloc_g.s \
+	     && echo "PASS: tinc -g assembly assembles"
+
+## Debug-info line markers (-g) on the Excelsior path: skj-exc emits an IR_LOC
+## per statement and records the source file on each function (verbs, funcs,
+## source bodies and lambdas); the ColdFire backend records each marker as a
+## "| line N" comment.  Assert the markers appear under -g, are absent without
+## it, and the -g assembly still assembles with skj-as.
+test-exc-loc: build/skj-exc build/skj-as
+	@mkdir -p build/debug
+	@./build/skj-exc -g -o build/debug/excloc_g.s tests/debug/loc.exs
+	@./build/skj-exc    -o build/debug/excloc_n.s tests/debug/loc.exs
+	@g=`grep -c '| line' build/debug/excloc_g.s`; \
+	 n=`grep -c '| line' build/debug/excloc_n.s`; \
+	 if [ "$$g" -ge 5 ] && [ "$$n" -eq 0 ]; then \
+	     echo "PASS: exc -g line markers ($$g with -g, $$n without)"; \
+	 else \
+	     echo "FAIL: exc -g line markers ($$g with -g, $$n without)"; exit 1; \
+	 fi
+	@./build/skj-as -o build/debug/excloc_g.o build/debug/excloc_g.s \
+	     && echo "PASS: exc -g assembly assembles"
+
+## DWARF 4 line-number serializer (item 2 of doc/tools/debugger.md): the
+## dwarf/ serializer turns a (code address, line) row table into a .debug_line
+## program.  dwline-emit writes the section bytes for a fixed table; the bytes
+## are wrapped in an ELF with GNU as (.incbin) and decoded by readelf and
+## llvm-dwarfdump, which must report exactly the rows emitted.  This is the
+## oracle check for the encoding, independent of skj-as-rv/skj-ld-rv (item 3).
+build/dwline-emit: tests/dwarf/dwline_emit.c dwarf/dwarf.c dwarf/dwarf.h | build
+	$(CC) $(CFLAGS) -Idwarf -Iir -o $@ tests/dwarf/dwline_emit.c dwarf/dwarf.c \
+	    ir/arena.c ir/util.c
+
+## skj-addr2line (item 4): the standalone address-to-source tool over the shared
+## DWARF reader (dwread.c).  Reads the .debug_line table and .symtab a skj build
+## carries (item 3) and answers address -> function, file:line.
+build/skj-addr2line: dwarf/addr2line_main.c dwarf/dwread.c dwarf/dwread.h | build
+	$(CC) $(CFLAGS) -Idwarf -Iir -o $@ dwarf/addr2line_main.c dwarf/dwread.c \
+	    ir/arena.c ir/util.c
+
+## skj-dbg (item 6): the source-level debugger.  It launches skj-run --gdb,
+## connects over the GDB remote protocol, and symbolizes through the shared
+## DWARF reader (dw_backtrace walks the fp chain reading memory over the wire).
+build/skj-dbg: dbg/skj_dbg.c dwarf/dwread.c dwarf/dwread.h | build
+	$(CC) $(CFLAGS) -Idwarf -Iir -o $@ dbg/skj_dbg.c dwarf/dwread.c \
+	    ir/arena.c ir/util.c
+
+test-dwarf-line: build/dwline-emit
+	@mkdir -p build/debug
+	@./build/dwline-emit build/debug
+	@printf '\t.section\t.debug_abbrev,""\n\t.incbin\t"build/debug/dwabbrev.bin"\n\t.section\t.debug_info,""\n\t.incbin\t"build/debug/dwinfo.bin"\n\t.section\t.debug_line,""\n\t.incbin\t"build/debug/dwline.bin"\n' \
+	    > build/debug/dwline.s
+	@$(RV_AS) -march=rv32im -mabi=ilp32 -o build/debug/dwline.o build/debug/dwline.s
+	@readelf --debug-dump=decodedline build/debug/dwline.o > build/debug/dwline.readelf
+	@readelf --debug-dump=info build/debug/dwline.o > build/debug/dwinfo.readelf
+	@llvm-dwarfdump --debug-line build/debug/dwline.o > build/debug/dwline.dwdump
+	@llvm-dwarfdump --debug-info build/debug/dwline.o > build/debug/dwinfo.dwdump
+	@llvm-dwarfdump --lookup=0x108 build/debug/dwline.o > build/debug/dwlookup.dwdump
+	@ok=1; \
+	 for pair in "10 100" "11 108" "12 110"; do \
+	     set -- $$pair; ln=$$1; ah=$$2; \
+	     grep -Eq "loc\.c +$$ln +0x$$ah" build/debug/dwline.readelf || { \
+	         echo "FAIL: readelf missing row line $$ln at 0x$$ah"; ok=0; }; \
+	     adp=`printf '0x%016x' 0x$$ah`; \
+	     grep -Eq "$$adp +$$ln " build/debug/dwline.dwdump || { \
+	         echo "FAIL: llvm-dwarfdump missing row line $$ln at $$adp"; ok=0; }; \
+	 done; \
+	 grep -q "end_sequence" build/debug/dwline.dwdump || { \
+	     echo "FAIL: no end_sequence in the line program"; ok=0; }; \
+	 grep -q "DW_TAG_compile_unit" build/debug/dwinfo.dwdump || { \
+	     echo "FAIL: no compile_unit DIE in .debug_info"; ok=0; }; \
+	 grep -Eq "DW_AT_stmt_list.*0x0*0\)" build/debug/dwinfo.dwdump || { \
+	     echo "FAIL: compile_unit missing DW_AT_stmt_list -> line program"; ok=0; }; \
+	 grep -q "DW_TAG_compile_unit" build/debug/dwinfo.readelf || { \
+	     echo "FAIL: readelf cannot decode the compile_unit DIE"; ok=0; }; \
+	 grep -Eq "line 11" build/debug/dwlookup.dwdump || { \
+	     echo "FAIL: address lookup of 0x108 did not resolve to line 11"; ok=0; }; \
+	 if [ "$$ok" = 1 ]; then \
+	     echo "PASS: dwarf .debug_{line,info,abbrev} decode and attach; 0x108 resolves to loc.c:11"; \
+	 else exit 1; fi
+
+## STT_FUNC symbols with sizes (item 2 of doc/tools/debugger.md): the RISC-V
+## backend emits .type @function and .size per function, and skj-as-rv honors
+## them into the object .symtab.  A debugger's address-to-function map and a
+## backtrace read these.  Assemble tests/debug/funcs.c with both skj-as-rv and
+## GNU as and check each function is a sized FUNC symbol with the same size.
+test-rv-stt-func: build/skj-cc-rv build/skj-as-rv
+	@mkdir -p build/debug
+	@./build/skj-cc-rv -o build/debug/funcs.s tests/debug/funcs.c
+	@./build/skj-as-rv -o build/debug/funcs.skj.o build/debug/funcs.s
+	@$(RV_AS) -march=rv32im -mabi=ilp32 -o build/debug/funcs.gas.o build/debug/funcs.s
+	@readelf -s build/debug/funcs.skj.o > build/debug/funcs.skj.syms
+	@readelf -s build/debug/funcs.gas.o > build/debug/funcs.gas.syms
+	@ok=1; \
+	 for fn in add helper main; do \
+	     ss=`awk -v f=$$fn '$$4=="FUNC" && $$8==f {print $$3}' build/debug/funcs.skj.syms`; \
+	     gs=`awk -v f=$$fn '$$4=="FUNC" && $$8==f {print $$3}' build/debug/funcs.gas.syms`; \
+	     if [ -z "$$ss" ]; then \
+	         echo "FAIL: $$fn is not a FUNC symbol in skj-as-rv output"; ok=0; \
+	     elif [ "$$ss" = 0 ]; then \
+	         echo "FAIL: $$fn has zero st_size in skj-as-rv output"; ok=0; \
+	     elif [ "$$ss" != "$$gs" ]; then \
+	         echo "FAIL: $$fn size $$ss (skj) != $$gs (gas)"; ok=0; \
+	     fi; \
+	 done; \
+	 if [ "$$ok" = 1 ]; then \
+	     echo "PASS: skj-as-rv emits sized STT_FUNC symbols matching GNU as"; \
+	 else exit 1; fi
+
+## DWARF debug sections from .loc (item 3 of doc/tools/debugger.md): the RISC-V
+## backend emits .file/.loc under -g; skj-as-rv collects the rows and builds
+## .debug_line/.debug_info/.debug_abbrev (dwarf/), with R_RISCV_32 at the
+## absolute address fields.  Validate on the object: the sections exist, the CU
+## carries DW_AT_stmt_list, the line program ends a sequence, and the decoded
+## (address, line) rows match GNU as fed the identical .loc stream.  Full
+## address-to-line resolution on a linked executable is the linker slice.
+test-rv-debug-sections: build/skj-cc-rv build/skj-as-rv
+	@mkdir -p build/debug
+	@./build/skj-cc-rv -g -o build/debug/dsec.s tests/debug/loc.c
+	@./build/skj-as-rv -o build/debug/dsec.skj.o build/debug/dsec.s
+	@$(RV_AS) -march=rv32im -mabi=ilp32 -o build/debug/dsec.gas.o build/debug/dsec.s
+	@readelf -S build/debug/dsec.skj.o > build/debug/dsec.secs
+	@llvm-dwarfdump --debug-info build/debug/dsec.skj.o > build/debug/dsec.info
+	@llvm-dwarfdump --debug-line build/debug/dsec.skj.o > build/debug/dsec.line
+	@llvm-dwarfdump --debug-line build/debug/dsec.gas.o > build/debug/dsec.gasline
+	@ok=1; \
+	 for s in .debug_line .debug_info .debug_abbrev; do \
+	     grep -q "$$s" build/debug/dsec.secs || { \
+	         echo "FAIL: section $$s missing from skj-as-rv object"; ok=0; }; \
+	 done; \
+	 grep -q "DW_TAG_compile_unit" build/debug/dsec.info || { \
+	     echo "FAIL: no compile_unit DIE"; ok=0; }; \
+	 grep -q "DW_AT_stmt_list" build/debug/dsec.info || { \
+	     echo "FAIL: CU missing DW_AT_stmt_list"; ok=0; }; \
+	 grep -q "end_sequence" build/debug/dsec.line || { \
+	     echo "FAIL: line program has no end_sequence"; ok=0; }; \
+	 sl=`awk '/ is_stmt/{print $$2}' build/debug/dsec.line | tr '\n' ' '`; \
+	 gl=`awk '/ is_stmt/{print $$2}' build/debug/dsec.gasline | tr '\n' ' '`; \
+	 if [ "$$sl" != "$$gl" ]; then \
+	     echo "FAIL: line rows [$$sl] != GNU as [$$gl]"; ok=0; \
+	 fi; \
+	 if [ "$$ok" = 1 ]; then \
+	     echo "PASS: skj-as-rv builds .debug_{line,info,abbrev} from .loc (rows match GNU as: $$sl)"; \
+	 else exit 1; fi
+
+## DWARF through the linker (item 3, the linker slice): skj-ld-rv preserves the
+## .debug_* sections, relocates their absolute address fields to final link
+## addresses, and emits them in the executable.  The payoff is addr2line and
+## llvm-dwarfdump --lookup resolving a real address to file:line on a
+## skj-linked binary, which the GNU toolchain's addr2line confirms.  Also check
+## the executable still runs (the debug sections are non-alloc, so they must not
+## perturb the loadable image) and matches the exit the non-debug build gives.
+test-rv-debug-link: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv/start.o
+	@mkdir -p build/debug
+	@./build/skj-cc-rv -g -o build/debug/dlink.s tests/debug/loc.c
+	@./build/skj-as-rv -o build/debug/dlink.o build/debug/dlink.s
+	@./build/skj-ld-rv -o build/debug/dlink.elf build/rv/start.o build/debug/dlink.o
+	@readelf -S build/debug/dlink.elf > build/debug/dlink.secs
+	@readelf -s build/debug/dlink.elf > build/debug/dlink.syms
+	@llvm-dwarfdump --debug-line build/debug/dlink.elf > build/debug/dlink.line
+	@ok=1; \
+	 for s in .debug_line .debug_info .debug_abbrev .symtab; do \
+	     grep -q "$$s" build/debug/dlink.secs || { \
+	         echo "FAIL: section $$s missing from linked executable"; ok=0; }; \
+	 done; \
+	 msz=`awk '$$4=="FUNC" && $$8=="main" {print $$3}' build/debug/dlink.syms`; \
+	 if [ -z "$$msz" ] || [ "$$msz" = 0 ]; then \
+	     echo "FAIL: main is not a sized FUNC symbol in .symtab"; ok=0; \
+	 fi; \
+	 $(QEMU_RV) ./build/debug/dlink.elf; ec=$$?; \
+	 if [ $$ec -ne 5 ]; then \
+	     echo "FAIL: linked -g executable exited $$ec (expected 5)"; ok=0; \
+	 fi; \
+	 addr=`awk '/ is_stmt/{print $$1; exit}' build/debug/dlink.line`; \
+	 line=`awk '/ is_stmt/{print $$2; exit}' build/debug/dlink.line`; \
+	 res=`$(RV_ADDR2LINE) -f -e build/debug/dlink.elf $$addr | tr '\n' ' '`; \
+	 case "$$res" in \
+	     "??"*|"") echo "FAIL: addr2line -f gave no function for $$addr"; ok=0 ;; \
+	     *loc.c:$$line*) : ;; \
+	     *) echo "FAIL: addr2line -f $$addr -> $$res (expected loc.c:$$line)"; ok=0 ;; \
+	 esac; \
+	 if [ "$$ok" = 1 ]; then \
+	     echo "PASS: skj-ld-rv carries DWARF + .symtab; addr2line -f $$addr -> $$res, runs (exit 5)"; \
+	 else exit 1; fi
+
+## skj-addr2line over the shared DWARF reader (item 4): resolve every compiled
+## statement address on a skj-linked executable and check the function name and
+## source line agree with GNU addr2line.  Paths are compared by basename, since
+## skj prints the stored relative name where GNU prepends the CU comp_dir.
+test-rv-addr2line: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-addr2line build/rv/start.o
+	@mkdir -p build/debug
+	@./build/skj-cc-rv -g -o build/debug/a2l.s tests/debug/loc.c
+	@./build/skj-as-rv -o build/debug/a2l.o build/debug/a2l.s
+	@./build/skj-ld-rv -o build/debug/a2l.elf build/rv/start.o build/debug/a2l.o
+	@llvm-dwarfdump --debug-line build/debug/a2l.elf > build/debug/a2l.line
+	@ok=1; n=0; \
+	 for addr in `awk '/ is_stmt/ && !/end_sequence/ {print $$1}' build/debug/a2l.line`; do \
+	     n=`expr $$n + 1`; \
+	     sf=`./build/skj-addr2line -f -e build/debug/a2l.elf $$addr | sed 's:.*/::'`; \
+	     gf=`$(RV_ADDR2LINE) -f -e build/debug/a2l.elf $$addr | sed 's:.*/::'`; \
+	     if [ "$$sf" != "$$gf" ]; then \
+	         echo "FAIL: $$addr skj[$$sf] != gnu[$$gf]"; ok=0; \
+	     fi; \
+	 done; \
+	 if [ "$$n" -lt 1 ]; then echo "FAIL: no statement addresses found"; ok=0; fi; \
+	 if [ "$$ok" = 1 ]; then \
+	     echo "PASS: skj-addr2line matches GNU addr2line on $$n statements (function + line)"; \
+	 else exit 1; fi
+
+## skj-run fault backtrace (item 5): a nested call chain faults through a null
+## read, and skj-run walks the frame-pointer chain and symbolizes it with the
+## shared DWARF reader.  Check the frames name the functions in call order
+## (level3 inner, main outer); the crt _start frame is NOTYPE and prints ??.
+test-rv-backtrace: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-run build/rv/start.o
+	@mkdir -p build/debug
+	@./build/skj-cc-rv -g -o build/debug/crash.s tests/debug/crash.c
+	@./build/skj-as-rv -o build/debug/crash.o build/debug/crash.s
+	@./build/skj-ld-rv -o build/debug/crash.elf build/rv/start.o build/debug/crash.o
+	@./build/skj-run build/debug/crash.elf 2>build/debug/crash.err; \
+	 bt=`grep '^#' build/debug/crash.err | sed 's/.*0x[0-9a-f]* *//; s/ at .*//'`; \
+	 order=`echo "$$bt" | grep -E 'level3|level2|level1|main' | tr '\n' ' '`; \
+	 if [ "$$order" = "level3 level2 level1 main " ]; then \
+	     echo "PASS: skj-run backtrace walks level3 -> level2 -> level1 -> main"; \
+	 else \
+	     echo "FAIL: backtrace order was [$$order]"; \
+	     cat build/debug/crash.err; exit 1; \
+	 fi
+
+## skj-run GDB stub (item 6a): drive the --gdb RSP server with gdb-multiarch as
+## the oracle.  A break at main, a backtrace at a fault (SIGSEGV), and the clean
+## exit code all come back through the stub's registers/memory/breakpoints.
+## Skips cleanly when gdb-multiarch is not installed (it is an extra oracle, not
+## a build dependency); the self-contained check is test-rv-dbg (skj-dbg).
+RV_GDB ?= gdb-multiarch
+test-rv-gdb: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-run build/rv/start.o
+	@if ! command -v $(RV_GDB) >/dev/null 2>&1; then \
+	     echo "SKIP: test-rv-gdb ($(RV_GDB) not found)"; exit 0; fi; \
+	 mkdir -p build/debug; \
+	 ./build/skj-cc-rv -g -o build/debug/loc.s tests/debug/loc.c; \
+	 ./build/skj-as-rv -o build/debug/loc.o build/debug/loc.s; \
+	 ./build/skj-ld-rv -o build/debug/loc.elf build/rv/start.o build/debug/loc.o; \
+	 ./build/skj-cc-rv -g -o build/debug/crash.s tests/debug/crash.c; \
+	 ./build/skj-as-rv -o build/debug/crash.o build/debug/crash.s; \
+	 ./build/skj-ld-rv -o build/debug/crash.elf build/rv/start.o build/debug/crash.o; \
+	 port=$$((20000 + $$$$ % 20000)); \
+	 ./build/skj-run --gdb $$port build/debug/loc.elf >/dev/null 2>build/debug/g1.err & rp=$$!; \
+	 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+	     grep -q listening build/debug/g1.err 2>/dev/null && break; sleep 0.2; done; \
+	 $(RV_GDB) -q -nx -batch -ex "set pagination off" \
+	     -ex "target remote 127.0.0.1:$$port" -ex "break main" \
+	     -ex "continue" -ex "continue" build/debug/loc.elf \
+	     >build/debug/g1.out 2>&1; \
+	 wait $$rp 2>/dev/null; \
+	 port=$$((20000 + ($$$$ + 1) % 20000)); \
+	 ./build/skj-run --gdb $$port build/debug/crash.elf >/dev/null 2>build/debug/g2.err & rp=$$!; \
+	 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+	     grep -q listening build/debug/g2.err 2>/dev/null && break; sleep 0.2; done; \
+	 $(RV_GDB) -q -nx -batch -ex "set pagination off" \
+	     -ex "target remote 127.0.0.1:$$port" -ex "continue" \
+	     -ex "backtrace" build/debug/crash.elf >build/debug/g2.out 2>&1; \
+	 kill $$rp 2>/dev/null; wait $$rp 2>/dev/null; \
+	 ok=1; \
+	 grep -q "Breakpoint 1, main" build/debug/g1.out || { echo "FAIL: no break at main"; ok=0; }; \
+	 grep -q "exited with code 05" build/debug/g1.out || { echo "FAIL: loc did not exit 05"; ok=0; }; \
+	 grep -q "SIGSEGV" build/debug/g2.out || { echo "FAIL: no SIGSEGV on crash"; ok=0; }; \
+	 for fn in level3 level2 level1 main; do \
+	     grep -q "in $$fn " build/debug/g2.out || { echo "FAIL: backtrace missing $$fn"; ok=0; }; done; \
+	 if [ $$ok = 1 ]; then \
+	     echo "PASS: gdb-multiarch drives the skj-run RSP stub (break, fault backtrace, exit)"; \
+	 else cat build/debug/g1.out build/debug/g2.out; exit 1; fi
+
+## skj-dbg end to end (item 6b): the in-tree debugger launches skj-run --gdb,
+## connects over the RSP, and drives break / continue / backtrace, symbolizing
+## through the shared DWARF reader.  Self-contained (no external gdb).
+test-rv-dbg: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-run build/skj-dbg build/rv/start.o
+	@mkdir -p build/debug
+	@./build/skj-cc-rv -g -o build/debug/loc.s tests/debug/loc.c
+	@./build/skj-as-rv -o build/debug/loc.o build/debug/loc.s
+	@./build/skj-ld-rv -o build/debug/loc.elf build/rv/start.o build/debug/loc.o
+	@./build/skj-cc-rv -g -o build/debug/crash.s tests/debug/crash.c
+	@./build/skj-as-rv -o build/debug/crash.o build/debug/crash.s
+	@./build/skj-ld-rv -o build/debug/crash.elf build/rv/start.o build/debug/crash.o
+	@./build/skj-dbg --run ./build/skj-run -ex "break main" -ex "continue" \
+	     build/debug/loc.elf >build/debug/dbg1.out 2>&1
+	@./build/skj-dbg --run ./build/skj-run -ex "continue" -ex "backtrace" \
+	     build/debug/crash.elf >build/debug/dbg2.out 2>&1
+	@ok=1; \
+	 grep -q "breakpoint at .*main at .*loc.c:" build/debug/dbg1.out || { echo "FAIL: break main not symbolized"; ok=0; }; \
+	 grep -q "stopped in main at .*loc.c:" build/debug/dbg1.out || { echo "FAIL: did not stop in main"; ok=0; }; \
+	 grep -q "SIGSEGV.*in level3 at .*crash.c:" build/debug/dbg2.out || { echo "FAIL: no symbolized SIGSEGV"; ok=0; }; \
+	 bt=`grep '^#' build/debug/dbg2.out | sed 's/.*0x[0-9a-f]* *//; s/ at .*//' | grep -E 'level|main' | tr '\n' ' '`; \
+	 if [ "$$bt" != "level3 level2 level1 main " ]; then echo "FAIL: bt order [$$bt]"; ok=0; fi; \
+	 if [ $$ok = 1 ]; then \
+	     echo "PASS: skj-dbg break/continue/backtrace over the RSP, DWARF-symbolized"; \
+	 else cat build/debug/dbg1.out build/debug/dbg2.out; exit 1; fi
 
 ## I64 integration test (IR builder → arm64 asm → qemu-aarch64)
 I64_TEST_A64_SRC := tests/test_i64.c $(IR_SRC) $(BE_A64)
@@ -4180,6 +4580,10 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp c
            test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 \
            test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 \
            check-rvas check-cc-rv-skj check-exc-rv-skj \
+           test-cc-rv-loc test-kp-rv-loc test-pc-loc test-moo-loc test-tinc-loc \
+           test-exc-loc test-dwarf-line test-rv-stt-func test-rv-debug-sections \
+           test-rv-debug-link test-rv-addr2line test-rv-backtrace \
+           test-rv-dbg test-rv-gdb \
            check-cc-rv-psabi test-cc-rv-psabi-interop \
            test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive \
            test-cc-rv-psabi-struct test-cc-driver check-libc \

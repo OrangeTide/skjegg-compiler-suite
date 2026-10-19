@@ -43,6 +43,7 @@ usage(FILE *out)
         "  --stack BYTES   guest stack size (default 1M)\n"
         "  --heap BYTES    guest heap size for brk (default 16M)\n"
         "  --max-insns N   stop after N instructions (default unlimited)\n"
+        "  --gdb PORT      serve the GDB remote protocol on PORT (rv32)\n"
         "  --total-mem BYTES  aggregate memory cap across all processes\n"
         "  --child-max-insns N  per-spawned-child instruction budget\n"
         "  --trace         dump the CPU event ring on a fault\n"
@@ -176,6 +177,14 @@ main(int argc, char **argv)
         }
         if (strcmp(a, "--max-insns") == 0 && i + 1 < argc) {
             o.max_insns = parse_size(argv[++i]);
+            continue;
+        }
+        if (strcmp(a, "--gdb") == 0 && i + 1 < argc) {
+            o.gdb_port = (int)strtol(argv[++i], NULL, 0);
+            if (o.gdb_port <= 0 || o.gdb_port > 65535) {
+                fprintf(stderr, "skj-run: bad gdb port '%s'\n", argv[i]);
+                return 2;
+            }
             continue;
         }
         if (strcmp(a, "--total-mem") == 0 && i + 1 < argc) {

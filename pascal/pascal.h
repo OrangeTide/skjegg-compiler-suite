@@ -102,4 +102,10 @@ struct node *parse_program(struct arena *a);
 
 struct ir_program *lower_program(struct arena *a, struct node *ast);
 
+/* Debug info (-g): when pascal_debug is set, lowering emits an IR_LOC per
+   statement and records pascal_src_file on each function for the line table.
+   Set by the driver before lower_program. */
+extern int pascal_debug;
+extern const char *pascal_src_file;
+
 #endif /* PASCAL_H */

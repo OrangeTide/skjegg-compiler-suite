@@ -27,6 +27,7 @@
 
 /* Linux/RISC-V syscall numbers: read 63, write 64, exit 93 */
 
+	.type	_start,@function
 _start:
 	la	sp, stack_top		/* our own stack, like start_rv.S: the
 					   kernel's is one page and the deeper
@@ -43,27 +44,37 @@ _start:
 	li	a7, 93
 	ecall
 1:	j	1b
+	.size	_start,.-_start
 
 /* int read(int fd, char *buf, int n); */
+	.type	read,@function
 read:
 	li	a7, 63
 	ecall
 	ret
+	.size	read,.-read
 
 /* int write(int fd, const char *buf, int n); */
+	.type	write,@function
 write:
 	li	a7, 64
 	ecall
 	ret
+	.size	write,.-write
 
 /* void exit(int status);  (alias _exit) */
+	.type	exit,@function
+	.type	_exit,@function
 exit:
 _exit:
 	li	a7, 93
 	ecall
 1:	j	1b
+	.size	exit,.-exit
+	.size	_exit,.-_exit
 
 /* void *__moo_arena_alloc(int size); bump allocator, 4-byte aligned */
+	.type	__moo_arena_alloc,@function
 __moo_arena_alloc:
 	addi	a0, a0, 3
 	andi	a0, a0, -4
@@ -73,13 +84,16 @@ __moo_arena_alloc:
 	sw	t2, 0(t0)
 	mv	a0, t1
 	ret
+	.size	__moo_arena_alloc,.-__moo_arena_alloc
 
 /* void __moo_arena_reset(void); */
+	.type	__moo_arena_reset,@function
 __moo_arena_reset:
 	la	t0, __moo_arena_ptr
 	la	t1, __moo_arena
 	sw	t1, 0(t0)
 	ret
+	.size	__moo_arena_reset,.-__moo_arena_reset
 
 /* char *__exc_map_stack(int size);
  *   Ask the emulator for a fresh region of `size` bytes with a guard page just
@@ -87,6 +101,7 @@ __moo_arena_reset:
  *   or 0 when the facility is absent: qemu-user answers the unknown ecall with
  *   -ENOSYS (a small negative), which is caught here so the caller falls back
  *   to the arena. */
+	.type	__exc_map_stack,@function
 __exc_map_stack:
 	li	a1, 1			/* GM_MAP_GUARD_LO */
 	li	a7, 0x000f0001		/* RV_SYS_MAP: a0=size, a1=flags */
@@ -96,6 +111,7 @@ __exc_map_stack:
 	ret
 1:	li	a0, 0
 	ret
+	.size	__exc_map_stack,.-__exc_map_stack
 
 /****************************************************************
  * Source coroutines (sources.md D4)
@@ -175,6 +191,7 @@ __exc_map_stack:
 /* int __exc_src_next(struct exc_src *s);
  *   Launches or resumes the body on its private stack and returns the
  *   yielded value (the null-word maybe protocol), or 0 when exhausted. */
+	.type	__exc_src_next,@function
 __exc_src_next:
 	lw	t0, 0(a0)
 	li	t1, 2
@@ -218,9 +235,11 @@ __exc_src_next:
 .Lsrc_done:
 	li	a0, 0
 	ret
+	.size	__exc_src_next,.-__exc_src_next
 
 /* void __exc_src_yield(struct exc_src *s, int value);
  *   Produces a value: park the body and return to the pump. */
+	.type	__exc_src_yield,@function
 __exc_src_yield:
 	save_ctx
 	sw	sp, 8(a0)		/* body sp */
@@ -230,6 +249,7 @@ __exc_src_yield:
 	mv	a0, a1			/* the pump's result */
 	restore_ctx
 	ret
+	.size	__exc_src_yield,.-__exc_src_yield
 
 	.data
 	.align	4

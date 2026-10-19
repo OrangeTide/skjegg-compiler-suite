@@ -171,6 +171,7 @@ typedef struct run_opts {
     int trace;                  /* dump the CPU trace ring on a fault */
     int stats;                  /* instruction count to stderr on exit */
     int quiet;
+    int gdb_port;               /* >0: serve the GDB remote protocol on this port (RV32) */
 } run_opts;
 
 /* Each front end loads the ELF, builds the machine, runs it, and returns

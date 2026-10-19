@@ -23,6 +23,16 @@ ir_new_temp(struct ir_func *fn)
     return fn->ntemps++;
 }
 
+/* A source-line marker for debug info (-g): no code, no value, the line in
+   imm.  The source file is on fn->src_file. */
+struct ir_insn *
+ir_loc(struct ir_func *fn, int line)
+{
+    struct ir_insn *i = ir_emit(fn, IR_LOC);
+    i->imm = line;
+    return i;
+}
+
 int
 ir_new_label(struct ir_func *fn)
 {

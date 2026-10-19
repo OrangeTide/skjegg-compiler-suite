@@ -40,9 +40,13 @@ Kobold:    kp                (the Kobold-Pascal AOT path: the native front end
              skj-kpc and the KPM1 compiler skj-kp over the bootstrap seed, plus
              the runtime libkpaot.a; add riscv for the KPM1->RV32 compiler)
 
+Usage docs for the selected tools and languages are vendored into DIR/doc
+(README.md always, plus the per-component reference, e.g. the whole Kobold
+doc set with kp).
+
 Options:
   -d DIR   destination directory (default: skjegg)
-  -r REF   git ref — branch or tag (default: main)
+  -r REF   git ref: branch or tag (default: main)
   -u DIR   install update-skjegg.sh to DIR (default: cwd)
   -h       show this help
 USAGE
@@ -360,6 +364,36 @@ if [ "$has_kp" -eq 1 ]; then
         cp "$S/jit/call_guest_rv.S" "$S/jit/rv_jit_i64.S" "$DEST/jit/"
     fi
     cp "$S/prebuild/kpcom.kpm" "$S/prebuild/kpcom.manifest" "$DEST/prebuild/"
+fi
+
+# Documentation.  Vendor the usage docs for each selected tool and language, so
+# a consuming project carries the reference for what it actually took.
+# README.md is the toolkit overview (the tool list and how each is invoked); the
+# rest are per-component and copied only when that component is selected.
+mkdir -p "$DEST/doc"
+cp "$S/README.md" "$DEST/doc/"
+
+if [ "$has_cc" -eq 1 ]; then
+    cp "$S/doc/languages/c.md" "$DEST/doc/"
+fi
+if [ "$has_pascal" -eq 1 ]; then
+    cp "$S/doc/languages/pascal.md" "$DEST/doc/"
+fi
+if [ "$has_mips" -eq 1 ]; then
+    cp "$S/doc/tools/mips.md" "$DEST/doc/"
+fi
+if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ]; then
+    cp "$S/doc/tools/emulator.md" "$DEST/doc/"
+fi
+if [ "$has_libc" -eq 1 ]; then
+    cp "$S/doc/tools/libc.md" "$DEST/doc/"
+fi
+# Kobold-Pascal: the whole language doc set (guide, tutorial, grammar,
+# semantics, builtins, embedding, sandbox, ...), which is how to use the
+# language and its toolchain.
+if [ "$has_kp" -eq 1 ]; then
+    mkdir -p "$DEST/doc/kobold"
+    cp "$S"/doc/languages/kobold/*.md "$DEST/doc/kobold/"
 fi
 
 # LICENSE
@@ -937,5 +971,6 @@ MK
 
 printf '\nVendored into %s/ (%s)\n' "$DEST" "$commit"
 printf 'Components: %s\n' "$COMPONENTS"
+printf 'Docs:       %s/doc/\n' "$DEST"
 printf 'Generated:  %s/skjegg.mk\n' "$DEST"
 printf 'Update:     %s/update-skjegg.sh\n' "$_upd_dir"

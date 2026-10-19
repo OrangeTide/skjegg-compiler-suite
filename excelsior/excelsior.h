@@ -264,4 +264,9 @@ void typecheck_program(struct arena *a, struct node *file);
 struct ir_program;
 struct ir_program *lower_program(struct arena *a, struct node *file);
 
+/* Debug info (-g): when exc_debug is set, lowering emits an IR_LOC per statement
+   and records the source file on each function for the line table.  The file is
+   taken from lex_filename() inside lower_program.  Set by the driver. */
+extern int exc_debug;
+
 #endif /* EXCELSIOR_H */

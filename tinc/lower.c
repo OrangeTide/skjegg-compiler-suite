@@ -13,6 +13,12 @@
 static struct arena *lower_arena;
 static struct ir_func *cur_fn;
 static struct ir_program *cur_prog;
+
+/* Debug info (-g), see tinc.h. */
+int tinc_debug = 0;
+const char *tinc_src_file = NULL;
+static int last_loc_line;               /* last line marked in this function */
+
 static int cur_ret_mode;
 static int cur_ret_count;
 static int ret_buf_slot;
@@ -1022,6 +1028,15 @@ lower_stmt(struct node *n)
     if (!n)
         return;
 
+    /* Debug info (-g): mark the source line at the head of each statement, once
+       per distinct line, so the backend builds an address-to-line table.  A
+       block carries no line of its own; its inner statements each mark theirs. */
+    if (tinc_debug && n->line > 0 && n->line != last_loc_line
+        && n->kind != N_BLOCK) {
+        ir_loc(cur_fn, n->line);
+        last_loc_line = n->line;
+    }
+
     switch (n->kind) {
     case N_BLOCK: {
         int saved = nlsyms;
@@ -1266,6 +1281,8 @@ lower_function(struct node *fn_ast)
     int nparams = 0;
 
     fn = ir_new_func(lower_arena, fn_ast->name);
+    fn->src_file = tinc_debug ? tinc_src_file : NULL;
+    last_loc_line = 0;
     cur_fn = fn;
     cur_ret_mode = fn_ast->ret_mode;
     cur_ret_count = fn_ast->ret_count;

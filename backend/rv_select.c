@@ -2122,6 +2122,10 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
     case IR_ENDF:
         break;
 
+    case IR_LOC:
+        rv_mc_loc(m, (int)i->imm);      /* debug-info line marker (-g) */
+        break;
+
     default:
         snprintf(err, errlen, "rv_select: unhandled op %d", i->op);
         return -1;

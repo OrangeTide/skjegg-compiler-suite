@@ -25,6 +25,7 @@
 	.globl _exit
 	.weak  __libc_fini
 
+	.type	_start,@function
 _start:
 	la	sp, stack_top
 	addi	sp, sp, -16
@@ -38,31 +39,41 @@ _start:
 	li	a7, 93
 	ecall
 2:	j	2b
+	.size	_start,.-_start
 
 /* int write(int fd, const char *buf, int n); */
+	.type	write,@function
 write:
 	li	a7, 64
 	ecall
 	ret
+	.size	write,.-write
 
 /* int read(int fd, char *buf, int n); */
+	.type	read,@function
 read:
 	li	a7, 63
 	ecall
 	ret
+	.size	read,.-read
 
 /* void exit(int status); */
+	.type	exit,@function
+	.type	_exit,@function
 exit:
 _exit:
 	li	a7, 93
 	ecall
 1:	j	1b
+	.size	exit,.-exit
+	.size	_exit,.-_exit
 
 /* __muldi3(a_lo, a_hi, b_lo, b_hi) -> a0:a1
  *   64-bit multiply (low 64 bits of result).
  *   Stack: 8(sp)=a_lo, 12(sp)=a_hi, 0(sp)=b_lo, 4(sp)=b_hi
  *   Result: a0=lo, a1=hi */
 	.globl __muldi3
+	.type	__muldi3,@function
 __muldi3:
 	lw	a0, 8(sp)		/* a0 = a_lo */
 	lw	a1, 12(sp)		/* a1 = a_hi */
@@ -77,11 +88,13 @@ __muldi3:
 	add	a1, t0, t1		/* a1 = result_hi */
 	mul	a0, a0, a2		/* a0 = result_lo */
 	ret
+	.size	__muldi3,.-__muldi3
 
 /* __ashldi3(a_lo, a_hi, shift) -> a0:a1
  *   64-bit left shift.
  *   Stack: 0(sp)=shift, 4(sp)=a_lo, 8(sp)=a_hi */
 	.globl __ashldi3
+	.type	__ashldi3,@function
 __ashldi3:
 	lw	a2, 0(sp)		/* a2 = shift */
 	lw	a0, 4(sp)		/* a0 = a_lo */
@@ -108,10 +121,12 @@ __ashldi3:
 	li	a1, 0
 .Lashl_done:
 	ret
+	.size	__ashldi3,.-__ashldi3
 
 /* __ashrdi3(a_lo, a_hi, shift) -> a0:a1
  *   64-bit arithmetic right shift. */
 	.globl __ashrdi3
+	.type	__ashrdi3,@function
 __ashrdi3:
 	lw	a2, 0(sp)		/* a2 = shift */
 	lw	a0, 4(sp)		/* a0 = a_lo */
@@ -138,10 +153,12 @@ __ashrdi3:
 	mv	a0, a1
 .Lashr_done:
 	ret
+	.size	__ashrdi3,.-__ashrdi3
 
 /* __lshrdi3(a_lo, a_hi, shift) -> a0:a1
  *   64-bit logical right shift. */
 	.globl __lshrdi3
+	.type	__lshrdi3,@function
 __lshrdi3:
 	lw	a2, 0(sp)		/* a2 = shift */
 	lw	a0, 4(sp)		/* a0 = a_lo */
@@ -168,10 +185,12 @@ __lshrdi3:
 	li	a1, 0
 .Llshr_done:
 	ret
+	.size	__lshrdi3,.-__lshrdi3
 
 /* void *__moo_arena_alloc(int size);
  *   Bump allocator.  Aligns size up to 4 bytes.  Returns pointer in a0. */
 	.globl __moo_arena_alloc
+	.type	__moo_arena_alloc,@function
 __moo_arena_alloc:
 	addi	a0, a0, 3
 	andi	a0, a0, -4
@@ -181,14 +200,17 @@ __moo_arena_alloc:
 	sw	t2, 0(t0)
 	mv	a0, t1
 	ret
+	.size	__moo_arena_alloc,.-__moo_arena_alloc
 
 /* void __moo_arena_reset(void); */
 	.globl __moo_arena_reset
+	.type	__moo_arena_reset,@function
 __moo_arena_reset:
 	la	t0, __moo_arena_ptr
 	la	t1, __moo_arena
 	sw	t1, 0(t0)
 	ret
+	.size	__moo_arena_reset,.-__moo_arena_reset
 
 /* __cont_capture()
  *   Called by IR_CAPTURE inline code after pushing s1-s11.
@@ -204,6 +226,7 @@ __moo_arena_reset:
  *              ra = return address to IR_CAPTURE resume point
  *   Clobbers:  all regs (callee-saves are in the captured segment) */
 	.globl __cont_capture
+	.type	__cont_capture,@function
 __cont_capture:
 	addi	sp, sp, -4
 	sw	ra, 0(sp)		/* save return address on stack */
@@ -252,6 +275,7 @@ __cont_capture:
 	mv	s0, t4			/* restore mark's FP */
 	mv	sp, t5			/* restore mark's SP */
 	jr	t6			/* a0 = buf (nonzero) */
+	.size	__cont_capture,.-__cont_capture
 
 /* __cont_resume(buf, value)
  *   Restores the captured stack segment and returns into it.
@@ -260,6 +284,7 @@ __cont_capture:
  *
  *   On entry:  0(sp) = buf pointer, 4(sp) = resume value */
 	.globl __cont_resume
+	.type	__cont_resume,@function
 __cont_resume:
 	lw	a3, 0(sp)		/* a3 = buf */
 	lw	a1, 4(sp)		/* a1 = resume value */
@@ -290,6 +315,7 @@ __cont_resume:
 	lw	ra, 0(sp)		/* restore ra (saved by __cont_capture) */
 	addi	sp, sp, 4
 	ret				/* return to IR_CAPTURE resume point */
+	.size	__cont_resume,.-__cont_resume
 
 	.data
 	.align	4

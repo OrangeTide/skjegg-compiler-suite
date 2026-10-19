@@ -70,6 +70,13 @@ rvt_begin_func(struct rv_mc *m, int serial)
 
 const char *rvt_errsym(struct rv_mc *m) { return m->errsym; }
 
+/* Debug info (-g): the text sink has no address-to-line table to build, so it
+   records the line as a comment for a human reading the assembly.  The real
+   address mapping is built by the JIT byte sink and, later, by the DWARF line
+   program the assembler will emit. */
+void rv_mc_loc(struct rv_mc *m, int line)
+{ fprintf(m->out, "\t.loc 1 %d\n", line); }
+
 /****************************************************************
  * Base-relative load/store with large-offset lowering (mirrors rv_emit.c's
  * emit_mem: a 12-bit signed immediate reaches only -2048..+2047 from the base,
@@ -446,6 +453,16 @@ target_emit(FILE *out, struct ir_program *prog)
 
     fputs("# tinc: generated RISC-V (RV32IMFD + Zfh) assembly\n", out);
 
+    /* Under -g a front end sets src_file; emit the DWARF .file hint once so the
+       per-statement .loc directives (rv_mc_loc) attach to it.  The assembler
+       turns .file/.loc into the .debug_line/.debug_info sections. */
+    for (fn = prog->funcs; fn; fn = fn->next) {
+        if (fn->src_file) {
+            fprintf(out, "\t.file 1 \"%s\"\n", fn->src_file);
+            break;
+        }
+    }
+
     m = rvt_new(out);
     if (!m) {
         fputs("rv_mc_text: out of memory\n", stderr);
@@ -453,13 +470,18 @@ target_emit(FILE *out, struct ir_program *prog)
     }
     for (fn = prog->funcs; fn; fn = fn->next) {
         char err[128];
+        int fserial = ++serial;
 
         fprintf(out, "\n\t.text\n\t.align 2\n");
         if (!fn->is_local)
             fprintf(out, "\t.globl %s\n", fn->name);
+        /* STT_FUNC + a size so a debugger maps an address to this function and
+           a backtrace knows its extent; the function body stays wholly in
+           .text, so .Lfunc_end - name is its byte length. */
+        fprintf(out, "\t.type %s, @function\n", fn->name);
         fprintf(out, "%s:\n", fn->name);
 
-        rvt_begin_func(m, ++serial);
+        rvt_begin_func(m, fserial);
         if (rv_select_func(m, fn,
                            target_aot_trap_guarded ? RV_TRAP_GUARDED
                                                    : RV_TRAP_HARDWARE,
@@ -467,6 +489,9 @@ target_emit(FILE *out, struct ir_program *prog)
             fprintf(stderr, "rv_mc_text: %s\n", err);
             exit(1);
         }
+        fprintf(out, ".Lfunc_end%d:\n", fserial);
+        fprintf(out, "\t.size %s, .Lfunc_end%d-%s\n",
+                fn->name, fserial, fn->name);
     }
     rvt_free(m);
 

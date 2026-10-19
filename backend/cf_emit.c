@@ -2078,6 +2078,14 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
     }
 
+    case IR_LOC:
+        /* debug-info line marker (-g): record the line as a comment for a human
+           reading the assembly.  No DWARF line program here yet (the JIT byte
+           sink builds the real address-to-line table); the assembler ignores
+           the comment. */
+        fprintf(out, "\t| line %d\n", (int)i->imm);
+        break;
+
     default:
         die("cf_emit: unhandled op %d", i->op);
     }
