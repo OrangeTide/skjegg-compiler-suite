@@ -38,12 +38,14 @@ trap 'rm -rf "$tmp"' EXIT
 moddir=$(dirname "$mod")
 
 # Find a unit's module file: beside the program first, then each KOBOLD_UNITS dir.
+# A dotted unit name maps its dots to path separators (io.files -> io/files.kpm).
 find_unit() {
     name=$1
-    if [ -f "$moddir/$name.kpm" ]; then echo "$moddir/$name.kpm"; return 0; fi
+    rel=$(echo "$name" | tr . /)
+    if [ -f "$moddir/$rel.kpm" ]; then echo "$moddir/$rel.kpm"; return 0; fi
     oldifs=$IFS; IFS=:
     for d in $KOBOLD_UNITS; do
-        if [ -n "$d" ] && [ -f "$d/$name.kpm" ]; then IFS=$oldifs; echo "$d/$name.kpm"; return 0; fi
+        if [ -n "$d" ] && [ -f "$d/$rel.kpm" ]; then IFS=$oldifs; echo "$d/$rel.kpm"; return 0; fi
     done
     IFS=$oldifs
     echo "aot-run.sh: cannot find unit '$name'" >&2

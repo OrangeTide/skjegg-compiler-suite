@@ -49,6 +49,7 @@ void _exit(int code);
 #ifdef KP_HAVE_FILE_IO
 int open(const char *path, int flags, int mode);
 int close(int fd);
+long lseek(int fd, long offset, int whence);
 int getdents64(int fd, void *buf, int count);
 #endif
 
@@ -130,7 +131,8 @@ read_byte(void)
     return fgetc(&__libc_stdin);        /* libc buffering; EOF (-1) at end */
 }
 
-static int g_peek = -2;         /* -2 empty, -1 EOF, else a pushed-back byte */
+static int g_peek = -2;         /* -2 empty, else a buffered byte (0..255) */
+static int g_eof;               /* sticky: set once a read hits end of input */
 
 static int
 next_byte(void)
@@ -142,13 +144,44 @@ next_byte(void)
         g_peek = -2;
         return c;
     }
-    return read_byte();
+    c = read_byte();
+    if (c == -1)
+        g_eof = 1;              /* latch: EOF stays set for every later read */
+    return c;
 }
 
 static void
 push_byte(int c)
 {
     g_peek = c;
+}
+
+/* The sticky end-of-input latch the guest's Eof() reads: a one-byte lookahead
+   over the console, true when no buffered byte remains and the stream has
+   ended.  A newline-less final line is still delivered by the reads above
+   before this latches, since the latch is set only when a read returns no byte.
+   On skj-run the read syscall blocks until input or close (a close returns 0,
+   which libc reports as EOF); on boris the host binds read to the same
+   close-signalled end.  This is guest runtime, not a host service (it buffers
+   over read); a program reaches it through the FFI, and the Kobold-level Eof
+   that calls it belongs in a shipped unit, not a compiler builtin (Kobold moves
+   calls that need no special lowering out of the front end into units). */
+int
+io_eof(void)
+{
+    int c;
+
+    if (g_peek != -2)
+        return 0;
+    if (g_eof)
+        return 1;
+    c = read_byte();
+    if (c == -1) {
+        g_eof = 1;
+        return 1;
+    }
+    g_peek = c;
+    return 0;
 }
 
 static int
@@ -566,10 +599,12 @@ rt_param_str(int i)
  *
  * A guest compiler such as kpcom reads its source file by path and writes its
  * output, so the freestanding tier needs file access the console seam does not
- * give.  The host open/read/close syscalls back these; skj-run reads at most a
- * page per read and has no lseek, so ReadFileStr grows a guest-heap buffer and
- * reads until EOF.  Both accept a NUL-terminated path copied out of the guest
- * string.  open / close are the per-target syscall wrappers above.
+ * give.  The host open/read/lseek/close syscalls back these.  ReadFileStr sizes
+ * the file first with lseek(SEEK_END), so one allocation holds it rather than
+ * growing a 256 KiB buffer and doubling (which matters on a small host heap);
+ * a non-seekable fd falls back to growing and reading to EOF.  Both accept a
+ * NUL-terminated path copied out of the guest string.  The open / close / lseek
+ * wrappers are the per-target syscall assembly above.
  ****************************************************************/
 
 /* asm-generic open flags, shared by the guest and the host. */
@@ -578,15 +613,19 @@ rt_param_str(int i)
 #define KP_O_CREAT   0x40
 #define KP_O_TRUNC   0x200
 
+/* lseek whence (asm-generic). */
+#define KP_SEEK_SET  0
+#define KP_SEEK_END  2
+
 uint32_t
 ReadFileStr(uint32_t pathstr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
-    uint32_t cap = 262144, len = 0, buf;
+    uint32_t cap, len = 0, buf;
     uint32_t s;
     int fd;
-    long n;
+    long n, size;
 
     if (plen < 0 || plen >= (int)sizeof path)
         return kp_str_new("", 0);
@@ -597,16 +636,32 @@ ReadFileStr(uint32_t pathstr)
     if (fd < 0)
         return kp_str_new("", 0);
 
-    buf = gheap_alloc(cap);
-    for (;;) {
-        if (len == cap) {
-            cap *= 2;
-            buf = gheap_realloc(buf, cap);
+    /* Size the file so one allocation holds it.  A non-seekable fd (a pipe, or
+       a host without lseek) returns < 0; then fall back to growing the buffer
+       and reading to EOF. */
+    size = lseek(fd, 0, KP_SEEK_END);
+    if (size >= 0 && lseek(fd, 0, KP_SEEK_SET) == 0) {
+        cap = (uint32_t)size;
+        buf = gheap_alloc(cap ? cap : 1);
+        while (len < cap) {
+            n = read(fd, (void *)(uintptr_t)(buf + len), (long)(cap - len));
+            if (n <= 0)
+                break;              /* short file or read error: keep what we got */
+            len += (uint32_t)n;
         }
-        n = read(fd, (void *)(uintptr_t)(buf + len), (long)(cap - len));
-        if (n <= 0)
-            break;
-        len += (uint32_t)n;
+    } else {
+        cap = 65536;
+        buf = gheap_alloc(cap);
+        for (;;) {
+            if (len == cap) {
+                cap *= 2;
+                buf = gheap_realloc(buf, cap);
+            }
+            n = read(fd, (void *)(uintptr_t)(buf + len), (long)(cap - len));
+            if (n <= 0)
+                break;
+            len += (uint32_t)n;
+        }
     }
     close(fd);
 

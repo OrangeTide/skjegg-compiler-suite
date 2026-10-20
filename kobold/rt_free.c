@@ -143,48 +143,56 @@ void kp_abort(void) { trap_die("skj-kp: aborted"); }
 void kp_assert(uint32_t cond) { if (!cond) trap_die("skj-kp: assertion failed"); }
 
 /****************************************************************
- * Guest heap: the shared coalescing allocator over the host-provided region
+ * Guest heap: the shared coalescing allocator over the program break
  *
  * The allocator itself is gheap_core.h, shared with the hosted platform layer
- * (rt_host.c); only the memory source differs here.  This tier's source is a
- * flat region [base, base + size) the host hands in through kp_rt_init, bumped
- * on demand and never grown, so GH_SBRK just advances a cursor in it.
+ * (rt_host.c); only the memory source differs here.  This tier grows the Linux
+ * program break (the brk syscall, the same seam libc's malloc uses), so the
+ * heap grows on demand within the host's task arena rather than from a fixed
+ * reservation.  The host moves one break for the guest; it need not hand in a
+ * region (boris A3).
  ****************************************************************/
 
-static uint8_t *g_base;         /* region base, set by kp_rt_init */
-static uint32_t g_cap;          /* region size in bytes */
-static uint32_t g_brk;          /* bytes handed out from the region */
+/* The raw Linux brk, from the shared syscall seam (syscall_rv.S / syscall_cf.S):
+   returns the new program break, or the unchanged break when the request cannot
+   be met. */
+extern void *__sys_brk(void *addr);
 
-/* Install the guest heap region.  The host calls this once at entry with a region
-   below 4 GB (so a block address fits the 32-bit guest address model).  base must
-   be 16-aligned.  Until it is called the heap is empty and any allocation traps. */
+/* The current break, queried lazily from the host on first use. */
+static uint8_t *g_brk;
+
+/* Install the guest heap.  The break is the memory source now, so a host no
+   longer hands in a region; this is retained as a no-op for hosts still calling
+   it during migration (the arguments are ignored). */
 void
 kp_rt_init(uint32_t base, uint32_t size)
 {
-    g_base = (uint8_t *)(uintptr_t)base;
-    g_cap = size;
-    g_brk = 0;
+    (void)base;
+    (void)size;
 }
 
 /* The core's memory source: grow the break by `incr`, return the old break, or
-   (uint8_t *)-1 if the region (or its absence) cannot satisfy it. */
+   (uint8_t *)-1 if the host cannot satisfy it. */
 static uint8_t *
 gh_sbrk(long incr)
 {
-    uint8_t *old;
+    uint8_t *old, *want, *got;
 
-    if (g_base == NULL)
-        return (uint8_t *)-1;
-    old = g_base + g_brk;
-    if (incr < 0) {
-        if ((uint32_t)(-incr) > g_brk)
+    if (g_brk == NULL) {
+        g_brk = (uint8_t *)__sys_brk((void *)0);
+        if (g_brk == (uint8_t *)-1 || g_brk == NULL)
             return (uint8_t *)-1;
-        g_brk -= (uint32_t)(-incr);
-    } else {
-        if (g_brk + (uint32_t)incr > g_cap || g_brk + (uint32_t)incr < g_brk)
-            return (uint8_t *)-1;
-        g_brk += (uint32_t)incr;
     }
+    old = g_brk;
+    want = old + incr;
+    if (incr > 0 && want < old)                 /* address wrap */
+        return (uint8_t *)-1;
+    if (incr < 0 && want > old)
+        return (uint8_t *)-1;
+    got = (uint8_t *)__sys_brk(want);
+    if (incr > 0 && got < want)                 /* host would not grow this far */
+        return (uint8_t *)-1;
+    g_brk = got;
     return old;
 }
 

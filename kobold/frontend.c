@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <dirent.h>
 
 /* kpcom imports ReadFileStr (its command-line driver reads source files), so it
    must be bound even though the `compile` export takes its source as a string. */
@@ -54,6 +55,56 @@ fe_write_file_str(uint32_t pathstr, uint32_t datastr)
     memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
     path[plen] = '\0';
     return kp_write_file(path, kp_str_bytes(datastr), (size_t)kp_str_len(datastr));
+}
+
+/* Directory enumeration for the `uses ns.*` wildcard: kpcom lists a namespace directory at
+   compile time. The same handle-based primitives the io.dirs unit uses, over the host
+   opendir/readdir. A handle is an index into a small table of open DIR*; kpd_next returns one
+   entry name at a time (the empty string at end). The jit_main and aot_rt host tiers carry
+   their own copies for the standalone and native-AOT compilers. */
+#define FE_KPD_MAX 16
+static DIR *fe_kpd_tab[FE_KPD_MAX];
+
+static int
+fe_kpd_open(uint32_t pathstr)
+{
+    char path[1024];
+    int plen = kp_str_len(pathstr);
+    int i;
+
+    if (plen < 0 || plen >= (int)sizeof path)
+        return -1;
+    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
+    path[plen] = '\0';
+    for (i = 0; i < FE_KPD_MAX; i++)
+        if (!fe_kpd_tab[i])
+            break;
+    if (i == FE_KPD_MAX)
+        return -1;
+    fe_kpd_tab[i] = opendir(path);
+    return fe_kpd_tab[i] ? i : -1;
+}
+
+static uint32_t
+fe_kpd_next(int h)
+{
+    struct dirent *e;
+
+    if (h < 0 || h >= FE_KPD_MAX || !fe_kpd_tab[h])
+        return kp_str_new("", 0);
+    e = readdir(fe_kpd_tab[h]);
+    if (!e)
+        return kp_str_new("", 0);
+    return kp_str_new(e->d_name, (int)strlen(e->d_name));
+}
+
+static void
+fe_kpd_close(int h)
+{
+    if (h >= 0 && h < FE_KPD_MAX && fe_kpd_tab[h]) {
+        closedir(fe_kpd_tab[h]);
+        fe_kpd_tab[h] = 0;
+    }
 }
 
 static void *
@@ -115,12 +166,22 @@ kp_compile_pas(const char *pas_path, char **module_text, size_t *out_len,
     /* Bind the standard runtime plus the file I/O kpcom imports (ReadFileStr for
        its source reads, WriteFileStr for `-o`). */
     kp_install_runtime(binds, &nbinds, (int)(sizeof binds / sizeof binds[0]));
-    if (nbinds + 2 <= (int)(sizeof binds / sizeof binds[0])) {
+    if (nbinds + 5 <= (int)(sizeof binds / sizeof binds[0])) {
         binds[nbinds].name = "ReadFileStr";
         binds[nbinds].addr = fe_as_addr((void (*)(void))fe_read_file_str);
         nbinds++;
         binds[nbinds].name = "WriteFileStr";
         binds[nbinds].addr = fe_as_addr((void (*)(void))fe_write_file_str);
+        nbinds++;
+        /* the unit-namespace wildcard lists a namespace directory at compile time */
+        binds[nbinds].name = "kpd_open";
+        binds[nbinds].addr = fe_as_addr((void (*)(void))fe_kpd_open);
+        nbinds++;
+        binds[nbinds].name = "kpd_next";
+        binds[nbinds].addr = fe_as_addr((void (*)(void))fe_kpd_next);
+        nbinds++;
+        binds[nbinds].name = "kpd_close";
+        binds[nbinds].addr = fe_as_addr((void (*)(void))fe_kpd_close);
         nbinds++;
     }
 

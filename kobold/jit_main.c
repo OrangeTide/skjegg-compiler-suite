@@ -229,18 +229,24 @@ static char g_dir[1024];        /* directory of the program, where units are fou
 #endif
 
 /* Try d/name.kpm, then d/<lowercased name>.kpm (as the compiler's unit search
-   does), writing the first readable path to path.  Returns 1 if one exists. */
+   does), writing the first readable path to path.  Returns 1 if one exists.  A
+   dotted unit name maps its dots to path separators, so io.files is sought as
+   d/io/files.kpm (doc/languages/kobold/kp-units.md). */
 static int
 try_dep_path(const char *d, const char *name, char *path, size_t plen)
 {
-    char low[256];
+    char rel[256], low[256];
     size_t j;
 
-    snprintf(path, plen, "%s/%s.kpm", d, name);
+    for (j = 0; name[j] && j + 1 < sizeof rel; j++)
+        rel[j] = name[j] == '.' ? '/' : name[j];
+    rel[j] = '\0';
+
+    snprintf(path, plen, "%s/%s.kpm", d, rel);
     if (access(path, R_OK) == 0)
         return 1;
-    for (j = 0; name[j] && j + 1 < sizeof low; j++)
-        low[j] = (char)tolower((unsigned char)name[j]);
+    for (j = 0; rel[j] && j + 1 < sizeof low; j++)
+        low[j] = (char)tolower((unsigned char)rel[j]);
     low[j] = '\0';
     snprintf(path, plen, "%s/%s.kpm", d, low);
     return access(path, R_OK) == 0;

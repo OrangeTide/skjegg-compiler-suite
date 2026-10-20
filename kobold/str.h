@@ -11,21 +11,26 @@
 typedef struct kp_vm kp_vm;
 #endif
 
-/* A `string` is a guest-heap object: a reference count and kind tag, then the byte length
-   and the bytes inline. The value the front end holds is the object's guest address (0 is
-   nil, counted as the empty string), so the byte storage is guest-visible: the code
-   generator reads a character inline with kp_str_base, the byte length with kp_str_len, and
-   a `LB` at base + (i - 1) (Pascal indexes from 1).
+/* A `string` is a guest-heap object: a reference count and kind tag, then the byte length,
+   an allocated byte capacity, and the bytes inline. The value the front end holds is the
+   object's guest address (0 is nil, counted as the empty string), so the byte storage is
+   guest-visible: the code generator reads a character inline with kp_str_base, the byte
+   length with kp_str_len, and a `LB` at base + (i - 1) (Pascal indexes from 1).
 
-   Strings are immutable. An assignment shares the value (a retain), and because no owner can
-   change the bytes there is no copy-on-write and no in-place mutation: there is no s[i] := c
-   and no SetLength(s). A new value is built by concatenation (kp_str_concat) or Copy
+   A string presents as immutable to a reader: its len bytes never change under it, there is
+   no s[i] := c and no SetLength(s). The one exception is append (kp_str_append*), which the
+   front end emits only for the self-append idiom (x := x + e). Append grows the string in
+   place when it is uniquely owned (refcount 1) with spare capacity, and otherwise builds an
+   independent copy, so no value another owner holds is ever disturbed and the immutable view
+   is preserved. A new value is otherwise built by concatenation (kp_str_concat) or Copy
    (kp_str_copy).
 
    kp_str_bytes is the read side a host output routine uses; it stays NUL-terminated. */
 uint32_t    kp_str_new(KP_VM_P const char *bytes, int len);
 uint32_t    kp_str_new_guest(KP_VM_P uint32_t addr, int len);  /* bytes at a guest address */
 uint32_t    kp_str_concat(KP_VM_P uint32_t a, uint32_t b);
+uint32_t    kp_str_append(KP_VM_P uint32_t s, uint32_t t);      /* append t to s (consumes s) */
+uint32_t    kp_str_append_char(KP_VM_P uint32_t s, int32_t code); /* append one byte to s */
 int32_t     kp_str_len(KP_VM_P uint32_t s);
 const char *kp_str_bytes(KP_VM_P uint32_t s);   /* NUL-terminated; "" for nil */
 uint32_t    kp_str_base(KP_VM_P uint32_t s);    /* guest address of the bytes, 0 if empty */

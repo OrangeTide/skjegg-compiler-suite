@@ -5,6 +5,10 @@
 | arrive on the stack (the toolkit/m68k C ABI); d2/d3 are callee-saved, so a
 | wrapper that loads an argument into one saves and restores it.  exit is weak so
 | libc's flushing exit overrides it; _exit is the raw process exit.
+|
+| Error convention (the raw-seam ABI): a failing call returns a negative Linux
+| errno in d0, passed through unchanged (lseek included), the same convention
+| the rv32 seam and boris honor, so a guest reads one -errno space everywhere.
 
     .globl read
     .globl write
@@ -12,6 +16,7 @@
     .globl close
     .globl lseek
     .globl getdents64
+    .globl __sys_brk
     .weak  exit
     .globl _exit
 
@@ -77,6 +82,16 @@ getdents64:
     move.l  #220, %d0           | __NR_getdents64
     trap    #0
     movem.l (%sp)+, %d2-%d3
+    rts
+
+| void *__sys_brk(void *addr); the raw Linux brk (#45), returning the new
+| program break in d0.  Both heaps grow through it: libc/sbrk.c on the hosted
+| ILP32 targets and the Kobold freestanding gheap (rt_free.c), so it lives in
+| the shared seam.
+__sys_brk:
+    move.l  4(%sp), %d1         | addr
+    move.l  #45, %d0            | __NR_brk
+    trap    #0
     rts
 
 | void exit(int status); (weak) and void _exit(int status);

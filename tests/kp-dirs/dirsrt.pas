@@ -1,10 +1,10 @@
 program dirsrt;
 { Directory reads reached through the `dirs` unit: no per-program external
-  declarations, just `uses dirs`.  Lists the directory named by the first
+  declarations, just `uses io.dirs`.  Lists the directory named by the first
   argument, counting entries and summing their name lengths.  Both totals are
   order-independent, so the result is deterministic whatever order the
   filesystem returns entries in. }
-uses dirs;
+uses io.dirs;
 var
   d: dirs.Directory;
   name: string;

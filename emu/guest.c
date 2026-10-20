@@ -12,6 +12,8 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <time.h>
+#include <sched.h>
 
 /****************************************************************
  * Sparse memory
@@ -694,6 +696,80 @@ sys_brk(guest *g, uint32_t want)
     return (int32_t)g->brk;
 }
 
+/* clock_gettime(clk_id, struct timespec *ts): write a 32-bit timespec
+ * (tv_sec, tv_nsec, each one target-endian word) and return 0.  This seam uses
+ * a 32-bit timespec rather than rv32 Linux's 64-bit one, a private convention
+ * skj-run and boris share; a monotonic uptime fits in 32 bits of seconds.
+ * clk_id 0 (CLOCK_REALTIME) reports wall-clock, anything else the monotonic
+ * clock the guest's millisecond timer wants. */
+static int32_t
+sys_clock_gettime(guest *g, uint32_t clk_id, uint32_t ts_ptr)
+{
+    struct timespec host;
+
+    if (ts_ptr == 0)
+        return -GUEST_EFAULT;
+    if (clock_gettime(clk_id == 0 ? CLOCK_REALTIME : CLOCK_MONOTONIC, &host) != 0)
+        return -GUEST_EINVAL;
+    gm_store(&g->mem, ts_ptr + 0, 4, g->big_endian, (uint32_t)host.tv_sec);
+    gm_store(&g->mem, ts_ptr + 4, 4, g->big_endian, (uint32_t)host.tv_nsec);
+    return 0;
+}
+
+/* getrandom(buf, len, flags): fill the guest buffer with len random bytes from
+ * the host and return the count.  The guest seeds its own generators from this;
+ * flags are ignored (the host source never blocks meaningfully here). */
+static int32_t
+sys_getrandom(guest *g, uint32_t buf, uint32_t len, uint32_t flags)
+{
+    uint8_t tmp[256];
+    uint32_t done = 0;
+
+    (void)flags;
+    if (len == 0)
+        return 0;
+    if (buf == 0)
+        return -GUEST_EFAULT;
+    while (done < len) {
+        uint32_t chunk = len - done;
+        long n;
+
+        if (chunk > sizeof tmp)
+            chunk = sizeof tmp;
+        n = syscall(SYS_getrandom, tmp, (size_t)chunk, 0);
+        if (n <= 0)
+            return done > 0 ? (int32_t)done : -GUEST_EINVAL;
+        gm_write(&g->mem, buf + done, tmp, (uint32_t)n);
+        done += (uint32_t)n;
+    }
+    return (int32_t)done;
+}
+
+/* nanosleep(req, rem): park for the {tv_sec, tv_nsec} the guest timespec holds
+ * (the 32-bit timespec convention, as clock_gettime above).  skj-run really
+ * sleeps on the host clock; the guest's Sleep/park glue uses this.  rem (the
+ * unslept remainder on a signal) is not written back; skj-run has no signals
+ * delivered to the guest, so a sleep here always completes. */
+static int32_t
+sys_nanosleep(guest *g, uint32_t req_ptr, uint32_t rem_ptr)
+{
+    struct timespec req;
+    uint32_t sec, nsec;
+
+    (void)rem_ptr;
+    if (req_ptr == 0)
+        return -GUEST_EFAULT;
+    sec  = gm_load(&g->mem, req_ptr + 0, 4, g->big_endian);
+    nsec = gm_load(&g->mem, req_ptr + 4, 4, g->big_endian);
+    if (nsec >= 1000000000u)
+        return -GUEST_EINVAL;
+    req.tv_sec = (time_t)sec;
+    req.tv_nsec = (long)nsec;
+    while (nanosleep(&req, &req) != 0)
+        ;                               /* resume across a host signal */
+    return 0;
+}
+
 int32_t
 guest_syscall(guest *g, int sys, uint32_t a0, uint32_t a1, uint32_t a2,
               uint32_t a3, uint32_t a4, uint32_t a5)
@@ -774,6 +850,19 @@ guest_syscall(guest *g, int sys, uint32_t a0, uint32_t a1, uint32_t a2,
 
     case GSYS_GETDENTS64:
         return sys_getdents64(g, a0, a1, a2);
+
+    case GSYS_CLOCK_GETTIME:
+        return sys_clock_gettime(g, a0, a1);
+
+    case GSYS_GETRANDOM:
+        return sys_getrandom(g, a0, a1, a2);
+
+    case GSYS_NANOSLEEP:
+        return sys_nanosleep(g, a0, a1);
+
+    case GSYS_SCHED_YIELD:
+        sched_yield();
+        return 0;
 
     case GSYS_EXIT:
     case GSYS_EXIT_GROUP:

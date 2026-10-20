@@ -24,8 +24,10 @@ pass=0
 for bin in "$ROOT"/"$BUILDDIR"/*; do
     [ -f "$bin" ] && [ -x "$bin" ] || continue
     name=$(basename "$bin")
+    # test_* and *_test are host self-checking binaries (fpu/i64/ops/rng) that
+    # run via their own make test-* targets, not cross binaries for this qemu.
     case $name in
-        *.o|*.out|start*|skj-*|test_*) continue ;;
+        *.o|*.out|start*|skj-*|test_*|*_test) continue ;;
     esac
     # only a binary with a matching tests/<name>.* (source or fixture) is a
     # real test; skip a stray build so it is not a phantom failure

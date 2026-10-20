@@ -305,10 +305,10 @@ and run it in the `skj-run` emulator, see `kp-sandbox.md`.
   `kp_rt_init` with them; nothing in `rt_free.c` or `io_free.c` depends on a
   syscall but the `_exit` the trap makes.
 
-The syscall seam `io_free.c` builds on is the POSIX-standard set `write` / `read`
-/ `_exit` (and `open` / `close` on ColdFire), the same names the C libc links, so
-the Kobold freestanding runtime and the C runtime speak one syscall seam
-(`runtime/io_free_rv.S`, `runtime/io_free_cf.S`).
+The syscall seam `io_free.c` builds on is the POSIX-standard set `write`, `read`,
+and `_exit` (plus `open` and `close` on ColdFire), the same names the C libc
+links, so the Kobold freestanding runtime and the C runtime speak one syscall
+seam (`runtime/io_free_rv.S`, `runtime/io_free_cf.S`).
 
 `io_free.c` no longer hand-rolls stream buffering: its console I/O delegates to
 libc's buffered-stream core (`libc/stdio_core.c`, the three standard streams and

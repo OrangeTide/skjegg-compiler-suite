@@ -140,6 +140,10 @@ enum guest_sys {
     GSYS_UNLINKAT,
     GSYS_RENAMEAT2,
     GSYS_GETDENTS64,
+    GSYS_CLOCK_GETTIME,
+    GSYS_GETRANDOM,
+    GSYS_NANOSLEEP,
+    GSYS_SCHED_YIELD,
 };
 
 typedef struct guest {

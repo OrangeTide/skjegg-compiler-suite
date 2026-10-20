@@ -551,8 +551,10 @@ operand promoted to a one-character string) or `copy`. Convert with `str` (to a 
 and `val` (from a string).
 
 Higher-level string helpers (`UpperCase`, `LowerCase`, `Trim`, `StringReplace`, and string
-`Delete`/`Insert`) live in the standard-library `strings` unit, reached with `uses strings`.
-See `kp-units.md` for the unit and the search path that finds it.
+`Delete`/`Insert`) live in the standard-library `core.strings` unit, reached with
+`uses core.strings` and called qualified (`strings.UpperCase`, `strings.Delete`, so the
+string `Delete`/`Insert` do not shadow the dynamic-array built-ins). See `kp-units.md` for
+the unit and the search path that finds it.
 
 ## Input and output
 
@@ -600,6 +602,13 @@ compiler itself reads its input with an `external` `ReadFileStr(path): string`.
 
 A coroutine is a routine that runs on its own stack and can suspend. Its value has type
 `process`, a handle.
+
+The five coroutine primitives (`start`, `yield`, `bind`, `release`, and the `process` type)
+are base-grammar control flow, like `for` and `while`, not a library reached through a unit.
+`start` takes a call form, `yield` is a suspension point, and `bind` introduces a binding, so
+they need compiler lowering and a stackful runtime rather than an ordinary call. Higher-level,
+library-shaped ergonomics (a scheduler, spawn/join, a give-up-the-turn helper) may be added
+later as a unit built on top of these primitives.
 
 - **start.** `start routine(args)` creates a coroutine from a call and returns a
   `process`. A `start begin ... end` block form runs an inline body; the block may not

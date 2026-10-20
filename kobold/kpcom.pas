@@ -7,6 +7,10 @@ program kpcom;
 
 {$mode objfpc}{$H+}
 
+{$IFNDEF KOBOLD}
+uses SysUtils;   { FindFirst/FindNext for the `uses ns.*` wildcard under the fpc bootstrap }
+{$ENDIF}
+
 { ---- Constants ---- }
 
 const
@@ -471,6 +475,32 @@ begin
     LowerStr := LowerStr + ToLowerCh(s[i]);
 end;
 
+{ The last segment of a dotted unit name is its default qualifier: core.strings
+  comes in as strings.  A flat name is its own last segment. }
+function LastSegment(const s: string): string;
+var
+  i: LongInt;
+begin
+  LastSegment := s;
+  for i := Length(s) downto 1 do
+    if s[i] = '.' then begin
+      LastSegment := Copy(s, i + 1, Length(s) - i);
+      Exit;
+    end;
+end;
+
+{ A dotted unit name maps its dots to path separators when it is resolved to a
+  file: io.files is found as <dir>/io/files.kpm (doc/languages/kobold/kp-units.md). }
+function DotToSlash(const s: string): string;
+var
+  i: LongInt;
+begin
+  DotToSlash := '';
+  for i := 1 to Length(s) do
+    if s[i] = '.' then DotToSlash := DotToSlash + '/'
+    else DotToSlash := DotToSlash + s[i];
+end;
+
 function IsDigit(c: Char): Boolean;
 begin
   IsDigit := (c >= '0') and (c <= '9');
@@ -708,6 +738,58 @@ begin
   if Length(data) > 0 then BlockWrite(f, data[1], Length(data));
   Close(f);
   WriteFileStr := 1;
+end;
+{$ENDIF}
+
+{ Directory enumeration for the `uses ns.*` namespace wildcard. Under Kobold these are the
+  same host imports the io.dirs unit uses: kpd_open returns a small handle (or -1), kpd_next
+  the next entry name ('' at the end), kpd_close releases it. Under the FPC bootstrap they
+  are a self-contained FindFirst/FindNext wrapper, keeping kpcom a single file with no
+  companion object. }
+{$IFDEF KOBOLD}
+function kpd_open(const path: string): LongInt; external cdecl;
+function kpd_next(handle: LongInt): string; external cdecl;
+procedure kpd_close(handle: LongInt); external cdecl;
+{$ELSE}
+const
+  KPD_MAX = 16;
+var
+  kpd_rec: array[0 .. KPD_MAX - 1] of TSearchRec;
+  kpd_used: array[0 .. KPD_MAX - 1] of Boolean;
+  kpd_pending: array[0 .. KPD_MAX - 1] of Boolean;   { a prefetched entry awaits in kpd_rec }
+
+function kpd_open(const path: string): LongInt;
+var
+  h: LongInt;
+begin
+  kpd_open := -1;
+  for h := 0 to KPD_MAX - 1 do
+    if not kpd_used[h] then begin
+      if FindFirst(path + '/*', faAnyFile, kpd_rec[h]) = 0 then begin
+        kpd_used[h] := True;
+        kpd_pending[h] := True;
+        kpd_open := h;
+      end;
+      Exit;
+    end;
+end;
+
+function kpd_next(handle: LongInt): string;
+begin
+  kpd_next := '';
+  if (handle < 0) or (handle >= KPD_MAX) or not kpd_used[handle] then Exit;
+  if not kpd_pending[handle] then Exit;
+  kpd_next := kpd_rec[handle].Name;
+  if FindNext(kpd_rec[handle]) <> 0 then kpd_pending[handle] := False;
+end;
+
+procedure kpd_close(handle: LongInt);
+begin
+  if (handle >= 0) and (handle < KPD_MAX) and kpd_used[handle] then begin
+    FindClose(kpd_rec[handle]);
+    kpd_used[handle] := False;
+    kpd_pending[handle] := False;
+  end;
 end;
 {$ENDIF}
 
@@ -2275,14 +2357,27 @@ end;
   emission, and linking are implemented downstream (AnalyzeUnit, LowerUnit, the loader). }
 
 function ParseUnitImport: LongInt;
-{ UnitImport = Identifier [ 'as' Qualifier ] [ '(' ImportItem, ... ')' ].
-  Text is the unit name; A is the qualifier ident ('_' means bare) or -1 for the
-  default (the unit name); Kids are the selective ImportItems, empty when no list. }
+{ UnitImport = UnitName [ 'as' Qualifier ] [ '(' ImportItem, ... ')' ]
+             | UnitName '.' '*' .
+  UnitName is dotted (core.strings); the last segment is the default qualifier.
+  Text is the full dotted unit name; A is the qualifier ident ('_' means bare) or
+  -1 for the default (the last segment); Kids are the selective ImportItems, empty
+  when no list.  Flag = 1 marks a wildcard import of the namespace in Text. }
 var
   item, q, ii, r: LongInt;
 begin
   item := NewNode(nkUsesItem);
   Nodes[item].Text := EatIdent('a unit name');
+  while Tok.Kind = tkDot do begin
+    NextToken;                        { consume '.' }
+    if Tok.Kind = tkStar then begin
+      NextToken;                      { consume '*': a namespace wildcard }
+      Nodes[item].Flag := 1;
+      ParseUnitImport := item;        { no 'as' and no selective list on a wildcard }
+      Exit;
+    end;
+    Nodes[item].Text := Nodes[item].Text + '.' + EatIdent('a unit name segment');
+  end;
   if Accept(tkAs) then begin
     q := NewNode(nkIdent);
     if Accept(tkUnderscore) then Nodes[q].Text := '_'
@@ -2450,14 +2545,20 @@ begin
 end;
 
 function ParseUnit: LongInt;
-{ Unit = 'unit' Identifier ';' [ UsesClause ] InterfacePart ImplementationPart
-  'end' '.'. A is the uses clause or -1, B the interface part, C the implementation. }
+{ Unit = 'unit' UnitName ';' [ UsesClause ] InterfacePart ImplementationPart
+  'end' '.'. A is the uses clause or -1, B the interface part, C the implementation.
+  UnitName is dotted (core.strings): the namespace leads, the last segment names
+  the unit. }
 var
   u: LongInt;
 begin
   u := NewNode(nkUnit);
   Expect(tkUnit);
   Nodes[u].Text := EatIdent('a unit name');
+  while Tok.Kind = tkDot do begin
+    NextToken;
+    Nodes[u].Text := Nodes[u].Text + '.' + EatIdent('a unit name segment');
+  end;
   Expect(tkSemicolon);
   if Tok.Kind = tkUses then Nodes[u].A := ParseUsesClause;
   Nodes[u].B := ParseInterfacePart;
@@ -3774,10 +3875,31 @@ begin
   MatchExact := True;
 end;
 
+function NormOrd(ty: LongInt): LongInt;
+begin
+  if (ty >= 0) and (SemTypes[ty].Kind = skSubrange) then NormOrd := SemTypes[ty].Base
+  else NormOrd := ty;
+end;
+
+function IsCharLit(node: LongInt): Boolean;
+{ A one-character string literal, which denotes a char value when used against a char. }
+begin
+  IsCharLit := (node >= 0) and (Nodes[node].Kind = nkStrLit) and
+               (Length(Nodes[node].Text) = 1);
+end;
+
+procedure CoerceCharLit(node, otherTy: LongInt);
+{ In a char context (compared, assigned, or passed against a char), retype a one-character
+  string literal to char in place, so it lowers as a character code rather than a freshly
+  built string. }
+begin
+  if IsCharLit(node) and (NormOrd(otherTy) = tyChar) then Nodes[node].Ty := tyChar;
+end;
+
 procedure CheckCall(node, sig: LongInt; const argtys: TIntArray);
 { Report a wrong argument count or the first incompatible argument. }
 var
-  i: LongInt;
+  i, aty: LongInt;
 begin
   if (sig < 0) or (SemTypes[sig].Kind <> skProc) then Exit;
   if SemTypes[sig].Variadic then Exit;
@@ -3787,10 +3909,20 @@ begin
       IntToStr(Length(argtys)));
     Exit;
   end;
-  for i := 0 to High(argtys) do
-    if not AssignCompatible(SemTypes[sig].ParamTypes[i], argtys[i]) then
+  for i := 0 to High(argtys) do begin
+    aty := argtys[i];
+    { a one-character string literal denotes a char value where a char is expected
+      (doc/languages/kobold/kp-language.md), so retype the argument node in place and
+      pass it as a char rather than rejecting it as a string }
+    if (NormOrd(SemTypes[sig].ParamTypes[i]) = tyChar) and (i < Length(Nodes[node].Kids))
+       and IsCharLit(Nodes[node].Kids[i]) then begin
+      CoerceCharLit(Nodes[node].Kids[i], SemTypes[sig].ParamTypes[i]);
+      aty := tyChar;
+    end;
+    if not AssignCompatible(SemTypes[sig].ParamTypes[i], aty) then
       SemErr(node, 'argument ' + IntToStr(i + 1) + ': cannot pass ' +
         TypeName(argtys[i]) + ' to ' + TypeName(SemTypes[sig].ParamTypes[i]));
+  end;
 end;
 
 procedure CollectRoutines(const name: string; scope: LongInt; out cands: TIntArray);
@@ -3830,12 +3962,6 @@ begin
   ResolveOverload := best;
 end;
 
-function NormOrd(ty: LongInt): LongInt;
-begin
-  if (ty >= 0) and (SemTypes[ty].Kind = skSubrange) then NormOrd := SemTypes[ty].Base
-  else NormOrd := ty;
-end;
-
 function Comparable(a, b: LongInt): Boolean;
 begin
   Comparable := True;
@@ -3849,20 +3975,6 @@ begin
   if (SemTypes[b].Kind = skNil) and
      (SemTypes[a].Kind in [skInterface, skString, skProcess, skProc]) then Exit;
   Comparable := False;
-end;
-
-function IsCharLit(node: LongInt): Boolean;
-{ A one-character string literal, which denotes a char value when used against a char. }
-begin
-  IsCharLit := (node >= 0) and (Nodes[node].Kind = nkStrLit) and
-               (Length(Nodes[node].Text) = 1);
-end;
-
-procedure CoerceCharLit(node, otherTy: LongInt);
-{ In a char context (compared or assigned against a char), retype a one-character string literal
-  to char in place, so it lowers as a character code rather than a freshly built string. }
-begin
-  if IsCharLit(node) and (NormOrd(otherTy) = tyChar) then Nodes[node].Ty := tyChar;
 end;
 
 procedure CheckRoutineValue(node, s: LongInt);
@@ -5812,9 +5924,9 @@ begin
     else if d > High(UnitPath) then dir := KP_STDLIB
     else dir := UnitPath[d];
     if dir = '' then Continue;
-    text := ReadFileStr(dir + uname + '.kpm');
+    text := ReadFileStr(dir + DotToSlash(uname) + '.kpm');
     if text <> '' then Exit(True);
-    text := ReadFileStr(dir + LowerStr(uname) + '.kpm');
+    text := ReadFileStr(dir + DotToSlash(LowerStr(uname)) + '.kpm');
     if text <> '' then Exit(True);
   end;
 end;
@@ -6125,15 +6237,22 @@ begin
   SelectView := viewScope;
 end;
 
-procedure BindUsesItem(item: LongInt);
-{ Bind one `uses` item: load the unit, record it as a direct dependency, and make the
-  selected names visible either bare (aliased into the global scope) or under a qualifier. }
-var
-  u, i, n, qn, qnode, viewScope: LongInt;
-  qual, uname: string;
-  bare: Boolean;
+function HasKpmExt(const s: string): Boolean;
+{ True when s ends with the case-insensitive suffix '.kpm'. }
 begin
-  uname := Nodes[item].Text;
+  HasKpmExt := (Length(s) >= 4) and (LowerStr(Copy(s, Length(s) - 3, 4)) = '.kpm');
+end;
+
+procedure BindUnitNamed(item: LongInt; const uname, qual: string; bare: Boolean);
+{ Load the named unit, record it as a direct dependency, and make its selected names visible
+  either bare (aliased into the global scope) or under qual. Shared by an ordinary `uses`
+  item and each unit a namespace wildcard expands to. A unit already taken as a dependency is
+  bound once (so `uses io.*, io.files (...)` does not double it). }
+var
+  u, i, n, qn, viewScope: LongInt;
+begin
+  for i := 0 to DepCount - 1 do
+    if LowerStr(DepName[i]) = LowerStr(uname) then Exit;
   u := LoadUnitInterface(item, uname);
   if u < 0 then Exit;
   n := DepCount;
@@ -6141,12 +6260,6 @@ begin
   DepName[n] := uname;
   DepFingerprint[n] := UUFingerprint[u];
   viewScope := SelectView(item, u);
-  qnode := Nodes[item].A;
-  bare := False;
-  qual := uname;
-  if qnode >= 0 then
-    if Nodes[qnode].Text = '_' then bare := True
-    else qual := Nodes[qnode].Text;
   if bare then
     for i := 0 to High(Scopes[viewScope].Members) do
       AddToScope(GlobalScope, Scopes[viewScope].Members[i])
@@ -6156,6 +6269,80 @@ begin
     QName[qn] := qual;
     QScope[qn] := viewScope;
   end;
+end;
+
+procedure BindNamespaceWildcard(item: LongInt; const ns: string);
+{ Expand `uses ns.*` to every unit found in the namespace directory ns across the unit search
+  path (the source directory, each -U directory, then the standard library), binding each
+  under its own last-segment qualifier (uses io.* -> files.*, dirs.*, console.*). Names are
+  collected unique and sorted, so the dependency order is deterministic regardless of the
+  directory's own order, and the first search directory that has a unit wins (as a single
+  `uses` would). One level: a unit in a nested namespace directory is not reached. }
+var
+  d, h, i, j: LongInt;
+  dir, entry, base: string;
+  names: array of string;
+  seen: Boolean;
+begin
+  SetLength(names, 0);
+  for d := -1 to High(UnitPath) + 1 do begin
+    if d < 0 then dir := UnitSrcDir
+    else if d > High(UnitPath) then dir := KP_STDLIB
+    else dir := UnitPath[d];
+    if dir = '' then Continue;
+    h := kpd_open(dir + DotToSlash(ns));
+    if h < 0 then Continue;
+    repeat
+      entry := kpd_next(h);
+      if entry = '' then Break;
+      if HasKpmExt(entry) then begin
+        base := Copy(entry, 1, Length(entry) - 4);   { strip '.kpm' }
+        seen := False;
+        for i := 0 to High(names) do
+          if LowerStr(names[i]) = LowerStr(base) then begin seen := True; Break; end;
+        if not seen then begin
+          SetLength(names, Length(names) + 1);
+          names[High(names)] := base;
+        end;
+      end;
+    until False;
+    kpd_close(h);
+  end;
+  if Length(names) = 0 then begin
+    SemErr(item, 'no units found in namespace ''' + ns + '.*''');
+    Exit;
+  end;
+  for i := 1 to High(names) do begin        { insertion sort for a deterministic dep order }
+    base := names[i]; j := i - 1;
+    while (j >= 0) and (LowerStr(names[j]) > LowerStr(base)) do begin
+      names[j + 1] := names[j]; Dec(j);
+    end;
+    names[j + 1] := base;
+  end;
+  for i := 0 to High(names) do
+    BindUnitNamed(item, ns + '.' + names[i], names[i], False);
+end;
+
+procedure BindUsesItem(item: LongInt);
+{ Bind one `uses` item: a namespace wildcard expands to its units; otherwise load the unit
+  and make its names visible bare (aliased into the global scope) or under a qualifier. }
+var
+  qnode: LongInt;
+  qual, uname: string;
+  bare: Boolean;
+begin
+  uname := Nodes[item].Text;
+  if Nodes[item].Flag = 1 then begin
+    BindNamespaceWildcard(item, uname);
+    Exit;
+  end;
+  qnode := Nodes[item].A;
+  bare := False;
+  qual := LastSegment(uname);
+  if qnode >= 0 then
+    if Nodes[qnode].Text = '_' then bare := True
+    else qual := Nodes[qnode].Text;
+  BindUnitNamed(item, uname, qual, bare);
 end;
 
 procedure BindUses(usesNode: LongInt);
@@ -10397,13 +10584,113 @@ begin
     LValueType := Nodes[node].Ty;   { field or element type, set by sema }
 end;
 
+function RefsSym(node, sym: LongInt): Boolean;
+{ True when the expression at node reads the variable sym anywhere in its subtree. The
+  self-append chain uses this to stay sound: once the accumulator x has been grown in place,
+  a later operand that reads x would see the half-built value, so such an operand keeps the
+  assignment on the plain concat path. }
+var
+  i: LongInt;
+begin
+  RefsSym := False;
+  if node < 0 then Exit;
+  if (Nodes[node].Kind = nkIdent) and (Nodes[node].Sym = sym) then begin
+    RefsSym := True;
+    Exit;
+  end;
+  if RefsSym(Nodes[node].A, sym) or RefsSym(Nodes[node].B, sym) or
+     RefsSym(Nodes[node].C, sym) or RefsSym(Nodes[node].D, sym) then begin
+    RefsSym := True;
+    Exit;
+  end;
+  for i := 0 to High(Nodes[node].Kids) do
+    if RefsSym(Nodes[node].Kids[i], sym) then begin
+      RefsSym := True;
+      Exit;
+    end;
+end;
+
+function ConcatSpine(n: LongInt; var ops: TIntArray): LongInt;
+{ Walk the left-leaning spine of a string concatenation, returning its leftmost leaf and
+  appending each right operand to ops in left-to-right order. `((x + a) + b)` yields leaf x
+  and ops [a, b]; a leaf that is not a string `+` ends the spine. }
+begin
+  if (Nodes[n].Kind = nkBinary) and (Nodes[n].Op = tkPlus) and (Nodes[n].Ty = tyStr) then begin
+    ConcatSpine := ConcatSpine(Nodes[n].A, ops);
+    SetLength(ops, Length(ops) + 1);
+    ops[High(ops)] := Nodes[n].B;
+  end
+  else
+    ConcatSpine := n;
+end;
+
+function IsSelfAppend(node: LongInt; var ops: TIntArray): Boolean;
+{ True when node is the self-append idiom `x := x + e` or a left-leaning chain of it
+  (`x := x + a + b + ...`): the target is a plain string variable and it is the leftmost
+  leaf of the right-hand concatenation. ops receives the appended operands in order. This is
+  the shape a build-a-string loop runs hot; recognizing it lets each step grow the string in
+  place (kp_str_append*) rather than allocating and copying the whole left operand (the
+  O(n^2) a naive concat chain costs). Restricted to a plain `var`: the function-result name
+  and by-reference targets carry reference-ownership subtleties the general path handles.
+  A later operand (anything past the first) may not read x: the first append may have grown
+  x in place, so a re-read would see the half-built value. The first operand may read x (it
+  is consumed before any mutation is observable), which keeps `x := x + x` on the fast path. }
+var
+  target, leaf, i: LongInt;
+begin
+  IsSelfAppend := False;
+  SetLength(ops, 0);
+  target := Nodes[node].A;
+  if Nodes[target].Kind <> nkIdent then Exit;
+  if (Nodes[target].Sym < 0) or (Syms[Nodes[target].Sym].Kind <> syVar) then Exit;
+  leaf := ConcatSpine(Nodes[node].B, ops);
+  if Length(ops) = 0 then Exit;            { the right-hand side was not a concatenation }
+  { the spine's leftmost leaf must be the target variable itself }
+  if (Nodes[leaf].Kind <> nkIdent) or (Nodes[leaf].Sym <> Nodes[target].Sym) then begin
+    SetLength(ops, 0);
+    Exit;
+  end;
+  for i := 1 to High(ops) do
+    if RefsSym(ops[i], Nodes[target].Sym) then begin
+      SetLength(ops, 0);
+      Exit;
+    end;
+  IsSelfAppend := True;
+end;
+
+procedure LowerSelfAppend(target: LongInt; const ops: TIntArray);
+{ Lower `x := x + a + b + ...` to a run of in-place appends. Each append helper consumes the
+  running reference (the slot's value for the first operand, then the owned intermediate) and
+  returns the grown value, so the slot is simply overwritten at the end: no retain of x, no
+  separate release of the old value. The first append grows x in place when it is uniquely
+  owned; the intermediates are uniquely owned by construction, so they always grow in place. }
+var
+  s, h, ov, i: LongInt;
+begin
+  s := Nodes[target].Sym;
+  h := LoadSym(s);
+  for i := 0 to High(ops) do
+    if Nodes[ops[i]].Ty = tyChar then
+      h := EmitStrCall2('kp_str_append_char', h, LowerExpr(ops[i]))
+    else begin
+      ov := LowerExpr(ops[i]);
+      h := EmitStrCall2('kp_str_append', h, ov);
+      ReleaseIfOwned(ops[i], ov);   { a fresh string operand (a call result, a nested concat) is consumed }
+    end;
+  StoreSym(s, h);
+end;
+
 procedure LowerAssign(node: LongInt);
 var
   target, v, s, tt, addr, old, i, rt, m, sf: LongInt;
-  aoffs, akinds, clones, argv: TIntArray;
+  aoffs, akinds, clones, argv, aops: TIntArray;
 begin
   target := Nodes[node].A;
   tt := LValueType(target);
+  if (tt = tyStr) and IsSelfAppend(node, aops) then begin
+    LowerSelfAppend(target, aops);
+    Exit;
+  end;
   { a property write becomes a call to its setter accessor (doc/languages/kobold/kp-property.md).
     A declaration-level property's setter is a free routine; a computed record field's is a
     method of the record, synthesized here as rec.setter(value). }

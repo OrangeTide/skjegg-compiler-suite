@@ -68,17 +68,9 @@ statx:
 	ret
 	.size	statx,.-statx
 
-/* void *__sys_brk(void *addr);  the raw Linux brk (#214), returning the new
-   program break.  libc/sbrk.c grows a real, sandbox-backed heap through it on
-   the ILP32 targets (hosted only; the freestanding runtime has its own heap,
-   so this stays out of the shared syscall seam). */
-	.globl __sys_brk
-	.type	__sys_brk,@function
-__sys_brk:
-	li	a7, 214
-	ecall
-	ret
-	.size	__sys_brk,.-__sys_brk
+/* __sys_brk (the raw Linux brk) now lives in the shared seam syscall_rv.S,
+   included below, since both libc/sbrk.c and the Kobold freestanding gheap
+   grow their heap through it. */
 
 /* The directory/path file operations the libc wraps with AT_FDCWD
    (libc/fileops.c): mkdirat, unlinkat (unlink and rmdir), renameat2.  rv32 has

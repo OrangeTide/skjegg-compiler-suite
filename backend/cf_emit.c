@@ -2263,14 +2263,16 @@ emit_global_def(FILE *out, struct ir_global *g)
     int elsz = global_elsz(g);
 
     if (g->is_strobj) {
-        /* A static Kobold string object: the {refcount, kind, len} header
-           in target endianness, then the text and a trailing NUL.  Emitting
-           the header words as .long keeps them big-endian on ColdFire, where
-           str_core.c reads them with native loads (a header baked into the
-           KPM as little-endian bytes would be byte-swapped). */
+        /* A static Kobold string object: the {refcount, kind, len, cap} header
+           in target endianness, then the text and a trailing NUL.  cap == len:
+           a static string carries no spare capacity.  Emitting the header words
+           as .long keeps them big-endian on ColdFire, where str_core.c reads
+           them with native loads (a header baked into the KPM as little-endian
+           bytes would be byte-swapped). */
         fprintf(out, "\t.long 0x%08x\n", 0xffffffffu);  /* KP_RC_STATIC */
         fprintf(out, "\t.long 0x%08x\n", 1u);           /* KP_OBJ_STRING */
         fprintf(out, "\t.long %d\n", g->init_strlen);   /* byte length */
+        fprintf(out, "\t.long %d\n", g->init_strlen);   /* capacity (== length) */
         if (g->init_strlen > 0)
             emit_string_bytes(out, g->init_string, g->init_strlen);
         fprintf(out, "\t.byte 0\n");                    /* trailing NUL */

@@ -6,6 +6,29 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.15.0
+
+#### Added
+- Kobold standard-library units with dotted namespaces (the core, io, std,
+  experimental, and kobold tiers) and a `uses ns.*` wildcard. Runtime services
+  (RNG, clock, sleep, console I/O, files) are now reached through units rather
+  than compiler builtins. Adds the core.strings unit and a typed read/write
+  surface for io.console.
+- boris runtime glue (A1-A7): a freestanding heap backed by brk, a 32-bit
+  xoshiro128** RNG with seed-driven and pure generators, a clock_gettime and
+  getrandom sandbox seam, Sleep/Yield over nanosleep, a sticky EOF latch for the
+  freestanding console, and the guest trap ecall aligned with boris VM_SYS_TRAP.
+
+#### Changed
+- Strings carry a byte capacity and grow in place: the self-append idiom
+  `s := s + e` and left-leaning concat chains lower to amortized in-place appends
+  instead of allocating and copying the whole left operand each step.
+- A one-character string literal is accepted where a char argument is expected.
+
+#### Tooling
+- `check-kp-corpus-san`: the Kobold corpus under the GH_POISON guest-heap
+  instrument plus ASan and UBSan.
+
 ### 0.14.0
 
 #### Added

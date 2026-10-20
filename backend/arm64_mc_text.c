@@ -365,13 +365,15 @@ emit_global_def(FILE *out, struct ir_global *g)
     int elsz = global_elsz(g);
 
     if (g->is_strobj) {
-        /* A static Kobold string object: the {refcount, kind, len} header
-           in target endianness, then the text and a trailing NUL.  The
-           header words assemble per-target (little-endian here), where
-           str_core.c reads them with native loads. */
+        /* A static Kobold string object: the {refcount, kind, len, cap} header
+           in target endianness, then the text and a trailing NUL.  cap == len:
+           a static string carries no spare capacity.  The header words assemble
+           per-target (little-endian here), where str_core.c reads them with
+           native loads. */
         fprintf(out, "\t.word 0x%08x\n", 0xffffffffu);  /* KP_RC_STATIC */
         fprintf(out, "\t.word 0x%08x\n", 1u);           /* KP_OBJ_STRING */
         fprintf(out, "\t.word %d\n", g->init_strlen);   /* byte length */
+        fprintf(out, "\t.word %d\n", g->init_strlen);   /* capacity (== length) */
         if (g->init_strlen > 0)
             emit_string_bytes(out, g->init_string, g->init_strlen);
         fprintf(out, "\t.byte 0\n");                    /* trailing NUL */

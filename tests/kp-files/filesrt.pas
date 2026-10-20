@@ -1,9 +1,9 @@
 program filesrt;
 { File I/O reached through the `files` unit: no per-program external
-  declarations, just `uses files`.  Exercises both surfaces on the file named by
+  declarations, just `uses io.files`.  Exercises both surfaces on the file named by
   the first argument: the whole-file ReadFile/WriteFile, and the Pascal-style
   line/stream handle (Create/WriteLine, then Open/ReadLine). }
-uses files;
+uses io.files;
 var
   f: files.TextFile;
   line: string;

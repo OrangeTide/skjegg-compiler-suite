@@ -3,23 +3,23 @@
    The ColdFire counterpart of kp_crt_rv.S, for a host whose seam to the guest is
    only write/read/exit (skj-run's CFV4e user mode, and downstream boris).  It
    records the entry argument vector for ParamCount / ParamStr, switches to its
-   own execution stack, hands the runtime its guest heap region, and enters the
-   program through kp_guest_entry, the fixed name the AOT driver gives the
-   program's entry.  A normal return exits 0; a program ends nonzero only by
-   calling Halt(code), which exits through io_halt.
+   own execution stack, and enters the program through kp_guest_entry, the fixed
+   name the AOT driver gives the program's entry.  A normal return exits 0; a
+   program ends nonzero only by calling Halt(code), which exits through io_halt.
 
-   The guest heap and the execution stack are reserved here in bss and handed to
-   the runtime.  A downstream host that owns its memory supplies its own region
-   instead (call kp_rt_init with it and jump to kp_guest_entry); nothing here
-   depends on a syscall but the exit the runtime makes through io_free.c.
+   The guest heap grows the program break on demand (rt_free.c over the brk
+   syscall), so this file reserves no heap region and no longer calls kp_rt_init;
+   the host sets the break's base and limit when it loads the task (boris A3).
+   Only the execution stack is reserved here in bss: a deep self-compile
+   overflows a small entry stack, so the crt switches to its own.
 
    Calls use the toolkit convention: arguments pushed right to left, the caller
    pops, results in d0/a0.  The entry argument vector is whatever the host places
    at the entry sp: argc, then the argv pointers, then a null; a host that passes
    none leaves the count word zero.
 
-   KP_HEAP_SIZE is 8 MiB (8388608) and the execution stack is 2 MiB (2097152);
-   skj-as has no .equ, so each literal is repeated at its use and its .space. */
+   The execution stack is 2 MiB (2097152); skj-as has no .equ, so the literal is
+   repeated at its use and its .space. */
 
     .text
     .globl _start
@@ -32,11 +32,6 @@ _start:
     lea     __kp_stack_top, %sp | our own stack: a deep self-compile overflows a
                                 | small entry stack (start.S switches for the
                                 | same reason)
-
-    move.l  #8388608, -(%sp)    | kp_rt_init(base, size): size = KP_HEAP_SIZE
-    pea     __kp_heap           | base
-    jsr     kp_rt_init
-    addq.l  #8, %sp
 
     jsr     kp_guest_entry      | run the program
 
@@ -55,10 +50,6 @@ __kp_crt_abi_ref:
     .long   kp_guest_abi_v3
 
     .bss
-    .align  4                   | 16-aligned base, as the allocator expects
-    .globl  __kp_heap
-__kp_heap:
-    .space  8388608             | KP_HEAP_SIZE (8 MiB)
-    .align  4
+    .align  4                   | 16-aligned base
     .space  2097152             | execution stack (2 MiB)
 __kp_stack_top:

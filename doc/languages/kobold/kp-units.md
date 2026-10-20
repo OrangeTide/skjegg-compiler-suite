@@ -237,6 +237,14 @@ Without a list, all exported names are visible under the qualifier. With a list,
 the named items are visible; a rename sets the local name (bare when the qualifier is
 `_`, otherwise under the qualifier).
 
+Idiomatically a Pascal-like unit is used bare, `uses geometry as _;`, so its names read
+like the language's own, the way traditional Pascal `uses` works. This is a convention, not
+a requirement, and it is not always possible: when a unit's exported name would shadow a
+built-in or collide with another bare import, bring it in under a qualifier (or a selective
+list that renames the offenders). `core.strings` is the standard example: its string
+`Delete` and `Insert` share names with the dynamic-array built-ins, so it is used qualified
+(`uses core.strings;` then `strings.Delete`) rather than `as _`.
+
 ## Re-export and cross-unit resolution
 
 Two different questions arise when unit A's interface refers to a name from unit B, for
@@ -511,12 +519,20 @@ A unit is found by name at two stages, and both stages search the same order: ex
 directories first, then the installed standard library.
 
 - **Compile time.** `kpcom` resolves each `uses` name to an interface `.kpm` by searching, in
-  order, every `-U<dir>` given on the command line, then a directory baked in at build time
-  (the install location, `$(PREFIX)/lib/kobold`). A name is tried as `<dir>/<name>.kpm` and
-  then `<dir>/<name>.kpm` lowercased.
+  order, the directory of the source being compiled, every `-U<dir>` given on the command
+  line, then a directory baked in at build time (the install location,
+  `$(PREFIX)/lib/kobold`). A flat name is tried as `<dir>/<name>.kpm` and then its lowercased
+  form; a dotted name maps its dots to path separators, so `io.files` is tried as
+  `<dir>/io/files.kpm` (and the lowercased fallback). A wildcard `io.*` lists the `<dir>/io/`
+  directory for its `.kpm` members (one level); the namespace is read from every search
+  directory in that same order, each unit taken from the first directory that has it (as a
+  single `uses` would), and the members are sorted so the resulting dependency list is
+  deterministic regardless of the directory's own order.
 - **Run time.** `kprun` resolves each dependency in the `.uses` list by searching, in order,
   the main module's own directory, every colon-separated entry of the `KOBOLD_UNITS`
-  environment variable, then the same baked-in standard library directory. An embedding host
+  environment variable, then the same baked-in standard library directory. A dotted dependency
+  maps its dots to path separators the same way; a wildcard has already been expanded to
+  concrete dependency names at compile time, so the runtime sees no `*`. An embedding host
   that walks dependencies with `kp_module_dep_name` chooses its own lookup.
 
 So a program that `uses strings` compiles and runs with no flags once the library is installed,
@@ -524,20 +540,86 @@ builds against a local copy with `-Ubuild/lib`, and runs against a local copy wi
 `KOBOLD_UNITS=build/lib`. The lowercase fallback keeps a `uses Strings` working on a
 case-sensitive filesystem where the file is `strings.kpm`.
 
+### Namespaces and the standard-library tiers
+
+A unit name is dotted. The segments before the last are a namespace and the last segment is the
+unit, which is also its default qualifier: `uses io.files;` brings the unit in as `files` (so
+`files.ReadFile`), exactly as a flat `uses files;` would. A flat name is a unit in the root
+namespace; dotting is how the library is organized as it grows, not a new mechanism (the
+qualifier model, selective lists, and `as` are unchanged, and the last segment is what `as` and
+the default qualifier act on).
+
+The leading namespace is a portability and category contract, read at a glance:
+
+- `core` — pure, needs no host: available on every tier (hosted, JIT, sandbox, bare metal).
+- `io` — input and output (console, files, directories): available wherever the target has
+  that I/O seam.
+- `std` — needs an operating system or host service: available everywhere except bare metal.
+- `experimental` — unstable, for trying things out; no stability promise.
+- `kobold` — units about the toolchain itself (host-side developer tools).
+
+The tier is **organizational for now**: the compiler maps the namespace to a directory and
+nothing yet stops a bare-metal build from using a `std` unit. Enforcement, where a build target
+declares the tiers it provides and a higher-tier `uses` is a compile or link error, is a later
+addition once targets carry that capability; the taxonomy is chosen now so units land in the
+right place from the start. A program organizes its own units the same way under its own
+namespace (`scene.actors`); only the five names above are reserved for the library.
+
+**Wildcard import.** `uses io.*` imports every unit directly in a namespace, one level deep (it
+does not reach `io.net.*`), each under its own last-segment qualifier, so it is shorthand for
+naming them individually; `as` and a selective list do not apply to it. A wildcard depends on
+the namespace's membership at compile time: adding a unit to `io` adds it to every `io.*`
+consumer and widens their dependency set and fingerprint, so a wildcard suits a program that
+wants the whole category, not the default way to depend on one unit.
+
 ### The standard library
 
 The standard library is a set of ordinary units installed under `$(PREFIX)/lib/kobold`, both as
-source (`.pas`) and as a precompiled interface (`.kpm`). It uses no privileged mechanism: a
-standard-library unit is found and linked exactly like any other unit on the search path, and a
-program could supply its own unit of the same name ahead of it with `-U` or `KOBOLD_UNITS`.
+source (`.pas`) and as a precompiled interface (`.kpm`), laid out by namespace (`core/`, `io/`,
+`std/`, ...). It uses no privileged mechanism: a standard-library unit is found and linked
+exactly like any other unit on the search path, and a program could supply its own unit of the
+same name ahead of it with `-U` or `KOBOLD_UNITS`.
 
-The first unit is `strings`: pure string helpers (`UpperCase`, `LowerCase`, `Trim` and its
-one-sided forms, `StringReplace`, and string `Delete`/`Insert`) built on `Copy`, `Pos`,
-`Length`, and concatenation, with no runtime support of its own. Because strings are immutable,
-its `Delete` and `Insert` return a new string rather than mutating one. They share a name with
-the dynamic-array `Delete`/`Insert` built-ins, so a program reaches them qualified, as
-`strings.Delete`, where they do not shadow the built-ins. `examples/strdemo.pas` is the worked
-example, run end to end in `make check`.
+The units, by tier:
+
+- `io.files` — whole-file (`ReadFile`/`WriteFile`) and handle (`Open`/`Create`/`ReadLine`/
+  `WriteLine`/`Close`) text I/O. Migrated from the flat `files`.
+- `io.dirs` — directory enumeration. Migrated from the flat `dirs`.
+- `io.console` — the standard input and output as typed functions: `Eof` (the sticky
+  end-of-input latch), `ReadLine`/`ReadChar`, and `WriteStr`/`WriteLine`/`WriteChar`. Numeric
+  and real console I/O (`ReadInt`, `ReadReal`, `WriteReal`) are a later addition (the real FFI
+  marshalling of `RandomReal` below, and the numeric reads' whitespace semantics, come first).
+- `std.time` — `Now` (monotonic milliseconds) and `Sleep(ms)`, over the host clock and the
+  park seam. A give-up-the-turn yield is `Sleep(0)` for now; a dedicated procedure waits on
+  coroutine scheduling landing as its own namespaced unit (`yield` is the coroutine keyword).
+- `std.random` — `SeedRandom`, `Randomize` (seed from host entropy), and `RandomBelow` (the
+  fast generator). It needs host entropy, hence `std`. `RandomReal` is deferred (a
+  real-returning `external cdecl` is not yet carried on the rv soft-float tier) and so is
+  `SecureRandom` (its buffer-fill surface needs more glue); a pure, seed-only `core.random`
+  subset usable on bare metal is also a later addition.
+- `core.strings` — pure string helpers built over the string builtins with no runtime
+  primitive of its own, so it works on every tier (hence `core`): `UpperCase`/`LowerCase`
+  (ASCII), `Trim`/`TrimLeft`/`TrimRight`, `StringReplace`, and a non-mutating string
+  `Delete`/`Insert`. Reached qualified as `strings.Delete` so it does not shadow the
+  dynamic-array built-ins of the same name.
+
+These units wrap runtime glue (`kp_random_*`, `kp_now_ms`, `kp_sleep_ms`, the console
+`io_eof`/`io_read_str`/`io_read_char`/`io_write_str`/`io_write_char`,
+the `kpf_*` file primitives) declared `external cdecl` in each unit's implementation, the same
+pattern as the original `files` unit, so the compiler core carries no knowledge of them and no
+builtin grows (see the units-over-builtins direction in `kobold.md`).
+
+What stays a builtin. An operation moves into a unit when it is an ordinary call: a concrete
+(non-generic) signature, reached through `external cdecl` glue or written in Kobold itself.
+An operation that the compiler must specialize per call stays a builtin. The array `insert`
+and `delete` (and `delete(map, key)`) are the clear case: they are generic over `array of T`,
+and the compiler passes the element's size and its managed-field layout to the runtime so it
+can zero new slots and release removed handles. A unit would need parametric generics (which
+Kobold does not have) and a way to obtain that layout for an arbitrary `T`, so these remain
+compiler builtins. This is why `core.strings` can carry a string `Delete`/`Insert` but the
+array ones cannot: `string` is one concrete, immutable type, so its helpers are an ordinary
+unit; the array operations are generic, mutate a designator by reference, and depend on the
+element layout.
 
 ## Globals: addressing and the ABI
 

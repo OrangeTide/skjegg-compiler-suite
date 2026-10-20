@@ -156,8 +156,8 @@ layout_data(struct kp_jit *j, struct ir_program *prog, char *err, size_t errlen)
            global) */
         size_t sz;
         if (g->is_strobj) {
-            /* {refcount, kind, len} header (3 words) + text + trailing NUL */
-            sz = 12 + (size_t)g->init_strlen + 1;
+            /* {refcount, kind, len, cap} header (4 words) + text + trailing NUL */
+            sz = 16 + (size_t)g->init_strlen + 1;
         } else {
             size_t count = (size_t)(g->arr_size > 0 ? g->arr_size : 1);
             if ((size_t)g->init_count > count)
@@ -192,14 +192,17 @@ layout_data(struct kp_jit *j, struct ir_program *prog, char *err, size_t errlen)
         uint8_t *a = j->data + (size_t)j->globals[i].addr;
         j->globals[i].addr = a;
         if (g->is_strobj) {
-            /* A static Kobold string object: {refcount, kind, len} header then
-               the text.  The host is little-endian and str_core.c reads the
-               header with native loads, so native uint32 stores are correct;
-               the trailing NUL is already zero from the anonymous mapping. */
-            uint32_t hdr[3] = { 0xffffffffu, 1u, (uint32_t)g->init_strlen };
+            /* A static Kobold string object: {refcount, kind, len, cap} header
+               then the text.  cap == len: a static string has no spare capacity,
+               so append never writes it in place (its saturated refcount already
+               forces the copy path).  The host is little-endian and str_core.c
+               reads the header with native loads, so native uint32 stores are
+               correct; the trailing NUL is already zero from the anonymous mapping. */
+            uint32_t hdr[4] = { 0xffffffffu, 1u, (uint32_t)g->init_strlen,
+                                (uint32_t)g->init_strlen };
             memcpy(a, hdr, sizeof hdr);
             if (g->init_strlen > 0)
-                memcpy(a + 12, g->init_string, (size_t)g->init_strlen);
+                memcpy(a + 16, g->init_string, (size_t)g->init_strlen);
         } else if (g->inits) {
             /* An aggregate byte image (structs, designated/mixed initializers).
                Gaps stay zero from the anonymous mapping.  A scalar entry is

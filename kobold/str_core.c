@@ -4,11 +4,15 @@
    (str_fmt.c hosted, rt_sandbox.c freestanding), since they need libc on the host
    and a hand-rolled implementation with no libc in the sandbox.
 
-   A string is a guest-heap object: a {refcount, kind} header, then the byte length
-   and the bytes inline (len bytes plus a trailing NUL). The value the front end
-   holds is the object's guest address; nil (0) is the empty string. Strings are
-   copy-on-write: the mutators take a borrowed value and return an independent owned
-   reference, which the caller stores before releasing the previous value. */
+   A string is a guest-heap object: a {refcount, kind} header, then the byte length,
+   an allocated byte capacity, and the bytes inline (len bytes plus a trailing NUL,
+   with room up to cap). The value the front end holds is the object's guest address;
+   nil (0) is the empty string. A read-only string presents as immutable: a reader
+   sees len bytes that never change under it. The one in-place mutation is append
+   (kp_str_append*), and it is only taken when the string is uniquely owned
+   (refcount 1) with spare capacity, so no value another owner can see is disturbed;
+   every other case allocates an independent copy and releases the handed-in
+   reference. A static string (saturated refcount) never takes the in-place path. */
 
 #include "str.h"
 #include "rt_glue.h"
@@ -17,10 +21,11 @@ struct kp_str {
     uint32_t refcount;
     uint32_t kind;              /* KP_OBJ_STRING */
     int32_t  len;
-    char     bytes[1];         /* len bytes then a trailing NUL */
+    int32_t  cap;               /* allocated byte capacity (>= len); bytes[cap] is the NUL slot */
+    char     bytes[1];         /* len bytes then a trailing NUL, with room up to cap */
 };
 
-#define STRHDR  ((uint32_t)(3 * sizeof(uint32_t)))   /* 12: refcount, kind, len */
+#define STRHDR  ((uint32_t)(4 * sizeof(uint32_t)))   /* 16: refcount, kind, len, cap */
 
 /* The string object at a guest address, or NULL for nil. */
 static struct kp_str *
@@ -36,11 +41,12 @@ str_finalize(KP_VM_P uint32_t s)
     RT_FREE(s);
 }
 
-/* Create a string of len bytes at refcount 1, returning its guest address and, through
-   out, its object pointer. An empty string is nil (address 0). The bytes are
-   uninitialized apart from the trailing NUL; the caller fills them. */
+/* Create a string of len bytes with room for cap bytes, at refcount 1, returning its
+   guest address and, through out, its object pointer. An empty string (len 0) is nil
+   (address 0) regardless of cap, which keeps the "nil is the empty string" invariant.
+   The bytes are uninitialized apart from the trailing NUL; the caller fills them. */
 static uint32_t
-str_make(KP_VM_P int32_t len, struct kp_str **out)
+str_make(KP_VM_P int32_t len, int32_t cap, struct kp_str **out)
 {
     uint32_t s;
     struct kp_str *d;
@@ -50,14 +56,59 @@ str_make(KP_VM_P int32_t len, struct kp_str **out)
         *out = 0;
         return 0;
     }
-    s = RT_ALLOC(STRHDR + (uint32_t)len + 1u);
+    if (cap < len)
+        cap = len;
+    s = RT_ALLOC(STRHDR + (uint32_t)cap + 1u);
     d = RT_PTR(s);
     d->refcount = 1;
     d->kind = KP_OBJ_STRING;
     d->len = len;
+    d->cap = cap;
     d->bytes[len] = '\0';
     *out = d;
     return s;
+}
+
+/* The capacity to allocate for a string that must hold need bytes, grown geometrically
+   from oldcap so a run of appends costs O(n) total rather than O(n^2). */
+static int32_t
+str_grow_cap(int32_t need, int32_t oldcap)
+{
+    int32_t c = oldcap > 8 ? oldcap : 8;
+
+    while (c < need)
+        c += c;                 /* double until it holds need */
+    return c;
+}
+
+/* Append add bytes (src) to s, consuming one reference of s and returning an owned
+   reference to the result. When s is a uniquely owned heap string with spare capacity
+   the bytes are written in place and s is returned unchanged; otherwise a fresh copy
+   is built and the handed-in reference is released. src must not alias s's storage past
+   its length (it is read before any release). */
+static uint32_t
+str_append_bytes(KP_VM_P uint32_t s, const char *src, int32_t add)
+{
+    struct kp_str *d = str_ptr(KP_VM_A s);
+    int32_t len = d ? d->len : 0;
+    int32_t nlen = len + add;
+    struct kp_str *nd;
+    uint32_t ns;
+
+    if (add <= 0)
+        return s;               /* nothing to add; keep the handed-in reference */
+    if (d && d->refcount == 1 && d->cap >= nlen) {
+        memcpy(d->bytes + len, src, (unsigned long)add);
+        d->len = nlen;
+        d->bytes[nlen] = '\0';
+        return s;
+    }
+    ns = str_make(KP_VM_A nlen, str_grow_cap(nlen, d ? d->cap : 0), &nd);
+    if (len)
+        memcpy(nd->bytes, d->bytes, (unsigned long)len);
+    memcpy(nd->bytes + len, src, (unsigned long)add);
+    RT_RELEASE(s);              /* drop the handed-in reference (frees it when it was the last) */
+    return ns;
 }
 
 uint32_t
@@ -68,7 +119,7 @@ kp_str_new(KP_VM_P const char *bytes, int len)
 
     if (len < 0)
         len = 0;
-    s = str_make(KP_VM_A len, &d);
+    s = str_make(KP_VM_A len, len, &d);
     if (len > 0) {
         if (bytes)
             memcpy(d->bytes, bytes, (unsigned long)len);
@@ -100,7 +151,7 @@ kp_str_concat(KP_VM_P uint32_t a, uint32_t b)
 
     /* The guest heap never moves an existing block, so sa and sb stay valid across the
        allocation below. */
-    s = str_make(KP_VM_A la + lb, &d);
+    s = str_make(KP_VM_A la + lb, la + lb, &d);
     if (la)
         memcpy(d->bytes, sa->bytes, (unsigned long)la);
     if (lb)
@@ -137,6 +188,24 @@ kp_str_from_char(KP_VM_P int32_t code)
     char c = (char)(code & 0xFF);
 
     return kp_str_new(KP_VM_A &c, 1);
+}
+
+uint32_t
+kp_str_append_char(KP_VM_P uint32_t s, int32_t code)
+{
+    char c = (char)(code & 0xFF);
+
+    return str_append_bytes(KP_VM_A s, &c, 1);
+}
+
+uint32_t
+kp_str_append(KP_VM_P uint32_t s, uint32_t t)
+{
+    struct kp_str *dt = str_ptr(KP_VM_A t);
+
+    if (!dt || dt->len == 0)
+        return s;               /* appending the empty string keeps s unchanged */
+    return str_append_bytes(KP_VM_A s, dt->bytes, dt->len);
 }
 
 int32_t
@@ -189,7 +258,7 @@ kp_str_copy(KP_VM_P uint32_t s, int32_t index, int32_t count)
         if (count > avail)
             count = avail;
     }
-    id = str_make(KP_VM_A count, &ns);
+    id = str_make(KP_VM_A count, count, &ns);
     if (count)
         memcpy(ns->bytes, d->bytes + (index - 1), (unsigned long)count);
     return id;

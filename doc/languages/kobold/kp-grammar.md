@@ -53,11 +53,15 @@ opacity, import, and method rules, is in `kp-units.md`; see also `kp-module-form
 > below matches what is built (see `kp-units.md`).
 
 ```ebnf
-Unit             = 'unit' Identifier ';'
+Unit             = 'unit' UnitName ';'
                    [ UsesClause ]
                    InterfacePart
                    ImplementationPart
                    'end' '.' .
+                 (* UnitName is dotted (kp-units.md): the leading segments are a
+                    namespace (core, io, std, experimental, kobold, or a user
+                    namespace), the last segment is the unit and the default
+                    qualifier. A flat name is still a unit in the root namespace. *)
                  (* one uses clause for the whole unit, private by default; the public
                     surface is stated with reexport. No separate interface-level and
                     implementation-level uses. No initialization or finalization
@@ -113,11 +117,22 @@ ProcOrFuncHeading = 'procedure' Identifier
                     one definition program-wide (the fold rule in kp-units.md). *)
 
 UsesClause       = 'uses' UnitImport { ',' UnitImport } ';' .
-UnitImport       = Identifier [ 'as' Qualifier ]
+UnitImport       = PlainImport | WildcardImport .
+PlainImport      = UnitName [ 'as' Qualifier ]
                    [ '(' ImportItem { ',' ImportItem } ')' ] .
+WildcardImport   = UnitName '.' '*' .
+                 (* 'uses io.*' imports every unit directly in the io namespace
+                    (one level, not recursive), each under its own last-segment
+                    qualifier; no 'as' and no selective list apply to a wildcard.
+                    The import depends on the namespace's current membership
+                    (kp-units.md). *)
+UnitName         = Identifier { '.' Identifier } .
+                 (* dotted: segments but the last are the namespace; the last is
+                    the unit and the default qualifier. *)
 Qualifier        = Identifier | '_' .
-                 (* the qualifier defaults to the unit name; 'as X' shortens it to X;
-                    'as _' drops it, so exported names come into scope bare. *)
+                 (* the qualifier defaults to the unit name's last segment; 'as X'
+                    shortens it to X; 'as _' drops it, so exported names come into
+                    scope bare. *)
 ImportItem       = Identifier [ 'as' Identifier ] .
                  (* selective import: only the named items are visible, and 'A as B'
                     renames A to B locally. Without a list, all exported names are

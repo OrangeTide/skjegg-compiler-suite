@@ -100,6 +100,25 @@ int io_read_char(void)
     return ch == EOF ? 0 : (unsigned char)ch;
 }
 
+/* The sticky end-of-input latch (io.console's Eof), matching io_free.c's
+   io_eof: a one-byte lookahead that is true once no byte remains on stdin.  A
+   peeked byte is pushed back so the next read returns it; once EOF is seen it
+   stays latched, so a read-to-end loop stops once. */
+static int io_eof_latched;
+int io_eof(void)
+{
+    int ch;
+    if (io_eof_latched)
+        return 1;
+    ch = getchar();
+    if (ch == EOF) {
+        io_eof_latched = 1;
+        return 1;
+    }
+    ungetc(ch, stdin);
+    return 0;
+}
+
 void io_read_ln(void)
 {
     int ch;
@@ -291,6 +310,7 @@ kp_install_runtime(struct kp_binding *binds, int *n, int cap)
 #endif
     BIND("io_read_str", io_read_str);
     BIND("io_read_ln", io_read_ln);
+    BIND("io_eof", io_eof);
     BIND("io_halt", io_halt);
 
     BIND("ParamCount", rt_param_count);
@@ -306,6 +326,8 @@ kp_install_runtime(struct kp_binding *binds, int *n, int cap)
     BIND("kp_assert", host_assert);
 
     BIND("kp_str_concat", kp_str_concat);
+    BIND("kp_str_append", kp_str_append);
+    BIND("kp_str_append_char", kp_str_append_char);
     BIND("kp_str_len", kp_str_len);
     BIND("kp_str_base", kp_str_base);
     BIND("kp_str_cmp", kp_str_cmp);

@@ -1,4 +1,4 @@
-unit files;
+unit io.files;
 { File I/O as a unit a program `uses`, rather than a compiler builtin or an
   external declaration repeated in every program.  The compiler core carries no
   file knowledge: the primitives are ordinary external symbols the runtime

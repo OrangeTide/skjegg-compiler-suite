@@ -1,4 +1,4 @@
-unit dirs;
+unit io.dirs;
 { Directory reads as a unit a program `uses`, the companion to `files`.  The
   compiler core carries no directory knowledge: the primitives are ordinary
   external symbols the runtime provides (kpd_open / kpd_next / kpd_close, in

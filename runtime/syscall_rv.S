@@ -3,7 +3,16 @@
    .include this file, so the wrappers are written once.  Each is a single ecall:
    a7 is the syscall number, a0..a4 the arguments (already in place on the ILP32
    psABI), the result in a0.  exit is weak so libc's flushing exit overrides it;
-   _exit is the raw process exit. */
+   _exit is the raw process exit.
+
+   Error convention (the raw-seam ABI boris and skj-run both honor): a failing
+   call returns a negative Linux errno in a0, the real rv32 Linux numbers (for
+   example -2 ENOENT, -9 EBADF).  The wrappers pass a0 through unchanged, lseek
+   included, so a guest built against this runtime reads the same -errno on
+   skj-run (emu/guest.c returns -GUEST_E*, the Linux values) and in the boris VM.
+   This is distinct from boris's name-bound host-call error space (its own small
+   VM_ERR_* read back through sys_errno), which this freestanding seam never
+   touches: it issues only the raw Linux calls. */
 
 	.globl write
 	.globl read
@@ -11,6 +20,11 @@
 	.globl close
 	.globl lseek
 	.globl getdents64
+	.globl clock_gettime
+	.globl getrandom
+	.globl nanosleep
+	.globl sched_yield
+	.globl __sys_brk
 	.weak  exit
 	.globl _exit
 
@@ -57,7 +71,9 @@ close:
    loff_t *result, whence) with a 64-bit offset split into two words and the new
    position written back through a pointer.  Sign-extend the 32-bit offset into
    the high word, pass a stack slot for the result, and return its low 32 bits
-   (a file under 2 GiB, which every toolchain input is). */
+   (a file under 2 GiB, which every toolchain input is).  On error _llseek sets
+   a0 to a negative Linux errno; return it unchanged, so the raw seam keeps the
+   negative-errno convention the other wrappers pass through. */
 	.type	lseek,@function
 lseek:
 	addi	sp, sp, -16
@@ -68,12 +84,9 @@ lseek:
 	mv	a3, sp			/* a3 = &result (loff_t) */
 	li	a7, 62			/* _llseek */
 	ecall
-	bltz	a0, 1f
-	lw	a0, 0(sp)		/* low 32 bits of the new position */
-	addi	sp, sp, 16
-	ret
-1:	li	a0, -1
-	addi	sp, sp, 16
+	bltz	a0, 1f			/* a0 < 0: keep the kernel's -errno */
+	lw	a0, 0(sp)		/* success: low 32 bits of the new position */
+1:	addi	sp, sp, 16
 	ret
 	.size	lseek,.-lseek
 
@@ -88,6 +101,57 @@ getdents64:
 	ret
 	.size	getdents64,.-getdents64
 
+/* int clock_gettime(int clk_id, void *ts); writes a 32-bit {tv_sec, tv_nsec}
+   through ts (see the seam note on the 32-bit timespec convention).  Args in
+   a0..a1. */
+	.type	clock_gettime,@function
+clock_gettime:
+	li	a7, 113
+	ecall
+	ret
+	.size	clock_gettime,.-clock_gettime
+
+/* int getrandom(void *buf, int len, unsigned flags); fills buf with len random
+   bytes and returns the count.  Args in a0..a2. */
+	.type	getrandom,@function
+getrandom:
+	li	a7, 278
+	ecall
+	ret
+	.size	getrandom,.-getrandom
+
+/* int nanosleep(const void *req, void *rem); parks the task for the {tv_sec,
+   tv_nsec} the req timespec holds (the 32-bit timespec convention this seam and
+   boris share).  Args in a0..a1.  On boris the park/yield glue is bound to its
+   sys_wait(timeout) host-call instead; this raw syscall is the skj-run backing. */
+	.type	nanosleep,@function
+nanosleep:
+	li	a7, 101
+	ecall
+	ret
+	.size	nanosleep,.-nanosleep
+
+/* int sched_yield(void); gives up the rest of the task's turn without sleeping.
+   No arguments.  A standard POSIX wrapper on the shared seam for C; the Kobold
+   runtime does not wrap it (Sleep(0) is the guest-level yield for now). */
+	.type	sched_yield,@function
+sched_yield:
+	li	a7, 124
+	ecall
+	ret
+	.size	sched_yield,.-sched_yield
+
+/* void *__sys_brk(void *addr); the raw Linux brk (#214), returning the new
+   program break.  Both heaps grow through it: libc/sbrk.c on the hosted ILP32
+   targets and the Kobold freestanding gheap (rt_free.c), so it lives in the
+   shared seam. */
+	.type	__sys_brk,@function
+__sys_brk:
+	li	a7, 214
+	ecall
+	ret
+	.size	__sys_brk,.-__sys_brk
+
 /* void exit(int status); (weak) and void _exit(int status); */
 	.type	exit,@function
 	.type	_exit,@function
@@ -100,15 +164,16 @@ _exit:
 	.size	_exit,.-_exit
 
 /* void __skj_trap_backtrace(int code);
-   The skj-run private RV_SYS_FATAL ecall: print a symbolized backtrace for the
-   calling frame and end the process with exit code a0, so an abort or a runtime
-   trap shows a source-level stack like a CPU fault does.  a7 sits far above the
-   Linux range, so on qemu-user it returns -ENOSYS and control returns here; the
-   caller then falls through to its own exit, so this is a no-op off skj-run. */
+   The RV_SYS_FATAL ecall (0x000f0000, boris's VM_SYS_TRAP): print a symbolized
+   backtrace for the calling frame and end the process with exit code a0, so an
+   abort or a runtime trap shows a source-level stack like a CPU fault does, and
+   a guest faults identically on skj-run and in the boris VM.  a7 sits far above
+   the Linux range, so on qemu-user it returns -ENOSYS and control returns here;
+   the caller then falls through to its own exit, so this is a no-op off a VM. */
 	.globl	__skj_trap_backtrace
 	.type	__skj_trap_backtrace,@function
 __skj_trap_backtrace:
-	li	a7, 0x000f0004		/* RV_SYS_FATAL */
+	li	a7, 0x000f0000		/* RV_SYS_FATAL = boris VM_SYS_TRAP */
 	ecall
 	ret
 	.size	__skj_trap_backtrace,.-__skj_trap_backtrace

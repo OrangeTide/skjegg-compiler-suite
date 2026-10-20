@@ -38,26 +38,33 @@
 #define RV_NR_UNLINKAT      35
 #define RV_NR_RENAMEAT2     276
 #define RV_NR_GETDENTS64    61
+#define RV_NR_CLOCK_GETTIME 113
+#define RV_NR_GETRANDOM     278
+#define RV_NR_NANOSLEEP     101
+#define RV_NR_SCHED_YIELD   124
 
 /* An emulator-private ecall facility: a7 in a range far above the Linux
  * syscall space, so qemu-user answers the same call with -ENOSYS and a guest
  * that wants a guarded region can fall back. The numbers match the sandbox
  * tree's so a guest built for one runs on the other.
  *
+ *   RV_SYS_FATAL  a0=exit code -> does not return
  *   RV_SYS_MAP    a0=size, a1=flags -> a0=base (0 on failure)
  *   RV_SYS_MUNMAP a0=base, a1=size  -> a0=0
  *   RV_SYS_SPAWN  a0=image ptr, a1=len -> a0=child handle (0 on failure)
- *   RV_SYS_FATAL  a0=exit code -> does not return
  *
- * The mapping calls reach gm_mmap/gm_munmap; spawn loads a fresh child process
- * from an image the guest holds in its own memory. RV_SYS_FATAL prints a
- * symbolized backtrace for the calling frame and ends the process with the
- * given exit code, so a guest abort or runtime trap shows a source-level stack
- * like a CPU fault does; on qemu-user it is -ENOSYS and the guest exits itself. */
+ * RV_SYS_FATAL is boris's VM_SYS_TRAP (0x000f0000): a guest runtime fault, so a
+ * Kobold or C abort/trap faults identically on skj-run and in the boris VM. It
+ * prints a symbolized backtrace for the calling frame and ends the process with
+ * the given exit code, so a guest abort or runtime trap shows a source-level
+ * stack like a CPU fault does; on qemu-user it is -ENOSYS and the guest exits
+ * itself. The mapping calls reach gm_mmap/gm_munmap; spawn loads a fresh child
+ * process from an image the guest holds in its own memory. MAP/MUNMAP/SPAWN
+ * stay skj-run-only (boris faults them as unknown low selectors). */
+#define RV_SYS_FATAL        0x000f0000u
 #define RV_SYS_MAP          0x000f0001u
 #define RV_SYS_MUNMAP       0x000f0002u
 #define RV_SYS_SPAWN        0x000f0003u
-#define RV_SYS_FATAL        0x000f0004u
 
 #define MAX_PROC        64
 #define QUANTUM         8192            /* instructions per scheduling slice */
@@ -81,6 +88,10 @@ sys_of_rv(uint32_t nr)
     case RV_NR_UNLINKAT:    return GSYS_UNLINKAT;
     case RV_NR_RENAMEAT2:   return GSYS_RENAMEAT2;
     case RV_NR_GETDENTS64:  return GSYS_GETDENTS64;
+    case RV_NR_CLOCK_GETTIME: return GSYS_CLOCK_GETTIME;
+    case RV_NR_GETRANDOM:   return GSYS_GETRANDOM;
+    case RV_NR_NANOSLEEP:   return GSYS_NANOSLEEP;
+    case RV_NR_SCHED_YIELD: return GSYS_SCHED_YIELD;
     default:                return GSYS_UNKNOWN;
     }
 }

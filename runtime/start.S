@@ -41,15 +41,9 @@ statx:
     movem.l (%sp)+, %d2-%d5
     rts
 
-| void *__sys_brk(void *addr);  the raw Linux brk (#45), returning the new
-| program break in d0.  libc/sbrk.c grows a real, sandbox-backed heap through
-| it on the ILP32 targets.
-    .globl __sys_brk
-__sys_brk:
-    move.l  4(%sp), %d1            | addr
-    move.l  #45, %d0              | __NR_brk
-    trap    #0
-    rts
+| __sys_brk (the raw Linux brk) now lives in the shared seam syscall_cf.S,
+| included above, since both libc/sbrk.c and the Kobold freestanding gheap grow
+| their heap through it.
 
 | The directory/path file operations the libc wraps with AT_FDCWD
 | (libc/fileops.c): mkdirat, unlinkat (unlink and rmdir), renameat2.  Each is a

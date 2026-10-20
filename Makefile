@@ -245,6 +245,16 @@ build/kpcom_kpm.c: prebuild/kpcom.kpm build/bin2c | build
 build/skj-kp-jit: kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c $(KP_RT) build/kp_co.o kobold/frontend.h $(KP_HDRS) Makefile | build
 	$(CC) $(KP_CFLAGS) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c $(KP_RT) build/kp_co.o -lm
 
+## skj-kp-jit-san: build/skj-kp-jit with the guest-heap write-after-free instrument
+## (GH_POISON, kobold/rt_host.c) plus ASan/UBSan, at -O1 -g so a report carries a usable
+## backtrace.  This is the tool that validates the string/array/map runtimes' reference
+## counting: an over-release, double free, or use-after-free in an in-place mutator (for
+## example the string self-append path, kp_str_append*) trips here even when the program's
+## printed values happen to look right.  Kept out of `all`; built on demand by
+## check-kp-corpus-san.
+build/skj-kp-jit-san: kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c $(KP_RT) build/kp_co.o kobold/frontend.h $(KP_HDRS) Makefile | build
+	$(CC) $(KP_CFLAGS) -O1 -g -DGH_POISON $(SAN_CFLAGS) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c $(KP_RT) build/kp_co.o -lm
+
 build/skj-kp-patrol: kobold/patrol_main.c $(KP_RT) build/kp_co.o $(KP_HDRS) Makefile | build
 	$(CC) $(KP_CFLAGS) -o $@ kobold/patrol_main.c $(KP_RT) build/kp_co.o -lm
 
@@ -625,6 +635,23 @@ check-kp-corpus: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a
 	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) -f elf64" \
 	    sh tests/run-kp-src-tests.sh
 
+## check-kp-corpus-san: run the whole behavioral corpus through the instrumented JIT
+## (GH_POISON + ASan/UBSan) and fail on any report.  This is the memory-safety gate for
+## the managed runtimes' reference counting, the check a value-only corpus run cannot make:
+## a string/array mutator that over-releases, double-frees, or reads freed storage prints
+## the right answer yet trips here.  Run it after any change to the string, dynamic-array,
+## or map runtime (the string self-append path is what it was added for).
+check-kp-corpus-san: build/skj-kp-jit-san
+	@env $(SAN_RUNENV) sh -c 'hits=0; \
+	  for f in tests/kp-corpus/*.pas; do \
+	    out=$$(build/skj-kp-jit-san --run "$$f" 2>&1); \
+	    if echo "$$out" | grep -qiE "AddressSanitizer|runtime error|use-after-free|write-after-free|GH_"; then \
+	      echo "FAIL $$f"; echo "$$out" | tail -8; hits=$$((hits + 1)); \
+	    fi; \
+	  done; \
+	  if [ $$hits -ne 0 ]; then echo "check-kp-corpus-san: $$hits file(s) tripped the instrument" >&2; exit 1; fi; \
+	  echo "check-kp-corpus-san: corpus clean under GH_POISON + ASan/UBSan"'
+
 ## The cross-arch corpus runs the AOT path only: the host front end and backend do
 ## the work, qemu runs the small program (a cross JIT would emulate JITing the
 ## whole seed, far too slow for the whole corpus).
@@ -693,14 +720,14 @@ check-kp-multi-arm64: build/skj-kpc build/skj-kp-arm64 build/libkpaot-arm64.a
 ## harness co-locates the same way).  A program that `uses files` then round-trips
 ## a file through it on the x86-64 JIT and AOT paths.  The temp path is handed in
 ## as an argument so the test writes only under build/.
-build/kp-files/files.kpm: kobold/lib/files.pas build/skj-kpc | build
-	@mkdir -p build/kp-files
+build/kp-files/io/files.kpm: kobold/lib/io/files.pas build/skj-kpc | build
+	@mkdir -p build/kp-files/io
 	./build/skj-kpc --emit-kpm $< > $@
 
 check-kp-files: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a \
                 build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
                 build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a \
-                build/kp-files/files.kpm
+                build/kp-files/io/files.kpm
 	@cp tests/kp-files/filesrt.pas build/kp-files/filesrt.pas
 	@rm -f build/kp-files/rt.txt
 	@./build/skj-kp-jit build/kp-files/filesrt.pas $(CURDIR)/build/kp-files/rt.txt \
@@ -718,7 +745,7 @@ check-kp-files: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a \
 	    || { echo "FAIL kp-files (aot)"; cat build/kp-files/aot.err build/kp-files/aot.out; exit 1; }
 	@# freestanding rv32: the free runner does not walk `.uses`, so compile the
 	@# unit and the program for rv32 and link them with the crt + free archive.
-	@./build/skj-kp-rv build/kp-files/files.kpm -o build/kp-files/files_rv.s 2>build/kp-files/rv.err
+	@./build/skj-kp-rv build/kp-files/io/files.kpm -o build/kp-files/files_rv.s 2>build/kp-files/rv.err
 	@./build/skj-as-rv -o build/kp-files/files_rv.o build/kp-files/files_rv.s 2>>build/kp-files/rv.err
 	@./build/skj-kp-rv build/kp-files/filesrt.kpm -o build/kp-files/filesrt_rv.s 2>>build/kp-files/rv.err
 	@./build/skj-as-rv -o build/kp-files/filesrt_rv.o build/kp-files/filesrt_rv.s 2>>build/kp-files/rv.err
@@ -731,8 +758,8 @@ check-kp-files: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a \
 	    || { echo "FAIL kp-files (free-rv)"; cat build/kp-files/rv.err build/kp-files/free-rv.err build/kp-files/free-rv.out; exit 1; }
 	@echo "kp-files: 1 passed (jit, aot, free-rv)"
 
-build/kp-dirs/dirs.kpm: kobold/lib/dirs.pas build/skj-kpc | build
-	@mkdir -p build/kp-dirs
+build/kp-dirs/io/dirs.kpm: kobold/lib/io/dirs.pas build/skj-kpc | build
+	@mkdir -p build/kp-dirs/io
 	./build/skj-kpc --emit-kpm $< > $@
 
 ## Directory reads reached through the `dirs` unit, over the same three tiers as
@@ -742,7 +769,7 @@ build/kp-dirs/dirs.kpm: kobold/lib/dirs.pas build/skj-kpc | build
 check-kp-dirs: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a \
                build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
                build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a \
-               build/kp-dirs/dirs.kpm
+               build/kp-dirs/io/dirs.kpm
 	@cp tests/kp-dirs/dirsrt.pas build/kp-dirs/dirsrt.pas
 	@mkscan() { rm -rf "$$1"; mkdir -p "$$1"; : > "$$1/alpha"; : > "$$1/beta"; : > "$$1/gamma"; }; \
 	 D=$(CURDIR)/build/kp-dirs/scan; \
@@ -760,7 +787,7 @@ check-kp-dirs: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a \
 	     > build/kp-dirs/aot.out 2>build/kp-dirs/aot.err; \
 	 cmp -s build/kp-dirs/aot.out tests/kp-dirs/dirsrt.expected \
 	     || { echo "FAIL kp-dirs (aot)"; cat build/kp-dirs/aot.err build/kp-dirs/aot.out; exit 1; }; \
-	 ./build/skj-kp-rv build/kp-dirs/dirs.kpm -o build/kp-dirs/dirs_rv.s 2>build/kp-dirs/rv.err; \
+	 ./build/skj-kp-rv build/kp-dirs/io/dirs.kpm -o build/kp-dirs/dirs_rv.s 2>build/kp-dirs/rv.err; \
 	 ./build/skj-as-rv -o build/kp-dirs/dirs_rv.o build/kp-dirs/dirs_rv.s 2>>build/kp-dirs/rv.err; \
 	 ./build/skj-kp-rv build/kp-dirs/dirsrt.kpm -o build/kp-dirs/dirsrt_rv.s 2>>build/kp-dirs/rv.err; \
 	 ./build/skj-as-rv -o build/kp-dirs/dirsrt_rv.o build/kp-dirs/dirsrt_rv.s 2>>build/kp-dirs/rv.err; \
@@ -772,6 +799,92 @@ check-kp-dirs: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a \
 	 cmp -s build/kp-dirs/free-rv.out tests/kp-dirs/dirsrt.expected \
 	     || { echo "FAIL kp-dirs (free-rv)"; cat build/kp-dirs/rv.err build/kp-dirs/free-rv.err build/kp-dirs/free-rv.out; exit 1; }
 	@echo "kp-dirs: 1 passed (jit, aot, free-rv)"
+
+## ---- the std/io stdlib wrapper units (tests/kp-stdlib) ----
+## The runtime glue for random, time, and the console latch (runtime/rng_glue.c,
+## sched_glue.c, kobold/io_free.c) is presented as units a program `uses`:
+## std.random, std.time, io.console.  The glue ships in the rv freestanding
+## archive, so the units are exercised on that tier (boris's Kobold target): each
+## unit and the program compile to rv objects and link with the crt and the free
+## archive.  The dotted unit names resolve through the front end's own directory
+## (dot -> path separator), so the unit .kpm files are staged under io/ and std/.
+build/kp-stdlib/io/console.kpm: kobold/lib/io/console.pas build/skj-kpc | build
+	@mkdir -p build/kp-stdlib/io
+	./build/skj-kpc --emit-kpm $< > $@
+build/kp-stdlib/std/time.kpm: kobold/lib/std/time.pas build/skj-kpc | build
+	@mkdir -p build/kp-stdlib/std
+	./build/skj-kpc --emit-kpm $< > $@
+build/kp-stdlib/std/random.kpm: kobold/lib/std/random.pas build/skj-kpc | build
+	@mkdir -p build/kp-stdlib/std
+	./build/skj-kpc --emit-kpm $< > $@
+build/kp-stdlib/core/strings.kpm: kobold/lib/core/strings.pas build/skj-kpc | build
+	@mkdir -p build/kp-stdlib/core
+	./build/skj-kpc --emit-kpm $< > $@
+
+check-kp-stdlib-free: build/skj-kpc build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
+                      build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a \
+                      build/kp-stdlib/io/console.kpm build/kp-stdlib/std/time.kpm \
+                      build/kp-stdlib/std/random.kpm build/kp-stdlib/core/strings.kpm
+	@cp tests/kp-stdlib/stddemo.pas build/kp-stdlib/stddemo.pas
+	@E=build/kp-stdlib/build.err; : > $$E; \
+	 ./build/skj-kpc --emit-kpm build/kp-stdlib/stddemo.pas > build/kp-stdlib/stddemo.kpm 2>>$$E; \
+	 for u in io/console std/time std/random stddemo; do \
+	   b=$$(basename $$u); \
+	   ./build/skj-kp-rv build/kp-stdlib/$$u.kpm -o build/kp-stdlib/$$b.s 2>>$$E && \
+	   ./build/skj-as-rv -o build/kp-stdlib/$$b.o build/kp-stdlib/$$b.s 2>>$$E || \
+	     { echo "FAIL kp-stdlib (compile $$u)"; cat $$E; exit 1; }; \
+	 done; \
+	 ./build/skj-ld-rv -o build/kp-stdlib/stddemo.elf build/kpfree-rv/kp_crt_rv.o \
+	   build/kp-stdlib/stddemo.o build/kp-stdlib/console.o build/kp-stdlib/time.o \
+	   build/kp-stdlib/random.o build/libkpaot-rv-free.a 2>>$$E || \
+	     { echo "FAIL kp-stdlib (link)"; cat $$E; exit 1; }; \
+	 $(QEMU_RV) build/kp-stdlib/stddemo.elf </dev/null > build/kp-stdlib/out 2>>$$E; \
+	 cmp -s build/kp-stdlib/out tests/kp-stdlib/stddemo.expected \
+	   || { echo "FAIL kp-stdlib (free-rv)"; cat $$E build/kp-stdlib/out; exit 1; }
+	@cp tests/kp-stdlib/consoleio.pas build/kp-stdlib/consoleio.pas
+	@E=build/kp-stdlib/build.err; : > $$E; \
+	 ./build/skj-kpc --emit-kpm build/kp-stdlib/consoleio.pas > build/kp-stdlib/consoleio.kpm 2>>$$E; \
+	 ./build/skj-kp-rv build/kp-stdlib/consoleio.kpm -o build/kp-stdlib/consoleio.s 2>>$$E && \
+	 ./build/skj-as-rv -o build/kp-stdlib/consoleio.o build/kp-stdlib/consoleio.s 2>>$$E || \
+	   { echo "FAIL kp-stdlib (compile consoleio)"; cat $$E; exit 1; }; \
+	 ./build/skj-ld-rv -o build/kp-stdlib/consoleio.elf build/kpfree-rv/kp_crt_rv.o \
+	   build/kp-stdlib/consoleio.o build/kp-stdlib/console.o build/libkpaot-rv-free.a 2>>$$E || \
+	     { echo "FAIL kp-stdlib (link consoleio)"; cat $$E; exit 1; }; \
+	 $(QEMU_RV) build/kp-stdlib/consoleio.elf < tests/kp-stdlib/consoleio.input \
+	   > build/kp-stdlib/conout 2>>$$E; \
+	 cmp -s build/kp-stdlib/conout tests/kp-stdlib/consoleio.expected \
+	   || { echo "FAIL kp-stdlib (consoleio)"; cat $$E build/kp-stdlib/conout; exit 1; }
+	@cp tests/kp-stdlib/nswild.pas build/kp-stdlib/nswild.pas
+	@E=build/kp-stdlib/build.err; : > $$E; \
+	 ./build/skj-kpc --emit-kpm build/kp-stdlib/nswild.pas > build/kp-stdlib/nswild.kpm 2>>$$E || \
+	   { echo "FAIL kp-stdlib (compile nswild: uses ns.*)"; cat $$E; exit 1; }; \
+	 ./build/skj-kp-rv build/kp-stdlib/nswild.kpm -o build/kp-stdlib/nswild.s 2>>$$E && \
+	 ./build/skj-as-rv -o build/kp-stdlib/nswild.o build/kp-stdlib/nswild.s 2>>$$E || \
+	   { echo "FAIL kp-stdlib (assemble nswild)"; cat $$E; exit 1; }; \
+	 ./build/skj-ld-rv -o build/kp-stdlib/nswild.elf build/kpfree-rv/kp_crt_rv.o \
+	   build/kp-stdlib/nswild.o build/kp-stdlib/console.o build/kp-stdlib/time.o \
+	   build/kp-stdlib/random.o build/libkpaot-rv-free.a 2>>$$E || \
+	     { echo "FAIL kp-stdlib (link nswild)"; cat $$E; exit 1; }; \
+	 $(QEMU_RV) build/kp-stdlib/nswild.elf </dev/null > build/kp-stdlib/wildout 2>>$$E; \
+	 cmp -s build/kp-stdlib/wildout tests/kp-stdlib/nswild.expected \
+	   || { echo "FAIL kp-stdlib (nswild)"; cat $$E build/kp-stdlib/wildout; exit 1; }
+	@cp tests/kp-stdlib/strdemo.pas build/kp-stdlib/strdemo.pas
+	@E=build/kp-stdlib/build.err; : > $$E; \
+	 ./build/skj-kpc --emit-kpm build/kp-stdlib/strdemo.pas > build/kp-stdlib/strdemo.kpm 2>>$$E || \
+	   { echo "FAIL kp-stdlib (compile strdemo: core.strings)"; cat $$E; exit 1; }; \
+	 ./build/skj-kp-rv build/kp-stdlib/strdemo.kpm -o build/kp-stdlib/strdemo.s 2>>$$E && \
+	 ./build/skj-as-rv -o build/kp-stdlib/strdemo.o build/kp-stdlib/strdemo.s 2>>$$E || \
+	   { echo "FAIL kp-stdlib (assemble strdemo)"; cat $$E; exit 1; }; \
+	 ./build/skj-kp-rv build/kp-stdlib/core/strings.kpm -o build/kp-stdlib/strings.s 2>>$$E && \
+	 ./build/skj-as-rv -o build/kp-stdlib/strings.o build/kp-stdlib/strings.s 2>>$$E || \
+	   { echo "FAIL kp-stdlib (assemble core.strings)"; cat $$E; exit 1; }; \
+	 ./build/skj-ld-rv -o build/kp-stdlib/strdemo.elf build/kpfree-rv/kp_crt_rv.o \
+	   build/kp-stdlib/strdemo.o build/kp-stdlib/strings.o build/libkpaot-rv-free.a 2>>$$E || \
+	     { echo "FAIL kp-stdlib (link strdemo)"; cat $$E; exit 1; }; \
+	 $(QEMU_RV) build/kp-stdlib/strdemo.elf </dev/null > build/kp-stdlib/strout 2>>$$E; \
+	 cmp -s build/kp-stdlib/strout tests/kp-stdlib/strdemo.expected \
+	   || { echo "FAIL kp-stdlib (strdemo)"; cat $$E build/kp-stdlib/strout; exit 1; }
+	@echo "kp-stdlib: 4 passed (free-rv): std.random, std.time, io.console (+ read/write), uses ns.*, core.strings"
 
 ## ---- the input-dependent corpus (tests/kp-io) ----
 ## Programs that read stdin or take arguments: a .input file is the program's
@@ -881,6 +994,20 @@ build/kpfree-rv/soft64.o: runtime/soft64.c build/skj-cc-rv build/skj-as-rv Makef
 	./build/skj-cc-rv $(KPFREE_RV_SKJFLAGS) -DSOFT64_NO_MULSHIFT -o $(@:.o=.s) runtime/soft64.c
 	./build/skj-as-rv -o $@ $(@:.o=.s)
 
+# The RNG generators and their guest-facing glue (runtime/, not kobold/).
+build/kpfree-rv/rng.o: runtime/rng.c runtime/rng.h build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	./build/skj-cc-rv $(KPFREE_RV_SKJFLAGS) -o $(@:.o=.s) runtime/rng.c
+	./build/skj-as-rv -o $@ $(@:.o=.s)
+
+build/kpfree-rv/rng_glue.o: runtime/rng_glue.c runtime/rng.h build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	./build/skj-cc-rv $(KPFREE_RV_SKJFLAGS) -o $(@:.o=.s) runtime/rng_glue.c
+	./build/skj-as-rv -o $@ $(@:.o=.s)
+
+# The park / yield glue (Sleep / Yield over the nanosleep / sched_yield seam).
+build/kpfree-rv/sched_glue.o: runtime/sched_glue.c build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	./build/skj-cc-rv $(KPFREE_RV_SKJFLAGS) -o $(@:.o=.s) runtime/sched_glue.c
+	./build/skj-as-rv -o $@ $(@:.o=.s)
+
 build/kpfree-rv/kp_crt_rv.o: kobold/kp_crt_rv.S build/skj-as-rv | build/kpfree-rv
 	./build/skj-as-rv -o $@ $<
 
@@ -925,7 +1052,8 @@ KPFREE_RV_ARCHIVE := build/kpfree-rv/rt_free.o build/kpfree-rv/io_free.o \
                      build/kpfree-rv/map.o build/kpfree-rv/soft64.o \
                      build/kpfree-rv/rv_i64_aot_alias.o build/kpfree-rv/rv_jit_i64.o \
                      build/kpfree-rv/co_free.o build/kpfree-rv/co_switch_rv.o \
-                     build/kpfree-rv/math_free.o
+                     build/kpfree-rv/math_free.o build/kpfree-rv/rng.o \
+                     build/kpfree-rv/rng_glue.o build/kpfree-rv/sched_glue.o
 
 build/libkpaot-rv-free.a: $(KPFREE_RV_ARCHIVE) | build/kpfree-rv
 	$(AR) rcs $@ $(KPFREE_RV_ARCHIVE)
@@ -2447,6 +2575,30 @@ build/rv/scm_%.s: tests/scm_%.scm build/skj-sc-rv | build/rv
 ## TinScheme GC test (host-only)
 build/test_gc: scheme/test_gc.c scheme/gc.c scheme/gc.h | build
 	$(CC) $(CFLAGS) -Ischeme -o $@ scheme/test_gc.c scheme/gc.c
+
+## RNG generators unit test (host-only): SplitMix64, xoroshiro128** and
+## ChaCha20 against known-answer vectors.  See doc/tools and boris A4.
+test-rng: build/rng_test
+	./build/rng_test
+
+build/rng_test: tests/rng_test.c runtime/rng.c runtime/rng.h | build
+	$(CC) $(CFLAGS) -Iruntime -o $@ tests/rng_test.c runtime/rng.c
+
+## RNG/clock glue unit test (host-only): the guest-facing kp_random_* / kp_now_ms
+## entry points, with the getrandom/clock_gettime seam stubbed deterministically.
+test-rng-glue: build/rng_glue_test
+	./build/rng_glue_test
+
+build/rng_glue_test: tests/rng_glue_test.c runtime/rng_glue.c runtime/rng.c runtime/rng.h | build
+	$(CC) $(CFLAGS) -Iruntime -o $@ tests/rng_glue_test.c runtime/rng_glue.c runtime/rng.c
+
+## Sleep glue unit test (host-only): the guest-facing kp_sleep_ms entry point,
+## with the nanosleep seam stubbed so nothing sleeps.
+test-sched-glue: build/sched_glue_test
+	./build/sched_glue_test
+
+build/sched_glue_test: tests/sched_glue_test.c runtime/sched_glue.c | build
+	$(CC) $(CFLAGS) -Iruntime -o $@ tests/sched_glue_test.c runtime/sched_glue.c
 
 test-gc: build/test_gc
 	./build/test_gc
@@ -5165,7 +5317,7 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp c
            test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive \
            test-cc-rv-psabi-struct test-cc-driver check-libc \
            check-kp check-kpcom \
-           check-kp-frontend check-kp-jit check-kp-aot check-kp-corpus check-kp-corpus-cf check-kp-multi check-kp-files check-kp-dirs check-kp-io check-kp-inc
+           check-kp-frontend check-kp-jit check-kp-aot check-kp-corpus check-kp-corpus-cf check-kp-multi check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-io check-kp-inc
 	@echo "All architecture test suites passed."
 
 clean:
@@ -5184,4 +5336,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-exc-rv-emu check-exc-rv-emu-san test-exc-coro-overflow check-emu check-rv-emu check-exc-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-exc-x86-64-asm check-exc-arm64-asm check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke check-exc-jit-arm64 test-gc test-coro test-threads test-libexc-guest32 test-jit-arena test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-abort-backtrace test-bt-loop test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line coverage-codegen clean FORCE
+.PHONY: all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-exc-rv-emu check-exc-rv-emu-san test-exc-coro-overflow check-emu check-rv-emu check-exc-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-exc-x86-64-asm check-exc-arm64-asm check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke check-exc-jit-arm64 test-gc test-coro test-threads test-libexc-guest32 test-jit-arena test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-abort-backtrace test-bt-loop test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE

@@ -341,7 +341,7 @@ struct ir_global {
     int is_local;
     int is_export;      /* a unit's exported var: visible to other modules at link */
     int is_rodata;      /* an immutable global (string literal, real pool, const): read-only */
-    int is_strobj;      /* a static string object: the backend emits the {refcount,kind,len}
+    int is_strobj;      /* a static string object: the backend emits the {refcount,kind,len,cap}
                            header in target endianness, then init_string as the text + NUL.
                            Keeps the Kobold string descriptor endian-correct on a big-endian
                            target (ColdFire), where a baked little-endian header would be
