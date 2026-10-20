@@ -243,7 +243,7 @@ parse_operand(struct lexer *l, struct operand *op, int allow_reglist)
                         return 1;
                     }
                 }
-                *l = saved;
+                lex_restore(l, &saved);
             }
             op->type = OP_DREG;
             op->reg = reg;

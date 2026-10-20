@@ -34,6 +34,7 @@
 #define M68K_NR_STATX       379
 #define M68K_NR_MKDIRAT     289
 #define M68K_NR_UNLINKAT    294
+#define M68K_NR_FCHMODAT    299
 #define M68K_NR_RENAMEAT2   351
 #define M68K_NR_GETDENTS64  220
 #define M68K_NR_WRITEV      146
@@ -52,6 +53,7 @@ sys_of_m68k(uint32_t nr)
     case M68K_NR_STATX:         return GSYS_STATX;
     case M68K_NR_MKDIRAT:       return GSYS_MKDIRAT;
     case M68K_NR_UNLINKAT:      return GSYS_UNLINKAT;
+    case M68K_NR_FCHMODAT:      return GSYS_FCHMODAT;
     case M68K_NR_RENAMEAT2:     return GSYS_RENAMEAT2;
     case M68K_NR_GETDENTS64:    return GSYS_GETDENTS64;
     case M68K_NR_BRK:           return GSYS_BRK;

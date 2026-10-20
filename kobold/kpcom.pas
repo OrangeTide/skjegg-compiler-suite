@@ -199,6 +199,8 @@ type
                                   by the implementation's value. }
     BinderVar: Boolean;         { a `fails e` error binder: always lives in a local slot, never a
                                   global cell, even when introduced at program scope (kp-errors.md) }
+    DisambDone: Boolean;        { EmittedRoutineName has resolved this routine's overload suffix }
+    DisambName: string;         { cached overload-disambiguated emit name, or '' for no suffix }
   end;
 
   TIntArray = array of LongInt;
@@ -469,10 +471,36 @@ end;
 function LowerStr(const s: string): string;
 var
   i: LongInt;
+  r: string;
 begin
-  LowerStr := '';
+  { Accumulate into a plain local, not the function-result pseudo-var: a local
+    `r := r + ch` is the self-append idiom the lowering grows in place
+    (kp_str_append_char, amortized O(n) with capacity doubling), while the
+    result name is excluded from that fast path and would allocate per char. }
+  r := '';
   for i := 1 to Length(s) do
-    LowerStr := LowerStr + ToLowerCh(s[i]);
+    r := r + ToLowerCh(s[i]);
+  LowerStr := r;
+end;
+
+function SameTextCI(const a, b: string): Boolean;
+{ Case-insensitive string equality with no allocation: the zero-garbage way to
+  compare an identifier against a keyword or another name, where LowerStr would
+  allocate (and churn the heap) only to be compared and discarded. }
+var
+  i, n: LongInt;
+begin
+  n := Length(a);
+  if n <> Length(b) then begin
+    SameTextCI := False;
+    Exit;
+  end;
+  for i := 1 to n do
+    if ToLowerCh(a[i]) <> ToLowerCh(b[i]) then begin
+      SameTextCI := False;
+      Exit;
+    end;
+  SameTextCI := True;
 end;
 
 { The last segment of a dotted unit name is its default qualifier: core.strings
@@ -1527,7 +1555,7 @@ begin
     end;
     tkNil: begin n := NewNode(nkNil); NextToken; end;
     tkIdent:
-      if LowerStr(Tok.StrVal) = '__line__' then begin
+      if SameTextCI(Tok.StrVal, '__line__') then begin
         { a compile-time intrinsic: the source line of its own occurrence, as an integer
           constant. A diagnostic helper receives the call site's line through it without the
           caller counting lines by hand, since a host routine never sees the guest line. }
@@ -1653,7 +1681,7 @@ var
   n: LongInt;
 begin
   ParseFailSuffix := left;
-  if (Tok.Kind = tkIdent) and (LowerStr(Tok.Text) = 'fails') then begin
+  if (Tok.Kind = tkIdent) and (SameTextCI(Tok.Text, 'fails')) then begin
     { `X fails` test, with an optional binder identifier naming the error }
     n := NewNode(nkFailsTest); Nodes[n].A := left;
     NextToken;
@@ -1667,7 +1695,7 @@ begin
     case Tok.Kind of
       tkElse: begin
         NextToken;
-        if (Tok.Kind = tkIdent) and (LowerStr(Tok.Text) = 'ignore') then begin
+        if (Tok.Kind = tkIdent) and (SameTextCI(Tok.Text, 'ignore')) then begin
           n := NewNode(nkOrElse); Nodes[n].A := left; Nodes[n].Flag := 1; Nodes[n].B := -1;
           NextToken;   { `or else ignore`: discard the error }
         end
@@ -1681,7 +1709,7 @@ begin
     else
       { an identifier: exit or fail (OrIntroducesFailSuffix already vetted it) }
       n := NewNode(nkOrDivert); Nodes[n].A := left;
-      if LowerStr(Tok.Text) = 'fail' then Nodes[n].Flag := 3 else Nodes[n].Flag := 0;
+      if SameTextCI(Tok.Text, 'fail') then Nodes[n].Flag := 3 else Nodes[n].Flag := 0;
       NextToken;
     end;
     ParseFailSuffix := n;
@@ -1778,7 +1806,7 @@ begin
         unaffected. `var` and `out` pass by reference, `const` by value. }
       if Accept(tkVar) then Nodes[p].Flag := 1
       else if Accept(tkConst) then Nodes[p].Flag := 2
-      else if (Tok.Kind = tkIdent) and (LowerStr(Tok.Text) = 'out') and
+      else if (Tok.Kind = tkIdent) and (SameTextCI(Tok.Text, 'out')) and
               (PeekTokenKind = tkIdent) then begin
         NextToken; Nodes[p].Flag := 3;
       end
@@ -2209,7 +2237,7 @@ function IsDirective(const w: string): Boolean;
 { True when the current token is an identifier matching a contextual directive word,
   such as `cdecl`. Contextual so the word stays usable as an ordinary identifier. }
 begin
-  IsDirective := (Tok.Kind = tkIdent) and (LowerStr(Tok.Text) = w);
+  IsDirective := (Tok.Kind = tkIdent) and (SameTextCI(Tok.Text, w));
 end;
 
 function ParseProcOrFunc: LongInt;
@@ -3166,7 +3194,7 @@ begin
     for i := 0 to High(Scopes[sc].Members) do begin
       s := Scopes[sc].Members[i];
       if Syms[s].Name = '' then Continue;
-      d := EditDist(ln, LowerStr(Syms[s].Name));
+      d := EditDist(ln, Syms[s].LowerName);
       if d < bestd then begin
         bestd := d;
         best := s;
@@ -3297,6 +3325,8 @@ begin
   Syms[idx].Imported := False;
   Syms[idx].LinkName := '';
   Syms[idx].BinderVar := False;
+  Syms[idx].DisambDone := False;
+  Syms[idx].DisambName := '';
   AddMember(CurScope, idx);
   AddSym := idx;
 end;
@@ -3935,7 +3965,7 @@ begin
   l := LowerStr(name);
   for i := 0 to High(Scopes[scope].Members) do begin
     s := Scopes[scope].Members[i];
-    if (Syms[s].Kind in [syProc, syFunc]) and (LowerStr(Syms[s].Name) = l) then begin
+    if (Syms[s].Kind in [syProc, syFunc]) and (Syms[s].LowerName = l) then begin
       SetLength(cands, n + 1); cands[n] := s; Inc(n);
     end;
   end;
@@ -4194,7 +4224,7 @@ begin
         { succ/pred take one ordinal and return that same ordinal type; odd takes
           one integer and returns boolean }
         if (Syms[s].Node < 0) and (Length(argtys) = 1) then begin
-          bn := LowerStr(Syms[s].Name);
+          bn := Syms[s].LowerName;
           if (bn = 'succ') or (bn = 'pred') then begin
             if not IsOrdinalType(argtys[0]) then
               SemErr(errNode, bn + ' requires an ordinal argument')
@@ -4221,7 +4251,7 @@ begin
         { SetLength cannot resize a buffer (the host owns its element backing) or a string (a
           string is immutable). Checked here in the semantic pass so it reports even when the
           program has other errors and lowering does not run. }
-        if (Syms[s].Node < 0) and (LowerStr(Syms[s].Name) = 'setlength') and
+        if (Syms[s].Node < 0) and (Syms[s].LowerName = 'setlength') and
            (Length(argtys) >= 1) then begin
           if IsBuffer(argtys[0]) then
             SemErr(errNode, 'cannot SetLength a buffer; the host owns its backing')
@@ -4234,13 +4264,13 @@ begin
           Insert(a, index, count) edit a dynamic array in place: the first argument is a value
           `array of T` (not a buffer, whose backing the host owns), and the index and count are
           integers. }
-        if (Syms[s].Node < 0) and (LowerStr(Syms[s].Name) = 'delete') and
+        if (Syms[s].Node < 0) and (Syms[s].LowerName = 'delete') and
            (Length(argtys) = 2) and IsMap(argtys[0]) then begin
           if argtys[1] <> tyStr then
             SemErr(errNode, 'Delete on a map takes a string key');
         end
         else if (Syms[s].Node < 0) and
-           ((LowerStr(Syms[s].Name) = 'delete') or (LowerStr(Syms[s].Name) = 'insert')) then begin
+           ((Syms[s].LowerName = 'delete') or (Syms[s].LowerName = 'insert')) then begin
           if Length(argtys) <> 3 then
             SemErr(errNode, Syms[s].Name + ' takes a dynamic array, an index, and a count')
           else if not IsDynArray(argtys[0]) or IsBuffer(argtys[0]) then
@@ -4252,7 +4282,7 @@ begin
           map's value type. MapFirst(m) returns an iterator; MapNext(it, out k, out v) advances
           it. The iterator is opaque, so MapNext's out value type is not checked against the map:
           the caller must pass a variable of the map's value type. }
-        if (Syms[s].Node < 0) and (LowerStr(Syms[s].Name) = 'tryget') then begin
+        if (Syms[s].Node < 0) and (Syms[s].LowerName = 'tryget') then begin
           if Length(argtys) <> 3 then
             SemErr(errNode, 'TryGet takes a map, a key, and an out value')
           else if not IsMap(argtys[0]) then
@@ -4262,11 +4292,11 @@ begin
           else if argtys[2] <> SemTypes[argtys[0]].Base then
             SemErr(errNode, 'the out value of TryGet must be the map value type');
         end;
-        if (Syms[s].Node < 0) and (LowerStr(Syms[s].Name) = 'mapfirst') then begin
+        if (Syms[s].Node < 0) and (Syms[s].LowerName = 'mapfirst') then begin
           if (Length(argtys) <> 1) or not IsMap(argtys[0]) then
             SemErr(errNode, 'MapFirst takes one map');
         end;
-        if (Syms[s].Node < 0) and (LowerStr(Syms[s].Name) = 'mapnext') then begin
+        if (Syms[s].Node < 0) and (Syms[s].LowerName = 'mapnext') then begin
           if Length(argtys) <> 3 then
             SemErr(errNode, 'MapNext takes an iterator, an out key, and an out value')
           else if argtys[0] <> tyMapIter then
@@ -4275,11 +4305,11 @@ begin
             SemErr(errNode, 'the key of MapNext must be a string');
         end;
         { fail(code) builds an error value from an integer code; errorcode(e) reads it back }
-        if (Syms[s].Node < 0) and (LowerStr(Syms[s].Name) = 'fail') then begin
+        if (Syms[s].Node < 0) and (Syms[s].LowerName = 'fail') then begin
           if (Length(argtys) <> 1) or not IsIntClass(argtys[0]) then
             SemErr(errNode, 'fail takes one integer error code');
         end;
-        if (Syms[s].Node < 0) and (LowerStr(Syms[s].Name) = 'errorcode') then begin
+        if (Syms[s].Node < 0) and (Syms[s].LowerName = 'errorcode') then begin
           if (Length(argtys) <> 1) or (argtys[0] <> tyErrorVal) then
             SemErr(errNode, 'errorcode takes one error value');
         end;
@@ -4403,13 +4433,13 @@ begin
     { read/readln write into their arguments, so each must be an assignable variable
       of a readable type: an integer, real, char, or string. }
     if (s >= 0) and (Syms[s].Node < 0) and
-       ((LowerStr(Syms[s].Name) = 'read') or (LowerStr(Syms[s].Name) = 'readln')) then
+       ((Syms[s].LowerName = 'read') or (Syms[s].LowerName = 'readln')) then
       for i := 0 to argn - 1 do begin
         if not IsAssignableDesignator(Nodes[node].Kids[i]) then
-          SemErr(Nodes[node].Kids[i], LowerStr(Syms[s].Name) + ' needs a variable argument')
+          SemErr(Nodes[node].Kids[i], Syms[s].LowerName + ' needs a variable argument')
         else if not (IsIntClass(argtys[i]) or IsRealType(argtys[i])
                 or (argtys[i] = tyChar) or (argtys[i] = tyStr)) then
-          SemErr(Nodes[node].Kids[i], LowerStr(Syms[s].Name) +
+          SemErr(Nodes[node].Kids[i], Syms[s].LowerName +
             ' cannot read into ' + TypeName(argtys[i]));
       end;
   end;
@@ -4892,7 +4922,7 @@ begin
         only legal inside a failable one (doc/languages/kobold/kp-errors.md) }
       if Nodes[d].Kind = nkCall then begin
         s := Nodes[Nodes[d].A].Sym;
-        if (s >= 0) and (Syms[s].Node < 0) and (LowerStr(Syms[s].Name) = 'fail')
+        if (s >= 0) and (Syms[s].Node < 0) and (Syms[s].LowerName = 'fail')
            and not CurFailable then
           SemErr(node, '''fail'' as a statement is only valid inside a routine marked ''fails''');
       end;
@@ -5373,7 +5403,7 @@ begin
     s := Scopes[CurScope].Members[i];
     { Flag 1 is a `forward` header; Flag 3 is a unit interface heading whose body
       lives in the implementation part. Either is completed by a matching body. }
-    if (Syms[s].Kind = wantKind) and (LowerStr(Syms[s].Name) = l) and
+    if (Syms[s].Kind = wantKind) and (Syms[s].LowerName = l) and
        (Syms[s].Node >= 0) and
        ((Nodes[Syms[s].Node].Flag = 1) or (Nodes[Syms[s].Node].Flag = 3)) and
        SigEqual(Syms[s].TypeId, sig) then
@@ -5395,7 +5425,7 @@ begin
   if isFunc then wantKind := syFunc else wantKind := syProc;
   l := LowerStr(name);
   for s := 0 to SymCount - 1 do
-    if (Syms[s].Kind = wantKind) and (LowerStr(Syms[s].Name) = l) and
+    if (Syms[s].Kind = wantKind) and (Syms[s].LowerName = l) and
        (Syms[s].Node >= 0) and
        ((Nodes[Syms[s].Node].Flag = 1) or (Nodes[Syms[s].Node].Flag = 3)) and
        (Nodes[Syms[s].Node].A >= 0) and                    { the heading is a method }
@@ -5421,7 +5451,7 @@ begin
   l := LowerStr(name);
   if isMethod then begin
     for s := 0 to SymCount - 1 do
-      if (Syms[s].Kind = wantKind) and (LowerStr(Syms[s].Name) = l) and
+      if (Syms[s].Kind = wantKind) and (Syms[s].LowerName = l) and
          (Syms[s].Node >= 0) and (Nodes[Syms[s].Node].A >= 0) and
          (Nodes[Nodes[Syms[s].Node].A].Ty = recvTy) and
          SigEqual(Syms[s].TypeId, sig) and
@@ -5431,7 +5461,7 @@ begin
   else
     for i := 0 to High(Scopes[CurScope].Members) do begin
       s := Scopes[CurScope].Members[i];
-      if (Syms[s].Kind = wantKind) and (LowerStr(Syms[s].Name) = l) and
+      if (Syms[s].Kind = wantKind) and (Syms[s].LowerName = l) and
          (Syms[s].Node >= 0) and (Nodes[Syms[s].Node].A < 0) and
          SigEqual(Syms[s].TypeId, sig) and
          (SemTypes[Syms[s].TypeId].Failable <> SemTypes[sig].Failable) then
@@ -6213,7 +6243,7 @@ begin
     found := False;
     for i := 0 to High(Scopes[UUScope[u]].Members) do begin
       m := Scopes[UUScope[u]].Members[i];
-      if LowerStr(Syms[m].Name) = LowerStr(selName) then begin
+      if Syms[m].LowerName = LowerStr(selName) then begin
         found := True;
         if Nodes[ii].A >= 0 then begin
           alias := AddSym(localName, Syms[m].Kind);   { added to viewScope (CurScope) }
@@ -6375,7 +6405,7 @@ begin
   found := False;
   for i := 0 to High(Scopes[UUScope[depu]].Members) do begin
     m := Scopes[UUScope[depu]].Members[i];
-    if LowerStr(Syms[m].Name) = LowerStr(Nodes[nameNode].Text) then begin
+    if Syms[m].LowerName = LowerStr(Nodes[nameNode].Text) then begin
       found := True;
       SetLength(ReexportSym, ReexportCount + 1);
       ReexportSym[ReexportCount] := m;
@@ -9163,7 +9193,7 @@ begin
   { a built-in name resolves to a symbol with no defining node; bname is its lowercased
     name, or '' for a user symbol (including a cross-unit import), so the dispatch below
     tests one string. }
-  if (Syms[s].Node < 0) and not Syms[s].Imported then bname := LowerStr(Syms[s].Name)
+  if (Syms[s].Node < 0) and not Syms[s].Imported then bname := Syms[s].LowerName
   else bname := '';
   { a type name applied to one argument is a conversion: widen or narrow between integer
     widths, or reinterpret an ordinal of the same width }
@@ -10815,7 +10845,7 @@ begin
     RETV2 (doc/languages/kobold/kp-errors.md) }
   if (Nodes[d].Kind = nkCall) and (Nodes[Nodes[d].A].Kind = nkIdent) then begin
     cs := Nodes[Nodes[d].A].Sym;
-    if (cs >= 0) and (Syms[cs].Node < 0) and (LowerStr(Syms[cs].Name) = 'fail')
+    if (cs >= 0) and (Syms[cs].Node < 0) and (Syms[cs].LowerName = 'fail')
        and (Length(Nodes[d].Kids) = 1) and (CurErrorSlot >= 0) then begin
       EmitSTL(LowerExpr(Nodes[d].Kids[0]), CurErrorSlot);
       if CurExitLabel < 0 then CurExitLabel := NewLabel;
@@ -11085,15 +11115,25 @@ begin
   if not RoutineEmitted(s) then Exit;
   for i := 0 to IrExportCount - 1 do
     if IrExports[i] = Syms[s].Name then Exit;
-  l := LowerStr(Syms[s].Name);
-  cnt := 0;
-  ord := 0;
-  for i := 0 to SymCount - 1 do
-    if RoutineEmitted(i) and (LowerStr(Syms[i].Name) = l) then begin
-      if i = s then ord := cnt;
-      Inc(cnt);
-    end;
-  if cnt > 1 then EmittedRoutineName := Syms[s].Name + '$' + IntToStr(ord);
+  { The overload suffix depends only on the symbol table, which is stable once
+    emission starts, so it is resolved once per routine and cached.  This turns
+    the per-call-site O(SymCount) scan (run per reference to the routine) into a
+    single scan per routine.  The export check above stays live, since exports
+    are registered as emission proceeds. }
+  if not Syms[s].DisambDone then begin
+    l := Syms[s].LowerName;
+    cnt := 0;
+    ord := 0;
+    for i := 0 to SymCount - 1 do
+      if RoutineEmitted(i) and (Syms[i].LowerName = l) then begin
+        if i = s then ord := cnt;
+        Inc(cnt);
+      end;
+    if cnt > 1 then Syms[s].DisambName := Syms[s].Name + '$' + IntToStr(ord)
+    else Syms[s].DisambName := '';
+    Syms[s].DisambDone := True;
+  end;
+  if Syms[s].DisambName <> '' then EmittedRoutineName := Syms[s].DisambName;
 end;
 
 function RoutineLinkName(node: LongInt): string;

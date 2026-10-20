@@ -45,6 +45,10 @@ struct gm_pool {
 
 typedef struct guest_mem {
     uint8_t **dir[GM_L1_ENTRIES];       /* lazily allocated leaf tables */
+    uint8_t **wdir[GM_L1_ENTRIES];      /* write fast path: mirrors dir, set only
+                                           for committed pages in a writable region
+                                           (steady state), so a store skips the
+                                           per-access region protection re-check */
     struct gm_region regions[GM_MAX_REGIONS];
     int nregions;
     struct gm_region *last;             /* one-entry lookup cache */
@@ -139,6 +143,7 @@ enum guest_sys {
     GSYS_MKDIRAT,
     GSYS_UNLINKAT,
     GSYS_RENAMEAT2,
+    GSYS_FCHMODAT,
     GSYS_GETDENTS64,
     GSYS_CLOCK_GETTIME,
     GSYS_GETRANDOM,

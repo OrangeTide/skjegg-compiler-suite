@@ -3855,6 +3855,11 @@ test-rv-sandbox-io: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-ru
 	     echo "PASS: sandbox openat/read/write/close (skj-run matches fixture + qemu; missing file -> exit 2)"; \
 	 else exit 1; fi
 
+## The driver's per-target runtime set (crt + helpers + libc), the objects the
+## skjcc link and the self-host tests pass to the linker.  Defined here, above
+## the first use: a Make prerequisite list is expanded as the rule is read, so a
+## variable referenced before its definition expands empty and the stale crt0.o
+## it should have rebuilt is used as-is.
 DRIVER_LIB_CF   := build/lib/coldfire/crt0.o build/lib/coldfire/half.o build/lib/coldfire/va_cf.o build/lib/coldfire/fini.o build/lib/coldfire/libc.a
 DRIVER_LIB_RV   := build/lib/riscv/crt0.o build/lib/riscv/va_rv.o build/lib/riscv/soft64_div.o build/lib/riscv/fini.o build/lib/riscv/libc.a
 DRIVER_LIB_MIPS := build/lib/mips/crt0.o build/lib/mips/half.o build/lib/mips/va_mips.o build/lib/mips/soft64_div.o build/lib/mips/fini.o build/lib/mips/libc.a
@@ -4058,6 +4063,167 @@ test-cf-selfhost-full: test-cf-selfhost build/skj-as
 	 ./build/skj-as -o build/selfhost-cf-full/lower.o build/selfhost-cf-full/lower.skj.s \
 	     || { echo "FAIL: skj-as rejected the full-TU asm"; exit 1; }
 	@echo "PASS: skj-cc translates a full TU (cc/lower.c) in-guest under skj-run == qemu, asm assembles (ColdFire)"
+
+## ---------------------------------------------------------------------------
+## Whole-toolchain self-host: skj-as and skj-ld as guest ELFs (RV32 + ColdFire)
+##
+## test-*-selfhost above builds skj-cc as a guest ELF but still runs skj-as and
+## skj-ld on the host.  These build the assembler and linker as guest ELFs too
+## (their own sources compiled by skjcc against the guest libc), so the full
+## cc -> as -> ld pipeline runs under skj-run.  skj-ld links in-guest because
+## ld/mapfile.c has a __skj__ branch that reads an object into a malloc buffer
+## instead of mmap (the guest libc has no sys/mman.h).
+
+build/selfhost/skj-as-rv.elf: $(AS_RV_SRC) build/skjcc $(DRIVER_LIB_RV) build/version.h | build
+	@mkdir -p build/selfhost
+	@set -e; objs=""; for s in $(AS_RV_SRC); do \
+	    b=$$(basename $$s .c); \
+	    ./build/skjcc -target riscv -c -Ibuild -Ias -Iir -Idwarf $$s -o build/selfhost/asrv_$$b.o; \
+	    objs="$$objs build/selfhost/asrv_$$b.o"; \
+	 done; \
+	 ./build/skjcc -target riscv $$objs -o $@
+
+build/selfhost/skj-ld-rv.elf: $(LD_RV_SRC) ld/mapfile.c build/skjcc $(DRIVER_LIB_RV) build/version.h | build
+	@mkdir -p build/selfhost
+	@set -e; objs=""; for s in $(LD_RV_SRC); do \
+	    b=$$(basename $$s .c); \
+	    ./build/skjcc -target riscv -c -Ibuild -Ild -Iir $$s -o build/selfhost/ldrv_$$b.o; \
+	    objs="$$objs build/selfhost/ldrv_$$b.o"; \
+	 done; \
+	 ./build/skjcc -target riscv $$objs -o $@
+
+build/selfhost-cf/skj-as-cf.elf: $(AS_SRC) build/skjcc $(DRIVER_LIB_CF) build/version.h | build
+	@mkdir -p build/selfhost-cf
+	@set -e; objs=""; for s in $(AS_SRC); do \
+	    b=$$(basename $$s .c); \
+	    ./build/skjcc -target coldfire -c -Ibuild -Ias -Iir -Idwarf $$s -o build/selfhost-cf/ascf_$$b.o; \
+	    objs="$$objs build/selfhost-cf/ascf_$$b.o"; \
+	 done; \
+	 ./build/skjcc -target coldfire $$objs -o $@
+
+build/selfhost-cf/skj-ld-cf.elf: $(LD_SRC) ld/mapfile.c build/skjcc $(DRIVER_LIB_CF) build/version.h | build
+	@mkdir -p build/selfhost-cf
+	@set -e; objs=""; for s in $(LD_SRC); do \
+	    b=$$(basename $$s .c); \
+	    ./build/skjcc -target coldfire -c -Ibuild -Ild -Iir $$s -o build/selfhost-cf/ldcf_$$b.o; \
+	    objs="$$objs build/selfhost-cf/ldcf_$$b.o"; \
+	 done; \
+	 ./build/skjcc -target coldfire $$objs -o $@
+
+## test-rv-selfhost-toolchain: assemble and link the in-guest-compiled add.c
+## with the in-guest skj-as-rv and skj-ld-rv too, then run the result (-> 42).
+## The whole C toolchain runs inside the sandbox.
+test-rv-selfhost-toolchain: test-rv-selfhost build/selfhost/skj-as-rv.elf \
+                            build/selfhost/skj-ld-rv.elf
+	@./build/skj-run build/selfhost/skj-as-rv.elf -o build/selfhost/add.guest.o \
+	    build/selfhost/add.skj.s 2>build/selfhost/as.err \
+	    || { echo "FAIL: in-guest skj-as-rv"; cat build/selfhost/as.err; exit 1; }
+	@./build/skj-run build/selfhost/skj-ld-rv.elf -o build/selfhost/add.guest.elf \
+	    build/lib/riscv/crt0.o build/selfhost/add.guest.o build/lib/riscv/libc.a \
+	    2>build/selfhost/ld.err \
+	    || { echo "FAIL: in-guest skj-ld-rv"; cat build/selfhost/ld.err; exit 1; }
+	@./build/skj-run build/selfhost/add.guest.elf; rc=$$?; \
+	 [ $$rc = 42 ] || { echo "FAIL: cc+as+ld in-guest program exit $$rc (want 42)"; exit 1; }
+	@echo "PASS: skj cc+as+ld all self-host under skj-run (RV32) -> 42"
+
+test-cf-selfhost-toolchain: test-cf-selfhost build/selfhost-cf/skj-as-cf.elf \
+                            build/selfhost-cf/skj-ld-cf.elf
+	@./build/skj-run build/selfhost-cf/skj-as-cf.elf -o build/selfhost-cf/add.guest.o \
+	    build/selfhost-cf/add.skj.s 2>build/selfhost-cf/as.err \
+	    || { echo "FAIL: in-guest skj-as-cf"; cat build/selfhost-cf/as.err; exit 1; }
+	@./build/skj-run build/selfhost-cf/skj-ld-cf.elf -o build/selfhost-cf/add.guest.elf \
+	    build/lib/coldfire/crt0.o build/selfhost-cf/add.guest.o build/lib/coldfire/libc.a \
+	    2>build/selfhost-cf/ld.err \
+	    || { echo "FAIL: in-guest skj-ld-cf"; cat build/selfhost-cf/ld.err; exit 1; }
+	@./build/skj-run build/selfhost-cf/add.guest.elf; rc=$$?; \
+	 [ $$rc = 42 ] || { echo "FAIL: cc+as+ld in-guest program exit $$rc (want 42)"; exit 1; }
+	@echo "PASS: skj cc+as+ld all self-host under skj-run (ColdFire) -> 42"
+
+## ---------------------------------------------------------------------------
+## Kobold compiler (skj-kpc) self-host: a freestanding kpcom guest ELF, linked
+## entirely by the skj toolchain (skj-kp -> skj-as -> skj-ld + the freestanding
+## runtime), run under skj-run to compile Kobold.  No file-I/O code is needed:
+## kobold/io_free.c already supplies ParamStr/ParamCount, ReadFileStr/
+## WriteFileStr and the kpd_* directory surface over open/read/write/lseek.
+
+build/selfhost/skj-kpc-rv.elf: prebuild/kpcom.kpm build/skj-kp-rv build/skj-as-rv \
+                               build/skj-ld-rv build/kpfree-rv/kp_crt_rv.o \
+                               build/libkpaot-rv-free.a | build
+	@mkdir -p build/selfhost
+	./build/skj-kp-rv prebuild/kpcom.kpm -o build/selfhost/kpcom-free-rv.s
+	./build/skj-as-rv -o build/selfhost/kpcom-free-rv.o build/selfhost/kpcom-free-rv.s
+	./build/skj-ld-rv -o $@ build/kpfree-rv/kp_crt_rv.o \
+	    build/selfhost/kpcom-free-rv.o build/libkpaot-rv-free.a
+
+build/selfhost-cf/skj-kpc-cf.elf: prebuild/kpcom.kpm build/skj-kp-cf build/skj-as \
+                                  build/skj-ld build/kpfree-cf/kp_crt_cf.o \
+                                  build/libkpaot-cf-free.a | build
+	@mkdir -p build/selfhost-cf
+	./build/skj-kp-cf prebuild/kpcom.kpm -o build/selfhost-cf/kpcom-free-cf.s
+	./build/skj-as -o build/selfhost-cf/kpcom-free-cf.o build/selfhost-cf/kpcom-free-cf.s
+	./build/skj-ld -o $@ build/kpfree-cf/kp_crt_cf.o \
+	    build/selfhost-cf/kpcom-free-cf.o build/libkpaot-cf-free.a
+
+## test-{rv,cf}-selfhost-kpc: run the freestanding skj-kpc guest ELF under
+## skj-run to --emit-kpm a small unit-free program (hello.pas) and assert the
+## emitted KPM1 is byte-identical to the host skj-kpc output.  This proves the
+## Kobold compiler compiles in-guest over the guest file I/O (ParamStr, the
+## source read, the KPM write).  The far heavier self-compile of kpcom's own
+## 480 KB source is the opt-in -full target below (minutes under the RV32
+## interpreter), kept out of the routine suite.
+test-rv-selfhost-kpc: build/selfhost/skj-kpc-rv.elf build/skj-kpc build/skj-run \
+                      tests/kp-corpus/hello.pas
+	@mkdir -p build/selfhost
+	@./build/skj-kpc --emit-kpm tests/kp-corpus/hello.pas > build/selfhost/hello.host.kpm
+	@./build/skj-run build/selfhost/skj-kpc-rv.elf --emit-kpm tests/kp-corpus/hello.pas \
+	    > build/selfhost/hello.guest.kpm 2>build/selfhost/kpc.err \
+	    || { echo "FAIL: in-guest skj-kpc (hello)"; cat build/selfhost/kpc.err; exit 1; }
+	@cmp -s build/selfhost/hello.host.kpm build/selfhost/hello.guest.kpm \
+	    || { echo "FAIL: in-guest KPM differs from host (hello)"; exit 1; }
+	@echo "PASS: skj-kpc self-hosts under skj-run (RV32): hello KPM == host"
+
+test-cf-selfhost-kpc: build/selfhost-cf/skj-kpc-cf.elf build/skj-kpc build/skj-run \
+                      tests/kp-corpus/hello.pas
+	@mkdir -p build/selfhost-cf
+	@./build/skj-kpc --emit-kpm tests/kp-corpus/hello.pas > build/selfhost-cf/hello.host.kpm
+	@./build/skj-run build/selfhost-cf/skj-kpc-cf.elf --emit-kpm tests/kp-corpus/hello.pas \
+	    > build/selfhost-cf/hello.guest.kpm 2>build/selfhost-cf/kpc.err \
+	    || { echo "FAIL: in-guest skj-kpc (hello)"; cat build/selfhost-cf/kpc.err; exit 1; }
+	@cmp -s build/selfhost-cf/hello.host.kpm build/selfhost-cf/hello.guest.kpm \
+	    || { echo "FAIL: in-guest KPM differs from host (hello)"; exit 1; }
+	@echo "PASS: skj-kpc self-hosts under skj-run (ColdFire): hello KPM == host"
+
+## The full self-compile: the in-guest skj-kpc compiles kpcom's own source and
+## the emitted KPM1 must match the host.  Opt-in and slow (the 480 KB source
+## through the RV32/ColdFire interpreter takes minutes), and it needs a larger
+## guest heap than the 16M default, so --heap 256M.
+test-rv-selfhost-kpc-full: build/selfhost/skj-kpc-rv.elf build/skj-kpc build/skj-run \
+                           kobold/kpcom.pas
+	@mkdir -p build/selfhost
+	@./build/skj-kpc --emit-kpm kobold/kpcom.pas > build/selfhost/kpcom.host.kpm
+	@./build/skj-run --heap 256M build/selfhost/skj-kpc-rv.elf --emit-kpm kobold/kpcom.pas \
+	    > build/selfhost/kpcom.guest.kpm 2>build/selfhost/kpc2.err \
+	    || { echo "FAIL: in-guest skj-kpc (kpcom self-compile)"; cat build/selfhost/kpc2.err; exit 1; }
+	@cmp -s build/selfhost/kpcom.host.kpm build/selfhost/kpcom.guest.kpm \
+	    || { echo "FAIL: in-guest kpcom KPM differs from host"; exit 1; }
+	@echo "PASS: skj-kpc compiles its own source in-guest under skj-run (RV32): KPM == host"
+
+test-cf-selfhost-kpc-full: build/selfhost-cf/skj-kpc-cf.elf build/skj-kpc build/skj-run \
+                           kobold/kpcom.pas
+	@mkdir -p build/selfhost-cf
+	@./build/skj-kpc --emit-kpm kobold/kpcom.pas > build/selfhost-cf/kpcom.host.kpm
+	@./build/skj-run --heap 256M build/selfhost-cf/skj-kpc-cf.elf --emit-kpm kobold/kpcom.pas \
+	    > build/selfhost-cf/kpcom.guest.kpm 2>build/selfhost-cf/kpc2.err \
+	    || { echo "FAIL: in-guest skj-kpc (kpcom self-compile)"; cat build/selfhost-cf/kpc2.err; exit 1; }
+	@cmp -s build/selfhost-cf/kpcom.host.kpm build/selfhost-cf/kpcom.guest.kpm \
+	    || { echo "FAIL: in-guest kpcom KPM differs from host"; exit 1; }
+	@echo "PASS: skj-kpc compiles its own source in-guest under skj-run (ColdFire): KPM == host"
+
+## Umbrella: the full in-guest self-host suite (opt-in, not part of make check).
+## The slow kpcom self-compile (-full targets) is left out; run it on demand.
+check-selfhost-all: test-rv-selfhost-toolchain test-cf-selfhost-toolchain \
+                    test-rv-selfhost-kpc test-cf-selfhost-kpc
+	@echo "PASS: skj toolchain (cc+as+ld+kpc) self-hosts under skj-run (RV32 + ColdFire)"
 
 ## The MIPS counterpart of the self-host tests.  skj-run decodes only ColdFire
 ## and RV32 ELFs, so the in-guest compiler runs under qemu-mipsel rather than
@@ -5312,7 +5478,7 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp c
            test-exc-loc test-dwarf-line test-rv-stt-func test-rv-debug-sections \
            test-rv-debug-link test-rv-addr2line test-rv-backtrace test-rv-abort-backtrace \
            test-bt-loop test-rv-wild-backtrace \
-           test-rv-dbg test-rv-gdb test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-help \
+           test-rv-dbg test-rv-gdb test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-help \
            check-cc-rv-psabi test-cc-rv-psabi-interop \
            test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive \
            test-cc-rv-psabi-struct test-cc-driver check-libc \
@@ -5336,4 +5502,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-exc-rv-emu check-exc-rv-emu-san test-exc-coro-overflow check-emu check-rv-emu check-exc-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-exc-x86-64-asm check-exc-arm64-asm check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke check-exc-jit-arm64 test-gc test-coro test-threads test-libexc-guest32 test-jit-arena test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-abort-backtrace test-bt-loop test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE
+.PHONY: all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-exc-rv-emu check-exc-rv-emu-san test-exc-coro-overflow check-emu check-rv-emu check-exc-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-exc-x86-64-asm check-exc-arm64-asm check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke check-exc-jit-arm64 test-gc test-coro test-threads test-libexc-guest32 test-jit-arena test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE

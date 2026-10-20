@@ -36,6 +36,7 @@
 #define RV_NR_STATX         291
 #define RV_NR_MKDIRAT       34
 #define RV_NR_UNLINKAT      35
+#define RV_NR_FCHMODAT      53
 #define RV_NR_RENAMEAT2     276
 #define RV_NR_GETDENTS64    61
 #define RV_NR_CLOCK_GETTIME 113
@@ -86,6 +87,7 @@ sys_of_rv(uint32_t nr)
     case RV_NR_STATX:       return GSYS_STATX;
     case RV_NR_MKDIRAT:     return GSYS_MKDIRAT;
     case RV_NR_UNLINKAT:    return GSYS_UNLINKAT;
+    case RV_NR_FCHMODAT:    return GSYS_FCHMODAT;
     case RV_NR_RENAMEAT2:   return GSYS_RENAMEAT2;
     case RV_NR_GETDENTS64:  return GSYS_GETDENTS64;
     case RV_NR_CLOCK_GETTIME: return GSYS_CLOCK_GETTIME;

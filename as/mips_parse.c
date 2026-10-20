@@ -560,7 +560,7 @@ run_pass(struct mips_asm *a)
                 define_label(a, name);
                 continue;
             }
-            *l = saved;
+            lex_restore(l, &saved);
             handle_directive(a, name);
             skip_to_eol(l);
             if (l->tok.type == T_NEWLINE) lex_next(l);

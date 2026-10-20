@@ -6,6 +6,29 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.16.0
+
+#### Added
+- In-guest self-hosting: the whole skj toolchain (skj-cc, skj-as, skj-ld, and
+  skj-kpc, the Kobold compiler) builds and runs as guest ELFs under skj-run on
+  RV32 and ColdFire. The Kobold compiler self-compiles in-guest and its output
+  matches the host byte for byte. New opt-in `make` targets prove each stage.
+- skj-ld reads objects without mmap under the guest libc, and fchmodat/chmod
+  were added to the emulator and the libc so the linker runs in-guest.
+
+#### Changed
+- The compiler does about 3.8x less work when self-compiling, with byte-identical
+  output. EmittedRoutineName's overload scan is resolved once per routine instead
+  of per call site, LowerStr builds its result in place, symbol comparisons use
+  the precomputed lowercase name, and a no-allocation SameTextCI serves the
+  parser's case-insensitive checks.
+- skj-run caches store write permission in a page directory parallel to the main
+  one, so a store to a committed writable page skips the per-access region check.
+
+#### Fixed
+- skj-cpp collects function-like macro arguments split across source lines.
+- skj-as: a use-after-free in the lexer-rewind peek.
+
 ### 0.15.0
 
 #### Added

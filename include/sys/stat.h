@@ -43,5 +43,7 @@ struct stat {
 int stat(const char *path, struct stat *buf);
 int fstat(int fd, struct stat *buf);
 int mkdir(const char *path, int mode);
+int chmod(const char *path, int mode);
+int fchmodat(int dirfd, const char *path, int mode, int flags);
 
 #endif /* _SYS_STAT_H */

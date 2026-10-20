@@ -71,6 +71,18 @@ unlinkat:                          | unlinkat(dirfd, path, flags)
     movem.l (%sp)+, %d2-%d5
     rts
 
+    .globl fchmodat
+fchmodat:                          | fchmodat(dirfd, path, mode, flags)
+    movem.l %d2-%d5, -(%sp)
+    move.l  20(%sp), %d1           | dirfd
+    move.l  24(%sp), %d2           | path
+    move.l  28(%sp), %d3           | mode
+    move.l  32(%sp), %d4           | flags
+    move.l  #299, %d0              | __NR_fchmodat
+    trap    #0
+    movem.l (%sp)+, %d2-%d5
+    rts
+
     .globl renameat2
 renameat2:                         | renameat2(olddirfd, oldpath, newdirfd, newpath, flags)
     movem.l %d2-%d5, -(%sp)

@@ -84,6 +84,9 @@ struct cpp {
     char outbuf[8192];
     int errors;
     int in_comment;
+    int macro_need_more;        /* set when a function-like macro call's argument
+                                   list did not close within the fed token list;
+                                   the line driver pulls more input and retries */
 };
 
 /* tok.c */

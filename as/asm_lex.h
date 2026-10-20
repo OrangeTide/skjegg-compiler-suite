@@ -83,6 +83,12 @@ void lex_next(struct lexer *l);
    dropping any open .include frames. */
 void lex_rewind(struct lexer *l);
 
+/* Restore the lexer to a snapshot (struct lexer saved = *l) after a bounded
+   lookahead, keeping the live scratch buffer rather than the snapshot's, so a
+   grow (realloc) between the save and the restore does not resurrect a freed
+   str_buf.  Use this in place of a raw `*l = saved`. */
+void lex_restore(struct lexer *l, const struct lexer *saved);
+
 /* Record the top-level source file's path, so a relative .include resolves
    against its directory.  Call after lex_init (the arena must be set). */
 void lex_set_source_path(struct lexer *l, const char *path);

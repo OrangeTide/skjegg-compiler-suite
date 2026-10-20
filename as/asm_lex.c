@@ -37,6 +37,23 @@ lex_rewind(struct lexer *l)
     l->inc_depth = 0;
 }
 
+void
+lex_restore(struct lexer *l, const struct lexer *saved)
+{
+    /* Rewind the scan position but keep the live scratch buffer.  A lex between
+       the save and the restore may have grown str_buf, which reallocs and frees
+       the old block, so copying the saved str_buf/str_cap back would resurrect a
+       freed pointer (a use-after-free the next string lex writes through).  The
+       buffer holds only the token just scanned, which the next lex overwrites,
+       so keeping the current allocation is correct. */
+    char *buf = l->str_buf;
+    int cap = l->str_cap;
+
+    *l = *saved;
+    l->str_buf = buf;
+    l->str_cap = cap;
+}
+
 /* Directory part of a path, as an arena copy ("" when there is no slash). */
 static const char *
 dir_of(struct arena *a, const char *path)

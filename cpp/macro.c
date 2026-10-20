@@ -485,7 +485,12 @@ macro_expand(struct cpp *p, struct pp_token *input)
 
         struct pp_token *rparen = find_closing_paren(lparen);
         if (!rparen) {
-            warn("unterminated macro arguments for '%s'", m->name);
+            /* The argument list is not closed within this token list.  A
+               function-like macro call may span source lines, so signal the
+               line driver (cpp_next_line) to pull more input and retry rather
+               than warning here.  Leave the macro name in place meanwhile; if
+               no more input arrives the driver reports it. */
+            p->macro_need_more = 1;
             tail->next = pp_token_dup(t);
             tail = tail->next;
             t = t->next;

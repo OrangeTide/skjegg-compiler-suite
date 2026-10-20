@@ -92,6 +92,14 @@ unlinkat:
 	ret
 	.size	unlinkat,.-unlinkat
 
+	.globl fchmodat
+	.type	fchmodat,@function
+fchmodat:
+	li	a7, 53
+	ecall
+	ret
+	.size	fchmodat,.-fchmodat
+
 	.globl renameat2
 	.type	renameat2,@function
 renameat2:

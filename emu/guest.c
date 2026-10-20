@@ -39,6 +39,10 @@ gm_free(guest_mem *m)
         free(m->dir[i]);
         m->dir[i] = NULL;
     }
+    for (i = 0; i < GM_L1_ENTRIES; i++) {       /* wdir borrows dir's pages */
+        free(m->wdir[i]);
+        m->wdir[i] = NULL;
+    }
     if (m->pool) {                      /* return this guest's pages to the pool */
         if (m->pool->used >= m->committed)
             m->pool->used -= m->committed;
@@ -129,6 +133,8 @@ gm_munmap(guest_mem *m, uint32_t base, uint32_t size)
         if (m->dir[l1] && m->dir[l1][l2]) {
             free(m->dir[l1][l2]);
             m->dir[l1][l2] = NULL;
+            if (m->wdir[l1])            /* drop the borrowed write-cache pointer */
+                m->wdir[l1][l2] = NULL;
             if (m->committed >= GM_PAGE_SIZE)
                 m->committed -= GM_PAGE_SIZE;
             if (m->pool && m->pool->used >= GM_PAGE_SIZE)
@@ -194,12 +200,20 @@ gm_page(guest_mem *m, uint32_t addr, int want_write)
     uint32_t l1 = addr >> 22;
     uint32_t l2 = (addr >> GM_PAGE_SHIFT) & (GM_L2_ENTRIES - 1);
     struct gm_region *r;
-    uint8_t *page = m->dir[l1] ? m->dir[l1][l2] : NULL;
+    uint8_t *page;
 
-    /* A committed page satisfies a read outright; a write still has to
-     * clear the region's protection. */
-    if (page && !want_write)
-        return page;
+    /* A committed page satisfies a read outright. A write to a committed page
+     * in a writable region is recorded in wdir, so it too returns without the
+     * region-protection re-check (the common case for the hot store path). */
+    if (want_write) {
+        page = m->wdir[l1] ? m->wdir[l1][l2] : NULL;
+        if (page)
+            return page;
+    } else {
+        page = m->dir[l1] ? m->dir[l1][l2] : NULL;
+        if (page)
+            return page;
+    }
 
     r = region_of(m, addr);
     if (!r) {
@@ -215,34 +229,46 @@ gm_page(guest_mem *m, uint32_t addr, int want_write)
         gm_fault(m, addr, 1, "read-only");
         return NULL;
     }
-    if (page)
-        return page;
-    if (m->committed + GM_PAGE_SIZE > m->limit) {
-        gm_fault(m, addr, want_write, "memory limit");
-        return NULL;
-    }
-    if (m->pool && m->pool->limit &&
-        m->pool->used + GM_PAGE_SIZE > m->pool->limit) {
-        gm_fault(m, addr, want_write, "memory pool exhausted");
-        return NULL;
-    }
 
-    if (!m->dir[l1]) {
-        m->dir[l1] = calloc(GM_L2_ENTRIES, sizeof(uint8_t *));
+    page = m->dir[l1] ? m->dir[l1][l2] : NULL;
+    if (!page) {
+        if (m->committed + GM_PAGE_SIZE > m->limit) {
+            gm_fault(m, addr, want_write, "memory limit");
+            return NULL;
+        }
+        if (m->pool && m->pool->limit &&
+            m->pool->used + GM_PAGE_SIZE > m->pool->limit) {
+            gm_fault(m, addr, want_write, "memory pool exhausted");
+            return NULL;
+        }
         if (!m->dir[l1]) {
+            m->dir[l1] = calloc(GM_L2_ENTRIES, sizeof(uint8_t *));
+            if (!m->dir[l1]) {
+                gm_fault(m, addr, want_write, "out of host memory");
+                return NULL;
+            }
+        }
+        page = calloc(1, GM_PAGE_SIZE);
+        if (!page) {
             gm_fault(m, addr, want_write, "out of host memory");
             return NULL;
         }
+        m->dir[l1][l2] = page;
+        m->committed += GM_PAGE_SIZE;
+        if (m->pool)
+            m->pool->used += GM_PAGE_SIZE;
     }
-    page = calloc(1, GM_PAGE_SIZE);
-    if (!page) {
-        gm_fault(m, addr, want_write, "out of host memory");
-        return NULL;
+
+    /* Warm the write fast path for a page that is writable in steady state.
+     * A read commit warms it too, so the first store is already fast. During
+     * loading a read-only region is transiently writable; it is deliberately
+     * left out of wdir, so once loading ends a store to it faults here. */
+    if ((r->prot & GM_W)) {
+        if (!m->wdir[l1])
+            m->wdir[l1] = calloc(GM_L2_ENTRIES, sizeof(uint8_t *));
+        if (m->wdir[l1])
+            m->wdir[l1][l2] = page;
     }
-    m->dir[l1][l2] = page;
-    m->committed += GM_PAGE_SIZE;
-    if (m->pool)
-        m->pool->used += GM_PAGE_SIZE;
     return page;
 }
 
@@ -606,6 +632,21 @@ sys_unlinkat(guest *g, uint32_t dirfd, uint32_t pathp, uint32_t flags)
                ? 0 : -GUEST_ENOENT;
 }
 
+/* fchmodat(dirfd, path, mode, flags): the guest libc's chmod backs on this, so
+   the linker can make its output executable in-guest. */
+static int32_t
+sys_fchmodat(guest *g, uint32_t dirfd, uint32_t pathp, uint32_t mode,
+             uint32_t flags)
+{
+    char path[1024];
+    int32_t e;
+
+    if ((e = copy_path(g, pathp, path, sizeof(path))) != 0)
+        return e;
+    return fchmodat((int)(int32_t)dirfd, path, (mode_t)mode, (int)flags) == 0
+               ? 0 : -GUEST_ENOENT;
+}
+
 /* renameat2(olddirfd, oldpath, newdirfd, newpath, flags): the guest libc always
  * passes flags 0, which is plain renameat (no _GNU_SOURCE needed on the host);
  * a nonzero flag word is rejected rather than silently dropped. */
@@ -847,6 +888,9 @@ guest_syscall(guest *g, int sys, uint32_t a0, uint32_t a1, uint32_t a2,
 
     case GSYS_RENAMEAT2:
         return sys_renameat2(g, a0, a1, a2, a3, a4);
+
+    case GSYS_FCHMODAT:
+        return sys_fchmodat(g, a0, a1, a2, a3);
 
     case GSYS_GETDENTS64:
         return sys_getdents64(g, a0, a1, a2);
