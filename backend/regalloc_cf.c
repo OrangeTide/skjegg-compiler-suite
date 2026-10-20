@@ -86,6 +86,12 @@ linscan(struct ir_func *fn, int *first_def, int *last_use,
     int nactive;
     int nspills;
     int t, k, p, r, w;
+    /* A fixed array, not int pool[num_regs]: skj-cc compiles this file for the
+       self-host build and has no VLAs.  num_regs is at most FP_NUM_REGS (the
+       largest class any caller passes), so the array always covers it.  It is
+       declared with the other locals, not mid-block, so the frame layout the
+       self-host cf backend emits for it is the ordinary one. */
+    int pool[FP_NUM_REGS];
 
     m = arena_save(fn->arena);
     ivs = arena_alloc(fn->arena, ntemps * sizeof(*ivs));
@@ -118,7 +124,6 @@ linscan(struct ir_func *fn, int *first_def, int *last_use,
 
     qsort(ivs, niv, sizeof(*ivs), sort_by_start);
 
-    int pool[num_regs];
     for (k = 0; k < num_regs; k++)
         pool[k] = (reserved && reserved[k]) ? 0 : 1;
 

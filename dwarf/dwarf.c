@@ -55,6 +55,7 @@ struct writer {
     uint8_t *p;
     size_t len;
     size_t cap;
+    int big;            /* 1 = big-endian multi-byte fields (ColdFire), 0 = LE */
 };
 
 static void
@@ -74,17 +75,29 @@ w_u8(struct writer *w, uint8_t v)
 static void
 w_u16(struct writer *w, uint16_t v)
 {
-    w_u8(w, (uint8_t)v);
-    w_u8(w, (uint8_t)(v >> 8));
+    if (w->big) {
+        w_u8(w, (uint8_t)(v >> 8));
+        w_u8(w, (uint8_t)v);
+    } else {
+        w_u8(w, (uint8_t)v);
+        w_u8(w, (uint8_t)(v >> 8));
+    }
 }
 
 static void
 w_u32(struct writer *w, uint32_t v)
 {
-    w_u8(w, (uint8_t)v);
-    w_u8(w, (uint8_t)(v >> 8));
-    w_u8(w, (uint8_t)(v >> 16));
-    w_u8(w, (uint8_t)(v >> 24));
+    if (w->big) {
+        w_u8(w, (uint8_t)(v >> 24));
+        w_u8(w, (uint8_t)(v >> 16));
+        w_u8(w, (uint8_t)(v >> 8));
+        w_u8(w, (uint8_t)v);
+    } else {
+        w_u8(w, (uint8_t)v);
+        w_u8(w, (uint8_t)(v >> 8));
+        w_u8(w, (uint8_t)(v >> 16));
+        w_u8(w, (uint8_t)(v >> 24));
+    }
 }
 
 static void
@@ -123,15 +136,23 @@ w_str(struct writer *w, const char *s)
     w->len += n;
 }
 
-/* Patch a 4-byte little-endian field written earlier (the unit_length and
-   header_length placeholders, back-filled once their spans are known). */
+/* Patch a 4-byte field written earlier (the unit_length and header_length
+   placeholders, back-filled once their spans are known), in the writer's byte
+   order. */
 static void
 w_patch_u32(struct writer *w, size_t at, uint32_t v)
 {
-    w->p[at + 0] = (uint8_t)v;
-    w->p[at + 1] = (uint8_t)(v >> 8);
-    w->p[at + 2] = (uint8_t)(v >> 16);
-    w->p[at + 3] = (uint8_t)(v >> 24);
+    if (w->big) {
+        w->p[at + 0] = (uint8_t)(v >> 24);
+        w->p[at + 1] = (uint8_t)(v >> 16);
+        w->p[at + 2] = (uint8_t)(v >> 8);
+        w->p[at + 3] = (uint8_t)v;
+    } else {
+        w->p[at + 0] = (uint8_t)v;
+        w->p[at + 1] = (uint8_t)(v >> 8);
+        w->p[at + 2] = (uint8_t)(v >> 16);
+        w->p[at + 3] = (uint8_t)(v >> 24);
+    }
 }
 
 /* line_base/line_range/opcode_base: the standard GCC-style values, which fix
@@ -146,7 +167,8 @@ w_patch_u32(struct writer *w, size_t at, uint32_t v)
 size_t
 dw_line_build(struct arena *a, const char *file_name,
               const struct dw_line_row *rows, int nrows,
-              uint32_t end_addr, uint8_t **out, size_t *set_addr_off)
+              uint32_t end_addr, uint8_t **out, size_t *set_addr_off,
+              int big)
 {
     struct writer w;
     size_t unit_len_at, after_len, hdr_len_at, after_hdr;
@@ -159,6 +181,7 @@ dw_line_build(struct arena *a, const char *file_name,
     w.p = arena_alloc(a, cap);
     w.len = 0;
     w.cap = cap;
+    w.big = big;
 
     /* ---- Unit header (DWARF 4, 32-bit DWARF format). */
     unit_len_at = w.len;
@@ -243,6 +266,7 @@ dw_abbrev_build(struct arena *a, uint8_t **out)
     w.p = arena_alloc(a, 64);
     w.len = 0;
     w.cap = 64;
+    w.big = 0;              /* the abbrev table is all u8/ULEB: endian-neutral */
 
     /* One abbreviation: a childless compile_unit. */
     w_uleb(&w, DW_ABBREV_COMPILE_UNIT);
@@ -266,7 +290,7 @@ size_t
 dw_info_build(struct arena *a, const char *producer, const char *file_name,
               const char *comp_dir, uint32_t low_pc, uint32_t high_pc,
               uint32_t stmt_list_off, uint8_t **out,
-              size_t *low_pc_off, size_t *high_pc_off)
+              size_t *low_pc_off, size_t *high_pc_off, int big)
 {
     struct writer w;
     size_t unit_len_at, after_len;
@@ -276,6 +300,7 @@ dw_info_build(struct arena *a, const char *producer, const char *file_name,
     w.p = arena_alloc(a, cap);
     w.len = 0;
     w.cap = cap;
+    w.big = big;
 
     /* ---- Compilation-unit header (DWARF 4, 32-bit DWARF format). */
     unit_len_at = w.len;

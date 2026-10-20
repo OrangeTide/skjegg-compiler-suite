@@ -592,6 +592,53 @@ ld_link(struct linker *ld)
         }
     }
 
+    /* Debug sections are non-alloc, so the loop above skipped them (their
+       input sections never matched an output section).  Merge them and apply
+       the absolute address relocations (low_pc / high_pc / line-program
+       set_address, all R_68K_32 against the text section symbol, now resolved)
+       into the merged buffers, so the linked executable carries final big-
+       endian addresses. */
+    ld_build_debug(ld);
+    for (int oi = 0; oi < ld->nobjs; oi++) {
+        struct ld_object *obj = &ld->objs[oi];
+
+        for (int ri = 0; ri < obj->nrelocs; ri++) {
+            struct ld_reloc *rel = &obj->relocs[ri];
+            struct ld_input_sec *isec = &obj->sections[rel->section];
+            struct ld_debug_sec *d = NULL;
+            struct ld_symbol *gsym;
+            uint8_t *patch;
+            int gi;
+
+            if (isec->type != SHT_PROGBITS
+                || strncmp(isec->name, ".debug_", 7) != 0)
+                continue;
+            for (int k = 0; k < ld->ndebug; k++) {
+                if (strcmp(ld->debug[k].name, isec->name) == 0) {
+                    d = &ld->debug[k];
+                    break;
+                }
+            }
+            if (!d)
+                continue;
+
+            gi = obj->sym_map[rel->sym_idx];
+            if (gi < 0)
+                die("%s: debug reloc references unmapped symbol", obj->path);
+            gsym = &ld->syms[gi];
+            patch = d->data + isec->assigned_vaddr + rel->offset;
+
+            switch (rel->type) {
+            case R_68K_32:
+                put32(patch, gsym->value + (uint32_t)rel->addend);
+                break;
+            default:
+                die("%s: unsupported debug relocation type %d in %s",
+                    obj->path, rel->type, isec->name);
+            }
+        }
+    }
+
     ld_check_undefined(ld);
     return 0;
 }

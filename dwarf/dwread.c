@@ -14,7 +14,7 @@
 #include <string.h>
 
 /****************************************************************
- * Little-endian scalar reads with bounds checks
+ * Scalar reads with bounds checks (endianness per the ELF being read)
  ****************************************************************/
 
 /* A bounded cursor over a byte span; every read checks room and clamps. */
@@ -23,6 +23,7 @@ struct rd {
     size_t len;
     size_t pos;
     int bad;            /* set once a read ran past the end */
+    int big;            /* 1 = big-endian multi-byte fields (ColdFire) */
 };
 
 static uint8_t
@@ -35,9 +36,12 @@ rd_u8(struct rd *c)
 static uint16_t
 rd_u16(struct rd *c)
 {
+    const uint8_t *q;
     uint16_t v;
     if (c->pos + 2 > c->len) { c->bad = 1; c->pos = c->len; return 0; }
-    v = (uint16_t)(c->p[c->pos] | (c->p[c->pos + 1] << 8));
+    q = c->p + c->pos;
+    v = c->big ? (uint16_t)((q[0] << 8) | q[1])
+               : (uint16_t)(q[0] | (q[1] << 8));
     c->pos += 2;
     return v;
 }
@@ -45,11 +49,16 @@ rd_u16(struct rd *c)
 static uint32_t
 rd_u32(struct rd *c)
 {
+    const uint8_t *q;
     uint32_t v;
     if (c->pos + 4 > c->len) { c->bad = 1; c->pos = c->len; return 0; }
-    v = (uint32_t)c->p[c->pos] | ((uint32_t)c->p[c->pos + 1] << 8)
-        | ((uint32_t)c->p[c->pos + 2] << 16)
-        | ((uint32_t)c->p[c->pos + 3] << 24);
+    q = c->p + c->pos;
+    if (c->big)
+        v = ((uint32_t)q[0] << 24) | ((uint32_t)q[1] << 16)
+            | ((uint32_t)q[2] << 8) | (uint32_t)q[3];
+    else
+        v = (uint32_t)q[0] | ((uint32_t)q[1] << 8)
+            | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
     c->pos += 4;
     return v;
 }
@@ -104,7 +113,7 @@ rd_str(struct rd *c)
 }
 
 /****************************************************************
- * ELF32 section lookup (little-endian)
+ * ELF32 section lookup (endianness per the ELF's EI_DATA)
  ****************************************************************/
 
 struct elf_sec {
@@ -115,25 +124,29 @@ struct elf_sec {
 };
 
 static uint32_t
-le32(const uint8_t *p)
+le32(const uint8_t *p, int big)
 {
+    if (big)
+        return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+             | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
          | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
 static uint16_t
-le16(const uint8_t *p)
+le16(const uint8_t *p, int big)
 {
-    return (uint16_t)(p[0] | (p[1] << 8));
+    return big ? (uint16_t)((p[0] << 8) | p[1]) : (uint16_t)(p[0] | (p[1] << 8));
 }
 
 /* Fill `out` for section index `idx`; returns 1 on success. */
 static int
-elf_section(const uint8_t *elf, size_t len, int idx, struct elf_sec *out)
+elf_section(const uint8_t *elf, size_t len, int idx, struct elf_sec *out,
+            int big)
 {
-    uint32_t shoff = le32(elf + 32);
-    uint16_t shentsize = le16(elf + 46);
-    uint16_t shnum = le16(elf + 48);
+    uint32_t shoff = le32(elf + 32, big);
+    uint16_t shentsize = le16(elf + 46, big);
+    uint16_t shnum = le16(elf + 48, big);
     const uint8_t *sh;
     uint32_t off, size;
 
@@ -142,34 +155,34 @@ elf_section(const uint8_t *elf, size_t len, int idx, struct elf_sec *out)
     if ((size_t)shoff + (size_t)shentsize * shnum > len)
         return 0;
     sh = elf + shoff + (size_t)idx * shentsize;
-    off = le32(sh + 16);
-    size = le32(sh + 20);
+    off = le32(sh + 16, big);
+    size = le32(sh + 20, big);
     if ((size_t)off + size > len)
         return 0;
     out->data = elf + off;
     out->size = size;
-    out->link = le32(sh + 24);
-    out->entsize = le32(sh + 36);
+    out->link = le32(sh + 24, big);
+    out->entsize = le32(sh + 36, big);
     return 1;
 }
 
 /* Find a section by name; returns its index or -1. */
 static int
-elf_find(const uint8_t *elf, size_t len, const char *name)
+elf_find(const uint8_t *elf, size_t len, const char *name, int big)
 {
-    uint32_t shoff = le32(elf + 32);
-    uint16_t shentsize = le16(elf + 46);
-    uint16_t shnum = le16(elf + 48);
-    uint16_t shstrndx = le16(elf + 50);
+    uint32_t shoff = le32(elf + 32, big);
+    uint16_t shentsize = le16(elf + 46, big);
+    uint16_t shnum = le16(elf + 48, big);
+    uint16_t shstrndx = le16(elf + 50, big);
     struct elf_sec strs;
 
-    if (!elf_section(elf, len, shstrndx, &strs))
+    if (!elf_section(elf, len, shstrndx, &strs, big))
         return 0 - 1;
     if ((size_t)shoff + (size_t)shentsize * shnum > len)
         return -1;
     for (int i = 0; i < shnum; i++) {
         const uint8_t *sh = elf + shoff + (size_t)i * shentsize;
-        uint32_t nm = le32(sh + 0);
+        uint32_t nm = le32(sh + 0, big);
         if (nm < strs.size
             && strcmp((const char *)strs.data + nm, name) == 0)
             return i;
@@ -354,26 +367,26 @@ func_cmp(const void *pa, const void *pb)
 
 static void
 read_symtab(struct arena *a, struct dw_reader *r,
-            const uint8_t *elf, size_t len)
+            const uint8_t *elf, size_t len, int big)
 {
-    int si = elf_find(elf, len, ".symtab");
+    int si = elf_find(elf, len, ".symtab", big);
     struct elf_sec sym, str;
     int count, keep = 0;
 
     if (si < 0)
         return;
-    if (!elf_section(elf, len, si, &sym) || sym.entsize == 0)
+    if (!elf_section(elf, len, si, &sym, big) || sym.entsize == 0)
         return;
-    if (!elf_section(elf, len, (int)sym.link, &str))
+    if (!elf_section(elf, len, (int)sym.link, &str, big))
         return;
 
     count = (int)(sym.size / sym.entsize);
     r->funcs = arena_alloc(a, (size_t)(count ? count : 1) * sizeof *r->funcs);
     for (int i = 0; i < count; i++) {
         const uint8_t *e = sym.data + (size_t)i * sym.entsize;
-        uint32_t nm = le32(e + 0);
-        uint32_t val = le32(e + 4);
-        uint32_t sz = le32(e + 8);
+        uint32_t nm = le32(e + 0, big);
+        uint32_t val = le32(e + 4, big);
+        uint32_t sz = le32(e + 8, big);
         uint8_t info = e[12];
         if (DW_ELF_ST_TYPE(info) != DW_STT_FUNC)
             continue;
@@ -397,21 +410,27 @@ int
 dw_read_elf(struct arena *a, struct dw_reader *r, const uint8_t *elf, size_t len)
 {
     struct lrow_buf rows = { 0 };
-    int li;
+    int li, big;
 
     memset(r, 0, sizeof *r);
     r->arena = a;
 
     if (len < 52 || memcmp(elf, "\177ELF", 4) != 0)
         return 1;
-    if (elf[4] != 1 /* ELFCLASS32 */ || elf[5] != 1 /* ELFDATA2LSB */)
+    if (elf[4] != 1 /* ELFCLASS32 */)
+        return 1;
+    if (elf[5] == 1)            /* ELFDATA2LSB: RISC-V, MIPS */
+        big = 0;
+    else if (elf[5] == 2)       /* ELFDATA2MSB: ColdFire/m68k */
+        big = 1;
+    else
         return 1;
 
-    li = elf_find(elf, len, ".debug_line");
+    li = elf_find(elf, len, ".debug_line", big);
     if (li >= 0) {
         struct elf_sec ls;
-        if (elf_section(elf, len, li, &ls)) {
-            struct rd c = { ls.data, ls.size, 0, 0 };
+        if (elf_section(elf, len, li, &ls, big)) {
+            struct rd c = { ls.data, ls.size, 0, 0, big };
             while (c.pos < ls.size && !c.bad)
                 run_line_unit(a, &c, &rows, &r->files, &r->nfiles);
         }
@@ -421,7 +440,7 @@ dw_read_elf(struct arena *a, struct dw_reader *r, const uint8_t *elf, size_t len
     if (r->nlines > 1)
         qsort(r->lines, (size_t)r->nlines, sizeof *r->lines, lrow_cmp);
 
-    read_symtab(a, r, elf, len);
+    read_symtab(a, r, elf, len, big);
     return 0;
 }
 

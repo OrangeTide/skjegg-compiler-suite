@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 
 /* The host object behind an Entity handle: a 2-D position the host owns. */
 struct entity {
@@ -81,6 +82,11 @@ int main(int argc, char **argv)
     double fret = 0;
     uintptr_t top;
 
+    if (argc == 2 && (strcmp(argv[1], "-h") == 0 ||
+                      strcmp(argv[1], "--help") == 0)) {
+        printf("usage: skj-kp-patrol module.kpm\n");
+        return 0;
+    }
     if (argc != 2) {
         fprintf(stderr, "usage: skj-kp-patrol module.kpm\n");
         return 2;

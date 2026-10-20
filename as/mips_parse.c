@@ -9,6 +9,7 @@
  * mnemonic is a real (non-macro) instruction. */
 
 #include "mips.h"
+#include "dwarf.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -279,6 +280,22 @@ do_align(struct mips_asm *a, int bytes)
         while (s->len % bytes) s->len++;
 }
 
+/* Append one line-table row (emit pass only; see .loc below). */
+static void
+mips_add_locrow(struct mips_asm *a, uint32_t offset, int line)
+{
+    if (a->n_locrows >= a->locrow_cap) {
+        a->locrow_cap = a->locrow_cap ? a->locrow_cap * 2 : 64;
+        a->locrows = realloc(a->locrows,
+                             (size_t)a->locrow_cap * sizeof *a->locrows);
+        if (!a->locrows)
+            die("mips_parse: out of memory");
+    }
+    a->locrows[a->n_locrows].offset = offset;
+    a->locrows[a->n_locrows].line = line;
+    a->n_locrows++;
+}
+
 static void
 handle_directive(struct mips_asm *a, const char *dir)
 {
@@ -360,13 +377,100 @@ handle_directive(struct mips_asm *a, const char *dir)
         return;
     }
 
+    /* .type sym,@function : mark the symbol STT_FUNC, so the ELF writer and a
+       debugger map an address to the function. */
+    if (strcmp(dir, ".type") == 0) {
+        lex_next(l);
+        if (l->tok.type == T_IDENT || l->tok.type == T_DOT_IDENT) {
+            int idx = sym_lookup(&a->st, l->tok.str);
+            if (idx < 0) idx = sym_add(&a->st, l->tok.str);
+            for (lex_next(l); l->tok.type != T_NEWLINE
+                              && l->tok.type != T_EOF; lex_next(l)) {
+                if ((l->tok.type == T_IDENT || l->tok.type == T_DOT_IDENT)
+                    && strcmp(l->tok.str, "function") == 0)
+                    sym_set_func(&a->st, idx);
+            }
+        } else {
+            skip_to_eol(l);
+        }
+        return;
+    }
+
+    /* .size sym,expr : the symbol's byte extent (st_size).  expr is a sum of
+       label and integer terms (the backend emits `.Lfunc_endN - func`); symbol
+       values are final by the emit pass, so evaluating the terms then leaves
+       the authoritative size. */
+    if (strcmp(dir, ".size") == 0) {
+        int target = -1;
+        lex_next(l);
+        if (l->tok.type == T_IDENT || l->tok.type == T_DOT_IDENT) {
+            target = sym_lookup(&a->st, l->tok.str);
+            if (target < 0) target = sym_add(&a->st, l->tok.str);
+            lex_next(l);
+        }
+        if (target >= 0 && l->tok.type == T_COMMA) {
+            int32_t acc = 0;
+            int neg = 0;
+            for (lex_next(l); l->tok.type != T_NEWLINE
+                              && l->tok.type != T_EOF; lex_next(l)) {
+                int32_t v;
+                if (l->tok.type == T_MINUS) { neg = 1; continue; }
+                if (l->tok.type == T_PLUS)  { neg = 0; continue; }
+                if (l->tok.type == T_INT) {
+                    v = (int32_t)l->tok.ival;
+                } else if (l->tok.type == T_IDENT
+                           || l->tok.type == T_DOT_IDENT) {
+                    int si = sym_lookup(&a->st, l->tok.str);
+                    v = si >= 0 ? (int32_t)a->st.syms[si].value : 0;
+                } else {
+                    break;
+                }
+                acc += neg ? -v : v;
+                neg = 0;
+            }
+            if (acc < 0) acc = 0;
+            sym_set_size(&a->st, target, (uint32_t)acc);
+        }
+        skip_to_eol(l);
+        return;
+    }
+
+    /* .file ["]name["] or .file N "name" : the DWARF source name, last wins. */
+    if (strcmp(dir, ".file") == 0) {
+        lex_next(l);
+        if (l->tok.type == T_INT)           /* the file number, if present */
+            lex_next(l);
+        if (l->tok.type == T_STRING)
+            a->debug_file = arena_strndup(&a->arena, l->tok.str,
+                                          (size_t)l->tok.str_len);
+        skip_to_eol(l);
+        return;
+    }
+
+    /* .loc N line [column] : one line-table row.  The address is the current
+       .text offset, known only in the emit pass, so rows are collected then. */
+    if (strcmp(dir, ".loc") == 0) {
+        int line = 0, seen_line = 0;
+        lex_next(l);
+        if (l->tok.type == T_INT) {         /* file number */
+            lex_next(l);
+            if (l->tok.type == T_INT) {
+                line = (int)l->tok.ival;
+                seen_line = 1;
+            }
+        }
+        if (a->pass == 2 && seen_line && a->cur_section == MSEC_TEXT)
+            mips_add_locrow(a, (uint32_t)a->sections[MSEC_TEXT].len, line);
+        skip_to_eol(l);
+        return;
+    }
+
     /* Accepted and ignored: assembler-mode and metadata directives.  The .set
      * reorder engine is a later step, so .set operands are consumed here. */
-    if (strcmp(dir, ".set") == 0 || strcmp(dir, ".type") == 0
-        || strcmp(dir, ".size") == 0 || strcmp(dir, ".ent") == 0
+    if (strcmp(dir, ".set") == 0 || strcmp(dir, ".ent") == 0
         || strcmp(dir, ".end") == 0 || strcmp(dir, ".frame") == 0
         || strcmp(dir, ".mask") == 0 || strcmp(dir, ".fmask") == 0
-        || strcmp(dir, ".option") == 0 || strcmp(dir, ".file") == 0
+        || strcmp(dir, ".option") == 0
         || strcmp(dir, ".ident") == 0 || strcmp(dir, ".local") == 0
         || strcmp(dir, ".gpword") == 0 || strcmp(dir, ".cprestore") == 0
         || strncmp(dir, ".cfi_", 5) == 0) {
@@ -523,7 +627,64 @@ mips_free(struct mips_asm *a)
     }
     free(a->st.syms);
     free(a->lex.str_buf);
+    free(a->locrows);
     arena_free(&a->arena);
+}
+
+/* Build the DWARF debug sections from the .loc rows collected in the emit
+   pass.  The three sections are non-alloc, so they do not perturb the
+   text/data layout.  MIPS is REL, so each absolute address field carries its
+   addend in place (dw_*_build writes the value) and the R_MIPS_32 relocation
+   against the synthesized .text base symbol only adds the final base. */
+void
+mips_emit_debug(struct mips_asm *a)
+{
+    struct arena *ar = &a->arena;
+    struct section *sl = &a->sections[MSEC_DEBUG_LINE];
+    struct section *si = &a->sections[MSEC_DEBUG_INFO];
+    struct section *sa = &a->sections[MSEC_DEBUG_ABBREV];
+    const char *name = a->debug_file ? a->debug_file : "?";
+    struct dw_line_row *rows;
+    uint8_t *bytes;
+    size_t len, set_addr_off, low_off, high_off, b;
+    uint32_t text_end;
+    int sym, i;
+
+    if (a->n_locrows == 0)
+        return;                 /* no .loc seen (no -g): emit nothing */
+
+    /* The text-base symbol the absolute address fields relocate against. */
+    sym = sym_lookup(&a->st, ".Ldebug_text0");
+    if (sym < 0)
+        sym = sym_add(&a->st, ".Ldebug_text0");
+    sym_define(&a->st, sym, MSEC_TEXT, 0);
+
+    rows = arena_alloc(ar, (size_t)a->n_locrows * sizeof *rows);
+    for (i = 0; i < a->n_locrows; i++) {
+        rows[i].addr = a->locrows[i].offset;
+        rows[i].line = a->locrows[i].line;
+    }
+    text_end = (uint32_t)a->sections[MSEC_TEXT].len;
+
+    /* .debug_line: the line program, set_address fixed to .text + first row. */
+    len = dw_line_build(ar, name, rows, a->n_locrows, text_end, &bytes,
+                        &set_addr_off, 0);
+    for (b = 0; b < len; b++)
+        sec_emit8(sl, bytes[b]);
+    sec_add_reloc_t(sl, (uint32_t)set_addr_off, sym, 0, R_MIPS_32);
+
+    /* .debug_abbrev: fixed, no relocations. */
+    len = dw_abbrev_build(ar, &bytes);
+    for (b = 0; b < len; b++)
+        sec_emit8(sa, bytes[b]);
+
+    /* .debug_info: a CU spanning all of .text, stmt_list at line program 0. */
+    len = dw_info_build(ar, "skjegg", name, ".", 0, text_end, 0, &bytes,
+                        &low_off, &high_off, 0);
+    for (b = 0; b < len; b++)
+        sec_emit8(si, bytes[b]);
+    sec_add_reloc_t(si, (uint32_t)low_off, sym, 0, R_MIPS_32);
+    sec_add_reloc_t(si, (uint32_t)high_off, sym, 0, R_MIPS_32);
 }
 
 /****************************************************************

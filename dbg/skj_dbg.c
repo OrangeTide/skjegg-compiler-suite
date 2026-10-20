@@ -495,9 +495,10 @@ read_file(const char *path, size_t *out_len)
 }
 
 static void
-usage(void)
+usage(FILE *out)
 {
-    die("usage: skj-dbg [--run skj-run] [--port N] [-ex CMD]... program.elf [args...]");
+    fprintf(out, "usage: skj-dbg [--run skj-run] [--port N] [-ex CMD]... "
+                 "program.elf [args...]\n");
 }
 
 int
@@ -529,15 +530,18 @@ main(int argc, char **argv)
             if (nex < (int)(sizeof ex / sizeof ex[0]))
                 ex[nex++] = argv[++i];
         } else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
-            usage();
+            usage(stdout);
+            return 0;
         } else {
             prog_i = i;
             elf = argv[i];
             break;
         }
     }
-    if (!elf)
-        usage();
+    if (!elf) {
+        usage(stderr);
+        return 2;
+    }
     if (port == 0)
         port = 20000 + (int)(getpid() % 20000);
 

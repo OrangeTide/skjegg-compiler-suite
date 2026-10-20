@@ -54,6 +54,7 @@ VERSION := $(SKJ_VERSION)$(GIT_SUFFIX)
 M68K_CC ?= m68k-linux-gnu-gcc
 M68K_AS ?= m68k-linux-gnu-as
 M68K_LD ?= m68k-linux-gnu-ld
+M68K_ADDR2LINE ?= m68k-linux-gnu-addr2line
 QEMU    ?= qemu-m68k
 RV_AS   ?= riscv64-linux-gnu-as
 RV_LD   ?= riscv64-linux-gnu-ld
@@ -69,6 +70,7 @@ MIPS_AS ?= mipsel-none-elf-as
 MIPS_LD ?= mipsel-none-elf-ld
 MIPS_OBJCOPY ?= mipsel-none-elf-objcopy
 MIPS_OBJDUMP ?= mipsel-none-elf-objdump
+MIPS_ADDR2LINE ?= mipsel-linux-gnu-addr2line
 QEMU_MIPS ?= qemu-mipsel
 SPIM ?= spim
 A64_AS  ?= aarch64-linux-gnu-as
@@ -217,7 +219,7 @@ KP_RT  := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kobold
           jit/jit_common.c jit/jit_arena.c jit/jit_x86.c jit/emit_x86.c jit/code.c \
           jit/call_guest_x86.S \
           backend/x86_select.c backend/regalloc_x86.c $(IR_SRC)
-KP_HDRS := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue.h kobold/obj.h kobold/co.h \
+KP_HDRS := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue.h kobold/obj.h kobold/gheap_core.h kobold/co.h \
            kobold/handle.h kobold/lowmem.h kobold/kp_host.h jit/jit_common.h jit/jit_arena.h \
            jit/jit_x86.h jit/emit_x86.h jit/code.h backend/mc.h backend/x86_select.h ir/ir.h
 KP_CFLAGS := $(CFLAGS) -DX86_BITS=64 -DKP_FREESTANDING -DKP_REAL=double -Iir -Ijit -Ibackend -Ikobold
@@ -258,7 +260,7 @@ KP_RT_RV := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kobo
             jit/jit_common.c jit/jit_arena.c jit/jit_rv.c jit/emit_rv.c jit/code.c \
             jit/call_guest_rv.S jit/rv_jit_i64.S \
             backend/rv_select.c backend/regalloc_rv.c $(IR_SRC)
-KP_HDRS_RV := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue.h kobold/obj.h kobold/co.h \
+KP_HDRS_RV := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue.h kobold/obj.h kobold/gheap_core.h kobold/co.h \
               kobold/handle.h kobold/lowmem.h kobold/kp_host.h jit/jit_common.h jit/jit_arena.h \
               jit/emit_rv.h jit/code.h backend/rv_mc.h backend/rv_select.h ir/ir.h
 KP_CFLAGS_RV := $(CFLAGS) -DKP_FREESTANDING -DKP_REAL=double -Iir -Ijit -Ibackend -Ikobold
@@ -283,7 +285,7 @@ KP_RT_A64 := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kob
              jit/jit_common.c jit/jit_arena.c jit/jit_arm64.c jit/emit_arm64.c jit/code.c \
              jit/call_guest_arm64.S \
              backend/arm64_select.c backend/regalloc_arm64.c $(IR_SRC)
-KP_HDRS_A64 := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue.h kobold/obj.h kobold/co.h \
+KP_HDRS_A64 := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue.h kobold/obj.h kobold/gheap_core.h kobold/co.h \
                kobold/handle.h kobold/lowmem.h kobold/kp_host.h jit/jit_common.h jit/jit_arena.h \
                jit/emit_arm64.h jit/code.h backend/arm64_mc.h backend/arm64_select.h ir/ir.h
 KP_CFLAGS_A64 := $(CFLAGS) -DKP_FREESTANDING -DKP_REAL=double -Iir -Ijit -Ibackend -Ikobold
@@ -481,22 +483,32 @@ KPCOM_FINGERPRINT = $(shell cat $(KPCOM_EMIT_INPUTS) 2>/dev/null | sha256sum | c
 
 ## Regenerate the committed seed by the self-host fixed point, then rewrite the
 ## manifest.  Stage 1 compiles the source with the committed seed as the front
-## end; stage 2 compiles it again with stage 1 as the front end; the two modules
-## must be byte identical (the fixed point).  Only then does stage 1 become the
-## new seed.  Uses the host JIT with KPCOM_KPM overriding the embedded seed, so
-## the committed seed drives its own regeneration regardless of what was baked
-## into build/skj-kp-jit.  This is the only target that writes prebuild/.
+## end; each later stage compiles it again with the previous stage as the front
+## end.  The seed is the first stage whose module equals the one it produces (the
+## fixed point).  A change that does not alter kpcom's own codegen converges in
+## one step (stage 1 == stage 2); a change that alters code kpcom itself emits
+## takes one more generation (stage 1 lowers kpcom's own source with the old
+## codegen, stage 2 with the new, so stage 2 == stage 3 is the fixed point).  The
+## loop allows a few generations and fails if none converges.  Uses the host JIT
+## with KPCOM_KPM overriding the embedded seed, so the committed seed drives its
+## own regeneration regardless of what was baked into build/skj-kp-jit.  This is
+## the only target that writes prebuild/.
 update-kpcom: build/skj-kp-jit
 	@set -e; \
 	echo "update-kpcom: stage 1 (committed seed compiles the source)"; \
-	KPCOM_KPM=$(KPCOM_SEED) build/skj-kp-jit --emit-kpm $(KPCOM_SRC_PAS) > build/kpcom.kpm.s1; \
-	echo "update-kpcom: stage 2 (stage 1 compiles the source)"; \
-	KPCOM_KPM=build/kpcom.kpm.s1 build/skj-kp-jit --emit-kpm $(KPCOM_SRC_PAS) > build/kpcom.kpm.s2; \
-	if ! cmp -s build/kpcom.kpm.s1 build/kpcom.kpm.s2; then \
-	    echo "update-kpcom: FAIL self-host fixed point broke (stage 1 != stage 2); seed not written" >&2; \
+	KPCOM_KPM=$(KPCOM_SEED) build/skj-kp-jit --emit-kpm $(KPCOM_SRC_PAS) > build/kpcom.kpm.g1; \
+	prev=build/kpcom.kpm.g1; seed=""; \
+	for g in 2 3 4; do \
+	    echo "update-kpcom: stage $$g (stage $$((g-1)) compiles the source)"; \
+	    KPCOM_KPM=$$prev build/skj-kp-jit --emit-kpm $(KPCOM_SRC_PAS) > build/kpcom.kpm.g$$g; \
+	    if cmp -s $$prev build/kpcom.kpm.g$$g; then seed=$$prev; break; fi; \
+	    prev=build/kpcom.kpm.g$$g; \
+	done; \
+	if [ -z "$$seed" ]; then \
+	    echo "update-kpcom: FAIL self-host did not reach a fixed point within 4 generations; seed not written" >&2; \
 	    exit 1; \
 	fi; \
-	cp build/kpcom.kpm.s1 $(KPCOM_SEED); \
+	cp $$seed $(KPCOM_SEED); \
 	fp='$(KPCOM_FINGERPRINT)'; \
 	ks=$$(sha256sum $(KPCOM_SEED) | cut -d' ' -f1); \
 	kb=$$(wc -c < $(KPCOM_SEED) | tr -d ' '); \
@@ -672,6 +684,95 @@ check-kp-multi-arm64: build/skj-kpc build/skj-kp-arm64 build/libkpaot-arm64.a
 	    KPAOTCC="$(A64_CC)" KPAOTQEMU="$(QEMU_A64)" \
 	    sh tests/run-kp-multi-tests.sh
 
+## ---- file I/O provided as a Kobold unit (tests/kp-files) ----
+## The `files` library unit (kobold/lib/files.pas) gives a program whole-file
+## read/write through `uses files`, instead of a per-program external declaration
+## of the runtime's ReadFileStr/WriteFileStr primitives.  The unit is precompiled
+## to an interface+code .kpm, staged beside a copy of the program (the compiler
+## resolves a used unit's interface in the program's own directory; the kp-multi
+## harness co-locates the same way).  A program that `uses files` then round-trips
+## a file through it on the x86-64 JIT and AOT paths.  The temp path is handed in
+## as an argument so the test writes only under build/.
+build/kp-files/files.kpm: kobold/lib/files.pas build/skj-kpc | build
+	@mkdir -p build/kp-files
+	./build/skj-kpc --emit-kpm $< > $@
+
+check-kp-files: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a \
+                build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
+                build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a \
+                build/kp-files/files.kpm
+	@cp tests/kp-files/filesrt.pas build/kp-files/filesrt.pas
+	@rm -f build/kp-files/rt.txt
+	@./build/skj-kp-jit build/kp-files/filesrt.pas $(CURDIR)/build/kp-files/rt.txt \
+	    > build/kp-files/jit.out 2>build/kp-files/jit.err; \
+	 cmp -s build/kp-files/jit.out tests/kp-files/filesrt.expected \
+	    || { echo "FAIL kp-files (jit)"; cat build/kp-files/jit.err build/kp-files/jit.out; exit 1; }
+	@./build/skj-kpc --emit-kpm build/kp-files/filesrt.pas \
+	    > build/kp-files/filesrt.kpm 2>build/kp-files/emit.err
+	@rm -f build/kp-files/rt.txt
+	@KOBOLD_UNITS=$(CURDIR)/build/kp-files KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
+	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) -f elf64" \
+	    sh kobold/aot-run.sh build/kp-files/filesrt.kpm $(CURDIR)/build/kp-files/rt.txt \
+	    > build/kp-files/aot.out 2>build/kp-files/aot.err; \
+	 cmp -s build/kp-files/aot.out tests/kp-files/filesrt.expected \
+	    || { echo "FAIL kp-files (aot)"; cat build/kp-files/aot.err build/kp-files/aot.out; exit 1; }
+	@# freestanding rv32: the free runner does not walk `.uses`, so compile the
+	@# unit and the program for rv32 and link them with the crt + free archive.
+	@./build/skj-kp-rv build/kp-files/files.kpm -o build/kp-files/files_rv.s 2>build/kp-files/rv.err
+	@./build/skj-as-rv -o build/kp-files/files_rv.o build/kp-files/files_rv.s 2>>build/kp-files/rv.err
+	@./build/skj-kp-rv build/kp-files/filesrt.kpm -o build/kp-files/filesrt_rv.s 2>>build/kp-files/rv.err
+	@./build/skj-as-rv -o build/kp-files/filesrt_rv.o build/kp-files/filesrt_rv.s 2>>build/kp-files/rv.err
+	@./build/skj-ld-rv -o build/kp-files/filesrt_rv.elf build/kpfree-rv/kp_crt_rv.o \
+	    build/kp-files/filesrt_rv.o build/kp-files/files_rv.o build/libkpaot-rv-free.a 2>>build/kp-files/rv.err
+	@rm -f build/kp-files/rt.txt
+	@$(QEMU_RV) build/kp-files/filesrt_rv.elf $(CURDIR)/build/kp-files/rt.txt \
+	    > build/kp-files/free-rv.out 2>build/kp-files/free-rv.err; \
+	 cmp -s build/kp-files/free-rv.out tests/kp-files/filesrt.expected \
+	    || { echo "FAIL kp-files (free-rv)"; cat build/kp-files/rv.err build/kp-files/free-rv.err build/kp-files/free-rv.out; exit 1; }
+	@echo "kp-files: 1 passed (jit, aot, free-rv)"
+
+build/kp-dirs/dirs.kpm: kobold/lib/dirs.pas build/skj-kpc | build
+	@mkdir -p build/kp-dirs
+	./build/skj-kpc --emit-kpm $< > $@
+
+## Directory reads reached through the `dirs` unit, over the same three tiers as
+## check-kp-files.  A scratch directory of three known files is rebuilt before
+## each runner; the program reports an order-independent entry count and total
+## name length, so the expected output is deterministic.
+check-kp-dirs: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a \
+               build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
+               build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a \
+               build/kp-dirs/dirs.kpm
+	@cp tests/kp-dirs/dirsrt.pas build/kp-dirs/dirsrt.pas
+	@mkscan() { rm -rf "$$1"; mkdir -p "$$1"; : > "$$1/alpha"; : > "$$1/beta"; : > "$$1/gamma"; }; \
+	 D=$(CURDIR)/build/kp-dirs/scan; \
+	 mkscan $$D; \
+	 ./build/skj-kp-jit build/kp-dirs/dirsrt.pas $$D \
+	     > build/kp-dirs/jit.out 2>build/kp-dirs/jit.err; \
+	 cmp -s build/kp-dirs/jit.out tests/kp-dirs/dirsrt.expected \
+	     || { echo "FAIL kp-dirs (jit)"; cat build/kp-dirs/jit.err build/kp-dirs/jit.out; exit 1; }; \
+	 ./build/skj-kpc --emit-kpm build/kp-dirs/dirsrt.pas \
+	     > build/kp-dirs/dirsrt.kpm 2>build/kp-dirs/emit.err; \
+	 mkscan $$D; \
+	 KOBOLD_UNITS=$(CURDIR)/build/kp-dirs KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
+	     KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) -f elf64" \
+	     sh kobold/aot-run.sh build/kp-dirs/dirsrt.kpm $$D \
+	     > build/kp-dirs/aot.out 2>build/kp-dirs/aot.err; \
+	 cmp -s build/kp-dirs/aot.out tests/kp-dirs/dirsrt.expected \
+	     || { echo "FAIL kp-dirs (aot)"; cat build/kp-dirs/aot.err build/kp-dirs/aot.out; exit 1; }; \
+	 ./build/skj-kp-rv build/kp-dirs/dirs.kpm -o build/kp-dirs/dirs_rv.s 2>build/kp-dirs/rv.err; \
+	 ./build/skj-as-rv -o build/kp-dirs/dirs_rv.o build/kp-dirs/dirs_rv.s 2>>build/kp-dirs/rv.err; \
+	 ./build/skj-kp-rv build/kp-dirs/dirsrt.kpm -o build/kp-dirs/dirsrt_rv.s 2>>build/kp-dirs/rv.err; \
+	 ./build/skj-as-rv -o build/kp-dirs/dirsrt_rv.o build/kp-dirs/dirsrt_rv.s 2>>build/kp-dirs/rv.err; \
+	 ./build/skj-ld-rv -o build/kp-dirs/dirsrt_rv.elf build/kpfree-rv/kp_crt_rv.o \
+	     build/kp-dirs/dirsrt_rv.o build/kp-dirs/dirs_rv.o build/libkpaot-rv-free.a 2>>build/kp-dirs/rv.err; \
+	 mkscan $$D; \
+	 $(QEMU_RV) build/kp-dirs/dirsrt_rv.elf $$D \
+	     > build/kp-dirs/free-rv.out 2>build/kp-dirs/free-rv.err; \
+	 cmp -s build/kp-dirs/free-rv.out tests/kp-dirs/dirsrt.expected \
+	     || { echo "FAIL kp-dirs (free-rv)"; cat build/kp-dirs/rv.err build/kp-dirs/free-rv.err build/kp-dirs/free-rv.out; exit 1; }
+	@echo "kp-dirs: 1 passed (jit, aot, free-rv)"
+
 ## ---- the input-dependent corpus (tests/kp-io) ----
 ## Programs that read stdin or take arguments: a .input file is the program's
 ## stdin and a .args file its command line (ParamStr/ParamCount), with the
@@ -801,8 +902,25 @@ build/kpfree-rv/co_switch_rv.o: runtime/co_switch_rv.S build/skj-as-rv | build/k
 build/kpfree-rv/io_free_rv.o: runtime/io_free_rv.S build/skj-as-rv | build/kpfree-rv
 	./build/skj-as-rv -o $@ $<
 
+# libc's buffered-stream core backs the freestanding console I/O, so the Kobold
+# runtime and the C runtime share one stdio buffering layer.  It builds on the
+# write/read seam only (no malloc, no printf engine), so it links in alone.
+build/kpfree-rv/stdio_core.o: libc/stdio_core.c libc/stdio_impl.h $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	./build/skj-cc-rv -Iinclude -Ilibc -o $(@:.o=.s) libc/stdio_core.c
+	./build/skj-as-rv -o $@ $(@:.o=.s)
+
+## strtod + ctype: io_free.c's real parse (scan_real) is shared from libc's strtod.
+build/kpfree-rv/strtod.o: libc/strtod.c $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	./build/skj-cc-rv -Iinclude -Ilibc -o $(@:.o=.s) libc/strtod.c
+	./build/skj-as-rv -o $@ $(@:.o=.s)
+
+build/kpfree-rv/ctype.o: libc/ctype.c $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	./build/skj-cc-rv -Iinclude -Ilibc -o $(@:.o=.s) libc/ctype.c
+	./build/skj-as-rv -o $@ $(@:.o=.s)
+
 KPFREE_RV_ARCHIVE := build/kpfree-rv/rt_free.o build/kpfree-rv/io_free.o \
-                     build/kpfree-rv/io_free_rv.o \
+                     build/kpfree-rv/io_free_rv.o build/kpfree-rv/stdio_core.o \
+                     build/kpfree-rv/strtod.o build/kpfree-rv/ctype.o \
                      build/kpfree-rv/str_core.o build/kpfree-rv/dynarr.o \
                      build/kpfree-rv/map.o build/kpfree-rv/soft64.o \
                      build/kpfree-rv/rv_i64_aot_alias.o build/kpfree-rv/rv_jit_i64.o \
@@ -826,7 +944,7 @@ build/libkpaot-rv-free.a: $(KPFREE_RV_ARCHIVE) | build/kpfree-rv
 ## exit 1).  Built strict-ColdFire (-mcpu=5475) with M68K_CC so skj-run's CFV4e
 ## core runs it, and assembled by skj-as to keep the path binutils-free.
 # Deferred (=, not :=): CF_RT_CFLAGS is defined further down the Makefile.
-KP_HDRS_CF := kobold/str.h kobold/dynarr.h kobold/map.h kobold/obj.h kobold/co.h \
+KP_HDRS_CF := kobold/str.h kobold/dynarr.h kobold/map.h kobold/obj.h kobold/gheap_core.h kobold/co.h \
               kobold/handle.h kobold/lowmem.h kobold/rt_glue.h kobold/kp_abi.h
 # The C runtime is compiled by skj-cc (the in-tree C compiler) to GAS asm and
 # assembled by skj-as, so the ColdFire kp runtime is built with no external
@@ -866,8 +984,24 @@ build/kpfree-cf/kp_crt_cf.o: kobold/kp_crt_cf.S build/skj-as | build/kpfree-cf
 build/kpfree-cf/io_free_cf.o: runtime/io_free_cf.S build/skj-as | build/kpfree-cf
 	./build/skj-as -o $@ $<
 
+# libc's buffered-stream core backs the freestanding console I/O (see the rv rule
+# above); it builds on the write/read seam only.
+build/kpfree-cf/stdio_core.o: libc/stdio_core.c libc/stdio_impl.h $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	./build/skj-cc -Iinclude -Ilibc -o $(@:.o=.s) libc/stdio_core.c
+	./build/skj-as -o $@ $(@:.o=.s)
+
+# strtod + ctype: io_free.c's real parse (scan_real) is shared from libc's strtod.
+build/kpfree-cf/strtod.o: libc/strtod.c $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	./build/skj-cc -Iinclude -Ilibc -o $(@:.o=.s) libc/strtod.c
+	./build/skj-as -o $@ $(@:.o=.s)
+
+build/kpfree-cf/ctype.o: libc/ctype.c $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	./build/skj-cc -Iinclude -Ilibc -o $(@:.o=.s) libc/ctype.c
+	./build/skj-as -o $@ $(@:.o=.s)
+
 KPFREE_CF_ARCHIVE := build/kpfree-cf/rt_free.o build/kpfree-cf/io_free.o \
-                     build/kpfree-cf/io_free_cf.o \
+                     build/kpfree-cf/io_free_cf.o build/kpfree-cf/stdio_core.o \
+                     build/kpfree-cf/strtod.o build/kpfree-cf/ctype.o \
                      build/kpfree-cf/str_core.o build/kpfree-cf/dynarr.o \
                      build/kpfree-cf/map.o build/kpfree-cf/soft64.o \
                      build/kpfree-cf/co_free.o build/kpfree-cf/math_free.o \
@@ -1024,10 +1158,10 @@ build/skj-run: $(EMU_SRC) $(EMU_HDR) dwarf/dwread.h build/version.h | build
 
 ## ColdFire assembler
 AS_SRC := as/main.c as/asm_lex.c as/asm_obj.c as/parse.c as/encode.c as/elf.c \
-          ir/util.c ir/arena.c
+          dwarf/dwarf.c ir/util.c ir/arena.c
 
-build/skj-as: $(AS_SRC) as/as.h as/asm_lex.h as/asm_obj.h | build
-	$(CC) $(CFLAGS) -Ias -Iir -o $@ $(AS_SRC)
+build/skj-as: $(AS_SRC) as/as.h as/asm_lex.h as/asm_obj.h dwarf/dwarf.h | build
+	$(CC) $(CFLAGS) -Ias -Iir -Idwarf -o $@ $(AS_SRC)
 
 ## RISC-V RV32 assembler (shares the lexer + object helpers with skj-as)
 AS_RV_SRC := as/rv_main.c as/asm_lex.c as/asm_obj.c as/rv_parse.c \
@@ -1040,10 +1174,11 @@ build/skj-as-rv: $(AS_RV_SRC) as/rv.h as/asm_lex.h as/asm_obj.h dwarf/dwarf.h | 
 ## MIPS I assembler (shares the lexer + object helpers with skj-as)
 ## Built up in steps; step 2 encodes the instruction set.  See doc/tools/mips.md.
 AS_MIPS_SRC := as/mips_main.c as/asm_lex.c as/asm_obj.c as/mips_parse.c \
-               as/mips_encode.c as/mips_elf.c as/mips_sched.c ir/util.c ir/arena.c
+               as/mips_encode.c as/mips_elf.c as/mips_sched.c dwarf/dwarf.c \
+               ir/util.c ir/arena.c
 
-build/skj-as-mips: $(AS_MIPS_SRC) as/mips.h as/asm_lex.h as/asm_obj.h | build
-	$(CC) $(CFLAGS) -Ias -Iir -o $@ $(AS_MIPS_SRC)
+build/skj-as-mips: $(AS_MIPS_SRC) as/mips.h as/asm_lex.h as/asm_obj.h dwarf/dwarf.h | build
+	$(CC) $(CFLAGS) -Ias -Iir -Idwarf -o $@ $(AS_MIPS_SRC)
 
 ## skj-ld linker
 LD_SRC := ld/main.c ld/elf_read.c ld/script.c ld/link.c ld/elf_write.c ld/mapfile.c ld/archive.c ir/util.c ir/arena.c
@@ -1084,8 +1219,8 @@ build/%.s: tests/%.tc build/skj-tinc | build
 build/%.o: build/%.s
 	$(M68K_AS) -o $@ $<
 
-build/start.o: runtime/start.S | build
-	$(M68K_AS) -o $@ $<
+build/start.o: runtime/start.S runtime/syscall_cf.S | build
+	$(M68K_AS) -Iruntime -o $@ $<
 
 ## _Float16 conversion helpers (integer-only, cross-compiled C)
 build/half.o: runtime/half.c | build
@@ -1140,8 +1275,8 @@ build/rv/%.s: tests/%.tc build/skj-tinc-rv | build/rv
 build/rv/%.o: build/rv/%.s
 	$(RV_AS) -march=rv32im -mabi=ilp32 -o $@ $<
 
-build/rv/start.o: runtime/start_rv.S | build/rv
-	$(RV_AS) -march=rv32im -mabi=ilp32 -o $@ $<
+build/rv/start.o: runtime/start_rv.S runtime/syscall_rv.S | build/rv
+	$(RV_AS) -Iruntime -march=rv32im -mabi=ilp32 -o $@ $<
 
 build/rv/%: build/rv/%.o build/rv/start.o
 	$(RV_LD) -m elf32lriscv -o $@ build/rv/start.o $<
@@ -1833,8 +1968,8 @@ build/san/skj-cpp: cpp/main.c $(CPP_SRC) cpp/cpp.h cpp/internal.h build/version.
 build/san/skj-cc: $(CC_SRC) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -DCC_M68K $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC)
 
-build/san/skj-as: $(AS_SRC) as/as.h as/asm_lex.h as/asm_obj.h build/version.h | build build/san
-	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Ias -Iir -o $@ $(AS_SRC)
+build/san/skj-as: $(AS_SRC) as/as.h as/asm_lex.h as/asm_obj.h dwarf/dwarf.h build/version.h | build build/san
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Ias -Iir -Idwarf -o $@ $(AS_SRC)
 
 build/san/skj-ld: $(LD_SRC) ld/ld.h ld/mapfile.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Ild -Iir -o $@ $(LD_SRC)
@@ -3038,17 +3173,73 @@ test-kp-rv-loc: build/skj-kpc build/skj-kp-rv build/skj-as-rv
 	@./build/skj-as-rv -o build/debug/kloc_g.o build/debug/kloc_g.s \
 	     && echo "PASS: kp-rv -g assembly assembles"
 
+## Kobold DWARF end to end (the Kobold twin of test-rv-addr2line): a -g Kobold
+## module compiles to a linked rv32 executable whose DWARF a stock toolchain
+## reads.  skj-kpc emits the LOC under -g, skj-kp-rv (the shared rv backend, so
+## .loc/.type/.size come for free) emits the directives, skj-as-rv builds the
+## .debug_* sections, and skj-ld-rv relocates them and re-emits the .symtab.
+## skj-addr2line must then agree with GNU addr2line on function and line for
+## every statement, proving a Kobold crash or breakpoint symbolizes like a C one.
+test-kp-rv-dwarf: build/skj-kpc build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
+                  build/skj-addr2line build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a
+	@mkdir -p build/debug
+	@./build/skj-kpc --emit-kpm -g -o build/debug/kdw.kpm tests/debug/loc.pas
+	@./build/skj-kp-rv -o build/debug/kdw.s build/debug/kdw.kpm
+	@./build/skj-as-rv -o build/debug/kdw.o build/debug/kdw.s
+	@./build/skj-ld-rv -o build/debug/kdw.elf build/kpfree-rv/kp_crt_rv.o \
+	     build/debug/kdw.o build/libkpaot-rv-free.a
+	@llvm-dwarfdump --debug-line build/debug/kdw.elf > build/debug/kdw.line
+	@ok=1; n=0; \
+	 for addr in `awk '/ is_stmt/ && !/end_sequence/ {print $$1}' build/debug/kdw.line`; do \
+	     n=`expr $$n + 1`; \
+	     sf=`./build/skj-addr2line -f -e build/debug/kdw.elf $$addr | sed 's:.*/::'`; \
+	     gf=`$(RV_ADDR2LINE) -f -e build/debug/kdw.elf $$addr | sed 's:.*/::'`; \
+	     if [ "$$sf" != "$$gf" ]; then \
+	         echo "FAIL: $$addr skj[$$sf] != gnu[$$gf]"; ok=0; \
+	     fi; \
+	 done; \
+	 if [ "$$n" -lt 1 ]; then echo "FAIL: no statement addresses found"; ok=0; fi; \
+	 if [ "$$ok" = 1 ]; then \
+	     echo "PASS: Kobold -g executable symbolizes, skj-addr2line matches GNU on $$n statements"; \
+	 else exit 1; fi
+
+## A Kobold runtime fault prints a symbolized backtrace, like a C abort.  A
+## failed assert() routes through the freestanding trap (rt_free.c), which calls
+## the same RV_SYS_FATAL ecall C's abort uses, so under skj-run a Kobold trap
+## shows a source-level stack (deep -> mid) and exits 70.  Combines item 2's
+## DWARF (-g) with item 4's trap routing, so it needs both landed.
+test-kp-rv-trap-backtrace: build/skj-kpc build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
+                           build/skj-run build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a
+	@mkdir -p build/debug
+	@./build/skj-kpc --emit-kpm -g -o build/debug/ktrap.kpm tests/debug/ktrap.pas
+	@./build/skj-kp-rv -o build/debug/ktrap.s build/debug/ktrap.kpm
+	@./build/skj-as-rv -o build/debug/ktrap.o build/debug/ktrap.s
+	@./build/skj-ld-rv -o build/debug/ktrap.elf build/kpfree-rv/kp_crt_rv.o \
+	     build/debug/ktrap.o build/libkpaot-rv-free.a
+	@./build/skj-run build/debug/ktrap.elf 2>build/debug/ktrap.err; rc=$$?; \
+	 [ "$$rc" = 70 ] || { echo "FAIL: trap exit $$rc (want 70)"; cat build/debug/ktrap.err; exit 1; }; \
+	 grep -q "assertion failed" build/debug/ktrap.err || { echo "FAIL: no assert message"; cat build/debug/ktrap.err; exit 1; }; \
+	 grep -q "backtrace:" build/debug/ktrap.err || { echo "FAIL: no backtrace"; cat build/debug/ktrap.err; exit 1; }; \
+	 bt=`grep '^#' build/debug/ktrap.err | sed 's/.*0x[0-9a-f]* *//; s/ at .*//'`; \
+	 order=`echo "$$bt" | grep -E 'deep|mid' | tr '\n' ' '`; \
+	 if [ "$$order" = "deep mid " ]; then \
+	     echo "PASS: skj-run Kobold trap backtrace walks deep -> mid, exit 70"; \
+	 else \
+	     echo "FAIL: Kobold trap backtrace order was [$$order]"; \
+	     cat build/debug/ktrap.err; exit 1; \
+	 fi
+
 ## Debug-info line markers (-g) on the Compact Pascal path: skj-pc emits an
 ## IR_LOC per statement and records the source file on each function; the
-## ColdFire backend records each marker as a "| line N" comment.  Assert the
+## ColdFire backend records each marker as a DWARF ".loc" directive.  Assert the
 ## markers appear under -g, are absent without it, and the -g assembly still
 ## assembles with skj-as.
 test-pc-loc: build/skj-pc build/skj-as
 	@mkdir -p build/debug
 	@./build/skj-pc -g -o build/debug/pcloc_g.s tests/debug/loc_pc.pas
 	@./build/skj-pc    -o build/debug/pcloc_n.s tests/debug/loc_pc.pas
-	@g=`grep -c '| line' build/debug/pcloc_g.s`; \
-	 n=`grep -c '| line' build/debug/pcloc_n.s`; \
+	@g=`grep -c '\.loc' build/debug/pcloc_g.s`; \
+	 n=`grep -c '\.loc' build/debug/pcloc_n.s`; \
 	 if [ "$$g" -ge 3 ] && [ "$$n" -eq 0 ]; then \
 	     echo "PASS: pc -g line markers ($$g with -g, $$n without)"; \
 	 else \
@@ -3059,15 +3250,15 @@ test-pc-loc: build/skj-pc build/skj-as
 
 ## Debug-info line markers (-g) on the MooScript path: skj-mooc emits an IR_LOC
 ## per statement and records the source file on each function; the ColdFire
-## backend records each marker as a "| line N" comment.  Assert the markers
+## backend records each marker as a DWARF ".loc" directive.  Assert the markers
 ## appear under -g, are absent without it, and the -g assembly still assembles
 ## with skj-as.
 test-moo-loc: build/skj-mooc build/skj-as
 	@mkdir -p build/debug
 	@./build/skj-mooc -g -o build/debug/mooloc_g.s tests/debug/loc.moo
 	@./build/skj-mooc    -o build/debug/mooloc_n.s tests/debug/loc.moo
-	@g=`grep -c '| line' build/debug/mooloc_g.s`; \
-	 n=`grep -c '| line' build/debug/mooloc_n.s`; \
+	@g=`grep -c '\.loc' build/debug/mooloc_g.s`; \
+	 n=`grep -c '\.loc' build/debug/mooloc_n.s`; \
 	 if [ "$$g" -ge 4 ] && [ "$$n" -eq 0 ]; then \
 	     echo "PASS: moo -g line markers ($$g with -g, $$n without)"; \
 	 else \
@@ -3078,14 +3269,14 @@ test-moo-loc: build/skj-mooc build/skj-as
 
 ## Debug-info line markers (-g) on the TinC path: skj-tinc emits an IR_LOC per
 ## statement and records the source file on each function; the ColdFire backend
-## records each marker as a "| line N" comment.  Assert the markers appear under
+## records each marker as a DWARF ".loc" directive.  Assert the markers appear under
 ## -g, are absent without it, and the -g assembly still assembles with skj-as.
 test-tinc-loc: build/skj-tinc build/skj-as
 	@mkdir -p build/debug
 	@./build/skj-tinc -g -o build/debug/tcloc_g.s tests/debug/loc.tc
 	@./build/skj-tinc    -o build/debug/tcloc_n.s tests/debug/loc.tc
-	@g=`grep -c '| line' build/debug/tcloc_g.s`; \
-	 n=`grep -c '| line' build/debug/tcloc_n.s`; \
+	@g=`grep -c '\.loc' build/debug/tcloc_g.s`; \
+	 n=`grep -c '\.loc' build/debug/tcloc_n.s`; \
 	 if [ "$$g" -ge 5 ] && [ "$$n" -eq 0 ]; then \
 	     echo "PASS: tinc -g line markers ($$g with -g, $$n without)"; \
 	 else \
@@ -3097,14 +3288,14 @@ test-tinc-loc: build/skj-tinc build/skj-as
 ## Debug-info line markers (-g) on the Excelsior path: skj-exc emits an IR_LOC
 ## per statement and records the source file on each function (verbs, funcs,
 ## source bodies and lambdas); the ColdFire backend records each marker as a
-## "| line N" comment.  Assert the markers appear under -g, are absent without
+## DWARF ".loc" directive.  Assert the markers appear under -g, are absent without
 ## it, and the -g assembly still assembles with skj-as.
 test-exc-loc: build/skj-exc build/skj-as
 	@mkdir -p build/debug
 	@./build/skj-exc -g -o build/debug/excloc_g.s tests/debug/loc.exs
 	@./build/skj-exc    -o build/debug/excloc_n.s tests/debug/loc.exs
-	@g=`grep -c '| line' build/debug/excloc_g.s`; \
-	 n=`grep -c '| line' build/debug/excloc_n.s`; \
+	@g=`grep -c '\.loc' build/debug/excloc_g.s`; \
+	 n=`grep -c '\.loc' build/debug/excloc_n.s`; \
 	 if [ "$$g" -ge 5 ] && [ "$$n" -eq 0 ]; then \
 	     echo "PASS: exc -g line markers ($$g with -g, $$n without)"; \
 	 else \
@@ -3299,6 +3490,53 @@ test-rv-addr2line: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-add
 	     echo "PASS: skj-addr2line matches GNU addr2line on $$n statements (function + line)"; \
 	 else exit 1; fi
 
+## The ColdFire twin of test-rv-addr2line: the skj-cc / skj-as / skj-ld path
+## emits big-endian DWARF through to a linked m68k executable, and skj-addr2line
+## must agree with GNU addr2line on function and line for every statement.
+test-cf-addr2line: build/skj-cc build/skj-as build/skj-ld build/skj-addr2line build/start.o
+	@mkdir -p build/debug
+	@./build/skj-cc -g -o build/debug/cfa2l.s tests/debug/loc.c
+	@./build/skj-as -o build/debug/cfa2l.o build/debug/cfa2l.s
+	@./build/skj-ld -o build/debug/cfa2l.elf build/start.o build/debug/cfa2l.o
+	@llvm-dwarfdump --debug-line build/debug/cfa2l.elf > build/debug/cfa2l.line
+	@ok=1; n=0; \
+	 for addr in `awk '/ is_stmt/ && !/end_sequence/ {print $$1}' build/debug/cfa2l.line`; do \
+	     n=`expr $$n + 1`; \
+	     sf=`./build/skj-addr2line -f -e build/debug/cfa2l.elf $$addr | sed 's:.*/::'`; \
+	     gf=`$(M68K_ADDR2LINE) -f -e build/debug/cfa2l.elf $$addr | sed 's:.*/::'`; \
+	     if [ "$$sf" != "$$gf" ]; then \
+	         echo "FAIL: $$addr skj[$$sf] != gnu[$$gf]"; ok=0; \
+	     fi; \
+	 done; \
+	 if [ "$$n" -lt 1 ]; then echo "FAIL: no statement addresses found"; ok=0; fi; \
+	 if [ "$$ok" = 1 ]; then \
+	     echo "PASS: skj-addr2line matches GNU addr2line on $$n ColdFire statements (function + line)"; \
+	 else exit 1; fi
+
+## The MIPS twin of test-rv-addr2line: skj-cc-mips / skj-as-mips / skj-ld-mips
+## emit little-endian DWARF (REL relocations) through to a linked mipsel
+## executable, and skj-addr2line must agree with GNU addr2line on every
+## statement's function and line.
+test-mips-addr2line: build/skj-cc-mips build/skj-as-mips build/skj-ld-mips build/skj-addr2line build/mips/start.o
+	@mkdir -p build/debug
+	@./build/skj-cc-mips -g -o build/debug/ma2l.s tests/debug/loc.c
+	@./build/skj-as-mips -o build/debug/ma2l.o build/debug/ma2l.s
+	@./build/skj-ld-mips -o build/debug/ma2l.elf build/mips/start.o build/debug/ma2l.o
+	@llvm-dwarfdump --debug-line build/debug/ma2l.elf > build/debug/ma2l.line
+	@ok=1; n=0; \
+	 for addr in `awk '/ is_stmt/ && !/end_sequence/ {print $$1}' build/debug/ma2l.line`; do \
+	     n=`expr $$n + 1`; \
+	     sf=`./build/skj-addr2line -f -e build/debug/ma2l.elf $$addr | sed 's:.*/::'`; \
+	     gf=`$(MIPS_ADDR2LINE) -f -e build/debug/ma2l.elf $$addr | sed 's:.*/::'`; \
+	     if [ "$$sf" != "$$gf" ]; then \
+	         echo "FAIL: $$addr skj[$$sf] != gnu[$$gf]"; ok=0; \
+	     fi; \
+	 done; \
+	 if [ "$$n" -lt 1 ]; then echo "FAIL: no statement addresses found"; ok=0; fi; \
+	 if [ "$$ok" = 1 ]; then \
+	     echo "PASS: skj-addr2line matches GNU addr2line on $$n MIPS statements (function + line)"; \
+	 else exit 1; fi
+
 ## skj-run fault backtrace (item 5): a nested call chain faults through a null
 ## read, and skj-run walks the frame-pointer chain and symbolizes it with the
 ## shared DWARF reader.  Check the frames name the functions in call order
@@ -3317,6 +3555,60 @@ test-rv-backtrace: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-run
 	     echo "FAIL: backtrace order was [$$order]"; \
 	     cat build/debug/crash.err; exit 1; \
 	 fi
+
+## An abort/assert prints the same symbolized backtrace as a hardware fault.
+## A failed assert calls abort(), which issues the skj-run RV_SYS_FATAL ecall:
+## the host walks the frame-pointer chain and symbolizes it before exiting 134,
+## so an intentional abort shows a source-level stack, not just a bare message.
+## The exit code must stay 134 and the backtrace must name the user frames in
+## call order (deep -> mid -> main).  Needs the rv libc for abort/assert.
+test-rv-abort-backtrace: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-run \
+                         build/rv/start.o build/rv/va_rv.o build/rv/soft64_div.o \
+                         build/rv/co_switch.o build/lib/riscv/libc.a
+	@mkdir -p build/debug
+	@./build/skj-cc-rv -g -Iinclude -o build/debug/aborts.s tests/debug/aborts.c
+	@./build/skj-as-rv -o build/debug/aborts.o build/debug/aborts.s
+	@./build/skj-ld-rv -o build/debug/aborts.elf build/rv/start.o build/debug/aborts.o \
+	     build/lib/riscv/libc.a build/rv/va_rv.o build/rv/soft64_div.o build/rv/co_switch.o
+	@./build/skj-run build/debug/aborts.elf 2>build/debug/aborts.err; rc=$$?; \
+	 [ "$$rc" = 134 ] || { echo "FAIL: abort exit $$rc (want 134)"; cat build/debug/aborts.err; exit 1; }; \
+	 grep -q "assertion failed" build/debug/aborts.err || { echo "FAIL: no assert message"; cat build/debug/aborts.err; exit 1; }; \
+	 grep -q "backtrace:" build/debug/aborts.err || { echo "FAIL: no backtrace"; cat build/debug/aborts.err; exit 1; }; \
+	 bt=`grep '^#' build/debug/aborts.err | sed 's/.*0x[0-9a-f]* *//; s/ at .*//'`; \
+	 order=`echo "$$bt" | grep -E 'deep|mid|main' | tr '\n' ' '`; \
+	 if [ "$$order" = "deep mid main " ]; then \
+	     echo "PASS: skj-run abort backtrace walks deep -> mid -> main, exit 134"; \
+	 else \
+	     echo "FAIL: abort backtrace order was [$$order]"; \
+	     cat build/debug/aborts.err; exit 1; \
+	 fi
+
+## dw_backtrace termination guards (host unit test): the backtrace walks a guest
+## frame-pointer chain through a read callback, so a corrupt or looping chain
+## must be bounded by the host.  Drive dw_backtrace with synthetic memory models
+## (an unbounded climb, a self-referential cycle, an unreadable chain, a finite
+## chain) and check it stops at the depth cap and the monotonic-fp check rather
+## than spinning.  Pure host: no DWARF, ELF, or qemu.
+build/bt_loop: tests/debug/bt_loop.c dwarf/dwread.c dwarf/dwread.h ir/arena.c ir/util.c | build
+	$(CC) $(CFLAGS) -Idwarf -Iir -o $@ tests/debug/bt_loop.c dwarf/dwread.c \
+	    ir/arena.c ir/util.c
+test-bt-loop: build/bt_loop
+	@./build/bt_loop
+
+## A wild frame does not crash the backtrace.  A call through a garbage function
+## pointer faults with a wild pc, so skj-run's backtrace starts from a bogus top
+## frame; it must still unwind the intact chain below (wrap, main) and exit 139
+## (SIGSEGV), never crash or hang the host.  The integration twin of test-bt-loop.
+test-rv-wild-backtrace: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-run build/rv/start.o
+	@mkdir -p build/debug
+	@./build/skj-cc-rv -g -o build/debug/wildjump.s tests/debug/wildjump.c
+	@./build/skj-as-rv -o build/debug/wildjump.o build/debug/wildjump.s
+	@./build/skj-ld-rv -o build/debug/wildjump.elf build/rv/start.o build/debug/wildjump.o
+	@./build/skj-run build/debug/wildjump.elf 2>build/debug/wildjump.err; rc=$$?; \
+	 [ "$$rc" = 139 ] || { echo "FAIL: wild jump exit $$rc (want 139)"; cat build/debug/wildjump.err; exit 1; }; \
+	 grep -q "backtrace:" build/debug/wildjump.err || { echo "FAIL: no backtrace"; cat build/debug/wildjump.err; exit 1; }; \
+	 grep -qE '  main( at |$$)' build/debug/wildjump.err || { echo "FAIL: chain below the wild frame not unwound"; cat build/debug/wildjump.err; exit 1; }; \
+	 echo "PASS: skj-run survives a wild frame, unwinds to main, exit 139"
 
 ## skj-run GDB stub (item 6a): drive the --gdb RSP server with gdb-multiarch as
 ## the oracle.  A break at main, a backtrace at a fault (SIGSEGV), and the clean
@@ -3385,6 +3677,262 @@ test-rv-dbg: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-run build
 	 if [ $$ok = 1 ]; then \
 	     echo "PASS: skj-dbg break/continue/backtrace over the RSP, DWARF-symbolized"; \
 	 else cat build/debug/dbg1.out build/debug/dbg2.out; exit 1; fi
+
+## Sandbox file I/O (openat): a guest opens a real host file through the RV32
+## sandbox's openat/read/write/close and copies it to stdout.  This is the
+## first file-I/O step toward running skj-cc/Kobold inside the sandbox.  The
+## skj-run output must match the fixture and qemu-riscv32 (its native openat),
+## and a missing file must fail with exit 2.
+test-rv-sandbox-io: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-run build/rv/start.o
+	@mkdir -p build/sandbox-io
+	@printf 'hello from the sandbox openat\nsecond line\n' > build/sandbox-io/greeting.txt
+	@./build/skj-cc-rv -DPATH='"build/sandbox-io/greeting.txt"' -o build/sandbox-io/cat.s tests/sandbox-io/cat.c
+	@./build/skj-as-rv -o build/sandbox-io/cat.o build/sandbox-io/cat.s
+	@./build/skj-ld-rv -o build/sandbox-io/cat.elf build/rv/start.o build/sandbox-io/cat.o
+	@./build/skj-cc-rv -DPATH='"build/sandbox-io/nope.txt"' -o build/sandbox-io/catm.s tests/sandbox-io/cat.c
+	@./build/skj-as-rv -o build/sandbox-io/catm.o build/sandbox-io/catm.s
+	@./build/skj-ld-rv -o build/sandbox-io/catm.elf build/rv/start.o build/sandbox-io/catm.o
+	@./build/skj-run build/sandbox-io/cat.elf > build/sandbox-io/out.skj 2>/dev/null
+	@$(QEMU_RV) build/sandbox-io/cat.elf > build/sandbox-io/out.qemu 2>/dev/null
+	@rc=0; ./build/skj-run build/sandbox-io/catm.elf >/dev/null 2>&1 || rc=$$?; \
+	 ok=1; \
+	 cmp -s build/sandbox-io/out.skj build/sandbox-io/greeting.txt || { echo "FAIL: skj-run output != fixture"; ok=0; }; \
+	 cmp -s build/sandbox-io/out.skj build/sandbox-io/out.qemu || { echo "FAIL: skj-run != qemu-riscv32"; ok=0; }; \
+	 if [ "$$rc" != 2 ]; then echo "FAIL: missing file gave exit $$rc, expected 2"; ok=0; fi; \
+	 if [ $$ok = 1 ]; then \
+	     echo "PASS: sandbox openat/read/write/close (skj-run matches fixture + qemu; missing file -> exit 2)"; \
+	 else exit 1; fi
+
+DRIVER_LIB_CF   := build/lib/coldfire/crt0.o build/lib/coldfire/half.o build/lib/coldfire/va_cf.o build/lib/coldfire/fini.o build/lib/coldfire/libc.a
+DRIVER_LIB_RV   := build/lib/riscv/crt0.o build/lib/riscv/va_rv.o build/lib/riscv/soft64_div.o build/lib/riscv/fini.o build/lib/riscv/libc.a
+DRIVER_LIB_MIPS := build/lib/mips/crt0.o build/lib/mips/half.o build/lib/mips/va_mips.o build/lib/mips/soft64_div.o build/lib/mips/fini.o build/lib/mips/libc.a
+
+## Guest libc file I/O + argv (continuing the sandbox openat work): a C program
+## built through the skjcc driver (crt + libc) slurps an input file with the
+## fopen/fseek/ftell/rewind/fread idiom the toolchain's slurp uses, writes it
+## back with fopen/fwrite, and echoes argc and the paths.  Run under skj-run and
+## qemu-riscv32 with argv; the round-trip output and the stdout must agree, which
+## pins the crt argv setup, the open/close/llseek syscall wrappers, and skj-run's
+## openat/llseek against qemu as the reference.
+test-rv-libc-io: build/skjcc $(DRIVER_LIB_RV) build/skj-run
+	@mkdir -p build/libc-io
+	@printf 'line one\nline two\nthe quick brown fox\n' > build/libc-io/in.txt
+	@./build/skjcc -target riscv -o build/libc-io/fileio tests/libc-io/fileio.c
+	@./build/skj-run build/libc-io/fileio build/libc-io/in.txt build/libc-io/out.txt \
+	     > build/libc-io/so.skj 2>&1; rc=$$?; cp build/libc-io/out.txt build/libc-io/out.skj 2>/dev/null; \
+	 [ $$rc = 0 ] || { echo "FAIL: skj-run exit $$rc"; cat build/libc-io/so.skj; exit 1; }
+	@$(QEMU_RV) build/libc-io/fileio build/libc-io/in.txt build/libc-io/out.txt \
+	     > build/libc-io/so.qemu 2>&1; rc=$$?; cp build/libc-io/out.txt build/libc-io/out.qemu 2>/dev/null; \
+	 [ $$rc = 0 ] || { echo "FAIL: qemu exit $$rc"; cat build/libc-io/so.qemu; exit 1; }
+	@ok=1; \
+	 cmp -s build/libc-io/in.txt build/libc-io/out.skj || { echo "FAIL: skj-run round-trip"; ok=0; }; \
+	 cmp -s build/libc-io/in.txt build/libc-io/out.qemu || { echo "FAIL: qemu round-trip"; ok=0; }; \
+	 cmp -s build/libc-io/so.skj build/libc-io/so.qemu || { echo "FAIL: skj-run vs qemu stdout"; ok=0; }; \
+	 grep -q "argc=3" build/libc-io/so.skj || { echo "FAIL: argv not delivered"; ok=0; }; \
+	 if [ $$ok = 1 ]; then \
+	     echo "PASS: libc fopen/fseek/ftell/fread/fwrite + argv (skj-run matches qemu)"; \
+	 else cat build/libc-io/so.skj build/libc-io/so.qemu; exit 1; fi
+
+## statx-backed stat/fstat for rv32: rv32 has no stat/fstat syscall, so the libc
+## stat family (libc/stat.c) goes through statx (#291); the rv32 crt carries the
+## wrapper (runtime/start_rv.S) and skj-run answers statx (emu/guest.c).  A guest
+## stat()s and fstat()s a known 12-byte file; skj-run and qemu-riscv32 must agree
+## and report the real size and type.
+test-rv-stat: build/skjcc $(DRIVER_LIB_RV) build/skj-run
+	@mkdir -p build/libc-io
+	@printf 'hello statx\n' > build/libc-io/stat.txt
+	@./build/skjcc -target riscv -o build/libc-io/statio tests/libc-io/statio.c
+	@./build/skj-run build/libc-io/statio build/libc-io/stat.txt > build/libc-io/stat.skj 2>&1; \
+	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: skj-run exit $$rc"; cat build/libc-io/stat.skj; exit 1; }
+	@$(QEMU_RV) build/libc-io/statio build/libc-io/stat.txt > build/libc-io/stat.qemu 2>&1; \
+	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: qemu exit $$rc"; cat build/libc-io/stat.qemu; exit 1; }
+	@ok=1; \
+	 cmp -s build/libc-io/stat.skj build/libc-io/stat.qemu || { echo "FAIL: skj-run vs qemu stdout"; ok=0; }; \
+	 grep -q "stat size=12 reg=1 dir=0" build/libc-io/stat.skj || { echo "FAIL: wrong stat output"; ok=0; }; \
+	 grep -q "fstat size=12 reg=1" build/libc-io/stat.skj || { echo "FAIL: wrong fstat output"; ok=0; }; \
+	 if [ $$ok = 1 ]; then \
+	     echo "PASS: libc stat/fstat via statx (skj-run matches qemu)"; \
+	 else cat build/libc-io/stat.skj build/libc-io/stat.qemu; exit 1; fi
+
+## The path file operations (mkdir/rename/remove/rmdir) over skj-run's
+## GSYS_MKDIRAT/UNLINKAT/RENAMEAT2 handlers, compared against the real kernel
+## under qemu.  A distinct scratch dir per runner keeps the two from colliding.
+test-rv-fileops: build/skjcc $(DRIVER_LIB_RV) build/skj-run
+	@mkdir -p build/libc-io/pod-skj build/libc-io/pod-qemu
+	@./build/skjcc -target riscv -o build/libc-io/pathops tests/libc-io/pathops.c
+	@./build/skj-run build/libc-io/pathops build/libc-io/pod-skj > build/libc-io/pod.skj 2>&1; \
+	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: skj-run exit $$rc"; cat build/libc-io/pod.skj; exit 1; }
+	@$(QEMU_RV) build/libc-io/pathops build/libc-io/pod-qemu > build/libc-io/pod.qemu 2>&1; \
+	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: qemu exit $$rc"; cat build/libc-io/pod.qemu; exit 1; }
+	@ok=1; \
+	 cmp -s build/libc-io/pod.skj build/libc-io/pod.qemu || { echo "FAIL: skj-run vs qemu stdout"; ok=0; }; \
+	 grep -q "mkdir=0"        build/libc-io/pod.skj || { echo "FAIL: mkdir";   ok=0; }; \
+	 grep -q "rename=0"       build/libc-io/pod.skj || { echo "FAIL: rename";  ok=0; }; \
+	 grep -q "statold=0"      build/libc-io/pod.skj || { echo "FAIL: statold"; ok=0; }; \
+	 grep -q "statnew size=3" build/libc-io/pod.skj || { echo "FAIL: statnew"; ok=0; }; \
+	 grep -q "remove=0"       build/libc-io/pod.skj || { echo "FAIL: remove";  ok=0; }; \
+	 grep -q "rmdir=0"        build/libc-io/pod.skj || { echo "FAIL: rmdir";   ok=0; }; \
+	 grep -q "statdir=0"      build/libc-io/pod.skj || { echo "FAIL: statdir"; ok=0; }; \
+	 if [ $$ok = 1 ]; then \
+	     echo "PASS: libc mkdir/rename/remove/rmdir (skj-run matches qemu)"; \
+	 else cat build/libc-io/pod.skj build/libc-io/pod.qemu; exit 1; fi
+
+## Directory reads (opendir/readdir/closedir) over skj-run's GSYS_GETDENTS64
+## handler, compared against the real kernel under qemu.  Each runner gets its
+## own scratch directory of three known files.
+test-rv-dirs: build/skjcc $(DRIVER_LIB_RV) build/skj-run
+	@mkdir -p build/libc-io
+	@for d in dir-skj dir-qemu; do \
+	    rm -rf build/libc-io/$$d; mkdir -p build/libc-io/$$d; \
+	    : > build/libc-io/$$d/alpha; : > build/libc-io/$$d/beta; : > build/libc-io/$$d/gamma; \
+	 done
+	@./build/skjcc -target riscv -o build/libc-io/dirio tests/libc-io/dirio.c
+	@./build/skj-run build/libc-io/dirio build/libc-io/dir-skj > build/libc-io/dir.skj 2>&1; \
+	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: skj-run exit $$rc"; cat build/libc-io/dir.skj; exit 1; }
+	@$(QEMU_RV) build/libc-io/dirio build/libc-io/dir-qemu > build/libc-io/dir.qemu 2>&1; \
+	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: qemu exit $$rc"; cat build/libc-io/dir.qemu; exit 1; }
+	@ok=1; \
+	 cmp -s build/libc-io/dir.skj build/libc-io/dir.qemu || { echo "FAIL: skj-run vs qemu stdout"; ok=0; }; \
+	 grep -q "entries=3" build/libc-io/dir.skj || { echo "FAIL: entry count"; ok=0; }; \
+	 grep -q "namelen=14" build/libc-io/dir.skj || { echo "FAIL: name lengths"; ok=0; }; \
+	 if [ $$ok = 1 ]; then \
+	     echo "PASS: libc opendir/readdir (skj-run matches qemu)"; \
+	 else cat build/libc-io/dir.skj build/libc-io/dir.qemu; exit 1; fi
+
+## Self-host: build skj-cc itself as an rv32 guest (its own sources compiled by
+## skj-cc-rv and linked against the rv libc), then run it under skj-run to
+## compile a small C program entirely through the sandbox syscalls.  The emitted
+## assembly must match a qemu run of the same in-guest compiler, and assembling,
+## linking and running it must yield the program's own result (add(40,2) == 42).
+## This exercises the full file-I/O surface (open/read/write) plus setjmp, time,
+## getenv and the 64-bit strto* the compiler needs.
+test-rv-selfhost: build/skjcc build/skj-cc-rv build/skj-as-rv build/skj-ld-rv \
+                  $(DRIVER_LIB_RV) build/skj-run tests/selfhost/add.c
+	@mkdir -p build/selfhost
+	@set -e; objs=""; for s in $(CC_SRC_RV); do \
+	    b=$$(basename $$s .c); \
+	    ./build/skjcc -target riscv -DCC_RISCV -c -Ibuild -Icc -Icpp -Iir -Ibackend \
+	        $$s -o build/selfhost/$$b.o; \
+	    objs="$$objs build/selfhost/$$b.o"; \
+	 done; \
+	 ./build/skjcc -target riscv $$objs -o build/selfhost/skj-cc-rv.elf
+	@./build/skj-run build/selfhost/skj-cc-rv.elf -o build/selfhost/add.skj.s \
+	    tests/selfhost/add.c 2>build/selfhost/skj.err \
+	    || { echo "FAIL: skj-run of in-guest skj-cc"; cat build/selfhost/skj.err; exit 1; }
+	@$(QEMU_RV) build/selfhost/skj-cc-rv.elf -o build/selfhost/add.qemu.s \
+	    tests/selfhost/add.c 2>build/selfhost/qemu.err \
+	    || { echo "FAIL: qemu of in-guest skj-cc"; cat build/selfhost/qemu.err; exit 1; }
+	@cmp -s build/selfhost/add.skj.s build/selfhost/add.qemu.s \
+	    || { echo "FAIL: in-guest asm differs skj-run vs qemu"; exit 1; }
+	@./build/skj-as-rv -o build/selfhost/add.o build/selfhost/add.skj.s
+	@./build/skj-ld-rv -o build/selfhost/add.elf build/lib/riscv/crt0.o \
+	    build/selfhost/add.o build/lib/riscv/libc.a
+	@./build/skj-run build/selfhost/add.elf; rc=$$?; \
+	 [ $$rc = 42 ] || { echo "FAIL: in-guest-compiled program exit $$rc (want 42)"; exit 1; }
+	@echo "PASS: skj-cc self-hosts under skj-run (compiled add.c in-guest -> 42)"
+
+## Full translation unit through the sandbox: the in-guest skj-cc (reused from
+## test-rv-selfhost) compiles the compiler's own largest source, cc/lower.c
+## (~4900 lines), under skj-run.  add.c was a toy; this is a real TU with the
+## full preprocessor reading many include files and the biggest functions in
+## the tree, so it exercises the sandbox heap (brk-backed sbrk) and the whole
+## compile path at scale.  The emitted asm must match a qemu run of the same
+## in-guest compiler byte-for-byte, and skj-as-rv must assemble it.
+test-rv-selfhost-full: test-rv-selfhost build/skj-as-rv
+	@mkdir -p build/selfhost-full
+	@FLAGS="-DCC_RISCV -Iinclude -Ibuild -Icc -Icpp -Iir -Ibackend"; \
+	 ./build/skj-run build/selfhost/skj-cc-rv.elf $$FLAGS \
+	     -o build/selfhost-full/lower.skj.s cc/lower.c 2>build/selfhost-full/skj.err \
+	     || { echo "FAIL: skj-run full-TU compile"; cat build/selfhost-full/skj.err; exit 1; }; \
+	 $(QEMU_RV) build/selfhost/skj-cc-rv.elf $$FLAGS \
+	     -o build/selfhost-full/lower.qemu.s cc/lower.c 2>build/selfhost-full/qemu.err \
+	     || { echo "FAIL: qemu full-TU compile"; cat build/selfhost-full/qemu.err; exit 1; }; \
+	 cmp -s build/selfhost-full/lower.skj.s build/selfhost-full/lower.qemu.s \
+	     || { echo "FAIL: full-TU asm differs skj-run vs qemu"; exit 1; }; \
+	 ./build/skj-as-rv -o build/selfhost-full/lower.o build/selfhost-full/lower.skj.s \
+	     || { echo "FAIL: skj-as-rv rejected the full-TU asm"; exit 1; }
+	@echo "PASS: skj-cc translates a full TU (cc/lower.c) in-guest under skj-run == qemu, asm assembles"
+
+## The ColdFire counterpart of test-rv-selfhost: skj-cc built as a ColdFire
+## guest (its own sources via skj-cc + skj-as + skj-ld, linked against the cf
+## libc), run under skj-run to compile add.c through the sandbox syscalls, its
+## asm checked against qemu-m68k, then assembled, linked and run for exit 42.
+## This exercises emit_insn past 32 KiB (the skj-as long-branch form) and the
+## ColdFire crt's argv/environ setup.
+test-cf-selfhost: build/skjcc build/skj-cc build/skj-as build/skj-ld \
+                  $(DRIVER_LIB_CF) build/skj-run tests/selfhost/add.c
+	@mkdir -p build/selfhost-cf
+	@set -e; objs=""; for s in $(CC_SRC); do \
+	    b=$$(basename $$s .c); \
+	    ./build/skjcc -target coldfire -DCC_M68K -c -Ibuild -Icc -Icpp -Iir -Ibackend \
+	        $$s -o build/selfhost-cf/$$b.o; \
+	    objs="$$objs build/selfhost-cf/$$b.o"; \
+	 done; \
+	 ./build/skjcc -target coldfire $$objs -o build/selfhost-cf/skj-cc-cf.elf
+	@./build/skj-run build/selfhost-cf/skj-cc-cf.elf -o build/selfhost-cf/add.skj.s \
+	    tests/selfhost/add.c 2>build/selfhost-cf/skj.err \
+	    || { echo "FAIL: skj-run of in-guest skj-cc"; cat build/selfhost-cf/skj.err; exit 1; }
+	@$(QEMU) build/selfhost-cf/skj-cc-cf.elf -o build/selfhost-cf/add.qemu.s \
+	    tests/selfhost/add.c 2>build/selfhost-cf/qemu.err \
+	    || { echo "FAIL: qemu of in-guest skj-cc"; cat build/selfhost-cf/qemu.err; exit 1; }
+	@cmp -s build/selfhost-cf/add.skj.s build/selfhost-cf/add.qemu.s \
+	    || { echo "FAIL: in-guest asm differs skj-run vs qemu"; exit 1; }
+	@./build/skj-as -o build/selfhost-cf/add.o build/selfhost-cf/add.skj.s
+	@./build/skj-ld -o build/selfhost-cf/add.elf build/lib/coldfire/crt0.o \
+	    build/selfhost-cf/add.o build/lib/coldfire/libc.a
+	@./build/skj-run build/selfhost-cf/add.elf; rc=$$?; \
+	 [ $$rc = 42 ] || { echo "FAIL: in-guest-compiled program exit $$rc (want 42)"; exit 1; }
+	@echo "PASS: skj-cc self-hosts under skj-run (compiled add.c in-guest -> 42, ColdFire)"
+
+## Full translation unit through the ColdFire sandbox, the counterpart of
+## test-rv-selfhost-full: the in-guest skj-cc (reused from test-cf-selfhost)
+## compiles the compiler's own largest source, cc/lower.c (~4900 lines), under
+## skj-run.  add.c was a toy; this is a real TU with the full preprocessor
+## reading many include files and the biggest functions in the tree, so it
+## exercises the ColdFire sandbox heap and the whole compile path at scale.  The
+## emitted asm must match a qemu-m68k run of the same in-guest compiler
+## byte-for-byte, and skj-as (the long-branch form past 32 KiB) must assemble it.
+test-cf-selfhost-full: test-cf-selfhost build/skj-as
+	@mkdir -p build/selfhost-cf-full
+	@FLAGS="-DCC_M68K -Iinclude -Ibuild -Icc -Icpp -Iir -Ibackend"; \
+	 ./build/skj-run build/selfhost-cf/skj-cc-cf.elf $$FLAGS \
+	     -o build/selfhost-cf-full/lower.skj.s cc/lower.c 2>build/selfhost-cf-full/skj.err \
+	     || { echo "FAIL: skj-run full-TU compile"; cat build/selfhost-cf-full/skj.err; exit 1; }; \
+	 $(QEMU) build/selfhost-cf/skj-cc-cf.elf $$FLAGS \
+	     -o build/selfhost-cf-full/lower.qemu.s cc/lower.c 2>build/selfhost-cf-full/qemu.err \
+	     || { echo "FAIL: qemu full-TU compile"; cat build/selfhost-cf-full/qemu.err; exit 1; }; \
+	 cmp -s build/selfhost-cf-full/lower.skj.s build/selfhost-cf-full/lower.qemu.s \
+	     || { echo "FAIL: full-TU asm differs skj-run vs qemu"; exit 1; }; \
+	 ./build/skj-as -o build/selfhost-cf-full/lower.o build/selfhost-cf-full/lower.skj.s \
+	     || { echo "FAIL: skj-as rejected the full-TU asm"; exit 1; }
+	@echo "PASS: skj-cc translates a full TU (cc/lower.c) in-guest under skj-run == qemu, asm assembles (ColdFire)"
+
+## The MIPS counterpart of the self-host tests.  skj-run decodes only ColdFire
+## and RV32 ELFs, so the in-guest compiler runs under qemu-mipsel rather than
+## the sandbox: build skj-cc-mips from its own sources (skj-cc-mips + skj-as-mips
+## + skj-ld-mips, linked against the mips libc), run it under qemu-mipsel to
+## compile add.c, then assemble, link and run the result for exit 42.  This is
+## the one self-host path that pulls open_memstream into the guest libc, since
+## mips_emit.c references it (the .set noreorder scheduler's buffer).
+test-mips-selfhost: build/skjcc build/skj-cc-mips build/skj-as-mips build/skj-ld-mips \
+                    $(DRIVER_LIB_MIPS) tests/selfhost/add.c
+	@mkdir -p build/selfhost-mips
+	@set -e; objs=""; for s in $(CC_SRC_MIPS); do \
+	    b=$$(basename $$s .c); \
+	    ./build/skjcc -target mips -DCC_MIPS -c -Ibuild -Icc -Icpp -Iir -Ibackend \
+	        $$s -o build/selfhost-mips/$$b.o; \
+	    objs="$$objs build/selfhost-mips/$$b.o"; \
+	 done; \
+	 ./build/skjcc -target mips $$objs -o build/selfhost-mips/skj-cc-mips.elf
+	@$(QEMU_MIPS) build/selfhost-mips/skj-cc-mips.elf -o build/selfhost-mips/add.s \
+	    tests/selfhost/add.c 2>build/selfhost-mips/err \
+	    || { echo "FAIL: qemu of in-guest skj-cc"; cat build/selfhost-mips/err; exit 1; }
+	@./build/skj-as-mips -o build/selfhost-mips/add.o build/selfhost-mips/add.s
+	@./build/skj-ld-mips -o build/selfhost-mips/add.elf build/lib/mips/crt0.o \
+	    build/selfhost-mips/add.o build/lib/mips/libc.a
+	@$(QEMU_MIPS) build/selfhost-mips/add.elf; rc=$$?; \
+	 [ $$rc = 42 ] || { echo "FAIL: in-guest-compiled program exit $$rc (want 42)"; exit 1; }
+	@echo "PASS: skj-cc self-hosts under qemu-mipsel (compiled add.c in-guest -> 42, MIPS)"
 
 ## I64 integration test (IR builder → arm64 asm → qemu-aarch64)
 I64_TEST_A64_SRC := tests/test_i64.c $(IR_SRC) $(BE_A64)
@@ -3998,10 +4546,13 @@ build/arm64/co_switch.o: runtime/co_switch_arm64.S | build/arm64
 ## target with that target's skj-cc, assembled with the in-tree assembler, and
 ## archived by skj-ar with a symbol index so the linker pulls only what a hosted
 ## program references.  skjcc links it by default; -ffreestanding omits it.
-LIBC_SRCS := string ctype stdlib printf stdio assert malloc sbrk errno \
-             strerror rand strtod scanf coro threads
+## stat/fstat go through statx on every target (the newer syscall arches have
+## no bare fstat/stat), so each crt carries a statx wrapper and the one
+## libc/stat.c serves them all.
+LIBC_SRCS := string ctype stdlib printf stdio_core stdio memstream assert malloc sbrk errno \
+             strerror rand strtod scanf coro threads stat fileops dirent time getenv
 LIBC_SRC_FILES := $(addprefix libc/,$(addsuffix .c,$(LIBC_SRCS)))
-LIBC_HDRS := $(wildcard include/*.h) libc/fmt.h
+LIBC_HDRS := $(wildcard include/*.h) $(wildcard include/sys/*.h) libc/fmt.h libc/stdio_impl.h
 
 ## printf's floating conversions (f F e E g G a A) are a compile-time option
 ## (SKJ_LIBC_FLOAT in libc/printf.c): defined here, the shipped libc.a formats
@@ -4013,8 +4564,11 @@ LIBC_CFLAGS_CF   := -DSKJ_LIBC_FLOAT
 LIBC_CFLAGS_RV   := -DSKJ_LIBC_FLOAT
 LIBC_CFLAGS_MIPS := -DSKJ_LIBC_FLOAT
 
+build/setjmp_cf.o: runtime/setjmp_cf.S build/skj-as | build
+	./build/skj-as -o $@ $<
+
 build/lib/coldfire/libc.a: build/skj-cc build/skj-as build/skj-ar \
-                           $(LIBC_SRC_FILES) $(LIBC_HDRS) build/co_switch_cf.o | build
+                           $(LIBC_SRC_FILES) $(LIBC_HDRS) build/co_switch_cf.o build/setjmp_cf.o | build
 	@mkdir -p build/lib/coldfire/obj
 	@for s in $(LIBC_SRCS); do \
 	    ./build/skj-cc $(LIBC_CFLAGS_CF) -o build/lib/coldfire/obj/$$s.s libc/$$s.c && \
@@ -4022,10 +4576,13 @@ build/lib/coldfire/libc.a: build/skj-cc build/skj-as build/skj-ar \
 	    || exit 1; \
 	done
 	@rm -f $@
-	@./build/skj-ar rcs $@ $(addprefix build/lib/coldfire/obj/,$(addsuffix .o,$(LIBC_SRCS))) build/co_switch_cf.o
+	@./build/skj-ar rcs $@ $(addprefix build/lib/coldfire/obj/,$(addsuffix .o,$(LIBC_SRCS))) build/co_switch_cf.o build/setjmp_cf.o
+
+build/rv/setjmp.o: runtime/setjmp_rv.S build/skj-as-rv | build/rv
+	./build/skj-as-rv -o $@ $<
 
 build/lib/riscv/libc.a: build/skj-cc-rv build/skj-as-rv build/skj-ar \
-                        $(LIBC_SRC_FILES) $(LIBC_HDRS) build/rv/co_switch.o | build
+                        $(LIBC_SRC_FILES) $(LIBC_HDRS) build/rv/co_switch.o build/rv/setjmp.o | build
 	@mkdir -p build/lib/riscv/obj
 	@for s in $(LIBC_SRCS); do \
 	    ./build/skj-cc-rv $(LIBC_CFLAGS_RV) -o build/lib/riscv/obj/$$s.s libc/$$s.c && \
@@ -4033,10 +4590,13 @@ build/lib/riscv/libc.a: build/skj-cc-rv build/skj-as-rv build/skj-ar \
 	    || exit 1; \
 	done
 	@rm -f $@
-	@./build/skj-ar rcs $@ $(addprefix build/lib/riscv/obj/,$(addsuffix .o,$(LIBC_SRCS))) build/rv/co_switch.o
+	@./build/skj-ar rcs $@ $(addprefix build/lib/riscv/obj/,$(addsuffix .o,$(LIBC_SRCS))) build/rv/co_switch.o build/rv/setjmp.o
+
+build/mips/setjmp.o: runtime/setjmp_mips.S build/skj-as-mips | build/mips
+	./build/skj-as-mips -o $@ $<
 
 build/lib/mips/libc.a: build/skj-cc-mips build/skj-as-mips build/skj-ar \
-                       $(LIBC_SRC_FILES) $(LIBC_HDRS) build/mips/co_switch.o | build
+                       $(LIBC_SRC_FILES) $(LIBC_HDRS) build/mips/co_switch.o build/mips/setjmp.o | build
 	@mkdir -p build/lib/mips/obj
 	@for s in $(LIBC_SRCS); do \
 	    ./build/skj-cc-mips $(LIBC_CFLAGS_MIPS) -o build/lib/mips/obj/$$s.s libc/$$s.c && \
@@ -4044,7 +4604,7 @@ build/lib/mips/libc.a: build/skj-cc-mips build/skj-as-mips build/skj-ar \
 	    || exit 1; \
 	done
 	@rm -f $@
-	@./build/skj-ar rcs $@ $(addprefix build/lib/mips/obj/,$(addsuffix .o,$(LIBC_SRCS))) build/mips/co_switch.o
+	@./build/skj-ar rcs $@ $(addprefix build/lib/mips/obj/,$(addsuffix .o,$(LIBC_SRCS))) build/mips/co_switch.o build/mips/setjmp.o
 
 ## fini.o: exit/atexit and the finalizer the crt calls when main returns.  It
 ## is force-linked (not archived) so the crt's weak __libc_fini reference
@@ -4062,10 +4622,6 @@ build/lib/mips/fini.o: build/skj-cc-mips build/skj-as-mips libc/fini.c $(LIBC_HD
 	@mkdir -p $(@D)
 	@./build/skj-cc-mips -o $(@D)/fini.s libc/fini.c
 	@./build/skj-as-mips -o $@ $(@D)/fini.s
-
-DRIVER_LIB_CF   := build/lib/coldfire/crt0.o build/lib/coldfire/half.o build/lib/coldfire/va_cf.o build/lib/coldfire/fini.o build/lib/coldfire/libc.a
-DRIVER_LIB_RV   := build/lib/riscv/crt0.o build/lib/riscv/va_rv.o build/lib/riscv/soft64_div.o build/lib/riscv/fini.o build/lib/riscv/libc.a
-DRIVER_LIB_MIPS := build/lib/mips/crt0.o build/lib/mips/half.o build/lib/mips/va_mips.o build/lib/mips/soft64_div.o build/lib/mips/fini.o build/lib/mips/libc.a
 
 ## The cross driver end to end: build and run a self-checking program (exit 42)
 ## for each in-tree (binutils-free) target through the one skjcc command, plus
@@ -4159,7 +4715,7 @@ check-libc-arm64: build/skj-cc-arm64 build/arm64/start_aapcs.o build/arm64/va.o 
 	@CCBIN="$(CURDIR)/build/skj-cc-arm64" \
 	 ASM="$(A64_AS) -o" \
 	 LD="$(A64_LD) -o" \
-	 QEMU="$(QEMU_A64)" \
+	 QEMU="$(firstword $(QEMU_A64))" \
 	 START="$(CURDIR)/build/arm64/start_aapcs.o" \
 	 HALF="$(CURDIR)/build/arm64/va.o $(CURDIR)/build/arm64/soft64.o $(CURDIR)/build/arm64/co_switch.o" \
 	 OUTDIR="$(CURDIR)/build/libc-arm64" \
@@ -4566,6 +5122,26 @@ check-rvas: build/skj-as-rv build/skj-ld-rv build/skj-run
 ## suites, plus the IR-builder integration tests (fpu / i64 / unsigned ops).
 ## ColdFire (qemu-m68k), RISC-V (qemu-riscv32, hardware float), x86-64
 ## (qemu-x86_64), AArch64 (qemu-aarch64).
+## Every skj-* tool recognizes -h / --help: prints its usage and exits 0.  One
+## representative per distinct entry point (the cross variants share a main.c
+## with the host tool, and skj-kpc covers the kpcom seed).  This keeps the -h
+## surface uniform as tools are added.
+HELP_TOOLS := skj-tinc skj-sc skj-mooc skj-pc skj-cc skj-cpp skj-exc skj-jit \
+              skj-as skj-as-rv skj-as-mips skj-ld skj-ld-rv skj-ld-mips skj-ar \
+              skj-run skj-addr2line skj-dbg skj-kp skj-kp-jit skj-kp-patrol \
+              skj-kpc
+test-help: $(addprefix build/,$(HELP_TOOLS))
+	@ok=1; \
+	 for t in $(HELP_TOOLS); do \
+	     out=`./build/$$t -h 2>&1`; rc=$$?; \
+	     if [ $$rc != 0 ] || ! printf '%s' "$$out" | grep -qi usage; then \
+	         echo "FAIL: $$t -h (rc=$$rc)"; ok=0; \
+	     fi; \
+	 done; \
+	 if [ $$ok = 1 ]; then \
+	     echo "PASS: -h prints usage and exits 0 on all $(words $(HELP_TOOLS)) tools"; \
+	 else exit 1; fi
+
 check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc \
            test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm \
            check-exc-x86-64-asm check-exc-arm64-asm \
@@ -4580,15 +5156,16 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp c
            test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 \
            test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 \
            check-rvas check-cc-rv-skj check-exc-rv-skj \
-           test-cc-rv-loc test-kp-rv-loc test-pc-loc test-moo-loc test-tinc-loc \
+           test-cc-rv-loc test-kp-rv-loc test-kp-rv-dwarf test-kp-rv-trap-backtrace test-pc-loc test-moo-loc test-tinc-loc \
            test-exc-loc test-dwarf-line test-rv-stt-func test-rv-debug-sections \
-           test-rv-debug-link test-rv-addr2line test-rv-backtrace \
-           test-rv-dbg test-rv-gdb \
+           test-rv-debug-link test-rv-addr2line test-rv-backtrace test-rv-abort-backtrace \
+           test-bt-loop test-rv-wild-backtrace \
+           test-rv-dbg test-rv-gdb test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-help \
            check-cc-rv-psabi test-cc-rv-psabi-interop \
            test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive \
            test-cc-rv-psabi-struct test-cc-driver check-libc \
            check-kp check-kpcom \
-           check-kp-frontend check-kp-jit check-kp-aot check-kp-corpus check-kp-corpus-cf check-kp-multi check-kp-io check-kp-inc
+           check-kp-frontend check-kp-jit check-kp-aot check-kp-corpus check-kp-corpus-cf check-kp-multi check-kp-files check-kp-dirs check-kp-io check-kp-inc
 	@echo "All architecture test suites passed."
 
 clean:
@@ -4607,4 +5184,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-exc-rv-emu check-exc-rv-emu-san test-exc-coro-overflow check-emu check-rv-emu check-exc-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-exc-x86-64-asm check-exc-arm64-asm check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke check-exc-jit-arm64 test-gc test-coro test-threads test-libexc-guest32 test-jit-arena test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free coverage-codegen clean FORCE
+.PHONY: all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-exc-rv-emu check-exc-rv-emu-san test-exc-coro-overflow check-emu check-rv-emu check-exc-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-exc-x86-64-asm check-exc-arm64-asm check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke check-exc-jit-arm64 test-gc test-coro test-threads test-libexc-guest32 test-jit-arena test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-abort-backtrace test-bt-loop test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line coverage-codegen clean FORCE

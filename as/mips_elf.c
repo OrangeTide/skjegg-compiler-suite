@@ -40,6 +40,7 @@
 #define STB_GLOBAL   1
 #define STB_WEAK     2
 #define STT_NOTYPE   0
+#define STT_FUNC     2
 #define STT_SECTION  3
 
 #define SHN_UNDEF    0
@@ -182,11 +183,16 @@ enum {
     SH_RODATA,
     SH_DATA,
     SH_BSS,
+    SH_DEBUG_LINE,          /* DWARF (-g): non-alloc PROGBITS */
+    SH_DEBUG_INFO,
+    SH_DEBUG_ABBREV,
     SH_SYMTAB,
     SH_STRTAB,
     SH_REL_TEXT,
     SH_REL_RODATA,
     SH_REL_DATA,
+    SH_REL_DEBUG_LINE,      /* the two debug sections with address relocations */
+    SH_REL_DEBUG_INFO,
     SH_SHSTRTAB,
     SH_COUNT,
 };
@@ -196,11 +202,14 @@ static int
 msec_shndx(int msec)
 {
     switch (msec) {
-    case MSEC_TEXT:   return SH_TEXT;
-    case MSEC_RODATA: return SH_RODATA;
-    case MSEC_DATA:   return SH_DATA;
-    case MSEC_BSS:    return SH_BSS;
-    default:          return SHN_UNDEF;
+    case MSEC_TEXT:          return SH_TEXT;
+    case MSEC_RODATA:        return SH_RODATA;
+    case MSEC_DATA:          return SH_DATA;
+    case MSEC_BSS:           return SH_BSS;
+    case MSEC_DEBUG_LINE:    return SH_DEBUG_LINE;
+    case MSEC_DEBUG_INFO:    return SH_DEBUG_INFO;
+    case MSEC_DEBUG_ABBREV:  return SH_DEBUG_ABBREV;
+    default:                 return SHN_UNDEF;
     }
 }
 
@@ -238,9 +247,14 @@ mips_elf_write(struct mips_asm *a, FILE *out)
     shname[SH_BSS] = strtab_add(&shstrtab, ".bss");
     shname[SH_SYMTAB] = strtab_add(&shstrtab, ".symtab");
     shname[SH_STRTAB] = strtab_add(&shstrtab, ".strtab");
+    shname[SH_DEBUG_LINE] = strtab_add(&shstrtab, ".debug_line");
+    shname[SH_DEBUG_INFO] = strtab_add(&shstrtab, ".debug_info");
+    shname[SH_DEBUG_ABBREV] = strtab_add(&shstrtab, ".debug_abbrev");
     shname[SH_REL_TEXT] = strtab_add(&shstrtab, ".rel.text");
     shname[SH_REL_RODATA] = strtab_add(&shstrtab, ".rel.rodata");
     shname[SH_REL_DATA] = strtab_add(&shstrtab, ".rel.data");
+    shname[SH_REL_DEBUG_LINE] = strtab_add(&shstrtab, ".rel.debug_line");
+    shname[SH_REL_DEBUG_INFO] = strtab_add(&shstrtab, ".rel.debug_info");
     shname[SH_SHSTRTAB] = strtab_add(&shstrtab, ".shstrtab");
 
     /* Symbol table: null, section syms, local defined, global/undefined. */
@@ -267,8 +281,9 @@ mips_elf_write(struct mips_asm *a, FILE *out)
         esyms[nesyms] = (struct elf_sym){
             .st_name = (uint32_t)strtab_add(&strtab, a->st.syms[k].name),
             .st_value = a->st.syms[k].value,
-            .st_size = 0,
-            .st_info = ELF32_ST_INFO(STB_LOCAL, STT_NOTYPE),
+            .st_size = a->st.syms[k].size,
+            .st_info = ELF32_ST_INFO(STB_LOCAL,
+                a->st.syms[k].is_func ? STT_FUNC : STT_NOTYPE),
             .st_other = 0,
             .st_shndx = (uint16_t)msec_shndx(a->st.syms[k].section),
         };
@@ -288,9 +303,10 @@ mips_elf_write(struct mips_asm *a, FILE *out)
         esyms[nesyms] = (struct elf_sym){
             .st_name = (uint32_t)strtab_add(&strtab, a->st.syms[k].name),
             .st_value = a->st.syms[k].defined ? a->st.syms[k].value : 0,
-            .st_size = 0,
+            .st_size = a->st.syms[k].size,
             .st_info = ELF32_ST_INFO(
-                a->st.syms[k].weak ? STB_WEAK : STB_GLOBAL, STT_NOTYPE),
+                a->st.syms[k].weak ? STB_WEAK : STB_GLOBAL,
+                a->st.syms[k].is_func ? STT_FUNC : STT_NOTYPE),
             .st_other = 0,
             .st_shndx = shndx,
         };
@@ -343,6 +359,13 @@ mips_elf_write(struct mips_asm *a, FILE *out)
     sec_off[MSEC_TEXT] = offset;   offset += (uint32_t)len[MSEC_TEXT];
     sec_off[MSEC_RODATA] = offset; offset += (uint32_t)len[MSEC_RODATA];
     sec_off[MSEC_DATA] = offset;   offset += (uint32_t)len[MSEC_DATA];
+    /* the non-alloc debug sections ride after the loadable data */
+    sec_off[MSEC_DEBUG_LINE] = offset;
+    offset += (uint32_t)len[MSEC_DEBUG_LINE];
+    sec_off[MSEC_DEBUG_INFO] = offset;
+    offset += (uint32_t)len[MSEC_DEBUG_INFO];
+    sec_off[MSEC_DEBUG_ABBREV] = offset;
+    offset += (uint32_t)len[MSEC_DEBUG_ABBREV];
     sec_off[MSEC_BSS] = offset;    /* NOBITS: no file bytes */
 
     symtab_off = offset;           offset += (uint32_t)symtab_size;
@@ -351,6 +374,11 @@ mips_elf_write(struct mips_asm *a, FILE *out)
     rel_off[MSEC_TEXT] = offset;   offset += (uint32_t)rel_size[MSEC_TEXT];
     rel_off[MSEC_RODATA] = offset; offset += (uint32_t)rel_size[MSEC_RODATA];
     rel_off[MSEC_DATA] = offset;   offset += (uint32_t)rel_size[MSEC_DATA];
+    rel_off[MSEC_DEBUG_LINE] = offset;
+    offset += (uint32_t)rel_size[MSEC_DEBUG_LINE];
+    rel_off[MSEC_DEBUG_INFO] = offset;
+    offset += (uint32_t)rel_size[MSEC_DEBUG_INFO];
+    /* .debug_abbrev has no relocations */
 
     shstrtab_off = offset;         offset += (uint32_t)shstrtab.len;
     shdr_off = offset;
@@ -406,6 +434,24 @@ mips_elf_write(struct mips_asm *a, FILE *out)
     put32(shdr[SH_BSS] + 20, (uint32_t)len[MSEC_BSS]);
     put32(shdr[SH_BSS] + 32, sec_addralign(&a->sections[MSEC_BSS]));
 
+    /* SH_DEBUG_LINE / INFO / ABBREV: non-alloc PROGBITS (flags 0, addr 0) */
+    {
+        struct { int sh; int msec; } dbg[3] = {
+            { SH_DEBUG_LINE,   MSEC_DEBUG_LINE },
+            { SH_DEBUG_INFO,   MSEC_DEBUG_INFO },
+            { SH_DEBUG_ABBREV, MSEC_DEBUG_ABBREV },
+        };
+        int i;
+        for (i = 0; i < 3; i++) {
+            int sh = dbg[i].sh;
+            put32(shdr[sh] + 0, (uint32_t)shname[sh]);
+            put32(shdr[sh] + 4, SHT_PROGBITS);
+            put32(shdr[sh] + 16, sec_off[dbg[i].msec]);
+            put32(shdr[sh] + 20, (uint32_t)len[dbg[i].msec]);
+            put32(shdr[sh] + 32, 1);
+        }
+    }
+
     /* SH_SYMTAB */
     put32(shdr[SH_SYMTAB] + 0, (uint32_t)shname[SH_SYMTAB]);
     put32(shdr[SH_SYMTAB] + 4, SHT_SYMTAB);
@@ -425,13 +471,15 @@ mips_elf_write(struct mips_asm *a, FILE *out)
 
     /* SH_REL_TEXT / RODATA / DATA */
     {
-        struct { int sh; int msec; int target_sh; } rel[3] = {
+        struct { int sh; int msec; int target_sh; } rel[5] = {
             { SH_REL_TEXT,   MSEC_TEXT,   SH_TEXT },
             { SH_REL_RODATA, MSEC_RODATA, SH_RODATA },
             { SH_REL_DATA,   MSEC_DATA,   SH_DATA },
+            { SH_REL_DEBUG_LINE, MSEC_DEBUG_LINE, SH_DEBUG_LINE },
+            { SH_REL_DEBUG_INFO, MSEC_DEBUG_INFO, SH_DEBUG_INFO },
         };
         int i;
-        for (i = 0; i < 3; i++) {
+        for (i = 0; i < 5; i++) {
             int sh = rel[i].sh;
             put32(shdr[sh] + 0, (uint32_t)shname[sh]);
             put32(shdr[sh] + 4, SHT_REL);
@@ -459,6 +507,13 @@ mips_elf_write(struct mips_asm *a, FILE *out)
         fwrite(a->sections[MSEC_RODATA].data, 1, len[MSEC_RODATA], out);
     if (len[MSEC_DATA] > 0)
         fwrite(a->sections[MSEC_DATA].data, 1, len[MSEC_DATA], out);
+    if (len[MSEC_DEBUG_LINE] > 0)
+        fwrite(a->sections[MSEC_DEBUG_LINE].data, 1, len[MSEC_DEBUG_LINE], out);
+    if (len[MSEC_DEBUG_INFO] > 0)
+        fwrite(a->sections[MSEC_DEBUG_INFO].data, 1, len[MSEC_DEBUG_INFO], out);
+    if (len[MSEC_DEBUG_ABBREV] > 0)
+        fwrite(a->sections[MSEC_DEBUG_ABBREV].data, 1,
+               len[MSEC_DEBUG_ABBREV], out);
 
     for (k = 0; k < nsyms_total; k++) {
         uint8_t sbuf[16];
@@ -474,6 +529,10 @@ mips_elf_write(struct mips_asm *a, FILE *out)
         fwrite(rel_buf[MSEC_RODATA], 1, rel_size[MSEC_RODATA], out);
     if (rel_size[MSEC_DATA] > 0)
         fwrite(rel_buf[MSEC_DATA], 1, rel_size[MSEC_DATA], out);
+    if (rel_size[MSEC_DEBUG_LINE] > 0)
+        fwrite(rel_buf[MSEC_DEBUG_LINE], 1, rel_size[MSEC_DEBUG_LINE], out);
+    if (rel_size[MSEC_DEBUG_INFO] > 0)
+        fwrite(rel_buf[MSEC_DEBUG_INFO], 1, rel_size[MSEC_DEBUG_INFO], out);
 
     fwrite(shstrtab.data, 1, shstrtab.len, out);
 

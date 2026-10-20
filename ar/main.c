@@ -442,15 +442,14 @@ walk_archive(const char *path, int extract)
  ****************************************************************/
 
 static void
-usage(void)
+usage(FILE *out)
 {
-    fprintf(stderr,
+    fprintf(out,
             "usage: skj-ar {rcs|t|x} archive.a [member.o ...]\n"
             "\n"
             "Minimal ar(1): create a GNU archive with a symbol index (r/c/s),\n"
             "list members (t), or extract them (x).  Generic over the object\n"
             "machine and byte order.\n");
-    exit(1);
 }
 
 int
@@ -462,8 +461,15 @@ main(int argc, char **argv)
 
     util_set_progname("skj-ar");
 
-    if (argc < 3)
-        usage();
+    if (argc >= 2 && (strcmp(argv[1], "-h") == 0 ||
+                      strcmp(argv[1], "--help") == 0)) {
+        usage(stdout);
+        return 0;
+    }
+    if (argc < 3) {
+        usage(stderr);
+        return 1;
+    }
     keys = argv[1];
     path = argv[2];
 
@@ -484,8 +490,10 @@ main(int argc, char **argv)
             die("unknown operation '%c'", *k);
         }
     }
-    if (mode == 0)
-        usage();
+    if (mode == 0) {
+        usage(stderr);
+        return 1;
+    }
 
     if (setjmp(util_die_env) != 0)
         return 1;

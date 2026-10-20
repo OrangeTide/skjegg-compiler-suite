@@ -28,9 +28,12 @@ usage(void)
         "Reads assembly text and produces ELF32 big-endian relocatable objects.\n"
         "\n"
         "options:\n"
-        "  -o FILE   write output to FILE (default: stdout)\n"
-        "  -h        show this help\n"
-        "  -V        show version\n");
+        "  -o FILE            write output to FILE (default: stdout)\n"
+        "  -mshort-branches   force word-form branches and error on a\n"
+        "                     displacement that overflows 16 bits (default:\n"
+        "                     widen such a branch to the 32-bit form)\n"
+        "  -h                 show this help\n"
+        "  -V                 show version\n");
 }
 
 int
@@ -42,6 +45,7 @@ main(int argc, char **argv)
     char *src;
     struct assembler a;
     int k;
+    volatile int short_branches = 0;    /* read after setjmp; volatile keeps it */
 
     util_set_progname("skj-as");
 
@@ -58,6 +62,8 @@ main(int argc, char **argv)
         }
         if (strcmp(argv[k], "-o") == 0 && k + 1 < argc) {
             outpath = argv[++k];
+        } else if (strcmp(argv[k], "-mshort-branches") == 0) {
+            short_branches = 1;
         } else if (argv[k][0] == '-') {
             die("unknown option: %s", argv[k]);
         } else {
@@ -80,10 +86,13 @@ main(int argc, char **argv)
     util_cleanup_push(cleanup_free, src);
 
     as_init(&a, src);
+    a.short_branches = short_branches;
+    lex_set_source_path(&a.lex, inpath);        /* for relative .include */
     util_cleanup_push(cleanup_as, &a);
 
     as_pass1(&a);
     as_pass2(&a);
+    cf_emit_debug(&a);          /* build .debug_* from the -g .loc rows */
 
     if (outpath) {
         out = fopen(outpath, "wb");

@@ -137,6 +137,7 @@ main(int argc, char **argv)
     }
 
     mips_assemble(&a);
+    mips_emit_debug(&a);        /* build .debug_* from the -g .loc rows */
 
     if (dump)
         dump_sections(&a);

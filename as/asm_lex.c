@@ -1,8 +1,10 @@
 /* asm_lex.c : arch-neutral GAS-syntax tokenizer */
 
 #include "asm_lex.h"
+#include "arena.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -18,6 +20,86 @@ lex_init(struct lexer *l, const char *src, char comment_ch, int reloc_pct)
     l->comment_ch = comment_ch;
     l->reloc_pct = reloc_pct;
     l->dollar_reg = 0;
+    l->base_src = src;
+    l->dir = NULL;
+    l->base_dir = NULL;
+    l->inc_depth = 0;
+}
+
+void
+lex_rewind(struct lexer *l)
+{
+    l->src = l->base_src;
+    l->pos = l->base_src;
+    l->line = 1;
+    l->tok.type = T_NEWLINE;
+    l->dir = l->base_dir;
+    l->inc_depth = 0;
+}
+
+/* Directory part of a path, as an arena copy ("" when there is no slash). */
+static const char *
+dir_of(struct arena *a, const char *path)
+{
+    const char *slash = strrchr(path, '/');
+
+    if (slash == NULL)
+        return "";
+    return arena_strndup(a, path, (size_t)(slash - path));
+}
+
+void
+lex_set_source_path(struct lexer *l, const char *path)
+{
+    l->base_dir = dir_of(l->arena, path);
+    l->dir = l->base_dir;
+}
+
+int
+lex_include(struct lexer *l, const char *name)
+{
+    char path[1024];
+    char *buf;
+    long size;
+    size_t got;
+    FILE *f;
+
+    if (l->inc_depth >= LEX_INCLUDE_DEPTH)
+        return -1;
+
+    if (name[0] == '/' || l->dir == NULL || l->dir[0] == '\0') {
+        if ((size_t)snprintf(path, sizeof path, "%s", name) >= sizeof path)
+            return -1;
+    } else if ((size_t)snprintf(path, sizeof path, "%s/%s", l->dir, name)
+               >= sizeof path) {
+        return -1;
+    }
+
+    f = fopen(path, "rb");
+    if (f == NULL)
+        return -1;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+    size = ftell(f);
+    if (size < 0 || size > LEX_INCLUDE_MAX) { fclose(f); return -1; }
+    rewind(f);
+
+    buf = arena_alloc(l->arena, (size_t)size + 1);
+    got = fread(buf, 1, (size_t)size, f);
+    fclose(f);
+    buf[got] = '\0';
+
+    /* save the current file and switch to the included one */
+    l->inc[l->inc_depth].src = l->src;
+    l->inc[l->inc_depth].pos = l->pos;
+    l->inc[l->inc_depth].line = l->line;
+    l->inc[l->inc_depth].dir = l->dir;
+    l->inc_depth++;
+
+    l->src = buf;
+    l->pos = buf;
+    l->line = 1;
+    l->dir = dir_of(l->arena, path);
+    return 0;
 }
 
 static void
@@ -155,6 +237,14 @@ lex_next(struct lexer *l)
         l->tok.line = l->line;
 
         if (*l->pos == '\0') {
+            if (l->inc_depth > 0) {     /* end of an included file: pop back */
+                l->inc_depth--;
+                l->src = l->inc[l->inc_depth].src;
+                l->pos = l->inc[l->inc_depth].pos;
+                l->line = l->inc[l->inc_depth].line;
+                l->dir = l->inc[l->inc_depth].dir;
+                continue;
+            }
             l->tok.type = T_EOF;
             return;
         }

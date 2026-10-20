@@ -21,6 +21,14 @@ cleanup_cpp(void *p)
     cpp_free(p);
 }
 
+#define CC_USAGE "usage: skj-cc [-V] [-o out.s] [-I path] [-D name[=val]] input.c"
+
+static void
+usage(FILE *out)
+{
+    fprintf(out, "%s\n", CC_USAGE);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -98,6 +106,10 @@ main(int argc, char **argv)
             printf("skj-cc %s\n", SKJ_VERSION);
             cpp_free(pp);
             return 0;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            usage(stdout);
+            cpp_free(pp);
+            return 0;
         } else if (strcmp(argv[i], "-E") == 0) {
             preprocess_only = 1;
         } else if (strcmp(argv[i], "-g") == 0) {
@@ -110,7 +122,7 @@ main(int argc, char **argv)
     }
 
     if (!inpath)
-        die("usage: skj-cc [-V] [-o out.s] [-I path] [-D name[=val]] input.c");
+        die("%s", CC_USAGE);
 
     /* Default search path for skj-provided headers (e.g. <stdarg.h>), added
        after any -I so user paths win.  SKJ_INCLUDE_DIR is baked in at build

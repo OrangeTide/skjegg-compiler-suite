@@ -351,17 +351,17 @@ dump(struct node *n, int depth)
  ****************************************************************/
 
 static void
-usage(const char *prog)
+usage(const char *prog, FILE *out, int code)
 {
-    fprintf(stderr, "usage: %s [options] <file.exs>\n", prog);
-    fprintf(stderr, "  -t          enable trace comments\n");
-    fprintf(stderr, "  -V          show version\n");
-    fprintf(stderr, "  --tokens    dump the token stream and exit\n");
-    fprintf(stderr, "  --ast       parse, resolve, and dump the AST\n");
-    fprintf(stderr, "  --symbols   dump the resolved symbol table\n");
-    fprintf(stderr, "  -S          compile and emit assembly\n");
-    fprintf(stderr, "  -o <file>   write output to <file> (implies -S)\n");
-    exit(1);
+    fprintf(out, "usage: %s [options] <file.exs>\n", prog);
+    fprintf(out, "  -t          enable trace comments\n");
+    fprintf(out, "  -V          show version\n");
+    fprintf(out, "  --tokens    dump the token stream and exit\n");
+    fprintf(out, "  --ast       parse, resolve, and dump the AST\n");
+    fprintf(out, "  --symbols   dump the resolved symbol table\n");
+    fprintf(out, "  -S          compile and emit assembly\n");
+    fprintf(out, "  -o <file>   write output to <file> (implies -S)\n");
+    exit(code);
 }
 
 int
@@ -391,6 +391,8 @@ main(int argc, char **argv)
         if (strcmp(argv[i], "-V") == 0) {
             printf("skj-exc %s\n", SKJ_VERSION);
             return 0;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            usage(argv[0], stdout, 0);
         } else if (strcmp(argv[i], "-t") == 0) {
             trace = 1;
         } else if (strcmp(argv[i], "-g") == 0) {
@@ -405,19 +407,19 @@ main(int argc, char **argv)
             emit_asm = 1;
         } else if (strcmp(argv[i], "-o") == 0) {
             if (++i >= argc)
-                usage(argv[0]);
+                usage(argv[0], stderr, 1);
             outfile = argv[i];
             emit_asm = 1;
         } else if (argv[i][0] == '-') {
-            usage(argv[0]);
+            usage(argv[0], stderr, 1);
         } else {
             if (filename)
-                usage(argv[0]);
+                usage(argv[0], stderr, 1);
             filename = argv[i];
         }
     }
     if (!filename)
-        usage(argv[0]);
+        usage(argv[0], stderr, 1);
 
     src = slurp(filename);
     util_cleanup_push(cleanup_free, src);

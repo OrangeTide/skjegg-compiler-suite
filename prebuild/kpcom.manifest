@@ -5,7 +5,7 @@
 # emit inputs, in order:
 #   kpcom.pas  version.inc  stdlib.inc
 # emit-flags are the kpcom arguments that produced kpcom.kpm.  See doc/languages/kobold/kobold.md.
-fingerprint 10f5807ee2ee9e32e5e49a60adf16002bda20222af1af804ec78360c4d2d29e3
+fingerprint 00c0959cf0e0f00b257803de95ce480caa8067fd630bf8ee8c70dff21ae175e2
 emit-flags --emit-kpm
-kpm-sha256 d6b776cf3ba597bf614ba0ed9f826b7d0ed638e92fd5842ad33b9c5f79bc751a
-kpm-bytes 3673219
+kpm-sha256 17ec9ccba5b57a7a25dd4fa0834dfd744c73084a3cd704f062e1131c4fbc6587
+kpm-bytes 3678603

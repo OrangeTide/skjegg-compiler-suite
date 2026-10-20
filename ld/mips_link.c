@@ -8,6 +8,8 @@
 
 #include "mips_ld.h"
 
+#include <string.h>
+
 static uint32_t
 rd32(const uint8_t *p)
 {
@@ -154,6 +156,50 @@ mips_ld_link(struct linker *ld)
 
             default:
                 die("%s: unsupported relocation type %d", obj->path, rel->type);
+            }
+        }
+    }
+
+    /* Debug sections are non-alloc, so reloc_patch returned NULL for them
+       above.  Merge them and apply the absolute address relocations (the
+       set_address / low_pc / high_pc R_MIPS_32 against the folded .text
+       section symbol) into the merged buffers.  MIPS is REL, so the addend
+       rides in the field: the final value is the section base plus it. */
+    ld_build_debug(ld);
+    for (int oi = 0; oi < ld->nobjs; oi++) {
+        struct ld_object *obj = &ld->objs[oi];
+
+        for (int ri = 0; ri < obj->nrelocs; ri++) {
+            struct ld_reloc *rel = &obj->relocs[ri];
+            struct ld_input_sec *isec = &obj->sections[rel->section];
+            struct ld_debug_sec *d = NULL;
+            uint8_t *patch;
+            uint32_t S;
+
+            if (rel->type == R_MIPS_NONE)
+                continue;
+            if (isec->type != SHT_PROGBITS
+                || strncmp(isec->name, ".debug_", 7) != 0)
+                continue;
+            for (int k = 0; k < ld->ndebug; k++) {
+                if (strcmp(ld->debug[k].name, isec->name) == 0) {
+                    d = &ld->debug[k];
+                    break;
+                }
+            }
+            if (!d)
+                continue;
+
+            S = reloc_symval(ld, obj, rel);
+            patch = d->data + isec->assigned_vaddr + rel->offset;
+
+            switch (rel->type) {
+            case R_MIPS_32:
+                wr32(patch, S + rd32(patch));
+                break;
+            default:
+                die("%s: unsupported debug relocation type %d in %s",
+                    obj->path, rel->type, isec->name);
             }
         }
     }

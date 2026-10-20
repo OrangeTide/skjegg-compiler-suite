@@ -1213,7 +1213,10 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
 
     case IR_LIC: {
         const char *sd = rd(fn, i->dst, 0);
-        fprintf(out, "\tli %s, %ld\n", sd, i->imm);
+        /* i->imm is int64_t; IR_LIC holds a 32-bit immediate.  Cast to long so
+           %ld reads the whole argument on an ILP32 host (the self-host build);
+           passing the 64-bit field reads half and shifts the following args. */
+        fprintf(out, "\tli %s, %ld\n", sd, (long)i->imm);
         wd(out, fn, i->dst, sd);
         break;
     }
@@ -2214,8 +2217,10 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
 
     case IR_LOC:
-        /* debug-info line marker (-g); this direct emitter has no line table
-           yet, so skip it (the RISC-V path and the JITs record it). */
+        /* debug-info line marker (-g): a DWARF .loc the assembler turns into a
+           .debug_line row.  The line-based delay-slot scheduler keeps directive
+           lines in place, so the row attaches to the following instruction. */
+        fprintf(out, "\t.loc 1 %d\n", (int)i->imm);
         break;
 
     default:
@@ -2249,6 +2254,10 @@ emit_function(FILE *out, struct ir_func *fn)
     fprintf(out, "\n\t.text\n\t.align 2\n");
     if (!fn->is_local)
         fprintf(out, "\t.globl %s\n", fn->name);
+    /* STT_FUNC + a size so a debugger maps an address to this function and a
+       backtrace knows its extent; the body stays wholly in .text, so
+       .Lfunc_end - name is its byte length. */
+    fprintf(out, "\t.type %s, @function\n", fn->name);
     fprintf(out, "%s:\n", fn->name);
     emit_prologue(out, fn);
 
@@ -2263,6 +2272,10 @@ emit_function(FILE *out, struct ir_func *fn)
         last->op != IR_RETV64 &&
         last->op != IR_TAILCALL && last->op != IR_TAILCALLI))
         emit_epilogue(out, fn);
+
+    fprintf(out, ".Lfunc_end%d:\n", label_prefix);
+    fprintf(out, "\t.size %s, .Lfunc_end%d-%s\n",
+            fn->name, label_prefix, fn->name);
 }
 
 /****************************************************************
@@ -2740,6 +2753,16 @@ target_emit(FILE *out, struct ir_program *prog)
     /* .set reorder: the assembler fills the delay/latency slots.
        .set noreorder: the backend's scheduler (sched_emit) does. */
     fputs(g_noreorder ? "\t.set noreorder\n" : "\t.set reorder\n", out);
+
+    /* Under -g a front end sets src_file; emit the DWARF .file hint once so the
+       per-statement .loc directives (the IR_LOC case) attach to it.  skj-as-mips
+       turns .file/.loc into the little-endian .debug_line/.debug_info sections. */
+    for (fn = prog->funcs; fn; fn = fn->next) {
+        if (fn->src_file) {
+            fprintf(out, "\t.file 1 \"%s\"\n", fn->src_file);
+            break;
+        }
+    }
 
     for (fn = prog->funcs; fn; fn = fn->next) {
         if (g_noreorder) {

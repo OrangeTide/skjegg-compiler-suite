@@ -666,10 +666,43 @@ encode_scc(struct assembler *a, int cc,
     return total;
 }
 
+/* A ColdFire/m68k Bcc/BRA/BSR carries its displacement in a word (16-bit) form
+ * or a long (32-bit) form, the latter selected by a 0xFF low byte in the
+ * opword.  A symbolic target always uses the long form so the size is the same
+ * in both passes without branch relaxation, and so a branch in a function
+ * larger than 32 KiB still reaches (the old code emitted only the word form and
+ * silently truncated the displacement, corrupting control flow).  With
+ * short_branches set the word form is forced and an out-of-range displacement
+ * is a hard error instead, for targets whose ISA lacks the long form.  The
+ * emulator and qemu both decode the long form (displacement relative to the
+ * opword + 2, for both widths). */
+/* A numeric local label reference (1f, 2b, ...) is always a nearby skip: it is
+ * unresolved (symbolic) in pass 1 but resolves to an immediate in pass 2, so it
+ * must size as the word form in both passes, or the two passes disagree. */
+static int
+is_numeric_local_ref(const char *sym)
+{
+    size_t n = strlen(sym);
+    return n >= 2 && n <= 3 && sym[0] >= '0' && sym[0] <= '9'
+           && (sym[n - 1] == 'b' || sym[n - 1] == 'f');
+}
+
 static int
 encode_branch(struct assembler *a, uint16_t base,
               struct operand *target, int emit)
 {
+    int is_long;
+
+    if (target->sym)
+        /* A named/.L label can be far, so use the long form unless the caller
+           forced short; a numeric local is near and stays word (see above). */
+        is_long = !a->short_branches && !is_numeric_local_ref(target->sym);
+    else
+        /* An already-resolved displacement here comes from a numeric local,
+           which is near: keep the word form so the size matches pass 1, and
+           let the range check below fault if one is ever somehow far. */
+        is_long = 0;
+
     if (emit) {
         struct section *s = &a->sections[a->cur_section];
         int32_t disp;
@@ -687,10 +720,18 @@ encode_branch(struct assembler *a, uint16_t base,
         } else {
             disp = (int32_t)target->imm;
         }
-        sec_emit16(s, base);
-        sec_emit16(s, (uint16_t)(int16_t)disp);
+        if (!is_long && (disp < -32768 || disp > 32767))
+            die("line %d: branch displacement %d out of 16-bit range "
+                "(drop -mshort-branches)", a->lex.tok.line, disp);
+        if (is_long) {
+            sec_emit16(s, base | 0x00FF);       /* 0xFF low byte: long form */
+            sec_emit32(s, (uint32_t)disp);
+        } else {
+            sec_emit16(s, base);                /* 0x00 low byte: word form */
+            sec_emit16(s, (uint16_t)(int16_t)disp);
+        }
     }
-    return 4;
+    return is_long ? 6 : 4;
 }
 
 static int
@@ -1081,9 +1122,11 @@ encode_insn(struct assembler *a, const char *mnemonic, int size,
 
 int
 encode_size(const char *mnemonic, int size,
-            struct operand *op1, struct operand *op2)
+            struct operand *op1, struct operand *op2, int short_branches)
 {
     struct assembler dummy;
     memset(&dummy, 0, sizeof(dummy));
+    dummy.short_branches = short_branches;      /* so pass 1 sizes branches as
+                                                   pass 2 will emit them */
     return do_encode(&dummy, mnemonic, size, op1, op2, 0);
 }

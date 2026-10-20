@@ -3,11 +3,51 @@
 
 /* The memory seam for the allocator.  __libc_sbrk grows or shrinks the program
    break by `incr` bytes and returns the old break, or (void *)-1 if the request
-   would leave the heap.  This is the portable "fixed static region" backing
-   (doc/tools/libc.md Phase B): the heap is a reserved .bss array the linker places in
-   the low-address image, which every target and host shares without a syscall.
-   A VM host, or the qemu/skj-run tier wanting a growable heap, can replace this
-   one file with a real brk without touching the allocator above it. */
+   cannot be met.  The allocator (malloc.c) sits on top and does not care which
+   backing is used.
+
+   Two backings, chosen by data model:
+
+   - ILP32 targets (ColdFire, RISC-V, MIPS) use the real Linux brk syscall, so
+     the heap grows on demand up to the sandbox's heap region (skj-run reserves
+     16 MiB by default; qemu likewise).  This is what lets the self-compiled
+     skj-cc translate a real, large source in-guest, not only a toy one.
+
+   - LP64 targets (x86-64, arm64) are ILP32-style: every live address must stay
+     below 4 GiB, and the host brk hands back a high address, so they keep the
+     portable fixed static region (a reserved .bss array the low-memory loader
+     places).  A target wanting a different heap replaces only this file. */
+
+#ifdef __skj_ilp32__
+
+/* The raw Linux brk, from the crt: returns the new program break (or the
+   unchanged break when the request cannot be satisfied). */
+extern void *__sys_brk(void *addr);
+
+/* The current break, queried lazily on first use rather than with a static
+   initializer. */
+static char *cur_brk;
+
+void *
+__libc_sbrk(long incr)
+{
+    char *old, *want, *got;
+
+    if (cur_brk == 0) {
+        cur_brk = (char *)__sys_brk((void *)0);
+        if (cur_brk == (char *)-1 || cur_brk == 0)
+            return (void *)-1;
+    }
+    old = cur_brk;
+    want = old + incr;
+    got = (char *)__sys_brk(want);
+    if (got < want)                     /* the region could not grow that far */
+        return (void *)-1;
+    cur_brk = got;
+    return old;
+}
+
+#else   /* LP64: the fixed static region */
 
 #ifndef __LIBC_HEAP_SIZE
 #define __LIBC_HEAP_SIZE (1024 * 1024)      /* 1 MiB default */
@@ -44,3 +84,5 @@ __libc_sbrk(long incr)
     heap_brk = next;
     return old;
 }
+
+#endif

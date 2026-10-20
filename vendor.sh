@@ -178,14 +178,16 @@ cp "$S/ir/ir.c" "$S/ir/ir.h" "$S/ir/util.c" "$S/ir/util.h" \
 if [ "$has_cf" -eq 1 ]; then
     mkdir -p "$DEST/backend" "$DEST/runtime"
     cp "$S/backend/cf_emit.c" "$S/backend/regalloc_cf.c" "$DEST/backend/"
-    cp "$S/runtime/start.S" "$DEST/runtime/"
+    # start.S .includes syscall_cf.S (the shared syscall seam), so both ship.
+    cp "$S/runtime/start.S" "$S/runtime/syscall_cf.S" "$DEST/runtime/"
 fi
 if [ "$has_rv" -eq 1 ]; then
     mkdir -p "$DEST/backend" "$DEST/runtime"
     cp "$S/backend/rv_select.c" "$S/backend/rv_mc_text.c" \
        "$S/backend/rv_mc.h" "$S/backend/rv_select.h" "$S/backend/rv_mc_text.h" \
        "$S/backend/regalloc_rv.c" "$DEST/backend/"
-    cp "$S/runtime/start_rv.S" "$DEST/runtime/"
+    # start_rv.S .includes syscall_rv.S (the shared syscall seam), so both ship.
+    cp "$S/runtime/start_rv.S" "$S/runtime/syscall_rv.S" "$DEST/runtime/"
 fi
 if [ "$has_mips" -eq 1 ]; then
     # The Linux crt (start_mips.S), plus what MIPS I specifically needs: half.c

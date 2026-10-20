@@ -5604,6 +5604,8 @@ begin
   DeclareBuiltinProc('read');
   DeclareBuiltinProc('flush');
   DeclareBuiltinProc('halt');
+  DeclareBuiltinProc('abort');
+  DeclareBuiltinProc('assert');
   DeclareBuiltinProc('release');
   DeclareBuiltinFunc('paramstr', tyStr);
   DeclareBuiltinFunc('paramcount', tyInt);
@@ -8730,9 +8732,12 @@ begin
       Inc(i);
     end;
     if bname = 'writeln' then begin
-      EnsureFunc('io_write_ln', 1, 'void');
-      EmitArg(strm);
-      PushInsn('CALL', 'sym=io_write_ln nargs=1');
+      { the trailing newline is a plain character write, the C fputc('\n') shape;
+        there is no dedicated newline primitive }
+      av := EmitLIC(10);
+      EnsureFunc('io_write_char', 2, 'void');
+      EmitArg(strm); EmitArg(av);
+      PushInsn('CALL', 'sym=io_write_char nargs=2');
     end;
     LowerBuiltin := -1;
     Exit;
@@ -8795,6 +8800,23 @@ begin
     EnsureFunc('io_halt', 1, 'void');
     EmitArg(av);
     PushInsn('CALL', 'sym=io_halt nargs=1');
+    LowerBuiltin := -1;
+    Exit;
+  end;
+  { abort: an unconditional fatal, like a runtime trap (exit 70, a backtrace
+    where the host has one) }
+  if (bname = 'abort') then begin
+    EnsureFunc('kp_abort', 0, 'void');
+    PushInsn('CALL', 'sym=kp_abort nargs=0');
+    LowerBuiltin := -1;
+    Exit;
+  end;
+  { assert(cond): fatal unless cond holds; the check is in the runtime so no
+    branch is emitted here }
+  if (bname = 'assert') and (Length(argNodes) = 1) then begin
+    EnsureFunc('kp_assert', 1, 'void');
+    EmitArg(LowerExpr(argNodes[0]));
+    PushInsn('CALL', 'sym=kp_assert nargs=1');
     LowerBuiltin := -1;
     Exit;
   end;
@@ -10318,8 +10340,14 @@ begin
       cloned/retained fallback on failure, see LowerFailForm). }
     nkOrDivert, nkOrElse: IsOwnedExpr := True;
     nkBinary: IsOwnedExpr := (Nodes[node].Op = tkPlus) and (Nodes[node].Ty = tyStr);
+    { a bare paramless function name auto-calls and so transfers a fresh
+      reference, EXCEPT inside the function's own body, where the name is the
+      result variable: that is a borrow (loaded from the result slot), so it must
+      not be released as a temporary, or `f := f + x` double-frees f (once as the
+      operand, once as the assignment's old value). }
     nkIdent: IsOwnedExpr := (Nodes[node].Sym >= 0) and
-                            (Syms[Nodes[node].Sym].Kind = syFunc);
+                            (Syms[Nodes[node].Sym].Kind = syFunc) and
+                            (Nodes[node].Sym <> CurFuncSym);
     nkField: IsOwnedExpr := IsMethodField(node);
   else
     IsOwnedExpr := False;
@@ -12224,7 +12252,7 @@ end;
 
 procedure Usage;
 begin
-  WriteLn('usage: kpcom [-o outfile] [-U dir] [-g] [-v] [-d] [--dump-ast] [--help] file...');
+  WriteLn('usage: kpcom [-o outfile] [-U dir] [-g] [-v] [-d] [--dump-ast] [-h] file...');
   WriteLn;
   WriteLn('  -o outfile         write the emitted KPM1 module here (default stdout)');
   WriteLn('  -U dir             a directory to search for a used unit''s .kpm');
@@ -12233,7 +12261,7 @@ begin
   WriteLn('  -d, --dump-tokens  print the token stream and stop');
   WriteLn('  --dump-ast         parse and print the syntax tree');
   WriteLn('  --emit-kpm         parse, analyze, and write the KPM1 module');
-  WriteLn('  --help             show this help and exit');
+  WriteLn('  -h, --help         show this help and exit');
   WriteLn;
   WriteLn('kobold-pascal ', KP_VERSION);
 end;
@@ -12366,7 +12394,7 @@ begin
   i := 1;
   while i <= ParamCount do begin
     arg := ParamStr(i);
-    if arg = '--help' then begin
+    if (arg = '--help') or (arg = '-h') then begin
       Usage;
       Halt(0);
     end

@@ -22,6 +22,9 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <dirent.h>
 
 /* The renamed guest entry (skj-kp emits the program's entry under this name). */
 extern void kp_guest_entry(void);
@@ -48,6 +51,11 @@ static void aot_trap(const char *what)
 void kp_trap_div_zero(void) { aot_trap("divide by zero"); }
 void kp_trap_overflow(void) { aot_trap("integer overflow"); }
 void kp_trap_index(void)    { aot_trap("array index out of bounds"); }
+
+/* The language fatals (abort / failed assert), the native-AOT twins of the
+   freestanding kp_abort/kp_assert in rt_free.c. */
+void kp_abort(void) { aot_trap("aborted"); }
+void kp_assert(uint32_t cond) { if (!cond) aot_trap("assertion failed"); }
 
 /****************************************************************
  * The kprun-compatible debug/test surface (mirrors jit_main.c)
@@ -97,6 +105,98 @@ int WriteFileStr(uint32_t pathstr, uint32_t datastr)
     memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
     path[plen] = '\0';
     return kp_write_file(path, kp_str_bytes(datastr), (size_t)kp_str_len(datastr));
+}
+
+/* The line/stream file primitives the `files` unit builds on: open a handle,
+   read one chunk, write bytes, close.  Stateless (the unit holds the fd and does
+   its own line buffering), mirroring jit_main.c and io_free.c. */
+#define KPF_CHUNK 4096
+
+int kpf_open_read(uint32_t pathstr)
+{
+    char path[1024];
+    int plen = kp_str_len(pathstr);
+    if (plen < 0 || plen >= (int)sizeof(path))
+        return -1;
+    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
+    path[plen] = '\0';
+    return open(path, O_RDONLY);
+}
+
+int kpf_open_write(uint32_t pathstr)
+{
+    char path[1024];
+    int plen = kp_str_len(pathstr);
+    if (plen < 0 || plen >= (int)sizeof(path))
+        return -1;
+    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
+    path[plen] = '\0';
+    return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+}
+
+uint32_t kpf_read(int fd)
+{
+    char tmp[KPF_CHUNK];
+    ssize_t n = (fd < 0) ? -1 : read(fd, tmp, sizeof tmp);
+    if (n <= 0)
+        return kp_str_new("", 0);
+    return kp_str_new(tmp, (int)n);
+}
+
+int kpf_write(int fd, uint32_t datastr)
+{
+    if (fd < 0)
+        return -1;
+    return (int)write(fd, kp_str_bytes(datastr), (size_t)kp_str_len(datastr));
+}
+
+void kpf_close(int fd)
+{
+    if (fd >= 0)
+        close(fd);
+}
+
+/* Directory reads for the `dirs` unit, over the host opendir/readdir.  A Kobold
+   handle is an index into a small table of open DIR*; kpd_next returns one
+   entry name at a time (or the empty string at end). */
+#define KPD_MAX 16
+static DIR *kpd_tab[KPD_MAX];
+
+int kpd_open(uint32_t pathstr)
+{
+    char path[1024];
+    int plen = kp_str_len(pathstr);
+    int i;
+    if (plen < 0 || plen >= (int)sizeof(path))
+        return -1;
+    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
+    path[plen] = '\0';
+    for (i = 0; i < KPD_MAX; i++)
+        if (!kpd_tab[i])
+            break;
+    if (i == KPD_MAX)
+        return -1;
+    kpd_tab[i] = opendir(path);
+    return kpd_tab[i] ? i : -1;
+}
+
+uint32_t kpd_next(int h)
+{
+    struct dirent *e;
+    if (h < 0 || h >= KPD_MAX || !kpd_tab[h])
+        return kp_str_new("", 0);
+    e = readdir(kpd_tab[h]);
+    if (!e)
+        return kp_str_new("", 0);
+    return kp_str_new(e->d_name, (int)strlen(e->d_name));
+}
+
+void kpd_close(int h)
+{
+    if (h >= 0 && h < KPD_MAX && kpd_tab[h]) {
+        closedir(kpd_tab[h]);
+        kpd_tab[h] = 0;
+    }
 }
 
 /****************************************************************

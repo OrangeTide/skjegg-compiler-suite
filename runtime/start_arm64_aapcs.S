@@ -13,6 +13,15 @@
 	.globl _start
 	.globl write
 	.globl read
+	.globl open
+	.globl close
+	.globl lseek
+	.globl statx
+	.globl mkdirat
+	.globl unlinkat
+	.globl renameat2
+	.globl fchmodat
+	.globl getdents64
 	.weak  exit
 	.globl _exit
 	.weak  __libc_fini
@@ -41,6 +50,70 @@ write:
 /* ssize_t read(int fd, void *buf, size_t n) */
 read:
 	mov	x8, #63
+	svc	#0
+	ret
+
+/* int open(const char *path, int flags, int mode);
+   arm64 has no bare open, so this is openat(AT_FDCWD, path, flags, mode) with
+   the arguments shifted up one register. */
+open:
+	mov	x3, x2			/* mode */
+	mov	x2, x1			/* flags */
+	mov	x1, x0			/* path */
+	mov	x0, #-100		/* AT_FDCWD */
+	mov	x8, #56			/* openat */
+	svc	#0
+	ret
+
+/* int close(int fd); */
+close:
+	mov	x8, #57
+	svc	#0
+	ret
+
+/* off_t lseek(int fd, off_t offset, int whence); arm64 has a simple lseek */
+lseek:
+	mov	x8, #62
+	svc	#0
+	ret
+
+/* int statx(int dirfd, const char *path, int flags, unsigned mask, void *buf);
+   args already in x0..x4 */
+statx:
+	mov	x8, #291
+	svc	#0
+	ret
+
+/* The directory/path file operations the libc wraps with AT_FDCWD
+   (libc/fileops.c): mkdirat, unlinkat (unlink and rmdir), renameat2.  arm64 has
+   no bare mkdir/unlink/rename, so these *at forms are the primitives.  Args are
+   already in x0.. on the AAPCS. */
+mkdirat:
+	mov	x8, #34
+	svc	#0
+	ret
+
+unlinkat:
+	mov	x8, #35
+	svc	#0
+	ret
+
+renameat2:
+	mov	x8, #276
+	svc	#0
+	ret
+
+/* int fchmodat(int dirfd, const char *path, int mode, int flags); the libc
+   chmod (libc/fileops.c) over AT_FDCWD.  Args are already in x0.. */
+fchmodat:
+	mov	x8, #53
+	svc	#0
+	ret
+
+/* int getdents64(int fd, void *buf, int count); directory reads for the libc
+   opendir/readdir (libc/dirent.c). */
+getdents64:
+	mov	x8, #61
 	svc	#0
 	ret
 

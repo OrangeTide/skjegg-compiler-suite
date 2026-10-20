@@ -19,16 +19,29 @@
 
 	.text
 	.globl _start
-	.globl write
-	.globl read
-	.weak  exit
-	.globl _exit
 	.weak  __libc_fini
+	.weak  environ			/* set below only when the libc links it */
+
+	/* the syscall wrappers (write/read/open/close/lseek/exit/_exit) are shared
+	   with the Kobold freestanding runtime */
+	.include "syscall_rv.S"
 
 	.type	_start,@function
 _start:
-	la	sp, stack_top
+	mv	t0, sp			/* the kernel/skj-run stack: argc at 0(sp), */
+					/* the argv pointers just above it */
+	la	sp, stack_top		/* switch to our own, larger stack */
 	addi	sp, sp, -16
+	lw	a0, 0(t0)		/* argc */
+	addi	a1, t0, 4		/* argv (the pointers live in the entry */
+					/* stack region, which stays mapped) */
+	slli	t1, a0, 2		/* envp = argv + (argc+1) words: skip the */
+	add	t1, a1, t1		/* argv[] entries and their NULL terminator */
+	addi	t1, t1, 4
+	la	t2, environ		/* weak: present only when the libc links it */
+	beqz	t2, 1f
+	sw	t1, 0(t2)
+1:
 	jal	ra, main
 	mv	s1, a0			/* preserve main's return across the finalizer */
 	la	t0, __libc_fini		/* weak: 0 when no libc is linked */
@@ -41,32 +54,59 @@ _start:
 2:	j	2b
 	.size	_start,.-_start
 
-/* int write(int fd, const char *buf, int n); */
-	.type	write,@function
-write:
-	li	a7, 64
+/* int statx(int dirfd, const char *path, int flags, unsigned mask,
+             struct statx *buf);  rv32 has no stat/fstat syscall, so the libc
+   stat family (libc/stat.c) goes through statx (#291).  This is a C-libc
+   wrapper, not part of the shared seam: the Kobold freestanding runtime uses
+   whole-file read/write and needs no stat.  The five arguments are already in
+   a0..a4 on the ILP32 psABI. */
+	.globl statx
+	.type	statx,@function
+statx:
+	li	a7, 291
 	ecall
 	ret
-	.size	write,.-write
+	.size	statx,.-statx
 
-/* int read(int fd, char *buf, int n); */
-	.type	read,@function
-read:
-	li	a7, 63
+/* void *__sys_brk(void *addr);  the raw Linux brk (#214), returning the new
+   program break.  libc/sbrk.c grows a real, sandbox-backed heap through it on
+   the ILP32 targets (hosted only; the freestanding runtime has its own heap,
+   so this stays out of the shared syscall seam). */
+	.globl __sys_brk
+	.type	__sys_brk,@function
+__sys_brk:
+	li	a7, 214
 	ecall
 	ret
-	.size	read,.-read
+	.size	__sys_brk,.-__sys_brk
 
-/* void exit(int status); */
-	.type	exit,@function
-	.type	_exit,@function
-exit:
-_exit:
-	li	a7, 93
+/* The directory/path file operations the libc wraps with AT_FDCWD
+   (libc/fileops.c): mkdirat, unlinkat (unlink and rmdir), renameat2.  rv32 has
+   no bare mkdir/unlink/rename, so these *at forms are the primitives.  The
+   arguments are already in a0.. on the ILP32 psABI. */
+	.globl mkdirat
+	.type	mkdirat,@function
+mkdirat:
+	li	a7, 34
 	ecall
-1:	j	1b
-	.size	exit,.-exit
-	.size	_exit,.-_exit
+	ret
+	.size	mkdirat,.-mkdirat
+
+	.globl unlinkat
+	.type	unlinkat,@function
+unlinkat:
+	li	a7, 35
+	ecall
+	ret
+	.size	unlinkat,.-unlinkat
+
+	.globl renameat2
+	.type	renameat2,@function
+renameat2:
+	li	a7, 276
+	ecall
+	ret
+	.size	renameat2,.-renameat2
 
 /* __muldi3(a_lo, a_hi, b_lo, b_hi) -> a0:a1
  *   64-bit multiply (low 64 bits of result).

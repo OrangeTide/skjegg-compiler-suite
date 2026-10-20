@@ -248,6 +248,10 @@ main(int argc, char **argv)
             printf("skj-jit %s\n", SKJ_VERSION);
             cpp_free(pp);
             return 0;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            printf("usage: skj-jit [-V] [-I path] [-D name[=val]] input.c\n");
+            cpp_free(pp);
+            return 0;
         } else if (argv[i][0] == '-') {
             /* ignore unknown options silently */
         } else {

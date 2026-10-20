@@ -24,6 +24,7 @@
 #include <string.h>
 
 /* Linux/RISC-V syscall numbers (the generic table). */
+#define RV_NR_OPENAT        56
 #define RV_NR_CLOSE         57
 #define RV_NR_LSEEK         62
 #define RV_NR_READ          63
@@ -32,6 +33,11 @@
 #define RV_NR_EXIT          93
 #define RV_NR_EXIT_GROUP    94
 #define RV_NR_BRK           214
+#define RV_NR_STATX         291
+#define RV_NR_MKDIRAT       34
+#define RV_NR_UNLINKAT      35
+#define RV_NR_RENAMEAT2     276
+#define RV_NR_GETDENTS64    61
 
 /* An emulator-private ecall facility: a7 in a range far above the Linux
  * syscall space, so qemu-user answers the same call with -ENOSYS and a guest
@@ -41,12 +47,17 @@
  *   RV_SYS_MAP    a0=size, a1=flags -> a0=base (0 on failure)
  *   RV_SYS_MUNMAP a0=base, a1=size  -> a0=0
  *   RV_SYS_SPAWN  a0=image ptr, a1=len -> a0=child handle (0 on failure)
+ *   RV_SYS_FATAL  a0=exit code -> does not return
  *
  * The mapping calls reach gm_mmap/gm_munmap; spawn loads a fresh child process
- * from an image the guest holds in its own memory. */
+ * from an image the guest holds in its own memory. RV_SYS_FATAL prints a
+ * symbolized backtrace for the calling frame and ends the process with the
+ * given exit code, so a guest abort or runtime trap shows a source-level stack
+ * like a CPU fault does; on qemu-user it is -ENOSYS and the guest exits itself. */
 #define RV_SYS_MAP          0x000f0001u
 #define RV_SYS_MUNMAP       0x000f0002u
 #define RV_SYS_SPAWN        0x000f0003u
+#define RV_SYS_FATAL        0x000f0004u
 
 #define MAX_PROC        64
 #define QUANTUM         8192            /* instructions per scheduling slice */
@@ -56,14 +67,20 @@ static int
 sys_of_rv(uint32_t nr)
 {
     switch (nr) {
+    case RV_NR_OPENAT:      return GSYS_OPENAT;
     case RV_NR_CLOSE:       return GSYS_CLOSE;
-    case RV_NR_LSEEK:       return GSYS_LSEEK;
+    case RV_NR_LSEEK:       return GSYS_LLSEEK;      /* rv32 #62 is _llseek */
     case RV_NR_READ:        return GSYS_READ;
     case RV_NR_WRITE:       return GSYS_WRITE;
     case RV_NR_WRITEV:      return GSYS_WRITEV;
     case RV_NR_EXIT:        return GSYS_EXIT;
     case RV_NR_EXIT_GROUP:  return GSYS_EXIT_GROUP;
     case RV_NR_BRK:         return GSYS_BRK;
+    case RV_NR_STATX:       return GSYS_STATX;
+    case RV_NR_MKDIRAT:     return GSYS_MKDIRAT;
+    case RV_NR_UNLINKAT:    return GSYS_UNLINKAT;
+    case RV_NR_RENAMEAT2:   return GSYS_RENAMEAT2;
+    case RV_NR_GETDENTS64:  return GSYS_GETDENTS64;
     default:                return GSYS_UNKNOWN;
     }
 }
@@ -90,6 +107,8 @@ typedef struct proc {
     uint32_t handle;            /* the token spawn returns (slot + generation) */
     int done;                   /* it has stopped and needs no more slices */
     int rc;                     /* a nonzero process exit status (a fault) */
+    int fatal;                  /* it exited through RV_SYS_FATAL (abort/trap) */
+    uint32_t fatal_pc;          /* the call site to root the fatal backtrace at */
     uint64_t insns;             /* instructions retired by this process */
     uint64_t insn_budget;       /* its instruction cap, 0 = unlimited */
 } proc;
@@ -240,6 +259,14 @@ do_ecall(rv_cpu *cpu, void *ctx)
     }
     if (nr == RV_SYS_SPAWN) {                    /* load a child from a guest image */
         cpu->x[10] = do_spawn(p, cpu->x[10], cpu->x[11]);
+        return 0;
+    }
+    if (nr == RV_SYS_FATAL) {                    /* abort/trap: backtrace, then exit */
+        p->fatal = 1;
+        p->fatal_pc = cpu->pc;                   /* the ecall site, inside abort/trap */
+        g->exited = 1;
+        g->exit_code = (int)(cpu->x[10] & 0xFF);
+        rv_halt(cpu);
         return 0;
     }
 
@@ -616,6 +643,8 @@ proc_slice(sched *S, proc *p)
         return;
     }
     if (p->g.exited) {                  /* a clean exit through the exit syscall */
+        if (p->fatal)                   /* ... or RV_SYS_FATAL: show the stack first */
+            print_backtrace(S, p, p->fatal_pc);
         p->done = 1;
         return;
     }

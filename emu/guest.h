@@ -127,12 +127,19 @@ enum guest_sys {
     GSYS_WRITE,
     GSYS_WRITEV,
     GSYS_OPEN,
+    GSYS_OPENAT,
     GSYS_CLOSE,
     GSYS_LSEEK,
+    GSYS_LLSEEK,
     GSYS_BRK,
     GSYS_EXIT,
     GSYS_EXIT_GROUP,
     GSYS_TIME,
+    GSYS_STATX,
+    GSYS_MKDIRAT,
+    GSYS_UNLINKAT,
+    GSYS_RENAMEAT2,
+    GSYS_GETDENTS64,
 };
 
 typedef struct guest {

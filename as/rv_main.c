@@ -82,6 +82,7 @@ main(int argc, char **argv)
     util_cleanup_push(cleanup_free, src);
 
     rv_init(&a, src);
+    lex_set_source_path(&a.lex, inpath);        /* for relative .include */
     util_cleanup_push(cleanup_rv, &a);
 
     rv_assemble(&a);

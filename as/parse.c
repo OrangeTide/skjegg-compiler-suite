@@ -1,6 +1,7 @@
 /* parse.c : two-pass GAS syntax parser for ColdFire assembler */
 
 #include "as.h"
+#include "dwarf.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -287,6 +288,20 @@ skip_to_eol(struct lexer *l)
         lex_next(l);
 }
 
+/* Append one line-table row (emit pass only; see .loc above). */
+static void
+cf_add_locrow(struct assembler *a, uint32_t offset, int line)
+{
+    if (a->n_locrows >= a->locrow_cap) {
+        a->locrow_cap = a->locrow_cap ? a->locrow_cap * 2 : 64;
+        a->locrows = realloc(a->locrows,
+                             (size_t)a->locrow_cap * sizeof *a->locrows);
+    }
+    a->locrows[a->n_locrows].offset = offset;
+    a->locrows[a->n_locrows].line = line;
+    a->n_locrows++;
+}
+
 static void
 handle_directive(struct assembler *a, const char *dir)
 {
@@ -295,6 +310,14 @@ handle_directive(struct assembler *a, const char *dir)
     if (strcmp(dir, ".text") == 0) {
         a->cur_section = SEC_TEXT;
         return;
+    }
+    if (strcmp(dir, ".include") == 0) {
+        lex_next(&a->lex);
+        if (a->lex.tok.type != T_STRING)
+            die("line %d: .include needs a \"file\" operand", a->lex.tok.line);
+        if (lex_include(&a->lex, a->lex.tok.str) != 0)
+            die("line %d: cannot .include \"%s\"", a->lex.tok.line, a->lex.tok.str);
+        return;         /* the included tokens come next; the parent resumes on pop */
     }
     if (strcmp(dir, ".data") == 0) {
         a->cur_section = SEC_DATA;
@@ -511,6 +534,103 @@ handle_directive(struct assembler *a, const char *dir)
         return;
     }
 
+    /* .type sym,@function : mark the symbol STT_FUNC so the ELF writer types it,
+       which a debugger's address-to-function map and a backtrace read from
+       .symtab.  The '@' is skipped by the lexer, so scan the operands for the
+       "function" word; any other type is left as the default. */
+    if (strcmp(dir, ".type") == 0) {
+        lex_next(&a->lex);
+        if (a->lex.tok.type == T_IDENT || a->lex.tok.type == T_DOT_IDENT) {
+            int idx = sym_lookup(&a->st, a->lex.tok.str);
+            if (idx < 0) idx = sym_add(&a->st, a->lex.tok.str);
+            for (lex_next(&a->lex); a->lex.tok.type != T_NEWLINE
+                                    && a->lex.tok.type != T_EOF; lex_next(&a->lex)) {
+                if ((a->lex.tok.type == T_IDENT || a->lex.tok.type == T_DOT_IDENT)
+                    && strcmp(a->lex.tok.str, "function") == 0)
+                    sym_set_func(&a->st, idx);
+            }
+        } else {
+            skip_to_eol(&a->lex);
+        }
+        return;
+    }
+
+    /* .size sym,expr : the symbol's byte extent, written as st_size.  expr is a
+       sum of label and integer terms (the backend emits `.Lfunc_endN - func`);
+       resolved symbol values are final by the emit pass, so evaluating the terms
+       each pass leaves the authoritative size after it. */
+    if (strcmp(dir, ".size") == 0) {
+        int target = -1;
+        lex_next(&a->lex);
+        if (a->lex.tok.type == T_IDENT || a->lex.tok.type == T_DOT_IDENT) {
+            target = sym_lookup(&a->st, a->lex.tok.str);
+            if (target < 0) target = sym_add(&a->st, a->lex.tok.str);
+            lex_next(&a->lex);
+        }
+        if (target >= 0 && a->lex.tok.type == T_COMMA) {
+            int32_t acc = 0;
+            int neg = 0;
+            for (lex_next(&a->lex); a->lex.tok.type != T_NEWLINE
+                                    && a->lex.tok.type != T_EOF; lex_next(&a->lex)) {
+                int32_t v;
+                if (a->lex.tok.type == T_MINUS) { neg = 1; continue; }
+                if (a->lex.tok.type == T_PLUS)  { neg = 0; continue; }
+                if (a->lex.tok.type == T_INT) {
+                    v = (int32_t)a->lex.tok.ival;
+                } else if (a->lex.tok.type == T_IDENT
+                           || a->lex.tok.type == T_DOT_IDENT) {
+                    int si = sym_lookup(&a->st, a->lex.tok.str);
+                    v = si >= 0 ? (int32_t)a->st.syms[si].value : 0;
+                } else {
+                    break;
+                }
+                acc += neg ? -v : v;
+                neg = 0;
+            }
+            if (acc < 0) acc = 0;
+            sym_set_size(&a->st, target, (uint32_t)acc);
+        }
+        skip_to_eol(&a->lex);
+        return;
+    }
+
+    /* .file ["]name["] or .file N "name" : the DWARF source name, last wins. */
+    if (strcmp(dir, ".file") == 0) {
+        lex_next(&a->lex);
+        if (a->lex.tok.type == T_INT)       /* the file number, if present */
+            lex_next(&a->lex);
+        if (a->lex.tok.type == T_STRING)
+            a->debug_file = arena_strndup(&a->arena, a->lex.tok.str,
+                                          a->lex.tok.str_len);
+        skip_to_eol(&a->lex);
+        return;
+    }
+
+    /* .loc N line [column] : one line-table row.  The address is the current
+       .text offset, known only in the emit pass, so rows are collected then. */
+    if (strcmp(dir, ".loc") == 0) {
+        int line = 0, seen_line = 0;
+        lex_next(&a->lex);
+        if (a->lex.tok.type == T_INT) {     /* file number */
+            lex_next(&a->lex);
+            if (a->lex.tok.type == T_INT) {
+                line = (int)a->lex.tok.ival;
+                seen_line = 1;
+            }
+        }
+        if (a->pass == 2 && seen_line && a->cur_section == SEC_TEXT)
+            cf_add_locrow(a, (uint32_t)a->sections[SEC_TEXT].len, line);
+        skip_to_eol(&a->lex);
+        return;
+    }
+
+    /* metadata directives we accept and ignore */
+    if (strcmp(dir, ".ident") == 0 || strncmp(dir, ".cfi_", 5) == 0
+        || strcmp(dir, ".local") == 0) {
+        skip_to_eol(&a->lex);
+        return;
+    }
+
     warn("line %d: unknown directive '%s'", a->lex.tok.line, dir);
     skip_to_eol(&a->lex);
 }
@@ -685,7 +805,7 @@ parse_instruction(struct assembler *a, const char *premnemonic)
         struct section *s = &a->sections[a->cur_section];
         result = encode_size(mnemonic, size,
                              nops >= 1 ? &op1 : NULL,
-                             nops >= 2 ? &op2 : NULL);
+                             nops >= 2 ? &op2 : NULL, a->short_branches);
         if (result < 0) {
             die("line %d: cannot encode '%s'", a->lex.tok.line, mnemonic);
         }
@@ -818,6 +938,7 @@ as_free(struct assembler *a)
         free(a->sections[k].data);
         free(a->sections[k].relocs);
     }
+    free(a->locrows);
     free(a->st.syms);
     free(a->lex.str_buf);
     arena_free(&a->arena);
@@ -828,9 +949,7 @@ as_pass1(struct assembler *a)
 {
     local_label_reset();
     a->pass = 1;
-    a->lex.pos = a->lex.src;
-    a->lex.line = 1;
-    a->lex.tok.type = T_NEWLINE;
+    lex_rewind(&a->lex);
     run_pass(a);
 }
 
@@ -843,8 +962,62 @@ as_pass2(struct assembler *a)
         a->sections[k].len = 0;
 
     a->pass = 2;
-    a->lex.pos = a->lex.src;
-    a->lex.line = 1;
-    a->lex.tok.type = T_NEWLINE;
+    lex_rewind(&a->lex);
     run_pass(a);
+}
+
+/* Build the DWARF debug sections from the .loc rows collected in the emit pass,
+   the big-endian ColdFire twin of as/rv_parse.c:rv_emit_debug.  The three
+   sections are non-alloc, so they do not perturb the text/data layout; the only
+   link-time unknowns are the absolute address fields, each an R_68K_32 against a
+   synthesized .text base symbol (value 0, which the ELF writer folds into the
+   .text section symbol plus the addend). */
+void
+cf_emit_debug(struct assembler *a)
+{
+    struct arena *ar = &a->arena;
+    struct section *sl = &a->sections[SEC_DEBUG_LINE];
+    struct section *si = &a->sections[SEC_DEBUG_INFO];
+    struct section *sa = &a->sections[SEC_DEBUG_ABBREV];
+    const char *name = a->debug_file ? a->debug_file : "?";
+    struct dw_line_row *rows;
+    uint8_t *bytes;
+    size_t len, set_addr_off, low_off, high_off, b;
+    uint32_t text_end;
+    int sym, i;
+
+    if (a->n_locrows == 0)
+        return;                 /* no .loc seen (no -g): emit nothing */
+
+    sym = sym_lookup(&a->st, ".Ldebug_text0");
+    if (sym < 0)
+        sym = sym_add(&a->st, ".Ldebug_text0");
+    sym_define(&a->st, sym, SEC_TEXT, 0);
+
+    rows = arena_alloc(ar, (size_t)a->n_locrows * sizeof *rows);
+    for (i = 0; i < a->n_locrows; i++) {
+        rows[i].addr = a->locrows[i].offset;
+        rows[i].line = a->locrows[i].line;
+    }
+    text_end = (uint32_t)a->sections[SEC_TEXT].len;
+
+    /* .debug_line: the line program, set_address fixed to .text + first row. */
+    len = dw_line_build(ar, name, rows, a->n_locrows, text_end, &bytes,
+                        &set_addr_off, 1);
+    for (b = 0; b < len; b++)
+        sec_emit8(sl, bytes[b]);
+    sec_add_reloc(sl, (uint32_t)set_addr_off, sym, (int32_t)rows[0].addr);
+
+    /* .debug_abbrev: fixed, no relocations. */
+    len = dw_abbrev_build(ar, &bytes);
+    for (b = 0; b < len; b++)
+        sec_emit8(sa, bytes[b]);
+
+    /* .debug_info: a CU spanning all of .text, stmt_list at line program 0. */
+    len = dw_info_build(ar, "skjegg", name, ".", 0, text_end, 0, &bytes,
+                        &low_off, &high_off, 1);
+    for (b = 0; b < len; b++)
+        sec_emit8(si, bytes[b]);
+    sec_add_reloc(si, (uint32_t)low_off, sym, 0);
+    sec_add_reloc(si, (uint32_t)high_off, sym, (int32_t)text_end);
 }

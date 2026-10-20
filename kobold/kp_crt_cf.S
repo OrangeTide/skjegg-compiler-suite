@@ -41,7 +41,7 @@ _start:
     jsr     kp_guest_entry      | run the program
 
     move.l  #0, -(%sp)          | a normal return exits 0, as the hosted crt does;
-    jsr     kp_sys_exit         | a nonzero status comes only from Halt(code)
+    jsr     io_halt             | flush buffered stdio, then _exit(0)
 1:  bra     1b
 
     /* Entry-ABI version guard (kp_abi.h): reference the archive's version symbol
@@ -52,7 +52,7 @@ _start:
     .align  4
     .globl  __kp_crt_abi_ref
 __kp_crt_abi_ref:
-    .long   kp_guest_abi_v1
+    .long   kp_guest_abi_v3
 
     .bss
     .align  4                   | 16-aligned base, as the allocator expects

@@ -6,6 +6,30 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.14.0
+
+#### Added
+- Guest file I/O: openat and real lseek in the sandbox; whole-file and
+  line/stream handles through a Kobold `files` unit; stat/fstat via statx across
+  rv32, ColdFire, MIPS, x86-64, and arm64; directory reads via getdents64 with a
+  `dirs` unit; and mkdir, rmdir, unlink, rename, and remove over the *at syscalls.
+- One buffered-stdio core and one syscall seam shared between the C libc and the
+  Kobold runtime; open/close/lseek on every C crt; open_memstream; and sbrk
+  backed by real brk on ILP32 so a full translation unit self-hosts.
+- DWARF for ColdFire and MIPS, with the serializer and reader parameterized by
+  endianness; abort and assert are symbolized like a fault.
+- skj-cc self-hosts under skj-run on RV32, filling the libc and runtime gaps it
+  hit, and `-h`/`--help` is recognized uniformly across every skj-* tool.
+
+#### Changed
+- skj-as defaults to 32-bit long-form branches, with `-mshort-branches` to opt
+  out, and gains an `.include` directive.
+
+#### Fixed
+- A Kobold string release-after-free in kpcom's IsOwnedExpr, found with the new
+  GH_POISON instrument.
+- cc/backends: a `%ld`/int64 vararg bug and continue inside a switch.
+
 ### 0.13.0
 
 #### Added

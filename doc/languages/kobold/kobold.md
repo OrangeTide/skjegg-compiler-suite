@@ -303,9 +303,22 @@ and run it in the `skj-run` emulator, see `kp-sandbox.md`.
   `kp_guest_entry`, and exits 0 on return (a program ends nonzero only through
   `Halt`). A real host supplies its own crt and memory region and calls
   `kp_rt_init` with them; nothing in `rt_free.c` or `io_free.c` depends on a
-  syscall but the `exit` the trap makes.
+  syscall but the `_exit` the trap makes.
 
-The entry seam (`kp_set_raw_args`, `kp_rt_init`, `kp_guest_entry`, `kp_sys_exit`)
+The syscall seam `io_free.c` builds on is the POSIX-standard set `write` / `read`
+/ `_exit` (and `open` / `close` on ColdFire), the same names the C libc links, so
+the Kobold freestanding runtime and the C runtime speak one syscall seam
+(`runtime/io_free_rv.S`, `runtime/io_free_cf.S`).
+
+`io_free.c` no longer hand-rolls stream buffering: its console I/O delegates to
+libc's buffered-stream core (`libc/stdio_core.c`, the three standard streams and
+`fputc` / `fgetc` / `fwrite` / `fflush` over that one `write` / `read` seam), so
+both runtimes share a single stdio buffering layer. Because output is now
+buffered, a crt must flush before the process ends: the shipped crts and `io_halt`
+call `fflush` then `_exit`, which is why the normal-return path goes through
+`io_halt` (ABI version 3).
+
+The entry seam (`kp_set_raw_args`, `kp_rt_init`, `kp_guest_entry`, `_exit`)
 is a published ABI a downstream host links against, so it is versioned
 (`kobold/kp_abi.h`, `KP_GUEST_ABI_VERSION`). `rt_free.c` defines the symbol
 `kp_guest_abi_v<N>` and the plain value `kp_guest_abi_version`, and the crt

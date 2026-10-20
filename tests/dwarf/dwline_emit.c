@@ -52,7 +52,7 @@ main(int argc, char **argv)
 
     arena_init(&a);
 
-    n = dw_line_build(&a, "loc.c", rows, 3, 0x118, &buf, NULL);
+    n = dw_line_build(&a, "loc.c", rows, 3, 0x118, &buf, NULL, 0);
     write_section(argv[1], "dwline.bin", buf, n);
 
     n = dw_abbrev_build(&a, &buf);
@@ -61,7 +61,7 @@ main(int argc, char **argv)
     /* The CU spans the rows' code; stmt_list points at offset 0, the sole line
        program in .debug_line. */
     n = dw_info_build(&a, "skjegg", "loc.c", "/skjegg", 0x100, 0x118, 0, &buf,
-                      NULL, NULL);
+                      NULL, NULL, 0);
     write_section(argv[1], "dwinfo.bin", buf, n);
 
     arena_free(&a);

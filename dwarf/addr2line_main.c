@@ -36,9 +36,9 @@ read_file(const char *path, size_t *out_len)
 }
 
 static void
-usage(void)
+usage(FILE *out)
 {
-    die("usage: skj-addr2line [-f] -e <file> <addr>...");
+    fprintf(out, "usage: skj-addr2line [-f] -e <file> <addr>...\n");
 }
 
 int
@@ -55,20 +55,25 @@ main(int argc, char **argv)
     util_set_progname("skj-addr2line");
 
     for (i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-f") == 0) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            usage(stdout);
+            return 0;
+        } else if (strcmp(argv[i], "-f") == 0) {
             want_func = 1;
         } else if (strcmp(argv[i], "-e") == 0) {
-            if (++i >= argc)
-                usage();
+            if (++i >= argc) {
+                usage(stderr);
+                return 2;
+            }
             elf_path = argv[i];
-        } else if (strcmp(argv[i], "--help") == 0) {
-            usage();
         } else {
             break;              /* first address argument */
         }
     }
-    if (!elf_path || i >= argc)
-        usage();
+    if (!elf_path || i >= argc) {
+        usage(stderr);
+        return 2;
+    }
 
     elf = read_file(elf_path, &elf_len);
     arena_init(&a);

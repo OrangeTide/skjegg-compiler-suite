@@ -13,9 +13,9 @@ cleanup_ld(void *p)
 }
 
 static void
-usage(void)
+usage(FILE *out, int code)
 {
-    fprintf(stderr,
+    fprintf(out,
             "usage: skj-ld-mips [-V] [-T script.ld] [-e entry] [-f fmt]"
             " [-Map map] -o output input.o [...]\n"
             "\n"
@@ -25,7 +25,7 @@ usage(void)
             "  -f elf      ELF32 ET_EXEC based at 0x00400000 for qemu-mipsel"
             " (default)\n"
             "  -f ps-exe   PlayStation PS-EXE based at 0x80010000\n");
-    exit(1);
+    exit(code);
 }
 
 int
@@ -53,14 +53,16 @@ main(int argc, char **argv)
         if (strcmp(argv[i], "-V") == 0) {
             printf("skj-ld-mips %s\n", SKJ_VERSION);
             return 0;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            usage(stdout, 0);
         } else if (strcmp(argv[i], "-T") == 0) {
-            if (++i >= argc) usage();
+            if (++i >= argc) usage(stderr, 1);
             script_path = argv[i];
         } else if (strcmp(argv[i], "-e") == 0) {
-            if (++i >= argc) usage();
+            if (++i >= argc) usage(stderr, 1);
             entry_override = argv[i];
         } else if (strcmp(argv[i], "-f") == 0) {
-            if (++i >= argc) usage();
+            if (++i >= argc) usage(stderr, 1);
             if (strcmp(argv[i], "ps-exe") == 0)
                 psexe = 1;
             else if (strcmp(argv[i], "elf") == 0)
@@ -68,10 +70,10 @@ main(int argc, char **argv)
             else
                 die("unknown output format: %s (want elf or ps-exe)", argv[i]);
         } else if (strcmp(argv[i], "-o") == 0) {
-            if (++i >= argc) usage();
+            if (++i >= argc) usage(stderr, 1);
             output_path = argv[i];
         } else if (strcmp(argv[i], "-Map") == 0) {
-            if (++i >= argc) usage();
+            if (++i >= argc) usage(stderr, 1);
             map_path = argv[i];
         } else if (argv[i][0] == '-') {
             die("unknown option: %s", argv[i]);
@@ -83,7 +85,7 @@ main(int argc, char **argv)
     }
 
     if (!output_path || ninputs == 0)
-        usage();
+        usage(stderr, 1);
 
     if (setjmp(util_die_env) != 0) {
         free(inputs);

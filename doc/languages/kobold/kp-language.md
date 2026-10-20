@@ -534,6 +534,8 @@ each routine's argument rules, result type, and trap behavior.
 | `write(...)` / `writeln(...)` | write values to a stream (see below) |
 | `flush(stream)` | flush a stream |
 | `halt` / `halt(code)` | end the program with an exit code |
+| `abort` | unconditional runtime fault (exit 70) |
+| `assert(cond)` | runtime fault (exit 70) unless `cond` holds |
 | `release(h)` | drop a reference to a handle |
 | `paramcount` | number of command-line arguments |
 | `paramstr(i)` | the `i`-th command-line argument (`paramstr(0)` is the program name) |
@@ -564,7 +566,10 @@ writeln(erroutput, 'failed');
 
 An optional first argument selects a stream: the predefined `output` (standard output,
 the default) or `erroutput` (standard error). `flush` flushes a stream, and `halt` ends
-the program.
+the program with a chosen exit code. `abort` and `assert(cond)` are the fatal-fault
+builtins: they end the program with exit 70 (an unconditional fault, or one when
+`cond` is false), distinct from `halt`'s orderly exit, and on skj-run they print a
+symbolized backtrace.
 
 Input uses `read` and `readln`, which read from standard input into their arguments.
 Each argument must be a variable of a readable type: an integer, real, char, or string.

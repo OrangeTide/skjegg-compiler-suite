@@ -1,5 +1,8 @@
 /* guest.c : sparse guest memory, the syscall layer, and the initial stack */
 
+#define _POSIX_C_SOURCE 200809L         /* openat (and AT_FDCWD via fcntl.h) */
+#define _DEFAULT_SOURCE                 /* syscall() for SYS_getdents64 */
+
 #include "guest.h"
 
 #include <stdio.h>
@@ -7,6 +10,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
 
 /****************************************************************
  * Sparse memory
@@ -361,6 +366,7 @@ gm_read_out(guest_mem *m, uint32_t addr, void *dst, uint32_t len)
 #define GUEST_ENOMEM    12
 #define GUEST_EFAULT    14
 #define GUEST_ENOSYS    38
+#define GUEST_EINVAL    22
 
 /** Copy a guest buffer into a host one.  Returns 0 on a fault. */
 static int
@@ -428,26 +434,253 @@ sys_read(guest *g, uint32_t fd, uint32_t buf, uint32_t len)
  * asm-generic Linux values both the m68k and rv guests use, which match the
  * host's, so they pass through unchanged.  An opened descriptor is the host
  * fd, used directly by sys_read / sys_write / close. */
+/* Copy a NUL-terminated guest path string into `out` (at most cap bytes).
+ * Returns 0 on success, -GUEST_EFAULT on an unmapped byte, -GUEST_ENOENT if it
+ * does not terminate within the buffer. */
+static int32_t
+copy_path(guest *g, uint32_t pathp, char *out, size_t cap)
+{
+    size_t i;
+
+    for (i = 0; i < cap - 1; i++) {
+        uint8_t *p = gm_page(&g->mem, pathp + (uint32_t)i, 0);
+        if (!p)
+            return -GUEST_EFAULT;
+        out[i] = (char)p[(pathp + (uint32_t)i) & (GM_PAGE_SIZE - 1)];
+        if (out[i] == '\0')
+            return 0;
+    }
+    return -GUEST_ENOENT;
+}
+
 static int32_t
 sys_open(guest *g, uint32_t pathp, uint32_t flags, uint32_t mode)
 {
     char path[1024];
-    uint32_t i;
+    int32_t e;
     int fd;
 
-    for (i = 0; i < sizeof(path) - 1; i++) {
-        uint8_t *p = gm_page(&g->mem, pathp + i, 0);
-        if (!p)
-            return -GUEST_EFAULT;
-        path[i] = (char)p[(pathp + i) & (GM_PAGE_SIZE - 1)];
-        if (path[i] == '\0')
-            break;
-    }
-    path[i] = '\0';
+    if ((e = copy_path(g, pathp, path, sizeof(path))) != 0)
+        return e;
     fd = open(path, (int)flags, mode);
     if (fd < 0)
         return -GUEST_ENOENT;
     return (int32_t)fd;
+}
+
+/* openat(dirfd, path, flags, mode): the form rv32 (and any asm-generic Linux
+ * target) uses, since it has no bare open.  dirfd is passed through to the host
+ * openat, so AT_FDCWD (-100, the same value on the guest) and a real directory
+ * fd the guest opened both work.  The flags and mode are the asm-generic Linux
+ * values, which match the host's. */
+static int32_t
+sys_openat(guest *g, uint32_t dirfd, uint32_t pathp, uint32_t flags,
+           uint32_t mode)
+{
+    char path[1024];
+    int32_t e;
+    int fd;
+
+    if ((e = copy_path(g, pathp, path, sizeof(path))) != 0)
+        return e;
+    fd = openat((int)dirfd, path, (int)flags, mode);
+    if (fd < 0)
+        return -GUEST_ENOENT;
+    return (int32_t)fd;
+}
+
+/* lseek(fd, offset, whence): a 32-bit offset for the ILP32 guests, sign
+ * extended to the host off_t.  Returns the new offset, or -errno.  This is the
+ * simple form m68k uses; rv32/asm-generic use llseek below. */
+static int32_t
+sys_lseek(guest *g, uint32_t fd, uint32_t offset, uint32_t whence)
+{
+    off_t r;
+
+    (void)g;
+    r = lseek((int)fd, (off_t)(int32_t)offset, (int)whence);
+    if (r < 0)
+        return -GUEST_EBADF;
+    return (int32_t)r;
+}
+
+/* _llseek(fd, off_hi, off_lo, loff_t *result, whence): the asm-generic (rv32)
+ * form.  The 64-bit offset is split across two words; the new position is
+ * written back through the guest pointer as a little-endian loff_t.  Returns 0
+ * on success, -errno on failure. */
+static int32_t
+sys_llseek(guest *g, uint32_t fd, uint32_t off_hi, uint32_t off_lo,
+           uint32_t resultp, uint32_t whence)
+{
+    int64_t off = (int64_t)(((uint64_t)off_hi << 32) | off_lo);
+    off_t r = lseek((int)fd, (off_t)off, (int)whence);
+
+    if (r < 0)
+        return -GUEST_EBADF;
+    /* write the 8-byte loff_t result, little-endian, to the guest */
+    gm_store(&g->mem, resultp, 4, 0, (uint32_t)(uint64_t)r);
+    gm_store(&g->mem, resultp + 4, 4, 0, (uint32_t)((uint64_t)r >> 32));
+    if (g->mem.fault)
+        return -GUEST_EFAULT;
+    return 0;
+}
+
+/* statx(dirfd, path, flags, mask, buf): the stat form the "new" Linux targets
+ * (rv32) use, since they have no stat/fstat syscall.  The guest libc translates
+ * the filled record into POSIX struct stat (libc/stat.c).  AT_EMPTY_PATH (the
+ * 0x1000 flag bit, value matched numerically so the host needs no _GNU_SOURCE)
+ * means "stat the fd in dirfd", the fstat case; otherwise it is a path stat
+ * relative to dirfd (AT_FDCWD for an absolute or cwd-relative path).  The host
+ * fd is the guest fd, as for read/write.  Only the STATX_BASIC_STATS fields the
+ * guest reads are filled, at their fixed struct-statx offsets, little-endian. */
+static int32_t
+sys_statx(guest *g, uint32_t dirfd, uint32_t pathp, uint32_t flags,
+          uint32_t mask, uint32_t bufp)
+{
+    char path[1024];
+    struct stat hs;
+    int r;
+    uint32_t i;
+
+    (void)mask;
+    if (flags & 0x1000u) {                      /* AT_EMPTY_PATH: fstat the fd */
+        r = fstat((int)(int32_t)dirfd, &hs);
+    } else {
+        int32_t e = copy_path(g, pathp, path, sizeof(path));
+        if (e != 0)
+            return e;
+        r = fstatat((int)(int32_t)dirfd, path, &hs, 0);
+    }
+    if (r < 0)
+        return -GUEST_ENOENT;
+
+    for (i = 0; i < 256; i += 4)                /* zero the struct statx first */
+        gm_store(&g->mem, bufp + i, 4, 0, 0);
+    gm_store(&g->mem, bufp + 0,  4, 0, 0x000007ffu);                  /* stx_mask */
+    gm_store(&g->mem, bufp + 4,  4, 0, (uint32_t)hs.st_blksize);      /* stx_blksize */
+    gm_store(&g->mem, bufp + 16, 4, 0, (uint32_t)hs.st_nlink);        /* stx_nlink */
+    gm_store(&g->mem, bufp + 20, 4, 0, (uint32_t)hs.st_uid);          /* stx_uid */
+    gm_store(&g->mem, bufp + 24, 4, 0, (uint32_t)hs.st_gid);          /* stx_gid */
+    gm_store(&g->mem, bufp + 28, 4, 0, (uint32_t)(hs.st_mode & 0xffffu)); /* stx_mode + spare */
+    gm_store(&g->mem, bufp + 32, 4, 0, (uint32_t)hs.st_ino);          /* stx_ino lo */
+    gm_store(&g->mem, bufp + 36, 4, 0, (uint32_t)((uint64_t)hs.st_ino >> 32));
+    gm_store(&g->mem, bufp + 40, 4, 0, (uint32_t)hs.st_size);         /* stx_size lo */
+    gm_store(&g->mem, bufp + 44, 4, 0, (uint32_t)((uint64_t)hs.st_size >> 32));
+    gm_store(&g->mem, bufp + 48, 4, 0, (uint32_t)hs.st_blocks);       /* stx_blocks lo */
+    gm_store(&g->mem, bufp + 52, 4, 0, (uint32_t)((uint64_t)hs.st_blocks >> 32));
+    gm_store(&g->mem, bufp + 64, 4, 0, (uint32_t)hs.st_atime);        /* stx_atime.sec lo */
+    gm_store(&g->mem, bufp + 96, 4, 0, (uint32_t)hs.st_ctime);        /* stx_ctime.sec lo */
+    gm_store(&g->mem, bufp + 112,4, 0, (uint32_t)hs.st_mtime);        /* stx_mtime.sec lo */
+    if (g->mem.fault)
+        return -GUEST_EFAULT;
+    return 0;
+}
+
+/* The *at directory/path operations the guest libc uses (via AT_FDCWD) for
+ * mkdir/unlink/rmdir/rename.  dirfd is passed through to the host, as for
+ * openat.  A failure returns -ENOENT (the guest libc only checks for nonzero,
+ * and remove() retries with AT_REMOVEDIR on it), matching sys_open's style. */
+static int32_t
+sys_mkdirat(guest *g, uint32_t dirfd, uint32_t pathp, uint32_t mode)
+{
+    char path[1024];
+    int32_t e;
+
+    if ((e = copy_path(g, pathp, path, sizeof(path))) != 0)
+        return e;
+    return mkdirat((int)(int32_t)dirfd, path, (mode_t)mode) == 0
+               ? 0 : -GUEST_ENOENT;
+}
+
+static int32_t
+sys_unlinkat(guest *g, uint32_t dirfd, uint32_t pathp, uint32_t flags)
+{
+    char path[1024];
+    int32_t e;
+
+    if ((e = copy_path(g, pathp, path, sizeof(path))) != 0)
+        return e;
+    return unlinkat((int)(int32_t)dirfd, path, (int)flags) == 0
+               ? 0 : -GUEST_ENOENT;
+}
+
+/* renameat2(olddirfd, oldpath, newdirfd, newpath, flags): the guest libc always
+ * passes flags 0, which is plain renameat (no _GNU_SOURCE needed on the host);
+ * a nonzero flag word is rejected rather than silently dropped. */
+static int32_t
+sys_renameat2(guest *g, uint32_t od, uint32_t oldp, uint32_t nd,
+              uint32_t newp, uint32_t flags)
+{
+    char oldpath[1024], newpath[1024];
+    int32_t e;
+
+    if (flags != 0)
+        return -GUEST_EINVAL;
+    if ((e = copy_path(g, oldp, oldpath, sizeof(oldpath))) != 0)
+        return e;
+    if ((e = copy_path(g, newp, newpath, sizeof(newpath))) != 0)
+        return e;
+    return renameat((int)(int32_t)od, oldpath, (int)(int32_t)nd, newpath) == 0
+               ? 0 : -GUEST_ENOENT;
+}
+
+/* Store a 64-bit value to guest memory honoring the guest's byte order. */
+static void
+store64(guest *g, uint32_t addr, uint64_t v)
+{
+    if (g->big_endian) {
+        gm_store(&g->mem, addr, 4, 0, (uint32_t)(v >> 32));
+        gm_store(&g->mem, addr + 4, 4, 0, (uint32_t)v);
+    } else {
+        gm_store(&g->mem, addr, 4, 0, (uint32_t)v);
+        gm_store(&g->mem, addr + 4, 4, 0, (uint32_t)(v >> 32));
+    }
+}
+
+/* getdents64(fd, dirp, count): read directory entries into the guest buffer.
+ * The host is asked (via the raw syscall) for entries into a local buffer, then
+ * each struct linux_dirent64 is re-emitted into guest memory field by field so
+ * the multi-byte fields take the guest's byte order; the name bytes copy raw.
+ * The kernel computes d_reclen as round_up(19 + namelen + 1, 8) with the same
+ * 19-byte head on every arch, so the guest layout matches the host one byte for
+ * byte and the total equals the host's return.  Returns bytes written, 0 at end
+ * of directory, -errno on error. */
+static int32_t
+sys_getdents64(guest *g, uint32_t fd, uint32_t dirp, uint32_t count)
+{
+    char hbuf[4096];
+    long n;
+    int hoff;
+    uint32_t gpos = 0;
+    uint32_t want = count < sizeof(hbuf) ? count : (uint32_t)sizeof(hbuf);
+
+    n = syscall(SYS_getdents64, (int)fd, hbuf, (size_t)want);
+    if (n < 0)
+        return -GUEST_ENOENT;
+    for (hoff = 0; hoff + 19 <= (int)n; ) {
+        /* host entry fields at their fixed offsets (host native order) */
+        uint64_t ino, off;
+        uint16_t reclen;
+        uint8_t  type;
+        int namebytes;
+        memcpy(&ino, hbuf + hoff + 0, 8);
+        memcpy(&off, hbuf + hoff + 8, 8);
+        memcpy(&reclen, hbuf + hoff + 16, 2);
+        type = (uint8_t)hbuf[hoff + 18];
+        if (reclen < 20 || hoff + reclen > (int)n)
+            break;
+        namebytes = reclen - 19;        /* name + NUL + padding */
+        store64(g, dirp + gpos + 0, ino);
+        store64(g, dirp + gpos + 8, off);
+        gm_store(&g->mem, dirp + gpos + 16, 2, 0, reclen);
+        gm_store(&g->mem, dirp + gpos + 18, 1, 0, type);
+        gm_write(&g->mem, dirp + gpos + 19, hbuf + hoff + 19, (uint32_t)namebytes);
+        gpos += reclen;
+        hoff += reclen;
+    }
+    if (g->mem.fault)
+        return -GUEST_EFAULT;
+    return (int32_t)gpos;
 }
 
 /* Linux brk: return the new break, or the current one when the request
@@ -465,8 +698,6 @@ int32_t
 guest_syscall(guest *g, int sys, uint32_t a0, uint32_t a1, uint32_t a2,
               uint32_t a3, uint32_t a4, uint32_t a5)
 {
-    (void)a3;
-    (void)a4;
     (void)a5;
 
     g->syscalls++;
@@ -514,6 +745,9 @@ guest_syscall(guest *g, int sys, uint32_t a0, uint32_t a1, uint32_t a2,
     case GSYS_OPEN:
         return sys_open(g, a0, a1, a2);
 
+    case GSYS_OPENAT:
+        return sys_openat(g, a0, a1, a2, a3);
+
     case GSYS_CLOSE:
         /* Keep the standard streams open; close a real file. */
         if (a0 > 2)
@@ -521,7 +755,25 @@ guest_syscall(guest *g, int sys, uint32_t a0, uint32_t a1, uint32_t a2,
         return 0;
 
     case GSYS_LSEEK:
-        return -GUEST_EBADF;
+        return sys_lseek(g, a0, a1, a2);
+
+    case GSYS_LLSEEK:
+        return sys_llseek(g, a0, a1, a2, a3, a4);
+
+    case GSYS_STATX:
+        return sys_statx(g, a0, a1, a2, a3, a4);
+
+    case GSYS_MKDIRAT:
+        return sys_mkdirat(g, a0, a1, a2);
+
+    case GSYS_UNLINKAT:
+        return sys_unlinkat(g, a0, a1, a2);
+
+    case GSYS_RENAMEAT2:
+        return sys_renameat2(g, a0, a1, a2, a3, a4);
+
+    case GSYS_GETDENTS64:
+        return sys_getdents64(g, a0, a1, a2);
 
     case GSYS_EXIT:
     case GSYS_EXIT_GROUP:

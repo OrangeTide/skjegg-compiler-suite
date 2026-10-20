@@ -193,10 +193,15 @@ and `kobold/rt_free.c` for the freestanding tier.
 
 Everything else is plain Pascal.
 
-**Assertions** are a wrapper over `WriteLn` and `halt`:
+**Assertions** are built in: `assert(cond)` is a runtime fault (exit 70) when
+`cond` is false, and `abort` is the unconditional form (kp-builtins.md). Unlike
+the `halt`-based wrapper below, a failed `assert` faults like an index or
+arithmetic trap, so on skj-run (RISC-V) it prints a symbolized source-level
+backtrace rather than just a message. For an assertion that carries its own text
+or a custom exit code, the `WriteLn`-and-`halt` wrapper still works:
 
 ```pascal
-procedure Assert(cond: boolean; msg: string);
+procedure AssertMsg(cond: boolean; msg: string);
 begin
   if not cond then
   begin

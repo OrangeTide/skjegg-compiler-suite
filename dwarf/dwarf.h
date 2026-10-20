@@ -31,10 +31,13 @@ struct dw_line_row {
    rows must be sorted by addr and nrows >= 1.  If set_addr_off is non-NULL it
    receives the byte offset, within the returned buffer, of the 4-byte
    DW_LNE_set_address operand: in a relocatable object that address is unknown
-   until link, so the caller places a R_RISCV_32 there against the text base. */
+   until link, so the caller places a text-base relocation there (R_RISCV_32,
+   R_MIPS_32, or R_68K_32).  big selects big-endian multi-byte fields (ColdFire);
+   0 is little-endian (RISC-V, MIPS). */
 size_t dw_line_build(struct arena *a, const char *file_name,
                      const struct dw_line_row *rows, int nrows,
-                     uint32_t end_addr, uint8_t **out, size_t *set_addr_off);
+                     uint32_t end_addr, uint8_t **out, size_t *set_addr_off,
+                     int big);
 
 /* Serialize the skeleton DWARF 4 .debug_abbrev table: a single abbreviation
    (code 1) describing a childless DW_TAG_compile_unit that carries producer,
@@ -55,6 +58,6 @@ size_t dw_info_build(struct arena *a, const char *producer,
                      const char *file_name, const char *comp_dir,
                      uint32_t low_pc, uint32_t high_pc,
                      uint32_t stmt_list_off, uint8_t **out,
-                     size_t *low_pc_off, size_t *high_pc_off);
+                     size_t *low_pc_off, size_t *high_pc_off, int big);
 
 #endif /* SKJ_DWARF_H */

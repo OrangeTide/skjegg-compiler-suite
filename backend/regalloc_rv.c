@@ -116,7 +116,10 @@ linscan(struct ir_func *fn, int *first_def, int *last_use,
 
     qsort(ivs, niv, sizeof(*ivs), sort_by_start);
 
-    int pool[num_regs];
+    /* A fixed array, not int pool[num_regs]: skj-cc compiles this file for the
+       self-host build and has no VLAs.  num_regs is at most FP_NUM_REGS (the
+       largest class any caller passes), so the array always covers it. */
+    int pool[FP_NUM_REGS];
     for (k = 0; k < num_regs; k++)
         pool[k] = (reserved && reserved[k]) ? 0 : 1;
 

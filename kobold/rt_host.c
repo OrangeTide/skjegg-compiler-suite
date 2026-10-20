@@ -26,29 +26,18 @@
 /****************************************************************
  * The guest heap
  *
- * A segregated-free-list allocator, the same design as src/gheap.c, but over a
- * flat low-memory region with identity addressing and no vm.  Each block carries
- * a 16-byte header so the payload stays 16-aligned; free blocks link into an
- * exact-size bin, or a single large list reused by first fit with a split.
+ * The allocator itself is gheap_core.h, shared with the freestanding guest
+ * platform (rt_free.c); only the memory source differs here.  This tier reserves
+ * a 256 MiB region below 4 GB with mmap, committed on demand, so a block address
+ * fits the 32-bit guest address model (identity addressing, no vm).  GH_SBRK
+ * reserves that region on first use and then bumps a cursor in it.
  ****************************************************************/
 
-struct block {
-    uint32_t      size;         /* total bytes including this header, a multiple of ALIGN */
-    uint32_t      is_free;      /* 1 while on a free list, for a double-free guard */
-    struct block *next;         /* free-list link when free */
-};
-
-#define ALIGN       16u
-#define HDR         (((uint32_t)sizeof(struct block) + ALIGN - 1u) & ~(ALIGN - 1u))
-#define GHEAP_NBINS 512u                        /* bins cover total sizes up to 8 KiB */
 #define GHEAP_CAP   ((size_t)256u << 20)        /* 256 MiB reservation, committed on demand */
 
-static uint8_t      *g_base;
-static size_t        g_cap;
-static size_t        g_brk;
-static size_t        g_live;         /* bytes in allocated (not freed) blocks */
-static struct block *g_bins[GHEAP_NBINS];
-static struct block *g_large;
+static uint8_t *g_base;         /* region base (a real low pointer) */
+static uint32_t g_cap;          /* region size in bytes */
+static uint32_t g_brk;          /* bytes handed out from the region */
 
 static void rt_oom(const char *what)
 {
@@ -85,146 +74,67 @@ static void *rt_map_low(size_t len)
 #endif
 }
 
-/* Reserve the heap region in the low 2 GB on first use, so a block address fits
-   the 32-bit guest address model. */
-static void gheap_init(void)
+/* The core's memory source: reserve the low region on first use, then grow the
+   break by `incr`, returning the old break or (uint8_t *)-1 if it cannot grow. */
+static uint8_t *
+gh_sbrk(long incr)
 {
-    void *p;
+    uint8_t *old;
 
-    if (g_base)
-        return;
-    p = rt_map_low(GHEAP_CAP);
-    if (p == MAP_FAILED)
-        rt_oom("guest heap mmap failed");
-    g_base = p;
-    g_cap = GHEAP_CAP;
-    g_brk = 0;
-}
-
-static uint32_t round_up(uint32_t n, uint32_t a)
-{
-    return (n + a - 1u) / a * a;
-}
-
-static void push_free(struct block *b)
-{
-    uint32_t idx = b->size / ALIGN;
-
-    b->is_free = 1;
-    if (idx < GHEAP_NBINS) {
-        b->next = g_bins[idx];
-        g_bins[idx] = b;
-    } else {
-        b->next = g_large;
-        g_large = b;
+    if (g_base == NULL) {
+        void *p = rt_map_low(GHEAP_CAP);
+        if (p == MAP_FAILED)
+            rt_oom("guest heap mmap failed");
+        g_base = p;
+        g_cap = (uint32_t)GHEAP_CAP;
+        g_brk = 0;
     }
+    old = g_base + g_brk;
+    if (incr < 0) {
+        if ((uint32_t)(-incr) > g_brk)
+            return (uint8_t *)-1;
+        g_brk -= (uint32_t)(-incr);
+    } else {
+        if (g_brk + (uint32_t)incr > g_cap || g_brk + (uint32_t)incr < g_brk)
+            return (uint8_t *)-1;
+        g_brk += (uint32_t)incr;
+    }
+    return old;
 }
 
-static uint32_t payload_addr(struct block *b)
-{
-    return (uint32_t)(uintptr_t)((uint8_t *)b + HDR);
-}
+#define GH_SBRK(incr) gh_sbrk((long)(incr))
+#include "gheap_core.h"
 
-static struct block *block_of(uint32_t addr)
-{
-    return (struct block *)((uintptr_t)addr - HDR);
-}
-
+/* The guest-address wrappers rt_glue.h declares: convert a native payload
+   pointer to and from a 32-bit guest address, and turn exhaustion into exit 70. */
 uint32_t gheap_alloc(uint32_t nbytes)
 {
-    struct block *b, *prev, *rem;
-    uint32_t need, idx;
+    void *p = gh_alloc(nbytes);
 
-    if (nbytes == 0)
-        return 0;
-    gheap_init();
-    need = round_up(nbytes + HDR, ALIGN);
-    idx = need / ALIGN;
-
-    if (idx < GHEAP_NBINS) {
-        b = g_bins[idx];
-        if (b) {
-            g_bins[idx] = b->next;
-            b->is_free = 0;
-            b->next = NULL;
-            g_live += b->size;
-            return payload_addr(b);
-        }
-    } else {
-        prev = NULL;
-        for (b = g_large; b; prev = b, b = b->next) {
-            if (b->size < need)
-                continue;
-            if (prev)
-                prev->next = b->next;
-            else
-                g_large = b->next;
-            if (b->size - need >= HDR + ALIGN) {
-                rem = (struct block *)((uint8_t *)b + need);
-                rem->size = b->size - need;
-                b->size = need;
-                push_free(rem);
-            }
-            b->is_free = 0;
-            b->next = NULL;
-            g_live += b->size;
-            return payload_addr(b);
-        }
-    }
-
-    if (g_brk + need > g_cap || g_brk + need < g_brk)
+    if (p == NULL && nbytes != 0)
         rt_oom("guest heap exhausted");
-    b = (struct block *)(g_base + g_brk);
-    g_brk += need;
-    b->size = need;
-    b->is_free = 0;
-    b->next = NULL;
-    g_live += b->size;
-    return payload_addr(b);
+    return (uint32_t)(uintptr_t)p;
 }
 
 void gheap_free(uint32_t addr)
 {
-    struct block *b;
+    gh_free((void *)(uintptr_t)addr);
+}
 
-    if (addr == 0)
-        return;
-    b = block_of(addr);
-    if (b->is_free)
-        return;                 /* ignore a double free */
-    g_live -= b->size;
-    push_free(b);
+uint32_t gheap_realloc(uint32_t addr, uint32_t nbytes)
+{
+    void *p = gh_realloc((void *)(uintptr_t)addr, nbytes);
+
+    if (p == NULL && nbytes != 0)
+        rt_oom("guest heap exhausted");
+    return (uint32_t)(uintptr_t)p;
 }
 
 /* Live guest-heap bytes (allocated, not freed).  A guest leak check snapshots
    this around a scope and diffs it, so only symmetric alloc/free matters. */
 uint32_t kp_gheap_live(void)
 {
-    return (uint32_t)g_live;
-}
-
-uint32_t gheap_realloc(uint32_t addr, uint32_t nbytes)
-{
-    struct block *b;
-    uint32_t need, oldpayload, na, copy;
-
-    if (addr == 0)
-        return gheap_alloc(nbytes);
-    if (nbytes == 0) {
-        gheap_free(addr);
-        return 0;
-    }
-    b = block_of(addr);
-    need = round_up(nbytes + HDR, ALIGN);
-    if (need <= b->size)
-        return addr;            /* fits in place */
-
-    oldpayload = b->size - HDR;
-    na = gheap_alloc(nbytes);
-    copy = (oldpayload < nbytes) ? oldpayload : nbytes;
-    memcpy((void *)(uintptr_t)na, (void *)(uintptr_t)addr, copy);
-    gheap_free(addr);
-    return na;
+    return gh_live();
 }
 
 /****************************************************************
@@ -246,6 +156,38 @@ void rt_register_final(uint32_t kind, void (*fn)(uint32_t addr))
 void co_table_retain(uint32_t id);
 void co_table_release(uint32_t id);
 
+/* GH_POISON (off by default) is the guest-heap write-after-free instrument;
+   gheap_core.h documents the poison/verify half (the GH_WAF report).  This half
+   catches a retain or release of an already-freed gheap object and prints a
+   backtrace (GH_UAF).  Build with -DGH_POISON, or set it once here, then
+   run a hosted tier: `skj-kp-jit prog.pas 2>&1 | grep GH_`.  See
+   doc/internals/kobold-heap.md for how to read the output and isolate user
+   codegen from the embedded compiler's. */
+#ifdef GH_POISON
+#include <execinfo.h>
+static void gh_uaf(const char *op, uint32_t v)
+{
+    void *bt[32];
+    int n = backtrace(bt, 32);
+    fprintf(stderr, "GH_UAF %s on freed object v=%08x (refcount=%u)\n",
+            op, v, ((struct kp_obj_hdr *)(uintptr_t)v)->refcount);
+    backtrace_symbols_fd(bt, n, 2);
+    fflush(stderr);
+}
+/* Only a real gheap block can be use-after-freed; a static string lives in the
+   module image, outside the region, so bound the check to [g_base, g_base+g_brk)
+   to avoid reading a non-gheap address's bytes as a header. */
+#define GH_IN_REGION(v) \
+    (g_base && (uintptr_t)(v) >= (uintptr_t)g_base \
+             && (uintptr_t)(v) < (uintptr_t)g_base + g_brk)
+#define GH_UAF_CHECK(op, v) \
+    do { if ((v) && !KP_VAL_IS_TABLE(v) && GH_IN_REGION(v) \
+             && gh_is_freed((void *)(uintptr_t)(v))) \
+             gh_uaf((op), (v)); } while (0)
+#else
+#define GH_UAF_CHECK(op, v) ((void)0)
+#endif
+
 void kp_retain(uint32_t v)
 {
     struct kp_obj_hdr *h;
@@ -256,6 +198,7 @@ void kp_retain(uint32_t v)
         co_table_retain(v);
         return;
     }
+    GH_UAF_CHECK("retain", v);
     h = (struct kp_obj_hdr *)(uintptr_t)v;
     if (h->refcount > 0 && h->refcount != KP_RC_STATIC)
         h->refcount++;
@@ -272,6 +215,7 @@ void kp_release(uint32_t v)
         co_table_release(v);
         return;
     }
+    GH_UAF_CHECK("release", v);
     h = (struct kp_obj_hdr *)(uintptr_t)v;
     if (h->refcount == 0 || h->refcount == KP_RC_STATIC)
         return;

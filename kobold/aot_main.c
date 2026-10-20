@@ -134,7 +134,10 @@ main(int argc, char **argv)
     int i;
 
     for (i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-o") == 0 && i + 1 < argc)
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            printf("usage: skj-kp module.kpm [-o out.asm]\n");
+            return 0;
+        } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc)
             outpath = argv[++i];
         else if (argv[i][0] != '-' && !inpath)
             inpath = argv[i];

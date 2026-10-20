@@ -143,6 +143,108 @@ strtoul(const char *s, char **end, int base)
     return v;
 }
 
+/* The 64-bit twin of parse_ul, behind strtoll/strtoull. */
+static unsigned long long
+parse_ull(const char *s, char **end, int base, int *neg)
+{
+    const char *start = s;
+    unsigned long long acc = 0;
+    unsigned long long cutoff;
+    int cutlim;
+    int any = 0;
+    int overflow = 0;
+
+    while (isspace((unsigned char)*s))
+        s++;
+
+    *neg = 0;
+    if (*s == '+' || *s == '-') {
+        *neg = (*s == '-');
+        s++;
+    }
+
+    if ((base == 0 || base == 16) &&
+        s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s += 2;
+        base = 16;
+    } else if (base == 0 && s[0] == '0') {
+        base = 8;
+    } else if (base == 0) {
+        base = 10;
+    }
+
+    cutoff = ULLONG_MAX / (unsigned long long)base;
+    cutlim = (int)(ULLONG_MAX % (unsigned long long)base);
+
+    for (;; s++) {
+        int c = (unsigned char)*s;
+        int d;
+        if (c >= '0' && c <= '9')
+            d = c - '0';
+        else if (c >= 'a' && c <= 'z')
+            d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'Z')
+            d = c - 'A' + 10;
+        else
+            break;
+        if (d >= base)
+            break;
+        any = 1;
+        if (overflow || acc > cutoff || (acc == cutoff && d > cutlim)) {
+            overflow = 1;
+            continue;
+        }
+        acc = acc * (unsigned long long)base + (unsigned long long)d;
+    }
+
+    if (end)
+        *end = (char *)(any ? s : start);
+    if (overflow)
+        *neg = (*neg) ? 2 : 3;
+    return acc;
+}
+
+long long
+strtoll(const char *s, char **end, int base)
+{
+    int neg;
+    unsigned long long v = parse_ull(s, end, base, &neg);
+    if (neg == 2) {
+        errno = ERANGE;
+        return LLONG_MIN;
+    }
+    if (neg == 3) {
+        errno = ERANGE;
+        return LLONG_MAX;
+    }
+    if (neg) {
+        if (v > (unsigned long long)LLONG_MAX + 1ull) {
+            errno = ERANGE;
+            return LLONG_MIN;
+        }
+        return -(long long)v;
+    }
+    if (v > (unsigned long long)LLONG_MAX) {
+        errno = ERANGE;
+        return LLONG_MAX;
+    }
+    return (long long)v;
+}
+
+unsigned long long
+strtoull(const char *s, char **end, int base)
+{
+    int neg;
+    unsigned long long v = parse_ull(s, end, base, &neg);
+    if (neg == 2 || neg == 3) {
+        errno = ERANGE;
+        return ULLONG_MAX;
+    }
+    if (neg)
+        return (unsigned long long)(-(long long)v);
+    return v;
+}
+
 int
 atoi(const char *s)
 {
@@ -215,8 +317,19 @@ qsort(void *base, size_t n, size_t size,
     }
 }
 
+/* Ask the host for a symbolized backtrace before terminating.  On RISC-V the crt
+   provides __skj_trap_backtrace (the skj-run RV_SYS_FATAL ecall, a no-op off
+   skj-run); elsewhere there is no such facility yet, so a file-local no-op keeps
+   abort portable and control falls through to the plain exit below. */
+#if defined(__skj_riscv__)
+extern void __skj_trap_backtrace(int code);
+#else
+static void __skj_trap_backtrace(int code) { (void)code; }
+#endif
+
 void
 abort(void)
 {
+    __skj_trap_backtrace(134);      /* under skj-run: backtrace, then exit 134 */
     exit(134);                      /* 128 + SIGABRT, as a kernel would report */
 }

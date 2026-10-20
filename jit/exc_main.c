@@ -182,6 +182,9 @@ main(int argc, char **argv)
         if (strcmp(argv[i], "-V") == 0) {
             printf("skj-exc-jit-arm64 %s\n", SKJ_VERSION);
             return 0;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            printf("usage: skj-exc-jit-arm64 [-V] [-t] input.exs\n");
+            return 0;
         } else if (strcmp(argv[i], "-t") == 0) {
             trace = 1;
         } else if (argv[i][0] == '-') {

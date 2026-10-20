@@ -47,6 +47,9 @@ enum section_id {
     SEC_DATA,
     SEC_RODATA,
     SEC_BSS,
+    SEC_DEBUG_LINE,         /* DWARF (-g): non-alloc PROGBITS, built at finalize */
+    SEC_DEBUG_INFO,
+    SEC_DEBUG_ABBREV,
     SEC_COUNT,
 };
 
@@ -61,8 +64,21 @@ struct assembler {
     struct symtab st;
     int pass;
     int errors;
+    int short_branches;         /* force word-form branches; error if a
+                                   displacement overflows 16 bits (default:
+                                   use the 32-bit form when it does not fit) */
+    const char *debug_file;     /* DWARF source name from .file (-g), or NULL */
+    struct locrow {
+        uint32_t offset;        /* .text byte offset of a .loc */
+        int line;
+    } *locrows;
+    int n_locrows;
+    int locrow_cap;
     struct arena arena;
 };
+
+/* Build the DWARF .debug_* sections from the .loc rows (after pass 2). */
+void cf_emit_debug(struct assembler *a);
 
 void as_init(struct assembler *a, const char *src);
 void as_free(struct assembler *a);
@@ -77,7 +93,7 @@ int encode_insn(struct assembler *a, const char *mnemonic, int size,
                 struct operand *op1, struct operand *op2);
 
 int encode_size(const char *mnemonic, int size,
-                struct operand *op1, struct operand *op2);
+                struct operand *op1, struct operand *op2, int short_branches);
 
 /****************************************************************
  * ELF writer

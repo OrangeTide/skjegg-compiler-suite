@@ -2399,8 +2399,9 @@ lower_expr(struct cc_node *n)
             gl = find_global(n->name);
         }
         if (gl->is_func || (gl->type &&
-            (gl->type->kind == TY_ARRAY || gl->type->kind == TY_FUNC)))
-            return emit_addr_sym(n->name);
+            (gl->type->kind == TY_ARRAY || gl->type->kind == TY_FUNC ||
+             gl->type->kind == TY_STRUCT || gl->type->kind == TY_UNION)))
+            return emit_addr_sym(n->name);      /* an aggregate rvalue is its address */
         int addr = emit_addr_sym(n->name);
         return emit_load(addr, gl->type ? gl->type : cc_type_int());
     }
@@ -4283,11 +4284,17 @@ lower_stmt(struct cc_node *n)
         emit_jmp(loop_stack[nloops - 1].brk);
         return;
 
-    case ND_CONTINUE:
-        if (nloops == 0)
+    case ND_CONTINUE: {
+        /* continue targets the nearest enclosing loop, not a switch: a switch
+           frame carries a break target but cont == -1, so skip those frames. */
+        int li = nloops - 1;
+        while (li >= 0 && loop_stack[li].cont < 0)
+            li--;
+        if (li < 0)
             die("lower:%d: continue outside loop", n->line);
-        emit_jmp(loop_stack[nloops - 1].cont);
+        emit_jmp(loop_stack[li].cont);
         return;
+    }
 
     case ND_RETURN:
         if (n->a) {

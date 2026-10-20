@@ -211,6 +211,8 @@ procedure read(var ...);               { from standard input }
 procedure readln(var ...);             { from standard input }
 procedure flush(f: text);              { f optional; defaults to output }
 procedure halt(code: integer);         { code optional; defaults to 0 }
+procedure abort;                       { unconditional runtime fault, exit 70 }
+procedure assert(cond: boolean);       { runtime fault unless cond holds }
 ```
 
 - `write` and `writeln` take any number of arguments, each written according to its
@@ -229,6 +231,14 @@ procedure halt(code: integer);         { code optional; defaults to 0 }
   rest of the current line after its arguments; a bare `readln` skips a line.
 - `flush` flushes a stream (the default is `output`). `halt` ends the program with
   the given exit code, or 0.
+- `abort` and `assert` are the fatal-fault builtins, distinct from `halt`: `halt`
+  is an orderly exit with a chosen code, while `abort` and a failed `assert` are
+  runtime faults that end the program with exit 70, the convention the index and
+  arithmetic traps use (kp-abi.md). `abort` always faults; `assert(cond)` faults
+  only when `cond` is false. On a host with a backtrace facility (skj-run on
+  RISC-V) the fault prints a symbolized source-level stack; elsewhere it prints a
+  one-line diagnostic. The check in `assert` is unconditional at runtime, not a
+  debug-only guard that a release build strips.
 
 ## Program environment
 

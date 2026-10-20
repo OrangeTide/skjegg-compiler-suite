@@ -40,7 +40,6 @@ void io_write_str(int fd, uint32_t sp)
 }
 void io_write_int(int fd, int v) { fprintf(fd_stream(fd), "%d", v); }
 void io_write_char(int fd, int ch) { fputc(ch, fd_stream(fd)); }
-void io_write_ln(int fd) { fputc('\n', fd_stream(fd)); }
 void io_flush(int fd) { fflush(fd_stream(fd)); }
 void io_halt(int code) { exit(code); }
 
@@ -190,6 +189,8 @@ static void host_trap(const char *what)
 static void host_trap_div_zero(void) { host_trap("divide by zero"); }
 static void host_trap_overflow(void) { host_trap("integer overflow"); }
 static void host_trap_index(void) { host_trap("array index out of bounds"); }
+static void host_abort(void) { host_trap("aborted"); }
+static void host_assert(uint32_t cond) { if (!cond) host_trap("assertion failed"); }
 
 /* On a host where an i64 is a single register (x86-64) or follows the C
    register ABI (rv32), a plain host division serves the __divdi3-family names the
@@ -278,7 +279,6 @@ kp_install_runtime(struct kp_binding *binds, int *n, int cap)
     BIND("io_write_str", io_write_str);
     BIND("io_write_int", io_write_int);
     BIND("io_write_char", io_write_char);
-    BIND("io_write_ln", io_write_ln);
     BIND("io_flush", io_flush);
     BIND("io_read_int", io_read_int);
     BIND("io_read_char", io_read_char);
@@ -302,6 +302,8 @@ kp_install_runtime(struct kp_binding *binds, int *n, int cap)
     BIND("kp_trap_index", host_trap_index);
     BIND("kp_trap_div_zero", host_trap_div_zero);
     BIND("kp_trap_overflow", host_trap_overflow);
+    BIND("kp_abort", host_abort);
+    BIND("kp_assert", host_assert);
 
     BIND("kp_str_concat", kp_str_concat);
     BIND("kp_str_len", kp_str_len);

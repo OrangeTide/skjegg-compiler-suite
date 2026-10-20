@@ -1,7 +1,7 @@
 /* kp_crt_rv.S : the freestanding RV32 start file for a Kobold guest program.
 
    The counterpart of the hosted aot_rt.c entry, for a host whose seam to the
-   guest is only write/read/exit.  It runs on the stack the host hands in (the
+   guest is only write/read/_exit.  It runs on the stack the host hands in (the
    entry sp), hands the runtime its argument vector and its guest heap region, and
    enters the program through kp_guest_entry, the name skj-kp-rv gives the
    program's entry.  A normal return exits 0 (the hosted crt does the same); a
@@ -35,7 +35,7 @@ _start:
     /* A normal return exits 0, as the hosted crt does; a program ends with a
        nonzero status only by calling Halt(code), which exits through io_halt. */
     li      a0, 0
-    call    kp_sys_exit                 /* exit(0); never returns */
+    call    io_halt                     /* flush buffered stdio, then _exit(0) */
 1:  j       1b
 
     /* Entry-ABI version guard (kp_abi.h): reference the archive's version symbol
@@ -47,7 +47,7 @@ _start:
     .align  2
     .globl  __kp_crt_abi_ref
 __kp_crt_abi_ref:
-    .word   kp_guest_abi_v1
+    .word   kp_guest_abi_v3
 
     .bss
     .align  4                           /* 16-aligned base, as the allocator expects */

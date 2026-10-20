@@ -9,24 +9,110 @@
 |   trap #0 to invoke
 |   return value in d0
 |
-| _start drops argc/argv (tests take no arguments), calls main, then
-| passes main's return value to _exit.
+| _start passes argc/argv to main and, when the libc links environ, sets it
+| from the envp array above argv, then passes main's return value to _exit.
 
     .text
     .globl _start
-    .globl read
-    .globl write
-    .weak  exit                 | libc's exit (flush + atexit) overrides this
-    .globl _exit
     .weak  __libc_fini          | provided by libc; absent (0) when freestanding
+    .weak  environ              | set below only when the libc links it
     .globl __cont_capture
     .globl __cont_resume
 
+    | the syscall wrappers (read/write/open/close/lseek/exit/_exit) are shared
+    | with the Kobold freestanding runtime
+    .include "syscall_cf.S"
+
+| int statx(int dirfd, const char *path, int flags, unsigned mask,
+|           struct statx *buf);  m68k has no stat/fstat the libc stat family can
+| use the modern way, so fstat/stat (libc/stat.c) go through statx (#379).  A
+| C-libc wrapper, not part of the shared seam (the Kobold runtime needs no stat).
+| Five stack arguments; d2-d5 are callee-saved, so save them around the trap.
+    .globl statx
+statx:
+    movem.l %d2-%d5, -(%sp)         | save callee-saved regs (16 bytes)
+    move.l  20(%sp), %d1            | dirfd
+    move.l  24(%sp), %d2            | path
+    move.l  28(%sp), %d3            | flags
+    move.l  32(%sp), %d4            | mask
+    move.l  36(%sp), %d5            | buf
+    move.l  #379, %d0              | __NR_statx
+    trap    #0
+    movem.l (%sp)+, %d2-%d5
+    rts
+
+| void *__sys_brk(void *addr);  the raw Linux brk (#45), returning the new
+| program break in d0.  libc/sbrk.c grows a real, sandbox-backed heap through
+| it on the ILP32 targets.
+    .globl __sys_brk
+__sys_brk:
+    move.l  4(%sp), %d1            | addr
+    move.l  #45, %d0              | __NR_brk
+    trap    #0
+    rts
+
+| The directory/path file operations the libc wraps with AT_FDCWD
+| (libc/fileops.c): mkdirat, unlinkat (unlink and rmdir), renameat2.  Each is a
+| C-libc wrapper, not part of the shared seam.  Stack arguments, d2-d5 saved
+| around the trap as the C ABI requires.
+    .globl mkdirat
+mkdirat:                           | mkdirat(dirfd, path, mode)
+    movem.l %d2-%d5, -(%sp)
+    move.l  20(%sp), %d1           | dirfd
+    move.l  24(%sp), %d2           | path
+    move.l  28(%sp), %d3           | mode
+    move.l  #289, %d0              | __NR_mkdirat
+    trap    #0
+    movem.l (%sp)+, %d2-%d5
+    rts
+
+    .globl unlinkat
+unlinkat:                          | unlinkat(dirfd, path, flags)
+    movem.l %d2-%d5, -(%sp)
+    move.l  20(%sp), %d1           | dirfd
+    move.l  24(%sp), %d2           | path
+    move.l  28(%sp), %d3           | flags
+    move.l  #294, %d0              | __NR_unlinkat
+    trap    #0
+    movem.l (%sp)+, %d2-%d5
+    rts
+
+    .globl renameat2
+renameat2:                         | renameat2(olddirfd, oldpath, newdirfd, newpath, flags)
+    movem.l %d2-%d5, -(%sp)
+    move.l  20(%sp), %d1           | olddirfd
+    move.l  24(%sp), %d2           | oldpath
+    move.l  28(%sp), %d3           | newdirfd
+    move.l  32(%sp), %d4           | newpath
+    move.l  36(%sp), %d5           | flags
+    move.l  #351, %d0              | __NR_renameat2
+    trap    #0
+    movem.l (%sp)+, %d2-%d5
+    rts
+
 _start:
+    move.l  %sp, %a1            | entry stack: argc at (%a1), argv just above
     lea     stack_top, %sp      | switch to our own stack (qemu-m68k's
     sub.l   #16, %sp            | default stack is a single page; recursive
                                 | tests overflow it within a few frames)
+    move.l  (%a1), %d0          | argc
+    lea     4(%a1), %a0         | argv (the pointers stay mapped in the entry
+                                | stack region)
+    move.l  %d0, %d1            | envp = argv + (argc+1) words: skip the argv[]
+    addq.l  #1, %d1             | entries and their NULL terminator
+    lsl.l   #2, %d1
+    move.l  %a0, %a2
+    add.l   %d1, %a2            | a2 = envp
+    lea     environ, %a3        | weak: present only when the libc links it
+    move.l  %a3, %d1
+    tst.l   %d1
+    beq     3f
+    move.l  %a2, (%a3)
+3:
+    move.l  %a0, -(%sp)         | push main's args right-to-left (argv, argc),
+    move.l  %d0, -(%sp)         | the toolkit/m68k C ABI; caller pops
     jsr     main
+    addq.l  #8, %sp             | pop the two args
     move.l  %d0, %d2            | preserve main's return across the finalizer
     lea     __libc_fini, %a0    | weak: 0 when no libc is linked
     move.l  %a0, %d0
@@ -39,36 +125,6 @@ _start:
     trap    #0
     | unreachable
 2:  bra     2b
-
-| int read(int fd, char *buf, int n);
-read:
-    movem.l %d2-%d3, -(%sp)
-    move.l  12(%sp), %d1        | fd
-    move.l  16(%sp), %d2        | buf
-    move.l  20(%sp), %d3        | n
-    move.l  #3, %d0             | __NR_read
-    trap    #0
-    movem.l (%sp)+, %d2-%d3
-    rts
-
-| int write(int fd, const char *buf, int n);
-write:
-    movem.l %d2-%d3, -(%sp)     | save callee-saved regs
-    move.l  12(%sp), %d1        | fd
-    move.l  16(%sp), %d2        | buf
-    move.l  20(%sp), %d3        | n
-    move.l  #4, %d0             | __NR_write
-    trap    #0
-    movem.l (%sp)+, %d2-%d3     | restore
-    rts
-
-| void exit(int status);  (alias _exit)
-exit:
-_exit:
-    move.l  4(%sp), %d1
-    move.l  #1, %d0              | __NR_exit
-    trap    #0
-1:  bra     1b
 
 | __muldi3(a_hi, a_lo, b_hi, b_lo) -> d0:d1
 |   64-bit multiply (low 64 bits of result).

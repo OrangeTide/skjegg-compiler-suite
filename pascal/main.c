@@ -43,6 +43,9 @@ main(int argc, char **argv)
         } else if (strcmp(argv[i], "-V") == 0) {
             printf("skj-pc %s\n", SKJ_VERSION);
             return 0;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            printf("usage: skj-pc [-V] [-o out.s] input.pas\n");
+            return 0;
         } else if (strcmp(argv[i], "-g") == 0) {
             pascal_debug = 1;
         } else if (argv[i][0] == '-') {

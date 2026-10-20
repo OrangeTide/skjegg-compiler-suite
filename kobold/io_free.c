@@ -2,11 +2,14 @@
 
    The re-bottoming of kp_host.c for a host whose only output seam is the write
    syscall and whose only input seam is read.  kp_host.c backs these on stdio
-   (fprintf, fgetc); here they go straight to the seam, with no libc.  The number
-   formatting and parsing (Str, Val) cannot be shared with the hosted str_fmt.c,
-   which uses snprintf and strtod, so the integer side is hand-rolled here (the
-   same approach as the upstream sandbox); the real side arrives with the
-   soft-float layer.
+   (fprintf, fgetc); here they go straight to the seam, with no libc.  Integer Str
+   and Val stay hand-rolled here (the same approach as the upstream sandbox):
+   Pascal's Val carries a '$' hex prefix and 1-based error-offset codes that C's
+   strtol does not model.  Real parsing, a plain decimal-float scan, is shared
+   instead: scan_real routes to libc's strtod, so this runtime and a C program
+   built against the same libc parse a real the one way.  Real formatting (fmt_g)
+   is still hand-rolled to avoid the double-to-u64 helper libc's %g path pulls,
+   which the rv32 freestanding tier has no libgcc for.
 
    The syscall wrappers are the one target-specific piece.  Each is a single trap
    (trap #0 on ColdFire, ecall on rv32) with register-bound operands, which needs
@@ -25,63 +28,79 @@
  ****************************************************************/
 
 /* The wrappers are defined in the per-target syscall assembly
-   (runtime/io_free_cf.S, runtime/io_free_rv.S).  ColdFire additionally has
-   open/close, so it enables the file-I/O surface at the end of this file; the
-   rv32 console seam has write/read/exit only. */
+   (runtime/io_free_cf.S, runtime/io_free_rv.S).  Both targets provide
+   open/close/lseek as well as write/read/exit, so both enable the file-I/O
+   surface at the end of this file. */
 #if (defined(__riscv) && __riscv_xlen == 32) || defined(__skj_riscv__)
-/* rv32: console seam only. */
+#define KP_HAVE_FILE_IO 1
 #elif defined(__mcoldfire__) || defined(__skj_m68k__)
 #define KP_HAVE_FILE_IO 1
 #else
 #error "io_free.c is a freestanding console; build it with the rv32 or ColdFire toolchain"
 #endif
 
-long kp_sys_write(long fd, const void *buf, long len);
-long kp_sys_read(long fd, void *buf, long len);
-void kp_sys_exit(int code);
+/* The unified syscall seam: the same POSIX-named wrappers the C libc links
+   (runtime/start_rv.S / start.S for a C program; runtime/io_free_*.S for this
+   freestanding runtime).  write/read return the count or -errno; _exit ends the
+   process. */
+int write(int fd, const void *buf, int len);
+int read(int fd, void *buf, int len);
+void _exit(int code);
 #ifdef KP_HAVE_FILE_IO
-long kp_sys_open(const char *path, long flags, long mode);
-long kp_sys_close(long fd);
+int open(const char *path, int flags, int mode);
+int close(int fd);
+int getdents64(int fd, void *buf, int count);
 #endif
+
+/****************************************************************
+ * The buffered-stream seam: libc's stdio_core.c
+ *
+ * The console I/O below buffers through libc's standard streams rather than
+ * hitting the write/read seam a byte at a time, so the Kobold freestanding
+ * runtime and the C runtime share one buffering implementation.  Declared
+ * opaquely here so this freestanding file needs no -Iinclude; keep in step with
+ * include/stdio.h.
+ ****************************************************************/
+struct __FILE;
+extern struct __FILE __libc_stdin, __libc_stdout, __libc_stderr;
+extern int fputc(int c, struct __FILE *f);
+extern int fgetc(struct __FILE *f);
+extern size_t fwrite(const void *p, size_t sz, size_t n, struct __FILE *f);
+extern int fflush(struct __FILE *f);
 
 /****************************************************************
  * Console output (the io_* names the guest emits)
  ****************************************************************/
 
+static struct __FILE *
+io_stream(int fd)
+{
+    return (fd == 2) ? &__libc_stderr : &__libc_stdout;
+}
+
 void
 io_write_str(int fd, uint32_t s)
 {
-    long f = (fd == 2) ? 2 : 1;
     int32_t len = kp_str_len(s);
 
     if (len > 0)
-        kp_sys_write(f, (const void *)(uintptr_t)kp_str_base(s), len);
+        fwrite((const void *)(uintptr_t)kp_str_base(s), 1, (size_t)len, io_stream(fd));
 }
 
 void
 io_write_char(int fd, int ch)
 {
-    char c = (char)ch;
-    long f = (fd == 2) ? 2 : 1;
-
-    kp_sys_write(f, &c, 1);
+    fputc((unsigned char)ch, io_stream(fd));
 }
 
-void
-io_write_ln(int fd)
-{
-    io_write_char(fd, '\n');
-}
-
-/* A decimal integer straight to the seam, with no heap string.  INT_MIN is safe:
-   the magnitude is taken in unsigned. */
+/* A decimal integer formatted into a stack buffer, no heap string.  INT_MIN is
+   safe: the magnitude is taken in unsigned. */
 void
 io_write_int(int fd, int v)
 {
     char buf[12];
     int n = 0;
     uint32_t m = v < 0 ? 0u - (uint32_t)v : (uint32_t)v;
-    long f = (fd == 2) ? 2 : 1;
     char out[12];
     int i, j = 0;
 
@@ -93,12 +112,13 @@ io_write_int(int fd, int v)
         out[j++] = '-';
     for (i = 0; i < n; i++)
         out[j++] = buf[n - 1 - i];
-    kp_sys_write(f, out, j);
+    fwrite(out, 1, (size_t)j, io_stream(fd));
 }
 
-/* fd streams are unbuffered here, so a flush is a no-op; halt exits. */
-void io_flush(int fd) { (void)fd; }
-void io_halt(int code) { kp_sys_exit(code); }
+/* A real flush now; halt flushes every stream, then exits (buffered output must
+   reach the seam before the process ends). */
+void io_flush(int fd) { fflush(io_stream(fd)); }
+void io_halt(int code) { fflush((struct __FILE *)0); _exit(code); }
 
 /****************************************************************
  * Console input (over the read syscall, one byte at a time)
@@ -107,11 +127,7 @@ void io_halt(int code) { kp_sys_exit(code); }
 static int
 read_byte(void)
 {
-    unsigned char c;
-
-    if (kp_sys_read(0, &c, 1) == 1)
-        return c;
-    return -1;                  /* end of input */
+    return fgetc(&__libc_stdin);        /* libc buffering; EOF (-1) at end */
 }
 
 static int g_peek = -2;         /* -2 empty, -1 EOF, else a pushed-back byte */
@@ -364,9 +380,11 @@ kp_str_valcode(uint32_t s, int32_t kind)
  * Reals: formatting, parsing, and the rv soft-float bit bridge
  *
  * The hosted tier formats a real with the C library's "%g" and parses it with
- * strtod (kp_host.c / str_fmt.c).  This tier has neither, so it hand-rolls a %g
- * matching formatter (six significant digits, trailing zeros stripped) and a
- * double parse.  The rv32 soft-float ABI carries a double across a call as its
+ * strtod (kp_host.c / str_fmt.c).  This tier parses with the same strtod (shared
+ * from libc, see scan_real below) but hand-rolls a %g matching formatter (six
+ * significant digits, trailing zeros stripped), because libc's %g path pulls a
+ * double-to-u64 helper the rv32 freestanding tier has no libgcc for.  The rv32
+ * soft-float ABI carries a double across a call as its
  * 64-bit integer bits, not in a float register, so the guest reaches these
  * through the brv_* bridge, which converts the bits to a double and back.
  ****************************************************************/
@@ -445,56 +463,28 @@ void
 io_write_real(int fd, double x)
 {
     char buf[40];
-    long f = (fd == 2) ? 2 : 1;
 
-    kp_sys_write(f, buf, fmt_g(x, buf));
+    fwrite(buf, 1, (size_t)fmt_g(x, buf), io_stream(fd));
 }
 
-/* Scan a real: [sign] digits [. digits] [ (e|E) [sign] digits ], in double.
-   Mirrors the sandbox's f32 scan_real, widened to the tier's f64 real. */
-static double
-pow10i(int e)
-{
-    double r = 1.0, b = 10.0;
-    int n = e < 0 ? -e : e;
-
-    while (n) {
-        if (n & 1) r *= b;
-        b *= b;
-        n >>= 1;
-    }
-    return e < 0 ? 1.0 / r : r;
-}
+/* Scan a real: the freestanding tier parses it with libc's strtod
+   (libc/strtod.c), the same decimal-float parser a C program built against this
+   libc uses, so the two runtimes share one real parser.  strtod wants a
+   NUL-terminated string while this tier's callers pass a counted buffer, so copy
+   the (bounded) token into a local NUL-terminated scratch first: a real literal
+   never needs more than a few dozen characters, and a double cannot resolve more
+   digits than this buffer holds. */
+extern double strtod(const char *s, char **end);
 
 static double
 scan_real(const char *b, int32_t len)
 {
-    int32_t i = 0, j, neg = 0, any = 0, expneg = 0, fracn = 0;
-    int expval = 0, e;
-    double m = 0.0, v;
+    char buf[64];
+    int32_t n = len < 0 ? 0 : (len > 63 ? 63 : len);
 
-    if (len == 0) return 0.0;
-    if (b[i] == '+' || b[i] == '-') { neg = b[i] == '-'; i++; }
-    while (i < len && b[i] >= '0' && b[i] <= '9') { m = m * 10.0 + (b[i] - '0'); i++; any = 1; }
-    if (i < len && b[i] == '.') {
-        i++;
-        while (i < len && b[i] >= '0' && b[i] <= '9') { m = m * 10.0 + (b[i] - '0'); fracn++; i++; any = 1; }
-    }
-    if (!any) return 0.0;
-    if (i < len && (b[i] == 'e' || b[i] == 'E')) {
-        j = i + 1;
-        if (j < len && (b[j] == '+' || b[j] == '-')) { expneg = b[j] == '-'; j++; }
-        if (j < len && b[j] >= '0' && b[j] <= '9') {
-            while (j < len && b[j] >= '0' && b[j] <= '9') {
-                if (expval < 100000) expval = expval * 10 + (b[j] - '0');
-                j++;
-            }
-            i = j;
-        }
-    }
-    e = (expneg ? -expval : expval) - fracn;
-    v = m * pow10i(e);
-    return neg ? -v : v;
+    memcpy(buf, b, (size_t)n);
+    buf[n] = '\0';
+    return strtod(buf, (char **)0);
 }
 
 double
@@ -579,7 +569,7 @@ rt_param_str(int i)
  * give.  The host open/read/close syscalls back these; skj-run reads at most a
  * page per read and has no lseek, so ReadFileStr grows a guest-heap buffer and
  * reads until EOF.  Both accept a NUL-terminated path copied out of the guest
- * string.  kp_sys_open / kp_sys_close are the per-target syscall wrappers above.
+ * string.  open / close are the per-target syscall wrappers above.
  ****************************************************************/
 
 /* asm-generic open flags, shared by the guest and the host. */
@@ -603,7 +593,7 @@ ReadFileStr(uint32_t pathstr)
     memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
     path[plen] = '\0';
 
-    fd = (int)kp_sys_open(path, KP_O_RDONLY, 0);
+    fd = (int)open(path, KP_O_RDONLY, 0);
     if (fd < 0)
         return kp_str_new("", 0);
 
@@ -613,12 +603,12 @@ ReadFileStr(uint32_t pathstr)
             cap *= 2;
             buf = gheap_realloc(buf, cap);
         }
-        n = kp_sys_read(fd, (void *)(uintptr_t)(buf + len), (long)(cap - len));
+        n = read(fd, (void *)(uintptr_t)(buf + len), (long)(cap - len));
         if (n <= 0)
             break;
         len += (uint32_t)n;
     }
-    kp_sys_close(fd);
+    close(fd);
 
     s = kp_str_new_guest(buf, (int)len);
     gheap_free(buf);
@@ -639,12 +629,151 @@ WriteFileStr(uint32_t pathstr, uint32_t datastr)
     memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
     path[plen] = '\0';
 
-    fd = (int)kp_sys_open(path, KP_O_WRONLY | KP_O_CREAT | KP_O_TRUNC, 0644);
+    fd = (int)open(path, KP_O_WRONLY | KP_O_CREAT | KP_O_TRUNC, 0644);
     if (fd < 0)
         return 0;
     len = (uint32_t)kp_str_len(datastr);
-    n = kp_sys_write(fd, kp_str_bytes(datastr), (long)len);
-    kp_sys_close(fd);
+    n = write(fd, kp_str_bytes(datastr), (long)len);
+    close(fd);
     return n == (long)len;
+}
+
+/* The line/stream file primitives the `files` unit builds on: open a handle,
+   read one chunk, write bytes, close.  Stateless (the unit holds the fd and does
+   its own line buffering), mirroring jit_main.c and aot_rt.c over this tier's
+   open/read/write/close syscall seam. */
+#define KPF_CHUNK 4096
+
+int
+kpf_open_read(uint32_t pathstr)
+{
+    char path[1024];
+    int plen = kp_str_len(pathstr);
+
+    if (plen < 0 || plen >= (int)sizeof path)
+        return -1;
+    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
+    path[plen] = '\0';
+    return (int)open(path, KP_O_RDONLY, 0);
+}
+
+int
+kpf_open_write(uint32_t pathstr)
+{
+    char path[1024];
+    int plen = kp_str_len(pathstr);
+
+    if (plen < 0 || plen >= (int)sizeof path)
+        return -1;
+    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
+    path[plen] = '\0';
+    return (int)open(path, KP_O_WRONLY | KP_O_CREAT | KP_O_TRUNC, 0644);
+}
+
+uint32_t
+kpf_read(int fd)
+{
+    char tmp[KPF_CHUNK];
+    long n = (fd < 0) ? -1 : read(fd, tmp, (long)sizeof tmp);
+
+    if (n <= 0)
+        return kp_str_new("", 0);
+    return kp_str_new(tmp, (int)n);
+}
+
+int
+kpf_write(int fd, uint32_t datastr)
+{
+    if (fd < 0)
+        return -1;
+    return (int)write(fd, kp_str_bytes(datastr), (long)kp_str_len(datastr));
+}
+
+void
+kpf_close(int fd)
+{
+    if (fd >= 0)
+        close(fd);
+}
+
+/* Directory reads for the `dirs` unit.  A small fixed table of open
+   directories: a Kobold handle is a table index, the walk over the raw
+   getdents64 buffer is done here so the unit sees one name at a time.  No
+   malloc in the freestanding runtime, so the per-handle buffer is in the
+   table. */
+#define KPD_MAX 8
+#define KPD_BUF 2048
+static struct {
+    int fd;
+    int inuse;
+    int pos;                    /* next unread byte in buf */
+    int len;                    /* valid bytes in buf */
+    char buf[KPD_BUF];
+} kpd_tab[KPD_MAX];
+
+int
+kpd_open(uint32_t pathstr)
+{
+    char path[1024];
+    int plen = kp_str_len(pathstr);
+    int i, fd;
+
+    if (plen < 0 || plen >= (int)sizeof path)
+        return -1;
+    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
+    path[plen] = '\0';
+    for (i = 0; i < KPD_MAX; i++)
+        if (!kpd_tab[i].inuse)
+            break;
+    if (i == KPD_MAX)
+        return -1;
+    fd = (int)open(path, KP_O_RDONLY, 0);
+    if (fd < 0)
+        return -1;
+    kpd_tab[i].fd = fd;
+    kpd_tab[i].inuse = 1;
+    kpd_tab[i].pos = 0;
+    kpd_tab[i].len = 0;
+    return i;
+}
+
+uint32_t
+kpd_next(int h)
+{
+    char *e;
+    unsigned short reclen;
+    const char *name;
+    int nl;
+
+    if (h < 0 || h >= KPD_MAX || !kpd_tab[h].inuse)
+        return kp_str_new("", 0);
+    if (kpd_tab[h].pos >= kpd_tab[h].len) {
+        int n = getdents64(kpd_tab[h].fd, kpd_tab[h].buf, KPD_BUF);
+        if (n <= 0)
+            return kp_str_new("", 0);
+        kpd_tab[h].len = n;
+        kpd_tab[h].pos = 0;
+    }
+    e = kpd_tab[h].buf + kpd_tab[h].pos;
+    memcpy(&reclen, e + 16, sizeof reclen);   /* struct linux_dirent64 d_reclen */
+    if (reclen < 20) {                        /* guard a malformed entry */
+        kpd_tab[h].pos = kpd_tab[h].len;
+        return kp_str_new("", 0);
+    }
+    kpd_tab[h].pos += reclen;
+    name = e + 19;                            /* d_name, NUL-terminated */
+    nl = 0;
+    while (nl < reclen - 19 && name[nl])
+        nl++;
+    return kp_str_new(name, nl);
+}
+
+void
+kpd_close(int h)
+{
+    if (h >= 0 && h < KPD_MAX && kpd_tab[h].inuse) {
+        close(kpd_tab[h].fd);
+        kpd_tab[h].inuse = 0;
+    }
 }
 #endif /* KP_HAVE_FILE_IO */

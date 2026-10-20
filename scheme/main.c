@@ -26,9 +26,10 @@ cleanup_free(void *p)
 }
 
 static void
-usage(void)
+usage(FILE *out, int code)
 {
-    die("usage: skj-sc [-p] [-o out.s] input.scm");
+    fprintf(out, "usage: skj-sc [-p] [-o out.s] input.scm\n");
+    exit(code);
 }
 
 int
@@ -56,6 +57,8 @@ main(int argc, char **argv)
         } else if (strcmp(argv[i], "-V") == 0) {
             printf("skj-sc %s\n", SKJ_VERSION);
             return 0;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            usage(stdout, 0);
         } else if (argv[i][0] == '-') {
             die("unknown option: %s", argv[i]);
         } else {
@@ -63,7 +66,7 @@ main(int argc, char **argv)
         }
     }
     if (inpath == NULL)
-        usage();
+        usage(stderr, 1);
 
     if (setjmp(util_die_env) != 0)
         return 1;

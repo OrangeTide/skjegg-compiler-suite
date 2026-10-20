@@ -71,6 +71,9 @@ enum mips_section_id {
     MSEC_DATA,
     MSEC_RODATA,
     MSEC_BSS,
+    MSEC_DEBUG_LINE,        /* DWARF (-g): non-alloc PROGBITS, built at finalize */
+    MSEC_DEBUG_INFO,
+    MSEC_DEBUG_ABBREV,
     MSEC_COUNT,
 };
 
@@ -86,12 +89,22 @@ struct mips_asm {
     int pass;
 
     const char *sched_src;  /* the source after delay-slot scheduling */
+    const char *debug_file; /* DWARF source name from .file (-g), or NULL */
+    struct mips_locrow {
+        uint32_t offset;    /* .text byte offset of a .loc */
+        int line;
+    } *locrows;
+    int n_locrows;
+    int locrow_cap;
     struct arena arena;
 };
 
 void mips_init(struct mips_asm *a, const char *src);
 void mips_free(struct mips_asm *a);
 void mips_assemble(struct mips_asm *a);
+
+/* Build the DWARF .debug_* sections from the .loc rows (after assemble). */
+void mips_emit_debug(struct mips_asm *a);
 
 /* Fill the branch and load delay slots in the .set reorder regions of src,
  * returning the rewritten source (arena-allocated). */

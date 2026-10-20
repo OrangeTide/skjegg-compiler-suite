@@ -373,6 +373,14 @@ handle_directive(struct rv_asm *a, const char *dir)
     if (strcmp(dir, ".bss") == 0 || strcmp(dir, ".sbss") == 0) {
         a->cur_section = RSEC_BSS; return;
     }
+    if (strcmp(dir, ".include") == 0) {
+        lex_next(l);
+        if (l->tok.type != T_STRING)
+            die("line %d: .include needs a \"file\" operand", l->tok.line);
+        if (lex_include(l, l->tok.str) != 0)
+            die("line %d: cannot .include \"%s\"", l->tok.line, l->tok.str);
+        return;         /* the included tokens come next; the parent resumes on pop */
+    }
 
     if (strcmp(dir, ".section") == 0) {
         lex_next(l);
@@ -726,9 +734,7 @@ sizing_pass(struct rv_asm *a)
     a->recording = 1;
     a->bsite = 0;
     a->nbsites = 0;
-    a->lex.pos = a->lex.src;
-    a->lex.line = 1;
-    a->lex.tok.type = T_NEWLINE;
+    lex_rewind(&a->lex);
     run_pass(a);
 }
 
@@ -833,7 +839,7 @@ rv_emit_debug(struct rv_asm *a)
 
     /* .debug_line: the line program, set_address fixed to .text + first row. */
     len = dw_line_build(ar, name, rows, a->n_locrows, text_end, &bytes,
-                        &set_addr_off);
+                        &set_addr_off, 0);
     for (b = 0; b < len; b++)
         sec_emit8(sl, bytes[b]);
     sec_add_reloc_t(sl, (uint32_t)set_addr_off, sym,
@@ -846,7 +852,7 @@ rv_emit_debug(struct rv_asm *a)
 
     /* .debug_info: a CU spanning all of .text, stmt_list at line program 0. */
     len = dw_info_build(ar, "skjegg", name, ".", 0, text_end, 0, &bytes,
-                        &low_off, &high_off);
+                        &low_off, &high_off, 0);
     for (b = 0; b < len; b++)
         sec_emit8(si, bytes[b]);
     sec_add_reloc_t(si, (uint32_t)low_off, sym, 0, R_RISCV_32);
@@ -878,8 +884,6 @@ rv_assemble(struct rv_asm *a)
     a->recording = 0;
     a->bsite = 0;
     a->pcrel_serial = 0;
-    a->lex.pos = a->lex.src;
-    a->lex.line = 1;
-    a->lex.tok.type = T_NEWLINE;
+    lex_rewind(&a->lex);
     run_pass(a);
 }

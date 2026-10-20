@@ -14,8 +14,9 @@
  * $a0..$a3.  The syscall wrappers pass them straight through: write's
  * (fd, buf, n) are already in $a0, $a1, $a2, which is the syscall order.
  *
- * _start drops argc/argv (tests take no arguments), calls main, then
- * passes main's return value to _exit.
+ * _start reads argc/argv from the entry stack and passes them to main
+ * (so a hosted program such as the self-compiled skj-cc sees its command
+ * line), then passes main's return value to _exit.
  *
  * The file relies on the assembler's default `.set reorder`: for
  * -march=mips1 the assembler fills the load delay slot, the branch delay
@@ -32,14 +33,36 @@
 	.globl __start
 	.globl write
 	.globl read
+	.globl open
+	.globl close
+	.globl lseek
+	.globl statx
+	.globl mkdirat
+	.globl unlinkat
+	.globl renameat2
+	.globl fchmodat
+	.globl getdents64
 	.weak  exit
 	.globl _exit
 	.weak  __libc_fini
+	.weak  environ
 
 __start:
 _start:
-	la	$sp, stack_top
-	addiu	$sp, $sp, -16
+	move	$t0, $sp		/* kernel/skj-run stack: argc at 0($sp), */
+					/* the argv pointers just above it */
+	la	$sp, stack_top		/* switch to our own, larger stack */
+	addiu	$sp, $sp, -16		/* o32 argument-slot space */
+	lw	$a0, 0($t0)		/* argc */
+	addiu	$a1, $t0, 4		/* argv (lives in the entry stack region, */
+					/* which stays mapped) */
+	sll	$t1, $a0, 2		/* envp = argv + (argc+1) words: skip the */
+	addu	$t1, $a1, $t1		/* argv[] entries and their NULL terminator */
+	addiu	$t1, $t1, 4
+	la	$t2, environ		/* weak: present only when the libc links it */
+	beqz	$t2, 1f
+	sw	$t1, 0($t2)
+1:
 	jal	main
 	move	$s0, $v0		/* preserve main's return across the finalizer */
 	la	$t0, __libc_fini	/* weak: 0 when no libc is linked */
@@ -51,17 +74,96 @@ _start:
 	syscall
 2:	b	2b
 
+/* The MIPS syscall ABI signals an error with $a3 != 0 and the (positive) errno
+   in $v0, rather than the negative-return convention the other targets and the
+   libc expect.  SYSRET translates that: on error it negates $v0 to -errno so a
+   caller's `r < 0` test works; on success it returns $v0 unchanged.  Every
+   wrapper ends with it. */
+	.macro SYSRET
+	beqz	$a3, 8f
+	subu	$v0, $zero, $v0
+8:
+	jr	$ra
+	.endm
+
 /* int write(int fd, const char *buf, int n); */
 write:
 	li	$v0, 4004		/* __NR_write */
 	syscall
-	jr	$ra
+	SYSRET
 
 /* int read(int fd, char *buf, int n); */
 read:
 	li	$v0, 4003		/* __NR_read */
 	syscall
-	jr	$ra
+	SYSRET
+
+/* int open(const char *path, int flags, int mode); args pass through $a0..$a2 */
+open:
+	li	$v0, 4005		/* __NR_open */
+	syscall
+	SYSRET
+
+/* int close(int fd); */
+close:
+	li	$v0, 4006		/* __NR_close */
+	syscall
+	SYSRET
+
+/* void *__sys_brk(void *addr);  the raw Linux brk (#4045), returning the new
+   program break.  libc/sbrk.c grows a real heap through it on the ILP32
+   targets (under qemu-mipsel here). */
+	.globl __sys_brk
+__sys_brk:
+	li	$v0, 4045		/* __NR_brk */
+	syscall
+	SYSRET
+
+/* long lseek(int fd, long offset, int whence); o32 has a simple 3-arg lseek */
+lseek:
+	li	$v0, 4019		/* __NR_lseek */
+	syscall
+	SYSRET
+
+/* int statx(int dirfd, const char *path, int flags, unsigned mask, void *buf);
+   the 5th arg already arrives at 16($sp) per the o32 stack convention */
+statx:
+	li	$v0, 4366		/* __NR_statx */
+	syscall
+	SYSRET
+
+/* The directory/path file operations the libc wraps with AT_FDCWD
+   (libc/fileops.c): mkdirat, unlinkat (unlink and rmdir), renameat2.  o32 has
+   bare mkdir/unlink/rename too, but the *at forms keep the one libc path; the
+   fifth renameat2 arg already arrives at 16($sp). */
+mkdirat:
+	li	$v0, 4289		/* __NR_mkdirat (__NR_Linux + 289) */
+	syscall
+	SYSRET
+
+unlinkat:
+	li	$v0, 4294		/* __NR_unlinkat (__NR_Linux + 294) */
+	syscall
+	SYSRET
+
+renameat2:
+	li	$v0, 4351		/* __NR_renameat2 (__NR_Linux + 351) */
+	syscall
+	SYSRET
+
+/* int fchmodat(int dirfd, const char *path, int mode, int flags); the libc
+   chmod (libc/fileops.c) over AT_FDCWD. */
+fchmodat:
+	li	$v0, 4333		/* __NR_fchmodat (__NR_Linux + 333) */
+	syscall
+	SYSRET
+
+/* int getdents64(int fd, void *buf, int count); directory reads for the libc
+   opendir/readdir (libc/dirent.c). */
+getdents64:
+	li	$v0, 4219		/* __NR_getdents64 (__NR_Linux + 219) */
+	syscall
+	SYSRET
 
 /* void exit(int status); */
 exit:

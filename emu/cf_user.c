@@ -31,6 +31,11 @@
 #define M68K_NR_CLOSE       6
 #define M68K_NR_LSEEK       19
 #define M68K_NR_BRK         45
+#define M68K_NR_STATX       379
+#define M68K_NR_MKDIRAT     289
+#define M68K_NR_UNLINKAT    294
+#define M68K_NR_RENAMEAT2   351
+#define M68K_NR_GETDENTS64  220
 #define M68K_NR_WRITEV      146
 #define M68K_NR_EXIT_GROUP  247
 
@@ -44,6 +49,11 @@ sys_of_m68k(uint32_t nr)
     case M68K_NR_OPEN:          return GSYS_OPEN;
     case M68K_NR_CLOSE:         return GSYS_CLOSE;
     case M68K_NR_LSEEK:         return GSYS_LSEEK;
+    case M68K_NR_STATX:         return GSYS_STATX;
+    case M68K_NR_MKDIRAT:       return GSYS_MKDIRAT;
+    case M68K_NR_UNLINKAT:      return GSYS_UNLINKAT;
+    case M68K_NR_RENAMEAT2:     return GSYS_RENAMEAT2;
+    case M68K_NR_GETDENTS64:    return GSYS_GETDENTS64;
     case M68K_NR_BRK:           return GSYS_BRK;
     case M68K_NR_WRITEV:        return GSYS_WRITEV;
     case M68K_NR_EXIT_GROUP:    return GSYS_EXIT_GROUP;

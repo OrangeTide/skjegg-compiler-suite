@@ -42,6 +42,9 @@ main(int argc, char **argv)
         } else if (strcmp(argv[i], "-V") == 0) {
             printf("skj-tinc %s\n", SKJ_VERSION);
             return 0;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            printf("usage: skj-tinc [-V] [-o out.s] input.tc\n");
+            return 0;
         } else if (strcmp(argv[i], "-g") == 0) {
             tinc_debug = 1;
         } else if (argv[i][0] == '-') {
