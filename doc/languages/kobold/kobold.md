@@ -310,11 +310,11 @@ and `_exit` (plus `open` and `close` on ColdFire), the same names the C libc
 links, so the Kobold freestanding runtime and the C runtime speak one syscall
 seam (`runtime/io_free_rv.S`, `runtime/io_free_cf.S`).
 
-`io_free.c` no longer hand-rolls stream buffering: its console I/O delegates to
-libc's buffered-stream core (`libc/stdio_core.c`, the three standard streams and
+`io_free.c`'s console I/O delegates to libc's buffered-stream core
+(`libc/stdio_core.c`, the three standard streams and
 `fputc` / `fgetc` / `fwrite` / `fflush` over that one `write` / `read` seam), so
-both runtimes share a single stdio buffering layer. Because output is now
-buffered, a crt must flush before the process ends: the shipped crts and `io_halt`
+both runtimes share a single stdio buffering layer. Because output is buffered, a
+crt must flush before the process ends: the shipped crts and `io_halt`
 call `fflush` then `_exit`, which is why the normal-return path goes through
 `io_halt` (ABI version 3).
 
@@ -349,7 +349,7 @@ transcendentals (`sin`, `cos`, `exp`, `ln`, `arctan`) are in `kobold/math_free.c
 computed in hardware double with range reduction and series since the tier has no
 libm; they are accurate to well under the `%g` six-digit output, so they
 reproduce the hosted (libm) results exactly, checked against the C library over a
-wide range. The tier is now at full parity with the hosted one.
+wide range. The tier is at full parity with the hosted one.
 
 `make check-kp-free` is the end-to-end proof: each `tests/kp-src` fixture goes
 `skj-kpc --emit-kpm` -> `skj-kp-rv` -> `skj-as-rv` -> `skj-ld-rv` into a static
@@ -450,8 +450,7 @@ raises it, and the checked ops never appear in C.
   backend: the hardware behavior is unusable (RV32 divide returns the wrapped
   value with no fault, the m68k exception surfaces as a raw signal or SIGFPEs
   under qemu), so the backend synthesises a divisor guard and an INT_MIN/-1
-  guard under the guarded trap policy on each (x86-64 and arm64 already had the
-  divisor guard).
+  guard under the guarded trap policy on each.
 - **In-tree, multi-unit corpus**: `tests/kp-multi` is the cross-module set, the
   one behavioral surface the single-module corpus cannot reach. A fixture is told
   apart by its first keyword: `program NAME;` is a test (paired with

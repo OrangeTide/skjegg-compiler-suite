@@ -8,8 +8,8 @@ stays on the trap axis (`panic`, nil dispatch, overflow, and the rest) described
 
 > Status: implemented. The `error` type, the `fails` signature marker, and all the call-site
 > forms compile and run, with the second return register wired on every backend, and the grammar
-> and fixtures are in place (the whole order below is done). The int-code representation is the
-> first version; the deferred items at the end are still to come.
+> and fixtures are in place. The error register holds an integer code; the deferred items at the
+> end are still to come.
 
 ## Two axes, kept apart
 
@@ -23,16 +23,13 @@ Kobold separates two kinds of failure, and does not let one mechanism serve both
   divide by zero, a bad index, or an explicit `panic`. It raises a trap, unwinds to the
   host's landing pad, and is the subject of `kp-abi.md`.
 
-Keeping them apart is a deliberate architectural choice. The trap
+The two are kept apart. The trap
 mechanism relies on a single VM-wide landing pad and the invariant that no landing pad spans
 a `yield` (see `kp-abi.md`). A value-returned error installs no pad and does no `longjmp`, so
-it composes with coroutines for free. Building a guest-side `try`/`except` that catches a
+it composes with coroutines for free. A guest-side `try`/`except` that caught a
 `panic` would put a landing pad on the guest stack, break that invariant, and force
-per-coroutine pad chains. We do not do that. Expected failures are values; unexpected
+per-coroutine pad chains. Expected failures are values; unexpected
 failures are traps.
-
-This mirrors the split in other value-error languages: Zig's `error` versus `@panic`, Swift's
-`throws` versus `fatalError`, Rust's `Result` versus `panic!`.
 
 ## The model: an error is a second return value
 
@@ -41,9 +38,7 @@ return register, and an error signal in a second register next to it. The caller
 second register and branches. There is no hidden control flow.
 
 Every surface form below is thin sugar over the same three steps: make the call, test the
-error register, branch. A reader can look at the generated IR and see an ordinary `if`. This
-is the property the design protects. Exceptions hide the test and the branch inside a runtime;
-Kobold does not.
+error register, branch. A reader can look at the generated IR and see an ordinary `if`.
 
 Take a failable function:
 
@@ -114,12 +109,11 @@ else
 ## The error type
 
 `error` is an opaque type, accessed only through operations, never compared as a raw integer.
-Keeping it opaque is what lets its representation grow later without breaking source.
 
 The invariant that makes the representation migratable is that **success is always "the error
 register is zero."** The call-site test is `reg <> 0` regardless of what the register holds.
 
-First version:
+The representation:
 
 - The error register holds an integer code. Zero means success; any other value is a code the
   program chose.
@@ -128,25 +122,10 @@ First version:
 - No allocation, no reference counting, no heap object. The whole mechanism is a register and
   a branch.
 
-Later, when a human-readable message earns its place:
-
-- The error register holds a managed handle instead of a bare int. A handle is Kobold's
-  opaque, reference-counted reference, the same kind of value as a `string` or a dynamic
-  array: an id or heap address, retained on copy, released on drop, finalized when the last
-  reference goes. The handle carries a code and a message. `nil` (still zero) means success.
-- `fail(msg: string)` and `fail(code: integer; msg: string)` join `fail(code)`.
-- `errormessage(e): string` joins `errorcode(e)`.
-- An allocation happens only on an actual failure, on the exceptional path.
-
-Because `error` is opaque and the success test never changes, moving from the int to the
-handle is a recompile, not a source edit. It bumps the interface fingerprint (the register
-goes from an int to a pointer), which the unit system already handles. Existing call sites,
-`or else`, and `fails` forms are byte-identical across the change; only `fail` construction and
-the accessors change underneath.
-
-This is the Go `error` shape (one canonical error value, nil for success) reached by a cheap
-first step, rather than Rust's `Result<T, E>`, which would need the sum types and generics the
-language has ruled out (see `kobold.md`).
+Because `error` is opaque and the success test never changes, a later move to a managed-handle
+representation that carries a human-readable message (the deferred item below) is a recompile,
+not a source edit: it bumps the interface fingerprint, which the unit system already handles,
+and existing call sites, `or else`, and `fails` forms are unaffected.
 
 ### Returning success and failure
 
@@ -190,10 +169,7 @@ not, and the signature says which.
 ## Handling at the call site
 
 Calling a failable routine and doing nothing with the error is a compile error. The result of
-a failable call cannot reach the rest of the program until the error has been dealt with. This
-is stricter than Go, which lets an error drop into `_`, and stricter than Rust, which only
-warns on an unused result. It matches Swift, where a `try` is mandatory, and Zig, where an
-unused error union is an error.
+a failable call cannot reach the rest of the program until the error has been dealt with.
 
 There are five ways to deal with it.
 
@@ -246,11 +222,11 @@ failure to its own caller, with no error binding and no repeated call. It is leg
 failable routine, since a non-failable routine has no error to set. Each routine that wants to
 forward writes `or fail` for itself; nothing propagates implicitly across frames.
 
-The shorthand is limited to those reserved words on purpose. The parser reaches `or` without
+The shorthand is limited to those reserved words. The parser reaches `or` without
 type information and cannot tell a failable call from a boolean, so it decides from the token
-after `or`. `else`, `exit`, `break`, `continue`, and `fail` are reserved and can never begin a
-boolean operand, so `a or else`, `a or exit`, `a or fail`, and the rest are unambiguous. A
-general `or someCall()` would collide with boolean `or` of a function call and is not offered.
+after `or`. `else`, `exit`, `break`, `continue`, and `fail` can never begin a
+boolean operand, so `a or else`, `a or exit`, `a or fail`, and the rest are unambiguous, while a
+general `or someCall()` stays boolean `or` of a function call.
 The idiomatic exit call, `Exit()`, is written in the body of a handler; the `or exit` divert is
 the keyword form.
 
@@ -287,17 +263,8 @@ if readFile(path) fails e then
 raw := readFile(path) or fail;
 ```
 
-That translating form repeats the call, which is the reason the `or else e do` binder (which
-would let one statement keep the value and inspect the error) is worth revisiting later. For the
-common case, forwarding the error as is, `or fail` needs neither.
-
-This fits the language's shape. Call chains in game scripts are shallow, so the ergonomic win
-of an implicit propagation operator is small, and marking each hop with `or fail` keeps every
-place a failure travels visible, which is the transparency the language is built on. It is also
-the easiest form for the compiler to reason about: `or fail` is a local divert plus a single
-check that the enclosing routine is failable, with no analysis that threads failability across
-frames. If deep chains ever show up in real scripts, an implicit operator can be added later as
-sugar over this same marked forward, with no change to anything below it.
+That translating form repeats the call. For the common case, forwarding the error as is,
+`or fail` needs no error binding and no repeated call.
 
 ## The ABI across backends
 
@@ -305,7 +272,7 @@ A failable call returns its value in the normal return register and the error in
 reserved return register. The caller does a plain compare-and-branch on the error register.
 There is no dependence on a condition flag.
 
-The flag independence is the point. Of the three targets, RISC-V has no condition flags at
+The error signal is flag-independent. Of the three targets, RISC-V has no condition flags at
 all; its backend already synthesizes carry and overflow as register values with `sltu`.
 Encoding the error signal in a condition flag would be unimplementable there, and fragile even
 on x86-64 and aarch64, where a callee's epilogue clobbers the flags. The error is a value in a
@@ -343,8 +310,8 @@ routine whose last result is an `error`, with the type system requiring that res
 consumed.
 
 General tuple returns in the source (`function f: (integer, integer)` with `a, b := f()`) are a
-separate language question that this note does not open; the 2026-09-25 decision to prefer
-out-parameters stands. The ABI is built generically; only failable is exposed.
+separate language question that this note does not open. The ABI is built generically; only
+failable is exposed.
 
 ## Coroutines
 
@@ -355,10 +322,6 @@ on the resume path, which is deferred.
 A coroutine body may still call failable routines, and must handle them locally, which is the
 only option anyway since there is no propagation. A coroutine that hits an unrecoverable
 condition uses `panic`, the trap axis, which the resume bracket already handles.
-
-This does not foreclose failable coroutines later. Adding an error channel to the resume
-protocol is additive, the same second-register idea on the suspend path, so a future
-failable iterator (resume hands back a value or an error) keeps the same mental model.
 
 ## Grammar notes
 
@@ -378,12 +341,9 @@ does not raise the grammar's lookahead class.
   `break`, `continue`, or `fail` means the failable suffix (and the boolean-`or` loop stops);
   anything else is boolean `or`. `exit` and `fail` stay ordinary builtins, so `Exit()` and
   `fail(code)` keep their normal call path, and the self-hosting compiler (which uses `Exit`
-  heavily) is unaffected. Reserving them was considered but not needed: the words cannot begin a
-  boolean operand in practice, so the peek is unambiguous without a lexer change.
-- The documentation note in `kp-grammar.md` that there are no `and then` / `or else` operators
-  is updated when this lands: `or else` exists as the failable recover suffix. There is no
-  `and then`; the success path of a failable call needs no operator, because the value simply
-  flows out.
+  heavily) is unaffected.
+- `or else` exists as the failable recover suffix. There is no `and then`; the success path of a
+  failable call needs no operator, because the value simply flows out.
 
 ## Deferred and non-goals
 
@@ -403,30 +363,11 @@ Non-goals, deliberately not built:
   not keep, the same reason coroutine drop is cancel-by-unwind (see `kp-abi.md`).
 - A guest-side `try`/`except` over `panic`. It would break the single-landing-pad invariant.
 
-## Implementation order
-
-1. (done) Wire the second return register on all three backends, with the IR return as an
-   N-ary, class-tagged operand list. This is the prerequisite and is independent of the surface.
-2. (done) The `error` type, `fail(code)`, and `errorcode(e)`, with the int-code representation.
-3. (done) The `fails` signature marker, serialized into the interface and the fingerprint, with
-   the strict no-overload rule. The marker is contextual at the parser (so `fails` stays usable
-   as an ordinary identifier until step 4 reserves it) and inert at lowering: a failable routine
-   still returns an ordinary single value until the call-site forms land.
-4. (done) The call-site forms: `fails [e]`, `or else EXPR`, `or exit` / `or break` /
-   `or continue` / `or fail`, `or else ignore`, and the must-consume check. The front end emits
-   `RETV2` for a failable routine and `CALL2` at a failable call. `exit`, `fail`, and `fails`
-   are handled contextually by a one-token peek rather than reserved as keywords (see the grammar
-   note below); the observable grammar is the same, and `Exit()` / `fail()` keep their existing
-   builtin call path, so the self-hosting fixed point is undisturbed.
-5. (done) Fixtures and docs: lex, parse, sema, emit, and a runcheck program that exercises the
-   value, error, divert, and discard paths; `kp-grammar.md` carries the `fails` marker and the
-   FailableSuffix grammar.
-
 ## See also
 
 - `kp-abi.md` for the trap axis, the landing pad, and the host boundary.
 - `kp-evaluation.md` for the run-time behavior of traps (exit status) and the
   arithmetic faults (divide by zero) that sit on the trap axis, not this one.
-- `kobold.md` for the decisions this builds on: no `Result[T, E]`, no generics, multiple
-  returns in registers, the trusted-now trap model.
+- `kobold.md` for the no `Result[T, E]`, no generics, multiple returns in registers, and
+  trusted-now trap model.
 - `kp-units.md` for interface fingerprints, which absorb the representation migration.

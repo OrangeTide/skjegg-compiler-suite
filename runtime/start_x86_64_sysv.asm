@@ -132,3 +132,7 @@ section .bss
     align 16
     resb 65536
 stack_top:
+
+; Mark the stack non-executable; nasm does not emit this note on its own, so
+; without it the linker assumes an executable stack and warns.
+section .note.GNU-stack noalloc noexec nowrite progbits

@@ -3,8 +3,7 @@
 This document sketches how Kobold-Pascal would run untrusted scripts, code from
 someone other than the game author, such as a downloaded mod. It is a deferred
 design: the default posture is trusted-now (see the Safety section of
-`kobold.md`), and none of the mechanisms below are built yet. It records the
-decisions so the work can start from an agreed shape.
+`kobold.md`), and none of the mechanisms below are built yet.
 
 ## Threat model
 
@@ -40,8 +39,7 @@ whole surface, because the compiler controls every byte of codegen.
 ### One tier: hardened native
 
 Untrusted scripts run on the native JIT with all checks forced on and resource
-limits enforced, not on a separate interpreter or emulated target. This keeps one
-backend and the native speed that motivated the project.
+limits enforced, not on a separate interpreter or emulated target.
 
 The accepted trade is that safety then rests on the compiler emitting every check
 correctly: a codegen bug in a forced check is an escape, where an interpreter would

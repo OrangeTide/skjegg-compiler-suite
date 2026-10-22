@@ -8,12 +8,6 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-extern int mkdirat(int dirfd, const char *path, int mode);
-extern int unlinkat(int dirfd, const char *path, int flags);
-extern int fchmodat(int dirfd, const char *path, int mode, int flags);
-extern int renameat2(int olddirfd, const char *oldpath,
-                     int newdirfd, const char *newpath, unsigned flags);
-
 int
 mkdir(const char *path, int mode)
 {

@@ -62,12 +62,8 @@ that scratch before any `xmm0..7` argument register is written, then the
 argument registers are loaded back from the scratch. A single float register
 argument, which cannot clobber anything, still loads directly.
 
-This costs a memory round trip on float-heavy calls. A fancier fix would emit a
-**register-level parallel move**: order the `xmm` moves so each source is read
-before it is overwritten, and break any cycle with a single scratch register
-(`xmm8`), keeping everything in registers. That is worth doing if float-argument
-throughput ever matters; the staging approach was chosen first for being
-obviously correct. The logic lives in `marshal` in `src/jit_x86.c`.
+This costs a memory round trip on float-heavy calls. The logic lives in
+`marshal` in `src/jit_x86.c`.
 
 ## The guest-internal convention across backends
 
@@ -154,9 +150,8 @@ natively 32-bit.
 
 Each VM has a **value stack**: an array of raw 64-bit cells with a top pointer.
 Because Kobold is statically typed, cells carry **no tags**; the guest and host agree
-on each argument's type from the routine's declared signature. (This is where Kobold
-departs from Lua, which tags every stack value.) Handles and strings ride the stack
-as their `u32` ids.
+on each argument's type from the routine's declared signature. Handles and strings ride
+the stack as their `u32` ids.
 
 A host function or method has one uniform signature:
 
@@ -382,9 +377,7 @@ coroutine**: a runtime object with its own heap-allocated private stack, referen
 counted like a handle. Suspend and resume are a **context switch** between the
 caller's stack and the coroutine's private stack, not a copy of the native stack.
 Because the coroutine's frames live at fixed private-stack addresses, it can be
-resumed from any caller depth and stored between ticks. Kobold does not use Skjegg's
-copy-back `__cont_*` runtime, whose restored segments are tied to the capture-time
-stack addresses; see `kobold.md` for the reasoning and the Excelsior precedent.
+resumed from any caller depth and stored between ticks.
 
 The runtime is a small C-callable helper set plus one per-backend assembly
 context-switch routine. The surface operators `start`/`yield`/`bind`/resume
@@ -431,8 +424,8 @@ still resume it, the coroutine survives. When the last reference goes, `kp_relea
 runs the `KP_H_CONT` reclaimer `kp_co_drop` (registered as the entry's finalizer, so
 it takes the object, not the id), which frees the private stack.
 
-Releasing the handles a suspended frame still owns uses **cancel-by-unwind** (rationale
-in `kobold.md`): the drop path resumes the coroutine in a cancel mode that runs the
+Releasing the handles a suspended frame still owns uses **cancel-by-unwind**: the drop
+path resumes the coroutine in a cancel mode that runs the
 front end's ordinary scope-exit release code and returns, rather than walking a
 per-suspend-point stack map. In cancel mode `kp_co_yield` does not suspend; the front
 end tests `kp_co_cancelling` after each yield, and after each call to a routine that can
@@ -536,8 +529,8 @@ landing pad in effect outside, and if a trap unwinds out of the coroutine it res
 running coroutine to its resumer and re-raises to that outer pad. The coroutine's C frames
 are abandoned mid-flight, so it is not cancel-unwound; it is marked done, and a later
 release just frees its stack. The handles its abandoned frames held cannot be identified
-(they lived in register-allocated frames, the same reason drop uses cancel-by-unwind and
-not a stack map), so they stay live until `kp_vm_free`, which sweeps the whole table and
+(they lived in register-allocated frames), so they stay live until `kp_vm_free`, which
+sweeps the whole table and
 runs every remaining finalizer as a teardown backstop. `kp_trap_landing_get` returns the
 currently installed pad for runtimes that need to save and restore it across a stack
 switch. Dropping a coroutine whose cleanup itself traps is a special case: the cancel path

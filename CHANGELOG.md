@@ -6,6 +6,41 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.17.0
+
+#### Added
+- The freestanding Kobold tier gains real number I/O and random units: io.console
+  `ReadReal`/`WriteReal` and `ReadInt`/`WriteInt`, and std.random `RandomReal` and
+  `SecureRandom`, reached through units with no change to the compiler.
+- C guests can draw from the shared random generators. `rand`/`srand` and the BSD
+  `arc4random` family (`arc4random`, `arc4random_buf`, `arc4random_uniform`) now
+  run over the same xoshiro128** fast generator and ChaCha20 CSPRNG that Kobold's
+  std.random uses.
+- ColdFire gains the time, RNG, and yield syscall seam (`clock_gettime`,
+  `getrandom`, `nanosleep`, `sched_yield`), matching the RV32 freestanding tier.
+- A manual for the toolchain itself (the pipeline, the drivers, the assembler and
+  linker, the targets and ABIs, building and vendoring), grammar references in the
+  C and Compact Pascal language manuals, and a doc/abi note for the shared
+  freestanding syscall seam.
+- An rv32 guest fault now prints the integer register file at the trap point, and
+  a backtrace that walks into unknown code is trimmed with a truncation marker
+  instead of printing garbage frames.
+
+#### Changed
+- The C and Kobold freestanding runtimes share one bottom layer: a single `_start`
+  and argv contract, one libgcc-free number formatter behind both libc `printf`
+  and the Kobold numeric I/O, and the syscall-wrapper and `*at` prototypes
+  collected in the libc headers instead of per-file externs.
+- The x86-64 hand-written crt stacks are marked non-executable, clearing the
+  linker's `.note.GNU-stack` warning.
+- The Kobold reference manuals now describe the current language and compiler
+  rather than the history of how the design was reached; the settled rationale is
+  kept in a source-tree decision log (`kobold/DECISIONS.md`).
+
+#### Fixed
+- ColdFire file operations: big-endian `statx` and `getdents64` decoding, with
+  ColdFire file-op test coverage to match the RV32 tier.
+
 ### 0.16.0
 
 #### Added

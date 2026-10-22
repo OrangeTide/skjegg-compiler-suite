@@ -554,11 +554,28 @@ dw_backtrace_format(const struct dw_reader *r, const uint32_t *pcs, int n,
         const char *fn = NULL, *file = NULL;
         int line = 0;
         char head[64];
+        int known = (r && dw_lookup_func(r, look, &fn) && fn);
+
+        /* The fp walk is already bounded against a corrupt chain, but a
+         * monotonic fp can still carry a garbage return address.  A caller
+         * frame (i > 0) that lands in no known function means the chain has
+         * wandered out of real code, so stop with one marker rather than print
+         * bogus frames up to the depth cap.  Only when a reader is present: with
+         * none every frame is unknown, so raw addresses are all there is to
+         * show, and the live pc (frame 0) can be a wild address and still is the
+         * fault site worth printing. */
+        if (r && i > 0 && !known) {
+            char note[96];
+            snprintf(note, sizeof note, "#%-2d 0x%08x  ?? (trace truncated: "
+                     "return address in no known function)\n", i, pcs[i]);
+            bt_append(buf, buflen, &off, note);
+            return i + 1;
+        }
 
         snprintf(head, sizeof head, "#%-2d 0x%08x  ", i, pcs[i]);
         bt_append(buf, buflen, &off, head);
 
-        if (r && dw_lookup_func(r, look, &fn) && fn)
+        if (known)
             bt_append(buf, buflen, &off, fn);
         else
             bt_append(buf, buflen, &off, "??");

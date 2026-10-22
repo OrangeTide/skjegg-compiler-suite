@@ -138,7 +138,6 @@ enum guest_sys {
     GSYS_BRK,
     GSYS_EXIT,
     GSYS_EXIT_GROUP,
-    GSYS_TIME,
     GSYS_STATX,
     GSYS_MKDIRAT,
     GSYS_UNLINKAT,

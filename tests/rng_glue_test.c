@@ -13,6 +13,7 @@ void      kp_randomize(void);
 double    kp_random_real(void);
 int       kp_random_below(int bound);
 void      kp_secure_bytes(void *buf, long n);
+int       kp_secure_below(int bound);
 long long kp_now_ms(void);
 
 /* Stubbed seam.  getrandom yields all-zero entropy (so the CSPRNG seeds with a
@@ -121,6 +122,18 @@ main(void)
         kp_secure_bytes(out, 8);
         for (i = 0; i < 8; i++) if (out[i] != want[i]) ok = 0;
         check(ok, "kp_secure_bytes zero-entropy keystream");
+    }
+
+    /* kp_secure_below stays in range and 0/negative bounds give 0. */
+    {
+        int ok = 1;
+        for (i = 0; i < 10000; i++) {
+            int v = kp_secure_below(10);
+            if (v < 0 || v >= 10) ok = 0;
+        }
+        check(ok, "kp_secure_below in [0,10)");
+        check(kp_secure_below(0) == 0, "kp_secure_below(0) is 0");
+        check(kp_secure_below(-5) == 0, "kp_secure_below(negative) is 0");
     }
 
     if (failures == 0)

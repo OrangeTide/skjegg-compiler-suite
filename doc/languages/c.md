@@ -195,6 +195,17 @@ coprocessor-1 instructions and lowers every float operation to an integer
 IEEE-754 helper, for the FPU-less PlayStation R3051. See the per-backend notes
 in `doc/tools/`.
 
+## Grammar
+
+The grammar skj-cc accepts is the C99 grammar from the ISO standard (ISO/IEC
+9899:1999, Annex A), with the named C11 additions above layered on top. This
+document does not inline that grammar, since the surface syntax is standard C;
+what differs from a conforming C implementation is the set of accepted features,
+and those are enumerated in the tables above and in the gaps below. A program
+that stays inside the supported feature set parses as standard C. For the
+preprocessor grammar see the preprocessor section above; for the token and macro
+rules see `cpp/`.
+
 ## Summary of gaps
 
 Intentionally deferred, by a design decision:

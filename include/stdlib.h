@@ -2,6 +2,7 @@
 #define _STDLIB_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
@@ -27,6 +28,11 @@ double             strtod(const char *s, char **end);
 
 int   rand(void);
 void  srand(unsigned seed);
+
+/* The CSPRNG surface, seeded from host entropy on first use (no seed API). */
+uint32_t arc4random(void);
+void     arc4random_buf(void *buf, size_t n);
+uint32_t arc4random_uniform(uint32_t bound);
 
 void  *malloc(size_t size);
 void  *calloc(size_t n, size_t size);

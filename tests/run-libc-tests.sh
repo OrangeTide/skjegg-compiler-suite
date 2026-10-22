@@ -31,7 +31,15 @@ START="${START:-$ROOT/build/start.o}"
 HALF="${HALF-$ROOT/build/half.o}"
 OUTDIR="${OUTDIR:-$ROOT/build}"
 TEST="${TEST:-$ROOT/tests/libc_phase_a.c $ROOT/tests/libc_phase_b.c $ROOT/tests/libc_phase_c.c $ROOT/tests/libc_phase_e.c $ROOT/tests/libc_phase_f.c $ROOT/tests/libc_phase_g.c $ROOT/tests/libc_phase_h.c $ROOT/tests/libc_coroutine.c $ROOT/tests/libc_threads_stress.c $ROOT/tests/libc_statx.c $ROOT/tests/libc_pathops.c $ROOT/tests/libc_readdir.c}"
-LIBC="${LIBC:-$ROOT/libc/string.c $ROOT/libc/ctype.c $ROOT/libc/stdlib.c $ROOT/libc/printf.c $ROOT/libc/stdio_core.c $ROOT/libc/stdio.c $ROOT/libc/assert.c $ROOT/libc/malloc.c $ROOT/libc/sbrk.c $ROOT/libc/errno.c $ROOT/libc/strerror.c $ROOT/libc/rand.c $ROOT/libc/strtod.c $ROOT/libc/scanf.c $ROOT/libc/coro.c $ROOT/libc/threads.c $ROOT/libc/stat.c $ROOT/libc/fileops.c $ROOT/libc/dirent.c $ROOT/libc/fini.c}"
+# runtime/rng.c holds the shared generators rand/srand draw from; it is pure
+# (no syscalls) and links on every target.  libc/arc4random.c is the CSPRNG
+# surface and needs the getrandom seam wrapper, which only the RV32 and ColdFire
+# crts carry, so it is added only when ARC4RANDOM is set (the cf/rv targets).
+LIBC_DEFAULT="$ROOT/libc/string.c $ROOT/libc/ctype.c $ROOT/libc/stdlib.c $ROOT/libc/printf.c $ROOT/libc/numfmt.c $ROOT/libc/stdio_core.c $ROOT/libc/stdio.c $ROOT/libc/assert.c $ROOT/libc/malloc.c $ROOT/libc/sbrk.c $ROOT/libc/errno.c $ROOT/libc/strerror.c $ROOT/libc/rand.c $ROOT/runtime/rng.c $ROOT/libc/strtod.c $ROOT/libc/scanf.c $ROOT/libc/coro.c $ROOT/libc/threads.c $ROOT/libc/stat.c $ROOT/libc/fileops.c $ROOT/libc/dirent.c $ROOT/libc/fini.c"
+if [ -n "${ARC4RANDOM:-}" ]; then
+    LIBC_DEFAULT="$LIBC_DEFAULT $ROOT/libc/arc4random.c"
+fi
+LIBC="${LIBC:-$LIBC_DEFAULT}"
 CFLAGS="${CFLAGS--DSKJ_LIBC_FLOAT}"
 EXPECT="${EXPECT:-42}"
 mkdir -p "$OUTDIR"

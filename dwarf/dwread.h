@@ -88,6 +88,9 @@ int dw_backtrace(uint32_t pc, uint32_t fp, dw_readmem read, void *ctx,
    no line is known.  Frames after the first look up `addr - 1`, since a return
    address points just past its call and could land in the next line's range.
    `r` may be NULL (or an empty reader), giving raw addresses with no symbols.
+   With a reader present, a caller frame whose return address lands in no known
+   function ends the output with one truncation marker, so a chain that has
+   wandered into garbage is trimmed rather than printed to the depth cap.
    Returns the number of frames formatted. */
 int dw_backtrace_format(const struct dw_reader *r, const uint32_t *pcs, int n,
                         char *buf, size_t buflen);

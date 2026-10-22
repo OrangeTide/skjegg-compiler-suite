@@ -25,7 +25,6 @@ arguments:
   concatenation), the left operand is evaluated before the right.
 - **Call arguments are evaluated right to left.** The arguments of a procedure or
   function call are evaluated from last to first, then passed in declaration order.
-  (This matches the order the self-hosting compiler depends on.)
 - **`and` and `or` short-circuit.** The left operand is evaluated first; the right
   is evaluated only when the left does not already decide the result.
 

@@ -44,6 +44,14 @@ int stat(const char *path, struct stat *buf);
 int fstat(int fd, struct stat *buf);
 int mkdir(const char *path, int mode);
 int chmod(const char *path, int mode);
+
+/* The *at primitives the crt wrappers expose (the only file-metadata syscalls
+   the "new" arches have).  statx fills the kernel's statx record, whose layout
+   libc/stat.c owns; it is opaque here, named only through a pointer. */
+struct statx;
+int statx(int dirfd, const char *path, int flags, unsigned mask,
+          struct statx *buf);
+int mkdirat(int dirfd, const char *path, int mode);
 int fchmodat(int dirfd, const char *path, int mode, int flags);
 
 #endif /* _SYS_STAT_H */

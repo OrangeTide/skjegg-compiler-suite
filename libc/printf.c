@@ -122,19 +122,12 @@ fmt_str(struct __sink *s, const char *str, int flags, int width, int prec)
 #ifdef SKJ_LIBC_FLOAT
 
 /* Append the decimal digits of an unsigned integer to buf (not NUL
-   terminated), returning the new length.  Used for the %f integer part. */
+   terminated), returning the new length.  Used for the %f integer part; the
+   digits come from the shared libgcc-free __fmt_udec (numfmt.c). */
 static int
 put_uint(char *buf, int nb, unsigned long long v)
 {
-    char tmp[24];
-    int nt = 0;
-    do {
-        tmp[nt++] = (char)('0' + (int)(v % 10));
-        v /= 10;
-    } while (v);
-    while (nt > 0)
-        buf[nb++] = tmp[--nt];
-    return nb;
+    return nb + __fmt_udec(buf + nb, v);
 }
 
 /* Render a finite double in fixed notation into buf: the integer part, then
@@ -267,53 +260,11 @@ fmt_float(struct __sink *s, double v, int conv, int upper, int flags,
         for (i = 0; t[i]; i++) body[nb++] = t[i];
         special = 1;
     } else if (conv == 'g') {
-        /* %g: choose fixed or scientific by the decimal exponent, then strip
-           trailing zeros (unless FL_ALT). */
-        int P = prec == 0 ? 1 : prec;
-        int X = 0;
-        double t = v, rr = 0.5;
-        int dot, j, end, k;
-        if (t != 0.0) {
-            while (t >= 10.0) { t /= 10.0; X++; }
-            while (t < 1.0)   { t *= 10.0; X--; }
-        }
-        /* The fixed-vs-scientific choice uses the exponent after rounding to P
-           significant figures, so a mantissa that rounds up into the next
-           decade (9.7 at %.1g -> 1e+01) is placed by its rounded value. */
-        for (k = 0; k < P - 1; k++)
-            rr *= 0.1;
-        if (t + rr >= 10.0)
-            X++;
-        if (X >= -4 && X < P)
-            nb = build_fixed(body, nb, v, P - 1 - X, flags);
-        else
-            nb = build_sci(body, nb, v, P - 1, flags, upper);
-        if (!(flags & FL_ALT)) {
-            /* find the fraction (after '.') up to e/E or the end, and drop
-               trailing zeros and a bare point */
-            dot = -1;
-            end = nb;
-            for (j = 0; j < nb; j++) {
-                if (body[j] == '.') dot = j;
-                else if (body[j] == 'e' || body[j] == 'E') { end = j; break; }
-            }
-            if (dot >= 0) {
-                int last = end - 1;
-                while (last > dot && body[last] == '0')
-                    last--;
-                if (last == dot)
-                    last--;         /* also drop the '.' */
-                /* shift any exponent tail down over the removed characters */
-                if (end < nb) {
-                    int shift = end - 1 - last;
-                    for (j = end; j < nb; j++)
-                        body[j - shift] = body[j];
-                    nb -= shift;
-                } else {
-                    nb = last + 1;
-                }
-            }
-        }
+        /* %g shares the libgcc-free renderer in numfmt.c with the Kobold
+           freestanding runtime (sig digits, fixed-vs-scientific by exponent,
+           trailing zeros stripped unless '#').  %f and %e keep the
+           decomposition below, which is hosted-libc only. */
+        nb = __fmt_greal(body, v, prec == 0 ? 1 : prec, flags & FL_ALT, upper);
     } else if (conv == 'f') {
         if (v >= 18446744073709551615.0)     /* integer part exceeds u64 */
             nb = build_sci(body, nb, v, prec, flags, upper);

@@ -102,6 +102,26 @@ kp_secure_bytes(void *buf, long n)
     kp_csprng_bytes(&g_csprng, (uint8_t *)buf, (size_t)n);
 }
 
+/* A cryptographically secure uniform integer in [0, bound); 0 when bound <= 0.
+ * Draws 32-bit words from the CSPRNG (over kp_secure_bytes, which seeds it on
+ * first use) and rejection-samples to the largest multiple of bound that fits a
+ * uint32, so the result is unbiased.  int in and out, a 32-bit value on every
+ * tier, matching a Kobold Integer across the cdecl FFI. */
+int
+kp_secure_below(int bound)
+{
+    uint32_t b, limit, r;
+
+    if (bound <= 0)
+        return 0;
+    b = (uint32_t)bound;
+    limit = (uint32_t)(0x100000000ull - (0x100000000ull % b)); /* 0 means no reject */
+    do {
+        kp_secure_bytes(&r, (long)sizeof r);
+    } while (limit != 0 && r >= limit);
+    return (int)(r % b);
+}
+
 /* Monotonic milliseconds (Pascal's GetTickCount / a tick clock). */
 long long
 kp_now_ms(void)

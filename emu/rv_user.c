@@ -330,6 +330,22 @@ dump_trace(const rv_cpu *cpu)
     }
 }
 
+/* Print the integer register file at a fault, so a crash shows machine state
+ * without rerunning under the debugger.  ra and sp and the argument registers
+ * a0-a7 are the ones a reader usually wants; the rest follow for completeness.
+ * The pc is already on the fault headline, so it is not repeated here.  Four
+ * registers per line, in ABI-name order (x0-x31). */
+static void
+dump_regs(int slot, const rv_cpu *cpu)
+{
+    int i;
+
+    fprintf(stderr, "skj-run: [proc %d] registers:\n", slot + 1);
+    for (i = 0; i < 32; i++)
+        fprintf(stderr, "  %4s=0x%08x%s", rv_x_names[i], cpu->x[i],
+                (i % 4) == 3 ? "\n" : "");
+}
+
 static const char *
 cause_name(uint32_t cause)
 {
@@ -637,6 +653,7 @@ proc_slice(sched *S, proc *p)
                     "(%s), pc=0x%08x\n", p->slot + 1,
                     p->g.mem.fault_write ? "write" : "read",
                     p->g.mem.fault_addr, p->g.mem.fault_why, p->cpu.pc);
+        dump_regs(p->slot, &p->cpu);
         if (o->trace)
             dump_trace(&p->cpu);
         print_backtrace(S, p, p->cpu.pc);
@@ -648,6 +665,7 @@ proc_slice(sched *S, proc *p)
         fprintf(stderr, "skj-run: [proc %d] %s at 0x%08x (mtval=0x%08x)\n",
                 p->slot + 1, cause_name(p->cpu.mcause), p->cpu.mepc,
                 p->cpu.mtval);
+        dump_regs(p->slot, &p->cpu);
         if (o->trace)
             dump_trace(&p->cpu);
         print_backtrace(S, p, p->cpu.mepc);

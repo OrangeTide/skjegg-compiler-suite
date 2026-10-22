@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stddef.h>
+#include <unistd.h>
 #include "stdio_impl.h"
 
 /* The buffered-stream core: the three standard streams and the character and
@@ -13,9 +14,6 @@
    crt's normal exit (returning from main) does not flush, so a program that
    leaves output in a buffer should fflush before it returns; line buffering
    means output ending in a newline is already flushed. */
-
-extern int write(int fd, const void *buf, int n);
-extern int read(int fd, void *buf, int n);
 
 FILE __libc_stdin  = { 0, F_READ,  _IOLBF, 0, 0 };
 FILE __libc_stdout = { 1, F_WRITE, _IOLBF, 0, 0 };

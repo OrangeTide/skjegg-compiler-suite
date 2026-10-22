@@ -2,11 +2,11 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 /* The crt supplies write (fd, buffer, length); assert reaches it directly,
    since the stream layer does not exist yet.  This is the only Phase A file
    that produces output, and it needs no host surface beyond the crt. */
-extern int write(int fd, const char *buf, int n);
 
 void
 __assert_fail(const char *expr, const char *file, int line, const char *func)

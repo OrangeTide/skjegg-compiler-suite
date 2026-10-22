@@ -560,11 +560,17 @@ sys_llseek(guest *g, uint32_t fd, uint32_t off_hi, uint32_t off_lo,
  * means "stat the fd in dirfd", the fstat case; otherwise it is a path stat
  * relative to dirfd (AT_FDCWD for an absolute or cwd-relative path).  The host
  * fd is the guest fd, as for read/write.  Only the STATX_BASIC_STATS fields the
- * guest reads are filled, at their fixed struct-statx offsets, little-endian. */
+ * guest reads are filled, at their fixed struct-statx offsets, in the guest's
+ * byte order: the 32-bit fields with gm_store's be flag, the 16-bit stx_mode as
+ * a halfword so it does not land in __spare0 on a big-endian guest, and the
+ * 64-bit fields through store64 (low word placed by endianness). */
+static void store64(guest *g, uint32_t addr, uint64_t v);
+
 static int32_t
 sys_statx(guest *g, uint32_t dirfd, uint32_t pathp, uint32_t flags,
           uint32_t mask, uint32_t bufp)
 {
+    int be = g->big_endian;
     char path[1024];
     struct stat hs;
     int r;
@@ -583,22 +589,19 @@ sys_statx(guest *g, uint32_t dirfd, uint32_t pathp, uint32_t flags,
         return -GUEST_ENOENT;
 
     for (i = 0; i < 256; i += 4)                /* zero the struct statx first */
-        gm_store(&g->mem, bufp + i, 4, 0, 0);
-    gm_store(&g->mem, bufp + 0,  4, 0, 0x000007ffu);                  /* stx_mask */
-    gm_store(&g->mem, bufp + 4,  4, 0, (uint32_t)hs.st_blksize);      /* stx_blksize */
-    gm_store(&g->mem, bufp + 16, 4, 0, (uint32_t)hs.st_nlink);        /* stx_nlink */
-    gm_store(&g->mem, bufp + 20, 4, 0, (uint32_t)hs.st_uid);          /* stx_uid */
-    gm_store(&g->mem, bufp + 24, 4, 0, (uint32_t)hs.st_gid);          /* stx_gid */
-    gm_store(&g->mem, bufp + 28, 4, 0, (uint32_t)(hs.st_mode & 0xffffu)); /* stx_mode + spare */
-    gm_store(&g->mem, bufp + 32, 4, 0, (uint32_t)hs.st_ino);          /* stx_ino lo */
-    gm_store(&g->mem, bufp + 36, 4, 0, (uint32_t)((uint64_t)hs.st_ino >> 32));
-    gm_store(&g->mem, bufp + 40, 4, 0, (uint32_t)hs.st_size);         /* stx_size lo */
-    gm_store(&g->mem, bufp + 44, 4, 0, (uint32_t)((uint64_t)hs.st_size >> 32));
-    gm_store(&g->mem, bufp + 48, 4, 0, (uint32_t)hs.st_blocks);       /* stx_blocks lo */
-    gm_store(&g->mem, bufp + 52, 4, 0, (uint32_t)((uint64_t)hs.st_blocks >> 32));
-    gm_store(&g->mem, bufp + 64, 4, 0, (uint32_t)hs.st_atime);        /* stx_atime.sec lo */
-    gm_store(&g->mem, bufp + 96, 4, 0, (uint32_t)hs.st_ctime);        /* stx_ctime.sec lo */
-    gm_store(&g->mem, bufp + 112,4, 0, (uint32_t)hs.st_mtime);        /* stx_mtime.sec lo */
+        gm_store(&g->mem, bufp + i, 4, be, 0);
+    gm_store(&g->mem, bufp + 0,  4, be, 0x000007ffu);                 /* stx_mask */
+    gm_store(&g->mem, bufp + 4,  4, be, (uint32_t)hs.st_blksize);     /* stx_blksize */
+    gm_store(&g->mem, bufp + 16, 4, be, (uint32_t)hs.st_nlink);       /* stx_nlink */
+    gm_store(&g->mem, bufp + 20, 4, be, (uint32_t)hs.st_uid);         /* stx_uid */
+    gm_store(&g->mem, bufp + 24, 4, be, (uint32_t)hs.st_gid);         /* stx_gid */
+    gm_store(&g->mem, bufp + 28, 2, be, (uint32_t)(hs.st_mode & 0xffffu)); /* stx_mode (u16) */
+    store64(g, bufp + 32, (uint64_t)hs.st_ino);                      /* stx_ino */
+    store64(g, bufp + 40, (uint64_t)(int64_t)hs.st_size);            /* stx_size */
+    store64(g, bufp + 48, (uint64_t)(int64_t)hs.st_blocks);          /* stx_blocks */
+    store64(g, bufp + 64, (uint64_t)(int64_t)hs.st_atime);           /* stx_atime.sec */
+    store64(g, bufp + 96, (uint64_t)(int64_t)hs.st_ctime);           /* stx_ctime.sec */
+    store64(g, bufp + 112, (uint64_t)(int64_t)hs.st_mtime);          /* stx_mtime.sec */
     if (g->mem.fault)
         return -GUEST_EFAULT;
     return 0;
@@ -667,17 +670,17 @@ sys_renameat2(guest *g, uint32_t od, uint32_t oldp, uint32_t nd,
                ? 0 : -GUEST_ENOENT;
 }
 
-/* Store a 64-bit value to guest memory honoring the guest's byte order. */
+/* Store a 64-bit value to guest memory honoring the guest's byte order: the low
+ * word sits at the low address on a little-endian guest and the high address on
+ * a big-endian one, and each 32-bit word is itself byte-ordered to match, so a
+ * native 64-bit load reads the value back whole. */
 static void
 store64(guest *g, uint32_t addr, uint64_t v)
 {
-    if (g->big_endian) {
-        gm_store(&g->mem, addr, 4, 0, (uint32_t)(v >> 32));
-        gm_store(&g->mem, addr + 4, 4, 0, (uint32_t)v);
-    } else {
-        gm_store(&g->mem, addr, 4, 0, (uint32_t)v);
-        gm_store(&g->mem, addr + 4, 4, 0, (uint32_t)(v >> 32));
-    }
+    int be = g->big_endian;
+
+    gm_store(&g->mem, addr + (be ? 4 : 0), 4, be, (uint32_t)v);
+    gm_store(&g->mem, addr + (be ? 0 : 4), 4, be, (uint32_t)(v >> 32));
 }
 
 /* getdents64(fd, dirp, count): read directory entries into the guest buffer.
@@ -715,7 +718,7 @@ sys_getdents64(guest *g, uint32_t fd, uint32_t dirp, uint32_t count)
         namebytes = reclen - 19;        /* name + NUL + padding */
         store64(g, dirp + gpos + 0, ino);
         store64(g, dirp + gpos + 8, off);
-        gm_store(&g->mem, dirp + gpos + 16, 2, 0, reclen);
+        gm_store(&g->mem, dirp + gpos + 16, 2, g->big_endian, reclen);
         gm_store(&g->mem, dirp + gpos + 18, 1, 0, type);
         gm_write(&g->mem, dirp + gpos + 19, hbuf + hoff + 19, (uint32_t)namebytes);
         gpos += reclen;

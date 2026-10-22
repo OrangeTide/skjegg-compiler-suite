@@ -39,6 +39,11 @@
 #define M68K_NR_GETDENTS64  220
 #define M68K_NR_WRITEV      146
 #define M68K_NR_EXIT_GROUP  247
+#define M68K_NR_OPENAT      288
+#define M68K_NR_SCHED_YIELD 158
+#define M68K_NR_NANOSLEEP   162
+#define M68K_NR_CLOCK_GETTIME 263
+#define M68K_NR_GETRANDOM   352
 
 static int
 sys_of_m68k(uint32_t nr)
@@ -48,6 +53,7 @@ sys_of_m68k(uint32_t nr)
     case M68K_NR_READ:          return GSYS_READ;
     case M68K_NR_WRITE:         return GSYS_WRITE;
     case M68K_NR_OPEN:          return GSYS_OPEN;
+    case M68K_NR_OPENAT:        return GSYS_OPENAT;
     case M68K_NR_CLOSE:         return GSYS_CLOSE;
     case M68K_NR_LSEEK:         return GSYS_LSEEK;
     case M68K_NR_STATX:         return GSYS_STATX;
@@ -59,6 +65,10 @@ sys_of_m68k(uint32_t nr)
     case M68K_NR_BRK:           return GSYS_BRK;
     case M68K_NR_WRITEV:        return GSYS_WRITEV;
     case M68K_NR_EXIT_GROUP:    return GSYS_EXIT_GROUP;
+    case M68K_NR_CLOCK_GETTIME: return GSYS_CLOCK_GETTIME;
+    case M68K_NR_GETRANDOM:     return GSYS_GETRANDOM;
+    case M68K_NR_NANOSLEEP:     return GSYS_NANOSLEEP;
+    case M68K_NR_SCHED_YIELD:   return GSYS_SCHED_YIELD;
     default:                    return GSYS_UNKNOWN;
     }
 }

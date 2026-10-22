@@ -16,6 +16,10 @@
     .globl close
     .globl lseek
     .globl getdents64
+    .globl clock_gettime
+    .globl getrandom
+    .globl nanosleep
+    .globl sched_yield
     .globl __sys_brk
     .weak  exit
     .globl _exit
@@ -82,6 +86,51 @@ getdents64:
     move.l  #220, %d0           | __NR_getdents64
     trap    #0
     movem.l (%sp)+, %d2-%d3
+    rts
+
+| int clock_gettime(int clk_id, void *ts); writes a 32-bit {tv_sec, tv_nsec}
+| through ts (the 32-bit timespec seam convention this seam and boris share).
+| Args d1..d2.
+clock_gettime:
+    move.l  %d2, -(%sp)
+    move.l  8(%sp), %d1         | clk_id
+    move.l  12(%sp), %d2        | ts
+    move.l  #263, %d0           | __NR_clock_gettime
+    trap    #0
+    move.l  (%sp)+, %d2
+    rts
+
+| int getrandom(void *buf, int len, unsigned flags); fills buf with len random
+| bytes and returns the count.  Args d1..d3.
+getrandom:
+    movem.l %d2-%d3, -(%sp)
+    move.l  12(%sp), %d1        | buf
+    move.l  16(%sp), %d2        | len
+    move.l  20(%sp), %d3        | flags
+    move.l  #352, %d0           | __NR_getrandom
+    trap    #0
+    movem.l (%sp)+, %d2-%d3
+    rts
+
+| int nanosleep(const void *req, void *rem); parks the task for the {tv_sec,
+| tv_nsec} the req timespec holds.  Args d1..d2.  On boris the park/yield glue is
+| bound to its sys_wait(timeout) host-call instead; this raw syscall is the
+| skj-run backing.
+nanosleep:
+    move.l  %d2, -(%sp)
+    move.l  8(%sp), %d1         | req
+    move.l  12(%sp), %d2        | rem
+    move.l  #162, %d0           | __NR_nanosleep
+    trap    #0
+    move.l  (%sp)+, %d2
+    rts
+
+| int sched_yield(void); gives up the rest of the task's turn without sleeping.
+| No arguments.  A standard POSIX wrapper on the shared seam for C; the Kobold
+| runtime does not wrap it (Sleep(0) is the guest-level yield for now).
+sched_yield:
+    move.l  #158, %d0           | __NR_sched_yield
+    trap    #0
     rts
 
 | void *__sys_brk(void *addr); the raw Linux brk (#45), returning the new

@@ -112,9 +112,7 @@ has to flow into a variable written at a different source location:
 - **Dynamic arrays** match when their element types are equal and both are the same
   array kind (both plain `array of T`, or both `buffer of T`). Array-ness does not
   alias across the host-ownership boundary.
-- **`map of T`** values match when their value types `T` are equal. (This was made
-  structural so that an `or else` fallback, written as a separate declaration, can
-  supply a map result for a failable map-returning call.)
+- **`map of T`** values match when their value types `T` are equal.
 - **Procedural types** match when they have the same result type, the same number
   of parameters, and pairwise-equal parameter types.
 

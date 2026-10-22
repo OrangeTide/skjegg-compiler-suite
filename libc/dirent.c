@@ -5,9 +5,7 @@
 #include <dirent.h>
 #include <stdlib.h>
 #include <fcntl.h>
-
-extern int close(int fd);
-extern int getdents64(int fd, void *buf, int count);
+#include <unistd.h>
 
 #define DIRBUF 4096
 

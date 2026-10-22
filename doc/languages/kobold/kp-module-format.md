@@ -28,10 +28,8 @@ the well-known symbols the IR references; it does not fix their calling details.
 
 ## Form
 
-Version 1 is a **text**, line-oriented format. Text is chosen for early bring-up:
-it is simple to write in Pascal and parse in C, and it is inspectable and
-diff-able, which matches how Skjegg cross-checks its emitters. A compact binary
-form may be defined later as version 2; the header version distinguishes them.
+Version 1 is a **text**, line-oriented format. A compact binary form may be
+defined later as version 2; the header version distinguishes them.
 
 Lexical rules:
 
@@ -274,8 +272,7 @@ exactly those fields, and the reader fills an `ir_insn` from them. `ir.md` is
 the reference for opcode semantics.
 
 **Version 1 opcode subset.** The reader accepts any `IR_*` mnemonic, but the
-front end emits only what the language needs, growing over time. The initial
-subset:
+front end emits only what the language needs. The emitted opcodes:
 
 - constants and moves: `LIC`, `LEA`, `ADL`, `MOV`
 - integer arithmetic and bitwise: `ADD SUB MUL DIVS DIVU MODS MODU AND OR XOR SHL SHRS SHRU NEG NOT`
@@ -290,8 +287,8 @@ subset:
 - 64-bit (`*64`): the `LIC64`/`ADD64`/… family, used for `set` values (an i64
   bitmask) and any i64 temp
 
-The front end now lowers the whole language, so the memory, real, 64-bit, and
-call opcodes above are all emitted, not just the initial integer subset.
+The front end lowers the whole language, so the memory, real, 64-bit, and
+call opcodes above are all emitted.
 
 **Overflow, debug, and failable opcodes.** These are part of the shared Skjegg IR
 (the `ir.h` opcode enum, not a layered Kobold-only set), and `ir.md` specifies them
@@ -364,16 +361,9 @@ version may change the encoding (for example a binary form) or extend the tables
 a backend refuses a version it does not implement, and the front end writes the
 lowest version that expresses the program.
 
-Version 1 text is the format, and a binary version 2 is indefinitely deferred, not
-planned. Modules are small and loaded once at startup, so parse speed and byte size
-are not bottlenecks, and the text form is readable, diffable, and fuzz-hardened. A
-binary form would add a second serializer and reader to maintain and fuzz for wins
-that do not matter at this scale. Format growth within version 1 rides the reserved
-section framework below and the extension opcodes (for example `LOC`, `ADDO`), neither
-of which needs a version bump, so version 1 has room to grow without a version 2. The
-version gate stays only as an escape hatch: should a concrete need ever arise, such as
-modules large enough that text parse time or size matters, a binary version 2 could be
-added with no break to version 1. See the decision log in `kobold.md`.
+Format growth within version 1 rides the reserved section framework below and the
+extension opcodes (for example `LOC`, `ADDO`), neither of which needs a version bump,
+so version 1 has room to grow without a version 2.
 
 ## Module kinds and the section framework
 
@@ -600,6 +590,6 @@ These are named here but their calling details live in `kp-abi.md`:
 - the width of a handle id and the host handle-table API,
 - struct-by-value ABI (the psABI function fields), when structured FFI is added,
 - No per-suspend-point coroutine stack map is planned. The drop path uses
-  **cancel-by-unwind** (decided; see the `kobold.md` decision log), which runs the
-  front end's ordinary scope-exit release code rather than walking a module-carried map,
-  so no stack-map side-table is added to the format.
+  **cancel-by-unwind**, which runs the front end's ordinary scope-exit release code
+  rather than walking a module-carried map, so no stack-map side-table is added to
+  the format.

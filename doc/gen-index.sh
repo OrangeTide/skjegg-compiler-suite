@@ -128,7 +128,8 @@ emit_ordered languages/kobold \
 printf '  </ul>\n'
 
 printf '\n  <h2>Tools</h2>\n  <ul>\n'
-emit_entries tools
+emit_ordered tools \
+    toolchain.md emulator.md debugger.md jit.md libc.md mips.md
 printf '  </ul>\n'
 
 printf '\n  <h2>Internals</h2>\n  <ul>\n'

@@ -1,19 +1,31 @@
 #include <stdlib.h>
 
-/* The linear congruential generator from the C standard's own example.  The
-   state is a plain unsigned long; rand() returns the middle bits so the low
-   bit is not a short-period toggle.  Single threaded, so no locking. */
-static unsigned long state = 1;
+#include "../runtime/rng.h"
+
+/* rand/srand over the shared fast generator (runtime/rng.c), so a C guest draws
+   from the same xoshiro128** that Kobold's std.random Random/RandomBelow use.
+   The C contract still holds: the sequence is deterministic, srand(seed) pins
+   it, and a program that never calls srand behaves as if srand(1) ran.  So the
+   state is seeded to 1 on first use rather than auto-seeded from host entropy
+   (that is arc4random's job).  Single threaded, so no locking. */
+static struct kp_rng state;
+static int           seeded;
 
 int
 rand(void)
 {
-    state = state * 1103515245UL + 12345UL;
-    return (int)((state >> 16) & 0x7fffUL);     /* 0 .. RAND_MAX (32767) */
+    if (!seeded) {
+        kp_rng_seed(&state, 1);
+        seeded = 1;
+    }
+    /* RAND_MAX is 32767, so return the top 15 bits of the 32-bit draw; the high
+       bits of xoshiro128** are the well-mixed ones. */
+    return (int)(kp_rng_u32(&state) >> 17);
 }
 
 void
 srand(unsigned seed)
 {
-    state = seed;
+    kp_rng_seed(&state, (uint32_t)seed);
+    seeded = 1;
 }

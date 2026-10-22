@@ -18,41 +18,14 @@
  */
 
 	.text
-	.globl _start
-	.weak  __libc_fini
-	.weak  environ			/* set below only when the libc links it */
+	/* _start and the argv/entry contract are shared with the Kobold
+	   freestanding crt (kobold/kp_crt_rv.S); both include this fragment.  This
+	   file provides stack_top (in bss below) and the C program provides main. */
+	.include "crt_entry_rv.S"
 
 	/* the syscall wrappers (write/read/open/close/lseek/exit/_exit) are shared
 	   with the Kobold freestanding runtime */
 	.include "syscall_rv.S"
-
-	.type	_start,@function
-_start:
-	mv	t0, sp			/* the kernel/skj-run stack: argc at 0(sp), */
-					/* the argv pointers just above it */
-	la	sp, stack_top		/* switch to our own, larger stack */
-	addi	sp, sp, -16
-	lw	a0, 0(t0)		/* argc */
-	addi	a1, t0, 4		/* argv (the pointers live in the entry */
-					/* stack region, which stays mapped) */
-	slli	t1, a0, 2		/* envp = argv + (argc+1) words: skip the */
-	add	t1, a1, t1		/* argv[] entries and their NULL terminator */
-	addi	t1, t1, 4
-	la	t2, environ		/* weak: present only when the libc links it */
-	beqz	t2, 1f
-	sw	t1, 0(t2)
-1:
-	jal	ra, main
-	mv	s1, a0			/* preserve main's return across the finalizer */
-	la	t0, __libc_fini		/* weak: 0 when no libc is linked */
-	beqz	t0, 1f
-	jalr	t0			/* run atexit handlers and flush stdio */
-1:
-	mv	a0, s1
-	li	a7, 93
-	ecall
-2:	j	2b
-	.size	_start,.-_start
 
 /* int statx(int dirfd, const char *path, int flags, unsigned mask,
              struct statx *buf);  rv32 has no stat/fstat syscall, so the libc

@@ -67,7 +67,7 @@ a conformance claim.
 | Relational operators, `in` | Done | |
 | Boolean `and`, `or`, `not` (short-circuit) | Done | Short-circuit is an extension over ISO's unspecified order. |
 | Set operators `+ - *` and membership | Done | |
-| Left-to-right vs unspecified evaluation order | Note | Kobold fixes operand evaluation right to left, to keep the self-hosted and native compilers bit-identical. |
+| Left-to-right vs unspecified evaluation order | Note | Kobold fixes operand evaluation right to left. |
 
 ### Statements and control flow
 
@@ -101,9 +101,9 @@ built-ins but not the standard arithmetic, transfer, or console-I/O intrinsics.
 | Ordinal | `ord`, `chr`, `succ`, `pred`, `odd` | Done | `succ` / `pred` return the argument's own ordinal type. |
 | Arithmetic | `abs`, `sqr`, `sqrt` | Done | `abs` / `sqr` keep the argument's numeric type; `sqrt` yields a real. |
 | Arithmetic | `sin`, `cos`, `exp`, `ln`, `arctan` | Done | Real functions lowered to runtime helpers over the C library (the runtime links `-lm`). |
-| Transfer | `trunc`, `round` | Done | `trunc` toward zero, `round` to nearest (round-to-nearest-even, matching Free Pascal). |
+| Transfer | `trunc`, `round` | Done | `trunc` toward zero, `round` to nearest (round-to-nearest-even). |
 | Console output | `write`, `writeln` | Done | Overloaded by argument type (integer, real, char, string); select `output` or `erroutput`. |
-| Output formatting | `write(x:width[:decimals])` | Omitted | The field-width and precision syntax is a clumsy mini-language; format with `str` / `copy` or a host `external`. |
+| Output formatting | `write(x:width[:decimals])` | Omitted | Format with `str` / `copy` or a host `external`. |
 | Console input | `read`, `readln` | Done | Token-based over stdin, into integer, real, char, or string variables. No field-width formatting. |
 | File I/O | `get`, `put`, `reset`, `rewrite`, `eof`, `eoln`, `page` | Omitted | No file type. |
 | Dynamic | `new`, `dispose` | Omitted | No pointers; handles are host-managed and reference-counted. |
@@ -129,9 +129,7 @@ that fit an embedded scripting language, though not always with the ISO syntax.
 
 ## Turbo Pascal / Delphi / Free Pascal family
 
-Most of Kobold's day-to-day ergonomics come from the Borland lineage that Free
-Pascal continues. `fpc` is the bootstrap compiler, so the accepted source is a Free
-Pascal subset.
+`fpc` is the bootstrap compiler, so the accepted source is a Free Pascal subset.
 
 | Feature | Status | Notes |
 |---|---|---|
@@ -159,15 +157,14 @@ Pascal subset.
 ## Kobold-original and Compact-Pascal extensions
 
 These are the features that make Kobold an embedded game-scripting language rather
-than a general-purpose Pascal. Some are drawn from the Compact Pascal design, some
-are Go-inspired, and the coroutine surface is Kobold's own.
+than a general-purpose Pascal.
 
 | Feature | Status | Notes |
 |---|---|---|
 | Opaque host handles via `interface` types | Done | Named procedural fields; a method call resolves at link to a direct call to the host's registered method. No pointer is ever exposed. |
 | Go-style receiver methods (`function f for (const p: T)`) | Done | Receiver is by reference unless `const`. Record calls resolve statically; handle calls resolve at link to the host's registered method. A script method overrides a host-registered method of the same name. |
 | Automatic reference counting (ARC) for handles and strings | Done | Retain on copy, release on scope exit or overwrite. Not tracing GC. |
-| Reference dynamic arrays `ref array of T` | Dropped | Removed to keep the array surface to two cases, value `array of T` and host `buffer of T`; whole-array alias-sharing was more surface and footgun than it earned. `ref` stays a reserved word. |
+| Reference dynamic arrays `ref array of T` | Dropped | The array surface is two cases, value `array of T` and host `buffer of T`. `ref` stays a reserved word. |
 | Host buffers `buffer of T`, multidimensional `buffer[,] of T` | Done | A shared array over a host-owned, strided element region; the host creates it and the guest indexes it. Read, written, and mapped through the checked `kp_buf_*` FFI. |
 | Guest-record trait conformance `implement I for R` | Done | Checks at compile time that record `R`'s receiver methods match interface `I`; retroactive and cross-unit, with no runtime representation. |
 | Stackful coroutines: `start`, `yield`, `bind`, `release` | Done | Each coroutine runs on its own reference-counted private stack. `yield` is statement-position only. Resumed one at a time, not forkable. |
@@ -207,10 +204,9 @@ What remains is polish and packaging, not language surface:
 Deliberate omissions that are unlikely to change. Some conflict with the embedded,
 sandboxed, no-pointer design: pointers and `new` / `dispose`, `file` / `text` types,
 `goto` / labels, `packed`, and a class model with exceptions. A host reaches these
-capabilities on the script's behalf through the FFI and handles. Others are simply
-clumsy and dropped on those grounds: the `write` / `read` field-width and precision
-formatting (`x:width[:decimals]`), where a script formats through the string builtins
-or a host routine instead.
+capabilities on the script's behalf through the FFI and handles. Another omission is
+the `write` / `read` field-width and precision formatting (`x:width[:decimals]`),
+where a script formats through the string builtins or a host routine instead.
 
 The unit and separate-compilation system is implemented; its design is in
 `kp-units.md`.

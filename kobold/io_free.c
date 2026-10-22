@@ -7,9 +7,10 @@
    Pascal's Val carries a '$' hex prefix and 1-based error-offset codes that C's
    strtol does not model.  Real parsing, a plain decimal-float scan, is shared
    instead: scan_real routes to libc's strtod, so this runtime and a C program
-   built against the same libc parse a real the one way.  Real formatting (fmt_g)
-   is still hand-rolled to avoid the double-to-u64 helper libc's %g path pulls,
-   which the rv32 freestanding tier has no libgcc for.
+   built against the same libc parse a real the one way.  Real formatting is
+   shared too: io_write_real goes through libc's __fmt_greal (numfmt.c), the
+   same libgcc-free %g renderer the C libc's printf uses, so neither tier pulls
+   the double-to-u64 helper the rv32 freestanding tier has no libgcc for.
 
    The syscall wrappers are the one target-specific piece.  Each is a single trap
    (trap #0 on ColdFire, ecall on rv32) with register-bound operands, which needs
@@ -70,6 +71,20 @@ extern size_t fwrite(const void *p, size_t sz, size_t n, struct __FILE *f);
 extern int fflush(struct __FILE *f);
 
 /****************************************************************
+ * The number formatters: libc's numfmt.c, shared with the C runtime
+ *
+ * __fmt_udec writes an unsigned value's decimal digits (most significant
+ * first, no NUL, no sign) and returns the count.  __fmt_greal renders a finite,
+ * non-negative double like "%g" (sig significant digits; alt keeps trailing
+ * zeros, upper selects 'E') and returns the byte count.  Both are libgcc-free,
+ * so the rv32 freestanding tier links them with no double-to-u64 helper.
+ * Declared opaquely here so this file still needs no -Ilibc; keep in step with
+ * libc/fmt.h.
+ ****************************************************************/
+extern int __fmt_udec(char *out, uint64_t v);
+extern int __fmt_greal(char *out, double v, int sig, int alt, int upper);
+
+/****************************************************************
  * Console output (the io_* names the guest emits)
  ****************************************************************/
 
@@ -95,24 +110,18 @@ io_write_char(int fd, int ch)
 }
 
 /* A decimal integer formatted into a stack buffer, no heap string.  INT_MIN is
-   safe: the magnitude is taken in unsigned. */
+   safe: the magnitude is taken in unsigned.  Digits come from the shared
+   __fmt_udec. */
 void
 io_write_int(int fd, int v)
 {
-    char buf[12];
-    int n = 0;
-    uint32_t m = v < 0 ? 0u - (uint32_t)v : (uint32_t)v;
     char out[12];
-    int i, j = 0;
+    int j = 0;
+    uint32_t m = v < 0 ? 0u - (uint32_t)v : (uint32_t)v;
 
-    do {
-        buf[n++] = (char)('0' + (int)(m % 10u));
-        m /= 10u;
-    } while (m);
     if (v < 0)
         out[j++] = '-';
-    for (i = 0; i < n; i++)
-        out[j++] = buf[n - 1 - i];
+    j += __fmt_udec(out + j, m);
     fwrite(out, 1, (size_t)j, io_stream(fd));
 }
 
@@ -246,6 +255,14 @@ io_read_str(void)
 /****************************************************************
  * Str and Val for integers (hand-rolled, no libc; the real side is in the
  * soft-float layer).  Ported from the upstream sandbox platform.
+ *
+ * The whole Str/Val surface is non-faulting (boris B2): a bad or out-of-range
+ * parse is reported through a status, never a trap.  scan_int/scan_int64 do only
+ * bounded arithmetic (overflow sets the error code, the base is a nonzero
+ * constant), kp_str_valcode returns the 1-based offending offset, scan_real
+ * routes to libc's lenient strtod over a bounded copy, and the formatters divide
+ * only by nonzero constants.  So a guest can parse untrusted input without a
+ * fault, and Val's failure is a value the program can handle.
  ****************************************************************/
 
 static int
@@ -313,54 +330,29 @@ scan_int64(const char *b, int32_t len, int64_t *iv, int32_t *code)
     *code = 0;
 }
 
-/* Divide *n by 10 returning the remainder, in constant 64-bit shifts and 32-bit
-   divides (16 bits at a time, MSB first), so no 64-bit libgcc helper is pulled. */
-static uint32_t
-u64_divmod10(uint64_t *n)
-{
-    uint64_t v = *n, q = 0;
-    uint32_t rem = 0, cur;
-
-    cur = (rem << 16) | (uint32_t)((v >> 48) & 0xFFFF); q = (q << 16) | (cur / 10u); rem = cur % 10u;
-    cur = (rem << 16) | (uint32_t)((v >> 32) & 0xFFFF); q = (q << 16) | (cur / 10u); rem = cur % 10u;
-    cur = (rem << 16) | (uint32_t)((v >> 16) & 0xFFFF); q = (q << 16) | (cur / 10u); rem = cur % 10u;
-    cur = (rem << 16) | (uint32_t)(v & 0xFFFF);         q = (q << 16) | (cur / 10u); rem = cur % 10u;
-    *n = q;
-    return rem;
-}
-
 uint32_t
 kp_str_from_int(int32_t x)
 {
-    char tmp[16], buf[16];
-    int n = 0, i;
+    char buf[16];
+    int n = 0;
     uint32_t v = x < 0 ? 0u - (uint32_t)x : (uint32_t)x;
 
-    do {
-        tmp[n++] = (char)('0' + (int)(v % 10u));
-        v /= 10u;
-    } while (v);
     if (x < 0)
-        tmp[n++] = '-';
-    for (i = 0; i < n; i++)
-        buf[i] = tmp[n - 1 - i];
+        buf[n++] = '-';
+    n += __fmt_udec(buf + n, v);
     return kp_str_new(buf, n);
 }
 
 uint32_t
 kp_str_from_int64(int64_t x)
 {
-    char tmp[24], buf[24];
-    int n = 0, i;
+    char buf[24];
+    int n = 0;
     uint64_t v = x < 0 ? 0ull - (uint64_t)x : (uint64_t)x;
 
-    do {
-        tmp[n++] = (char)('0' + (int)u64_divmod10(&v));
-    } while (v);
     if (x < 0)
-        tmp[n++] = '-';
-    for (i = 0; i < n; i++)
-        buf[i] = tmp[n - 1 - i];
+        buf[n++] = '-';
+    n += __fmt_udec(buf + n, v);
     return kp_str_new(buf, n);
 }
 
@@ -414,8 +406,10 @@ kp_str_valcode(uint32_t s, int32_t kind)
  *
  * The hosted tier formats a real with the C library's "%g" and parses it with
  * strtod (kp_host.c / str_fmt.c).  This tier parses with the same strtod (shared
- * from libc, see scan_real below) but hand-rolls a %g matching formatter (six
- * significant digits, trailing zeros stripped), because libc's %g path pulls a
+ * from libc, see scan_real below) and formats through the same %g renderer:
+ * __fmt_greal (libc/numfmt.c), which both the C libc's printf and this runtime
+ * call.  It is libgcc-free (six significant digits, trailing zeros stripped,
+ * digits extracted with double-to-int steps), so neither tier pulls a
  * double-to-u64 helper the rv32 freestanding tier has no libgcc for.  The rv32
  * soft-float ABI carries a double across a call as its
  * 64-bit integer bits, not in a float register, so the guest reaches these
@@ -440,56 +434,18 @@ d2b(double d)
 }
 #endif
 
-/* Format v like C's "%g" with the default precision of six significant digits:
-   round to six, then render in fixed notation when the exponent is in [-4, 6)
-   and in exponential notation otherwise, stripping trailing fraction zeros and a
-   bare decimal point.  Returns the byte count written to out (no NUL). */
+/* Format v like C's "%g" (six significant digits): the sign and the NaN
+   spelling here, the magnitude through the shared __fmt_greal (numfmt.c), the
+   same renderer the C libc's %g uses.  Returns the byte count written to out
+   (no NUL). */
 static int
 fmt_g(double v, char *out)
 {
-    int n = 0, i, exp10 = 0, last;
-    long d;
-    double scaled;
-    char dig[6];
+    int n = 0;
 
     if (v != v) { out[0] = 'n'; out[1] = 'a'; out[2] = 'n'; return 3; }
     if (v < 0.0) { out[n++] = '-'; v = -v; }
-    if (v == 0.0) { out[n++] = '0'; return n; }
-
-    /* Normalise the magnitude to [1, 10) and count the decimal exponent. */
-    while (v >= 10.0) { v /= 10.0; exp10++; }
-    while (v < 1.0)  { v *= 10.0; exp10--; }
-
-    /* Round to six significant digits: a 6-digit integer in [100000, 999999],
-       handling a carry that pushes it to seven digits (9.999995 -> 10). */
-    scaled = v * 100000.0;
-    d = (long)(scaled + 0.5);
-    if (d >= 1000000) { d = 100000; exp10++; }
-    for (i = 5; i >= 0; i--) { dig[i] = (char)('0' + (int)(d % 10)); d /= 10; }
-
-    if (exp10 < -4 || exp10 >= 6) {             /* exponential */
-        out[n++] = dig[0];
-        last = 5; while (last > 0 && dig[last] == '0') last--;
-        if (last >= 1) { out[n++] = '.'; for (i = 1; i <= last; i++) out[n++] = dig[i]; }
-        out[n++] = 'e';
-        out[n++] = exp10 < 0 ? '-' : '+';
-        {
-            int e = exp10 < 0 ? -exp10 : exp10;
-            if (e >= 100) { out[n++] = (char)('0' + e / 100); e %= 100; }
-            out[n++] = (char)('0' + e / 10);
-            out[n++] = (char)('0' + e % 10);
-        }
-    } else if (exp10 >= 0) {                     /* fixed, integer part present */
-        for (i = 0; i <= exp10; i++) out[n++] = dig[i];
-        last = 5; while (last > exp10 && dig[last] == '0') last--;
-        if (last > exp10) { out[n++] = '.'; for (i = exp10 + 1; i <= last; i++) out[n++] = dig[i]; }
-    } else {                                     /* fixed, 0.00ddd */
-        last = 5; while (last > 0 && dig[last] == '0') last--;
-        out[n++] = '0'; out[n++] = '.';
-        for (i = 0; i < (-exp10 - 1); i++) out[n++] = '0';
-        for (i = 0; i <= last; i++) out[n++] = dig[i];
-    }
-    return n;
+    return n + __fmt_greal(out + n, v, 6, 0, 0);
 }
 
 void
@@ -591,6 +547,38 @@ rt_param_str(int i)
     while (p[n])
         n++;
     return kp_str_new(p, n);
+}
+
+/****************************************************************
+ * Entry shim (the shared crt crt_entry_<arch>.S calls main)
+ *
+ * The shared _start reads argc and argv from the entry stack and calls
+ * main(argc, argv), the one entry contract the C runtime uses too.  For a
+ * Kobold guest, main records the args for ParamStr / ParamCount and runs the
+ * program through kp_guest_entry, the entry skj-kp emits; a normal return
+ * exits 0 (a nonzero status comes only from Halt, through io_halt).  The shared
+ * _start then runs __libc_fini to flush buffered stdio before it exits,
+ * matching io_halt's flush-then-exit.  environ is defined, not just weak, so
+ * the Kobold link needs no weak-undefined resolution when _start sets it.
+ ****************************************************************/
+
+char **environ;
+
+extern void kp_guest_entry(void);
+
+int
+main(int argc, char **argv)
+{
+    g_argc = argc;
+    g_argv = argv;
+    kp_guest_entry();
+    return 0;
+}
+
+void
+__libc_fini(void)
+{
+    fflush((struct __FILE *)0);         /* flush every stream (stdio_core) */
 }
 
 #ifdef KP_HAVE_FILE_IO

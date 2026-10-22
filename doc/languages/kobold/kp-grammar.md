@@ -211,8 +211,7 @@ BufferType       = 'buffer' [ '[' { ',' } ']' ] 'of' Type .
                     and 'buffer[,,] of T' is 3D. It is indexed b[i, j, ...] with one subscript
                     per axis (checked at compile time) as base + sum(i_k * stride_k); the
                     per-axis extents and byte strides are set by the host at creation, so a
-                    row pitch may exceed cols * elemsize. The rank-comma is borrowed from C#:
-                    no Pascal-family form fits a single strided region with runtime extents *)
+                    row pitch may exceed cols * elemsize *)
 
 MapType          = 'map' 'of' Type .
                  (* a string-keyed associative array with value type Type, a refcounted
@@ -238,9 +237,9 @@ SetType          = 'set' 'of' SimpleType .
 
 InterfaceType    = 'interface' { InterfaceField } 'end' .
 InterfaceField   = Identifier ':' ProceduralType ';' .
-                 (* Syntax lifted from Compact Pascal. In Kobold an interface
-                    type is a host handle type: named procedural fields are the
-                    operations the host provides. See Handle types below. *)
+                 (* In Kobold an interface type is a host handle type: named
+                    procedural fields are the operations the host provides.
+                    See Handle types below. *)
 
 ProceduralType   = 'procedure' [ FormalParams ]
                  | 'function' [ FormalParams ] ':' Type .
@@ -268,9 +267,9 @@ including `string`. Calling a method on `nil` faults in safe mode.
 
 ### Handle types
 
-A host handle type is declared with the `interface` syntax lifted from Compact
-Pascal: an `interface` block of named procedural fields. It names an opaque, typed
-reference whose storage lives in the host.
+A host handle type is declared with the `interface` syntax: an `interface` block
+of named procedural fields. It names an opaque, typed reference whose storage
+lives in the host.
 
 ```pascal
 type
@@ -281,12 +280,11 @@ type
 ```
 
 An interface field's result type is a simple type or a handle, never a `string`,
-record, or array (as in Compact Pascal, a structured result has no way to cross the
-field's procedural type).
+record, or array (a structured result has no way to cross the field's procedural
+type).
 
-Kobold's semantics differ from Compact Pascal's. In Compact Pascal an interface is
-an inline vtable over a script record, satisfied by an `implement` block. In Kobold
-an interface *is* the handle type, and the concrete implementation is the host's:
+In Kobold an interface *is* the handle type, and the concrete implementation is
+the host's:
 the host registers matching methods, and the loader resolves each of the interface's
 methods at link to a direct call against the host's registered function, so a call
 like `e.move(1, 0)` reaches the host with no runtime vtable lookup. A method an
@@ -371,14 +369,13 @@ function TryLookup(k: Key; out v: Value): Boolean;
 ```
 
 The caller checks the `Boolean` (or an enum status) before reading `v`. For an
-error rather than a second value, prefer a `fails` routine. See the decision log
-in `kobold.md`.
+error rather than a second value, prefer a `fails` routine.
 
 A method is called with dot notation. On a record receiver the call resolves
 statically to the script routine that implements the method. On a handle receiver
 the call cannot bind at compile time, so it resolves at link to a direct call
 against the method the host registered for that handle type; there is no runtime
-vtable lookup (see the no-dynamic-dispatch entry in `kobold.md`).
+vtable lookup.
 
 A script may define a method on a host handle type, layering behavior over the
 host type. When a script method and a host-registered method share a name on the
@@ -666,25 +663,22 @@ var       while     with      yield
 
 `start`, `bind`, and `yield` are reserved for the coroutine constructs, and
 `bind` also uses the reserved `in`. `shl` and `shr` are the bitwise shift
-operators. `interface` opens a host handle type (the
-syntax is lifted from Compact Pascal). `external` is reserved for routines provided
-by the host FFI. `for` doubles as the loop keyword and the method-receiver keyword.
+operators. `interface` opens a host handle type. `external` is reserved for
+routines provided by the host FFI. `for` doubles as the loop keyword and the method-receiver keyword.
 
 `map` opens `map of T`, a string-keyed associative array with value type `T` (see MapType).
 
 `buffer` opens `buffer of T`, a host-backed shared array whose element backing the host owns
 and places, so ARC never frees it and the guest cannot resize it. `ref` and `slice` stay
-reserved but are not parsed. `ref` once opened a reference-array type `ref array of T` (a
-whole-array reference counterpart to the value-typed `array of T`); that type was dropped to
-keep the array surface to two cases, value arrays and host buffers. `slice` is held for a
-possible future windowed view (a subrange `a[lo..hi]` sharing backing).
+reserved but are not parsed. `slice` is held for a possible future windowed view (a subrange
+`a[lo..hi]` sharing backing).
 
 `unit`, `uses`, `reexport`, `implementation`, and `shared` are part of the implemented units
 surface (see the Compilation units section), as is `implement` for guest-record trait
 conformance (`implement I for R`, a static conformance check). `as` is the import alias in a
 `uses` clause. `property` declares an accessor-backed value (`kp-property.md`); `kpcom` parses
 it in a program or in a unit's implementation part, with cross-module property export still
-deferred. All are described in the decision log in `kobold.md`.
+deferred.
 
 `out` (a parameter mode), `cdecl` (a calling convention on a host import),
 `export` (a module entry), `read` and `write` (property accessors), and `fails` (the

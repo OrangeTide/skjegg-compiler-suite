@@ -8,9 +8,8 @@ or a computed value.
 > Status: implemented (routine-reference accessors), scalar-value types for now. The
 > declaration-level property and the computed record field both work: a read becomes a call
 > to the getter, a write a call to the setter, and a property with only `read` is read-only.
-> This is an independent language feature, judged on its own merits. It was split out of the
-> units design (`kp-units.md`), where earlier drafts folded it in. Units do not require it: a
-> unit exports plain `var` and `const`, and can use a `property` once this feature exists.
+> Units do not require it: a unit exports plain `var` and `const`, and can use a `property`
+> once this feature exists.
 >
 > Deferred: a property whose type is a handle or aggregate (string, record, dynamic array),
 > since the accessor result would need ARC ownership and sret handling; a property in a
@@ -18,14 +17,6 @@ or a computed value.
 > the inline accessor syntax below. The accessors are a parameterless getter and a one-argument
 > setter; for a computed field they are methods of the record, resolved at the use site like
 > any method, so an accessor may be declared after the field.
-
-## Why a separate feature
-
-A `property` is not specific to units. It is a general type-system feature: a member that
-presents as a value but is backed by accessors. It applies to a unit's exported surface
-and to record fields alike. Keeping it separate lets units land with a small, clear
-export model (`var` for state, `const` for compile-time values) and lets the property
-feature be designed, scheduled, and justified on its own.
 
 ## The surface
 
@@ -47,16 +38,15 @@ At the use site a property reads and writes exactly like a variable. At the ABI 
 access is a call to its accessor by default, resolved at link the same way a routine import
 is. Because the use site does not change, a unit can start with a plain `var` and later
 replace it with a `property` of the same name: the use-site source is unchanged, only the
-ABI changes, so consumers recompile but do not edit. This is the payoff of uniform access,
-and it is why `var` and `property` are deliberately interchangeable at the call site.
+ABI changes, so consumers recompile but do not edit.
 
 A call per read is not the whole story. For a trivial accessor, a getter that just returns
 a field, or the deferred lambda form below, the object format can carry the accessor body
 in the module's interface so the consumer inlines it across the unit boundary. A property
-read then lowers to the same load a `var` access would, with no call. This is the reason
-property was originally designed alongside units: it reuses the interface inlining
-mechanism units already need for an inline `const`, where the value rides the interface and
-the consumer bakes it in (see the Mapping to KPM1 section of `kp-units.md`). An inlined
+read then lowers to the same load a `var` access would, with no call. It reuses the
+interface inlining mechanism units use for an inline `const`, where the value rides the
+interface and the consumer bakes it in (see the Mapping to KPM1 section of `kp-units.md`).
+An inlined
 accessor body is consumer-observable, so it is part of the interface fingerprint: change
 the body and the consumers that inlined it must recompile, exactly like a changed inline
 const.
@@ -103,4 +93,4 @@ for the cases that genuinely need an accessor.
 
 - `kp-units.md` the unit and separate-compilation design (exports `var` and `const`).
 - `kp-grammar.md` the reserved words and the deferred property productions.
-- `kobold.md` the language and runtime design, and the decision log.
+- `kobold.md` the language and runtime design.

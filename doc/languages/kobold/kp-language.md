@@ -61,8 +61,8 @@ nil not of or procedure program property record reexport ref repeat set shared
 shl shr slice start string then to type unit until uses var while with yield
 ```
 
-`ref` and `slice` are reserved but not parsed: `ref` named a dropped reference array and
-`slice` is held for a future windowed view. `map` opens `map of T`, `as` is the import alias
+`ref` and `slice` are reserved but not parsed: `slice` is held for a future windowed
+view. `map` opens `map of T`, `as` is the import alias
 in a `uses` clause, and `reexport` names a unit's re-exported surface. `property` declares an
 accessor-backed value with uniform access, as a declaration or a computed record field (see
 `kp-property.md`). `out`, `cdecl`, `export`, `read`, and `write` are contextual: they act as
@@ -191,8 +191,8 @@ storage, and `setlength` on a shared array makes it unique first (copy on write)
 down. `insert(a, index, count)` opens `count` zero-filled slots at `index`, shifting the tail
 up, which the caller then fills by assignment. Both edit the array in place copy-on-write, so
 an edit of a shared array leaves the other owners untouched. `index` and `count` are clamped
-to the array, so a `delete` past the end removes only to the end. (Kobold's `insert` opens a
-gap rather than taking the value to insert, unlike Delphi's `Insert`.)
+to the array, so a `delete` past the end removes only to the end. Kobold's `insert` opens a
+gap rather than taking the value to insert.
 
 ```pascal
 delete(xs, 1, 2);      { drop xs[1] and xs[2] }
@@ -362,8 +362,7 @@ change the result. `shl` and `shr` are bit shifts. Comparisons yield a boolean.
 A type name applied like a call is a conversion, for example `int64(x)`, `longint(x)`, or
 `real(x)`.
 
-Argument and operand evaluation order is right to left, matching the bootstrap compiler,
-so the self-hosted and native compilers emit identical code.
+Argument and operand evaluation order is right to left.
 
 ## Statements
 
@@ -592,8 +591,8 @@ readln;               { skip to the next line }
 
 `write` and `writeln` take plain overloaded arguments. Standard Pascal's field-width
 and precision formatting (`write(x:width)` and `write(x:width:decimals)`) is not
-supported by design: it is a clumsy mini-language rarely needed in a script. Format a
-value with the string builtins (`str`, `copy`) or a host `external` when needed.
+supported. Format a value with the string builtins (`str`, `copy`) or a host
+`external` when needed.
 
 File input in a program is done through a host primitive, not a built-in `file` type. The
 compiler itself reads its input with an `external` `ReadFileStr(path): string`.

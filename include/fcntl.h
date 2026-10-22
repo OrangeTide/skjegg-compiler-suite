@@ -26,8 +26,18 @@
    file.  libc/fileops.c uses it for rmdir(). */
 #define AT_REMOVEDIR 0x200
 
+/* AT_EMPTY_PATH: operate on dirfd itself when the path is "" (libc/stat.c uses
+   it so fstat() reaches statx with the descriptor and an empty path). */
+#define AT_EMPTY_PATH 0x1000
+
 /* open() is the crt syscall wrapper (runtime/start_rv.S), a fixed three-argument
    form over openat(AT_FDCWD, ...).  mode matters only with O_CREAT. */
 int open(const char *path, int flags, int mode);
+
+/* The remaining *at wrappers the crt exposes, used by libc/fileops.c with
+   AT_FDCWD.  mkdirat/fchmodat live in <sys/stat.h> with the mkdir family. */
+int unlinkat(int dirfd, const char *path, int flags);
+int renameat2(int olddirfd, const char *oldpath,
+              int newdirfd, const char *newpath, unsigned flags);
 
 #endif /* _FCNTL_H */

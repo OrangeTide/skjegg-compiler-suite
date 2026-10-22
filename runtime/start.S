@@ -13,9 +13,6 @@
 | from the envp array above argv, then passes main's return value to _exit.
 
     .text
-    .globl _start
-    .weak  __libc_fini          | provided by libc; absent (0) when freestanding
-    .weak  environ              | set below only when the libc links it
     .globl __cont_capture
     .globl __cont_resume
 
@@ -96,41 +93,10 @@ renameat2:                         | renameat2(olddirfd, oldpath, newdirfd, newp
     movem.l (%sp)+, %d2-%d5
     rts
 
-_start:
-    move.l  %sp, %a1            | entry stack: argc at (%a1), argv just above
-    lea     stack_top, %sp      | switch to our own stack (qemu-m68k's
-    sub.l   #16, %sp            | default stack is a single page; recursive
-                                | tests overflow it within a few frames)
-    move.l  (%a1), %d0          | argc
-    lea     4(%a1), %a0         | argv (the pointers stay mapped in the entry
-                                | stack region)
-    move.l  %d0, %d1            | envp = argv + (argc+1) words: skip the argv[]
-    addq.l  #1, %d1             | entries and their NULL terminator
-    lsl.l   #2, %d1
-    move.l  %a0, %a2
-    add.l   %d1, %a2            | a2 = envp
-    lea     environ, %a3        | weak: present only when the libc links it
-    move.l  %a3, %d1
-    tst.l   %d1
-    beq     3f
-    move.l  %a2, (%a3)
-3:
-    move.l  %a0, -(%sp)         | push main's args right-to-left (argv, argc),
-    move.l  %d0, -(%sp)         | the toolkit/m68k C ABI; caller pops
-    jsr     main
-    addq.l  #8, %sp             | pop the two args
-    move.l  %d0, %d2            | preserve main's return across the finalizer
-    lea     __libc_fini, %a0    | weak: 0 when no libc is linked
-    move.l  %a0, %d0
-    tst.l   %d0
-    beq     1f
-    jsr     (%a0)               | run atexit handlers and flush stdio
-1:
-    move.l  %d2, %d1            | exit status
-    move.l  #1, %d0             | __NR_exit
-    trap    #0
-    | unreachable
-2:  bra     2b
+    | _start and the argv/entry contract are shared with the Kobold freestanding
+    | crt (kobold/kp_crt_cf.S); both include this fragment.  This file provides
+    | stack_top (in bss below) and the C program provides main.
+    .include "crt_entry_cf.S"
 
 | __muldi3(a_hi, a_lo, b_hi, b_lo) -> d0:d1
 |   64-bit multiply (low 64 bits of result).

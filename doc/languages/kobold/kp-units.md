@@ -4,7 +4,7 @@ This note describes the design of the unit system: how a script is split across
 several source files that compile separately and link together, so game scripts can
 share and link against common material instead of living in one translation unit.
 
-> Status: implemented. `kpcom` compiles a `program` or a `unit` separately to a KPM1 module and links precompiled units through `uses`, resolved by the `-U` search path and interface fingerprints; cross-unit routines, methods, types, and exported globals link and run, `implement I for R` trait conformance is checked, and `kpbundle` packages a program with its units into one self-contained module. A single translation unit plus `{$I}` includes still works as before. The surface and rules below match what the compiler accepts, settled in the decision log of `kobold.md`; the KPM1 framework this builds on is in `kp-module-format.md`, and the grammar is in `kp-grammar.md`. The `property` feature that earlier drafts folded in here has been split into its own proposal, `kp-property.md`; it is judged on its own merits and is not required for units, though it shares object-format inlining machinery with them (see Mapping to KPM1).
+> Status: implemented. `kpcom` compiles a `program` or a `unit` separately to a KPM1 module and links precompiled units through `uses`, resolved by the `-U` search path and interface fingerprints; cross-unit routines, methods, types, and exported globals link and run, `implement I for R` trait conformance is checked, and `kpbundle` packages a program with its units into one self-contained module. A single translation unit plus `{$I}` includes still works as before. The surface and rules below match what the compiler accepts; the KPM1 framework this builds on is in `kp-module-format.md`, and the grammar is in `kp-grammar.md`. The `property` feature is a separate feature, specified in `kp-property.md`; it is not required for units, though it shares object-format inlining machinery with them (see Mapping to KPM1).
 
 ## What a unit is
 
@@ -27,14 +27,10 @@ end.
 
 A name is exported by appearing in the `interface` part. Its body lives in
 `implementation`. Anything declared only in `implementation` is private to the unit.
-This is the Borland-family split. It was chosen over per-declaration export markers and
-over a two-file definition/implementation layout because it keeps the exported surface
-readable in one place while staying a single file per unit.
+This is the Borland-family split.
 
-A unit has no `initialization` or `finalization` section. Run-once setup is a deferred
-question, and auto-run unit setup is hard for an end user to reason about (link order,
-partial init on error). Setup is an exported routine the program or host calls
-explicitly. See the decision log in `kobold.md`.
+A unit has no `initialization` or `finalization` section. Setup is an exported routine
+the program or host calls explicitly.
 
 ## Opaque types
 
@@ -64,9 +60,7 @@ themselves stay private. A consumer therefore knows how much space the value occ
 can hold it, pass it, and assign it by value, but it cannot name or touch a field. It
 reaches the contents only through the unit's routines and methods.
 
-The size is computed, never written by hand. Earlier exploration considered a
-user-declared size (`OPAQUE RECORD(32)`); that is rejected as fragile, because a
-hand-written size drifts out of step with the real definition. The definition in the
+The size is computed, never written by hand. The definition in the
 implementation is the single source of truth, and the compiler derives the size from it,
 so the interface size is always correct.
 
@@ -163,7 +157,7 @@ case n of MaxLives: ... ;                 { ok }
 
 Because the value is baked into consumers, changing an exported inline `const` requires
 recompiling the units that use it, not just relinking. This is the same contract as a C
-header constant or an enum member, not a pitfall to design around. It is made safe by
+header constant or an enum member. It is made safe by
 the interface fingerprint (see [Interface fingerprinting](#interface-fingerprinting)): a
 consumer that baked the old value is rejected at link, not left running with a stale one.
 Enum members are compile-time constants in the same way, carried with their type.
@@ -174,10 +168,7 @@ A value that should change with only a relink, without recompiling consumers, is
 link-time constant symbol: the consumer emits a reference to a named const that the linker
 patches to an immediate. Because its value is unknown at compile time, it cannot appear in
 a constant position (an array bound, a case label, a subrange), the same boundary a property
-has. It is the honest form for a tunable scalar in a foundation library, and it is cheaper
-than an accessor property, which would add a routine and a call per read. It is a `const`,
-not a property. Earlier drafts suggested expressing a changeable value as a read-only
-property; that is retracted, because a plain scalar constant does not need an accessor.
+has. It is a `const`, not a property.
 
 The surface distinguishes it from an inline const by leaving the value out of the interface.
 A unit declares a link-time const value-less in its interface, giving only its type, and
@@ -208,8 +199,7 @@ A program or unit names its dependencies in a single `uses` clause, at the top o
 file after the `unit` or `program` header. There is no separate interface-level and
 implementation-level `uses`: a unit has one dependency list, private by default, and the
 public surface is stated explicitly with `reexport`. This decouples what a
-unit depends on from what it exposes, which the Borland interface/implementation split
-conflates.
+unit depends on from what it exposes.
 
 Every import has a qualifier. An unqualified `uses` uses the unit's own name as the
 qualifier:
@@ -273,15 +263,10 @@ end.
 ```
 
 A consumer of `scene` can now write `scene.Vec` (or `Vec` under its chosen qualifier)
-without a separate `uses geometry`. Re-export is selective on purpose. Pulling a whole
-dependency into the public surface is the transitive-surface bloat that has caused
-trouble in other module systems, so a unit re-exports only the names its own interface
-genuinely requires a consumer to name.
-
-This is close to Rust's `pub use`. Classic Modula-2 has no such convenience: a client
-imports every module whose names it writes, relying only on automatic resolution.
-Kobold keeps that automatic resolution and adds selective re-export as the curated
-middle.
+without a separate `uses geometry`. Re-export is selective: a unit re-exports only the
+names its own interface genuinely requires a consumer to name. Automatic resolution still
+lets a consumer hold and pass a name it did not import; re-export is only about which
+names the consumer may write.
 
 ## Dependency graph
 
@@ -317,8 +302,7 @@ a diamond is normal: unit A uses C, unit B uses C, and a program that uses A and
 in C through both paths. Depending on how libraries are packaged, C's definitions may
 arrive at the link once (C shipped as its own object, both A and B importing it) or twice
 (A and B each a self-contained bundle that absorbed C). The fold makes both correct
-without the program author choosing a packaging model, which is exactly why traditional
-linkers carry COMDAT and weak-symbol folding.
+without the program author choosing a packaging model.
 
 Every definition absorbed from a used unit is foldable, in the spirit of a linker
 folding COMDAT or weak symbols. A unit's own definitions are unique. The fold covers
@@ -343,9 +327,7 @@ whitespace and comments do not matter, the emitted code does.
 In the common case the two copies of C came from the same compiler over the same source,
 so they are byte-identical and the hash matches at once; the fold is cheap. The fold
 earns its keep on version skew: A built against C v1 and B against C v2, whose bodies
-differ, is an error that names both, not a silent choice of one. This is where the design
-departs from Go, which would carry several versions of C in one program and treat them as
-unrelated.
+differ, is an error that names both, not a silent choice of one.
 
 This is order-independent by construction. Whatever order definitions are visited in,
 the result is the same: one canonical body, or an error. "Keep the first" is therefore
@@ -459,8 +441,7 @@ The interface can carry inlinable bodies, not only signatures. An exported inlin
 already puts its value in the interface for the consumer to bake in; the same mechanism
 generalizes to small routine bodies, so a trivial accessor can be inlined across the unit
 boundary. This is the object-format hook that lets a `property` read lower to look like a
-plain `var` access instead of a call, and it is why property and units were originally
-designed together (see `kp-property.md`). An inlined body is consumer-observable, so it is
+plain `var` access instead of a call (see `kp-property.md`). An inlined body is consumer-observable, so it is
 part of the interface fingerprint, exactly like an inline const value: change the body and
 the consumers that inlined it must recompile.
 
@@ -583,20 +564,27 @@ same name ahead of it with `-U` or `KOBOLD_UNITS`.
 The units, by tier:
 
 - `io.files` — whole-file (`ReadFile`/`WriteFile`) and handle (`Open`/`Create`/`ReadLine`/
-  `WriteLine`/`Close`) text I/O. Migrated from the flat `files`.
-- `io.dirs` — directory enumeration. Migrated from the flat `dirs`.
+  `WriteLine`/`Close`) text I/O.
+- `io.dirs` — directory enumeration.
 - `io.console` — the standard input and output as typed functions: `Eof` (the sticky
-  end-of-input latch), `ReadLine`/`ReadChar`, and `WriteStr`/`WriteLine`/`WriteChar`. Numeric
-  and real console I/O (`ReadInt`, `ReadReal`, `WriteReal`) are a later addition (the real FFI
-  marshalling of `RandomReal` below, and the numeric reads' whitespace semantics, come first).
+  end-of-input latch), `ReadLine`/`ReadChar`, `WriteStr`/`WriteLine`/`WriteChar`, and the real
+  surface `ReadReal`/`WriteReal` (`ReadReal` skips whitespace and reads one real token,
+  `WriteReal` prints it in the write statement's `%g` shape). A real crosses the unit cdecl FFI
+  the same way the write/read builtins' `io_*_real` path does: in a float register on ColdFire,
+  as its 64-bit bits in an integer register pair on the rv32 soft-float tier, so it needs no
+  bridge. `ReadInt`/`WriteInt` are the integer surface: `ReadInt` skips whitespace and reads one
+  signed decimal token, returning an `Int64` (the same 64-bit cdecl return as `std.time`'s `Now`,
+  so endian-safe on both tiers); `WriteInt` prints a 32-bit `Integer`. A non-numeric input reads
+  as zero (this tier's lenient scan); a status-returning `Val` surface is a later design pass.
 - `std.time` — `Now` (monotonic milliseconds) and `Sleep(ms)`, over the host clock and the
   park seam. A give-up-the-turn yield is `Sleep(0)` for now; a dedicated procedure waits on
   coroutine scheduling landing as its own namespaced unit (`yield` is the coroutine keyword).
-- `std.random` — `SeedRandom`, `Randomize` (seed from host entropy), and `RandomBelow` (the
-  fast generator). It needs host entropy, hence `std`. `RandomReal` is deferred (a
-  real-returning `external cdecl` is not yet carried on the rv soft-float tier) and so is
-  `SecureRandom` (its buffer-fill surface needs more glue); a pure, seed-only `core.random`
-  subset usable on bare metal is also a later addition.
+- `std.random` — `SeedRandom`, `Randomize` (seed from host entropy), `RandomBelow` and
+  `RandomReal` (a uniform real in [0, 1)) over the fast generator, and `SecureRandom(bound)`
+  over the ChaCha20 CSPRNG (seeded once from host entropy, rejection-sampled to stay unbiased).
+  It needs host entropy, hence `std`. `RandomReal` crosses the cdecl FFI as a real the same
+  way `io.console`'s `ReadReal` does, no bridge. A pure, seed-only `core.random` subset usable
+  on bare metal is a later addition.
 - `core.strings` — pure string helpers built over the string builtins with no runtime
   primitive of its own, so it works on every tier (hence `core`): `UpperCase`/`LowerCase`
   (ASCII), `Trim`/`TrimLeft`/`TrimRight`, `StringReplace`, and a non-mutating string
@@ -605,8 +593,7 @@ The units, by tier:
 
 These units wrap runtime glue (`kp_random_*`, `kp_now_ms`, `kp_sleep_ms`, the console
 `io_eof`/`io_read_str`/`io_read_char`/`io_write_str`/`io_write_char`,
-the `kpf_*` file primitives) declared `external cdecl` in each unit's implementation, the same
-pattern as the original `files` unit, so the compiler core carries no knowledge of them and no
+the `kpf_*` file primitives) declared `external cdecl` in each unit's implementation, so the compiler core carries no knowledge of them and no
 builtin grows (see the units-over-builtins direction in `kobold.md`).
 
 What stays a builtin. An operation moves into a unit when it is an ordinary call: a concrete
@@ -643,12 +630,12 @@ on demand in functions that touch globals is an emitter detail, deferred.
 
 ## Future directions
 
-- **A cell as a first-class value (option 8).** Shared mutable state that wants identity
+- **A cell as a first-class value.** Shared mutable state that wants identity
   and, later, synchronization could be modeled as a `ref`/cell handle created and passed
   around, built on the existing handle and ARC machinery with no new object-format work.
   This is the Rust `Arc<Mutex>` or Clojure atom shape. It is less "looks like a global"
   than an exported `var`, but it is the honest home for genuinely shared, synchronized
-  state. Worth investigating as an alternative or complement to `shared var`.
+  state.
 - **The `property` feature.** Uniform-access, accessor-backed, and computed values,
   including computed record fields, are specified in `kp-property.md` as an independent
   proposal. Units can use it once it lands but do not require it.
@@ -656,13 +643,12 @@ on demand in functions that touch globals is an emitter detail, deferred.
 ## Open questions
 
 - **Whether `kpcom` itself is ever split into units.** The compiler is a single Pascal
-  file today, and the self-hosting fixed point does not depend on units. Splitting it is
-  not proposed here.
+  file today, and the self-hosting fixed point does not depend on units.
 
 ## See also
 
 - `kp-grammar.md` the concrete syntax for units and the `uses` clause.
 - `kp-property.md` the split-out property / uniform-access proposal.
 - `kp-module-format.md` the KPM1 module kinds and interface section.
-- `kobold.md` the language and runtime design, and the decision log.
+- `kobold.md` the language and runtime design.
 - `kp-conformance.md` where units sit against the Pascal standards and dialects.

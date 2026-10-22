@@ -3,6 +3,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <fcntl.h>
+#include <unistd.h>
 #include "fmt.h"
 #include "stdio_impl.h"
 
@@ -12,10 +13,6 @@
    the malloc'd FILE of fopen and the format engine (__vformat), so a program
    that only needs buffered console output pulls stdio_core.o without this
    object's malloc and printf dependencies. */
-
-extern int open(const char *path, int flags, int mode);
-extern int close(int fd);
-extern long lseek(int fd, long offset, int whence);
 
 /* Open a real file.  The three standard streams stay static; a fopen'd stream
    is a malloc'd FILE buffering over the open/read/write/close/lseek crt

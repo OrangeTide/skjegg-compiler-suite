@@ -195,6 +195,82 @@ constants; they are not a distinct type for range checking.
 `{ block }`, `(* block *)`, and `// line` comments are all
 supported.  Shebang lines (`#!/...`) are skipped.
 
+## Grammar
+
+Compact Pascal has no separate grammar specification file; the grammar is the
+one the front end under `pascal/` parses. The EBNF below describes the
+implemented subset (it omits the features listed as not implemented above). It
+follows the usual conventions: `{ ... }` is zero or more, `[ ... ]` is optional,
+`|` separates alternatives, and quoted text is literal.
+
+```ebnf
+program       = "program" ident [ "(" ident { "," ident } ")" ] ";"
+                block "." ;
+
+block         = { declaration } compound_stmt ;
+
+declaration   = const_decl | type_decl | var_decl | proc_decl ;
+
+const_decl    = "const" { ident [ ":" type ] "=" const_expr ";" } ;
+type_decl     = "type" { ident "=" type ";" } ;
+var_decl      = "var" { ident { "," ident } ":" type [ "=" const_expr ] ";" } ;
+
+proc_decl     = ( "procedure" ident [ params ]
+                | "function"  ident [ params ] ":" type ) ";"
+                ( "forward" ";" | block ";" ) ;
+
+params        = "(" param_group { ";" param_group } ")" ;
+param_group   = [ "var" | "const" ] ident { "," ident } ":" type ;
+
+type          = ident
+              | "string" [ "[" const_expr "]" ]
+              | "array" "[" subrange { "," subrange } "]" "of" type
+              | "record" field_list "end"
+              | "set" "of" type
+              | "(" ident { "," ident } ")" ;         (* enumerated *)
+subrange      = const_expr ".." const_expr ;
+field_list    = field { ";" field } [ variant_part ] ;
+field         = ident { "," ident } ":" type ;
+variant_part  = "case" [ ident ":" ] ident "of"
+                { const_expr { "," const_expr } ":" "(" field_list ")" ";" } ;
+
+compound_stmt = "begin" [ statement { ";" statement } ] "end" ;
+
+statement     = compound_stmt
+              | lvalue ":=" expr
+              | ident [ "(" [ expr { "," expr } ] ")" ]    (* proc call *)
+              | "if" expr "then" statement [ "else" statement ]
+              | "while" expr "do" statement
+              | "for" ident ":=" expr ( "to" | "downto" ) expr "do" statement
+              | "repeat" statement { ";" statement } "until" expr
+              | "case" expr "of" case_arm { ";" case_arm }
+                [ "else" statement { ";" statement } ] "end"
+              | "with" lvalue { "," lvalue } "do" statement
+              | "break" | "continue"
+              | "exit" [ "(" expr ")" ] | "halt" [ "(" expr ")" ]
+              | (* empty *) ;
+case_arm      = const_expr { ( "," | ".." ) const_expr } ":" statement ;
+
+lvalue        = ident { "." ident | "[" expr { "," expr } "]" } ;
+
+expr          = simple_expr [ rel_op simple_expr ] ;
+rel_op        = "=" | "<>" | "<" | "<=" | ">" | ">=" | "in" ;
+simple_expr   = [ "+" | "-" ] term { add_op term } ;
+add_op        = "+" | "-" | "or" | "xor" | "or" "else" ;
+term          = factor { mul_op factor } ;
+mul_op        = "*" | "/" | "div" | "mod" | "and" | "shl" | "shr"
+              | "and" "then" ;
+factor        = literal
+              | lvalue
+              | ident "(" [ expr { "," expr } ] ")"       (* func/cast call *)
+              | "(" expr ")"
+              | "not" factor
+              | "[" [ set_elem { "," set_elem } ] "]" ;   (* set literal *)
+set_elem      = expr [ ".." expr ] ;
+
+literal       = integer | string | char | ident ;         (* ident: const/enum *)
+```
+
 ## Summary of Major Gaps
 
 These features are absent from the implementation and would require

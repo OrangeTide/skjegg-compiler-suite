@@ -1,13 +1,13 @@
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <stdint.h>
 
 /* rv32 (like the other "new" architectures) has no stat or fstat syscall; the
    stat family is served by statx(2).  statx fills a fixed, architecture-
    independent record, so the struct below is pinned to the kernel ABI and the
-   fields POSIX stat needs are copied out of it. */
+   fields POSIX stat needs are copied out of it.  AT_FDCWD / AT_EMPTY_PATH come
+   from <fcntl.h>; STATX_BASIC_STATS is statx's own mask, so it stays here. */
 
-#define AT_FDCWD          (-100)
-#define AT_EMPTY_PATH     0x1000
 #define STATX_BASIC_STATS 0x000007ffU
 
 /* The four statx timestamps are flattened into their { s64 sec; u32 nsec; s32 }
@@ -45,9 +45,6 @@ struct statx {
    offsetof in a constant expression; the fields are laid out naturally aligned,
    and the round-trip test checks the values against the real kernel.) */
 _Static_assert(sizeof(struct statx) == 256, "statx layout");
-
-extern int statx(int dirfd, const char *path, int flags, unsigned mask,
-                 struct statx *buf);
 
 static void
 from_statx(const struct statx *sx, struct stat *buf)

@@ -1,7 +1,7 @@
 /* Phase-F libc self-check: the self-contained additions strerror, rand/srand,
    strtod/atof, and sscanf/vsscanf.  All arithmetic is deterministic (fixed
-   LCG, IEEE double), so the result is identical on every target.  Returns 42
-   when every case holds. */
+   generator, IEEE double), so the result is identical on every target.  Returns
+   42 when every case holds. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,7 +26,7 @@ main(void)
     expect(strcmp(strerror(ERANGE), "Numerical result out of range") == 0);
     expect(strcmp(strerror(999), "Unknown error") == 0);
 
-    /* rand/srand: the LCG is deterministic, so a fixed seed gives a fixed
+    /* rand/srand: the generator is deterministic, so a fixed seed gives a fixed
        first value, and reseeding repeats it */
     {
         int a, b;
