@@ -225,42 +225,33 @@ emit_globals(FILE *out, struct ir_program *prog)
  * Extern declarations (NASM requires explicit extern for undefined symbols)
  ****************************************************************/
 
-static int
-is_defined(struct ir_program *prog, const char *sym)
-{
-    struct ir_func *fn;
-    struct ir_global *g;
-
-    for (fn = prog->funcs; fn; fn = fn->next)
-        if (strcmp(fn->name, sym) == 0)
-            return 1;
-    for (g = prog->globals; g; g = g->next)
-        if (strcmp(g->name, sym) == 0)
-            return 1;
-    return 0;
-}
-
 static void
-emit_extern_once(FILE *out, const char **seen, int *nseen, const char *sym)
+emit_extern_once(FILE *out, struct strset *seen, const char *sym)
 {
-    int k;
-
-    for (k = 0; k < *nseen; k++)
-        if (strcmp(seen[k], sym) == 0)
-            return;
-    if (*nseen < 256)
-        seen[(*nseen)++] = sym;
-    fprintf(out, "extern %s\n", nasm_sym(sym));
+    if (strset_add(seen, sym))
+        fprintf(out, "extern %s\n", nasm_sym(sym));
 }
 
 static void
 emit_externs(FILE *out, struct ir_program *prog)
 {
     struct ir_func *fn;
+    struct ir_global *g;
     struct ir_insn *i;
-    const char *seen[256];
-    int nseen = 0;
+    struct strset defined, seen;
 
+    /* Every symbol the module defines, so a reference to one is not wrongly
+       declared extern.  Built once into a set: a per-reference linear scan of
+       the function and global lists was quadratic in program size (kpcom has
+       ~1250 symbols and ~8000 referencing instructions, and that scan was the
+       front end's single hottest spot). */
+    strset_init(&defined);
+    for (fn = prog->funcs; fn; fn = fn->next)
+        strset_add(&defined, fn->name);
+    for (g = prog->globals; g; g = g->next)
+        strset_add(&defined, g->name);
+
+    strset_init(&seen);
     for (fn = prog->funcs; fn; fn = fn->next) {
         for (i = fn->head; i; i = i->next) {
             if (i->sym &&
@@ -269,31 +260,32 @@ emit_externs(FILE *out, struct ir_program *prog)
                  i->op == IR_CALL_AGG || i->op == IR_CALL2 ||
                  i->op == IR_LEA || i->op == IR_LEA64)) {
                 /* a symbol-address load (IR_LEA/LEA64) can reference an external
-                   data symbol, which NASM needs declared extern; is_defined
-                   filters out the program's own globals and functions.  IR_CALL2 is
-                   the failable call, so a cross-unit `fails` routine is covered too */
-                if (!is_defined(prog, i->sym))
-                    emit_extern_once(out, seen, &nseen, i->sym);
+                   data symbol, which NASM needs declared extern; the defined
+                   set filters out the program's own globals and functions.
+                   IR_CALL2 is the failable call, so a cross-unit `fails`
+                   routine is covered too */
+                if (!strset_contains(&defined, i->sym))
+                    emit_extern_once(out, &seen, i->sym);
             }
             switch (i->op) {
             case IR_FLH:
-                emit_extern_once(out, seen, &nseen, "__skj_extendhfsf");
+                emit_extern_once(out, &seen, "__skj_extendhfsf");
                 break;
             case IR_FSH:
-                emit_extern_once(out, seen, &nseen, "__skj_truncsfhf");
+                emit_extern_once(out, &seen, "__skj_truncsfhf");
                 break;
             case IR_CAPTURE:
-                emit_extern_once(out, seen, &nseen, "__cont_capture");
+                emit_extern_once(out, &seen, "__cont_capture");
                 break;
             case IR_RESUME:
-                emit_extern_once(out, seen, &nseen, "__cont_resume");
+                emit_extern_once(out, &seen, "__cont_resume");
                 break;
             case IR_MARK:
-                emit_extern_once(out, seen, &nseen, "__cont_mark_sp");
-                emit_extern_once(out, seen, &nseen, "__cont_arena_ptr");
+                emit_extern_once(out, &seen, "__cont_mark_sp");
+                emit_extern_once(out, &seen, "__cont_arena_ptr");
                 break;
             case IR_CONT_UNWIND:
-                emit_extern_once(out, seen, &nseen, "__cont_arena_ptr");
+                emit_extern_once(out, &seen, "__cont_arena_ptr");
                 break;
             default:
                 break;
@@ -306,9 +298,12 @@ emit_externs(FILE *out, struct ir_program *prog)
        helpers, not IR calls, so the scan above does not reach them).  NASM needs
        them declared; an unused extern is harmless. */
     if (target_aot_trap_guarded) {
-        emit_extern_once(out, seen, &nseen, "kp_trap_overflow");
-        emit_extern_once(out, seen, &nseen, "kp_trap_div_zero");
+        emit_extern_once(out, &seen, "kp_trap_overflow");
+        emit_extern_once(out, &seen, "kp_trap_div_zero");
     }
+
+    strset_free(&seen);
+    strset_free(&defined);
 }
 
 /****************************************************************

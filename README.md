@@ -136,7 +136,7 @@ make check-smoke  # full in-tree toolchain smoke test (no cross toolchain needed
 make clean        # remove build/
 ```
 
-The Makefile header lists the full target set (per-backend suites, the
+`make help` prints the full target set (per-backend suites, the
 emulator tiers, the MIPS and PlayStation paths, and the integer/float
 integration tests).  `make check-smoke` exercises the full in-tree
 pipeline (front end -> `skj-as` -> `skj-ld` -> `qemu-m68k`) without

@@ -1,31 +1,26 @@
-{ Test building repeated strings }
+{ Test building repeated strings by ansistring concatenation }
 program TestStringRepeat;
 var
-  s: string[30];
-  i, len: integer;
+  s: string;
+  d: array[1..3] of string;
+  i: integer;
 begin
+  d[1] := '1';
+  d[2] := '2';
+  d[3] := '3';
+
   { Build "AAAA" }
   s := '';
-  len := 0;
-  for i := 1 to 4 do begin
-    len := len + 1;
-    s[len] := 'A';
-  end;
-  s[0] := chr(len);
+  for i := 1 to 4 do
+    s := s + 'A';
   writeln(s);
 
   { Build "12321" }
   s := '';
-  len := 0;
-  for i := 1 to 3 do begin
-    len := len + 1;
-    s[len] := chr(ord('0') + i);
-  end;
-  for i := 2 downto 1 do begin
-    len := len + 1;
-    s[len] := chr(ord('0') + i);
-  end;
-  s[0] := chr(len);
+  for i := 1 to 3 do
+    s := s + d[i];
+  for i := 2 downto 1 do
+    s := s + d[i];
   writeln(s);
 
   writeln(length(s));

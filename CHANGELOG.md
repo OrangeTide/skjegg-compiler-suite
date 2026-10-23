@@ -6,6 +6,41 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.19.0
+
+#### Added
+- A major Compact Pascal expansion that brings the front end far enough to
+  compile and run the Kobold compiler's own source (`kpcom.pas`). The in-tree
+  acceptance suite compiles 88 corpus programs through the Pascal front end with
+  byte-identical output, and the host test suite passes 209 programs.
+- Pascal numeric and layout support: `Int64` with a scalar type-size layer, and
+  `Real`, `Double`, and `Single` floating point. A host AOT pipeline and an LP64
+  pointer-width layer build native x86-64 executables.
+- Pascal heap strings: an `ansistring` representation with reference-counted
+  assignment, reference-counted aggregate string members, scope-exit release
+  under a leak gate, and in-place self-append.
+- Pascal aggregates and routines: scalar and managed-element dynamic arrays,
+  open-array parameters, nested dynamic arrays, registered enum types with
+  ordinal `High`/`Low` and enum-indexed arrays, `out` parameters, overloading by
+  arity and type, and typed constant aggregates with string members.
+- Pascal host and build integration: external `cdecl` host imports,
+  `ErrOutput`/`Output` stream selection with `Flush`, `{$I file}` include
+  splicing, and `ParamStr`/`ParamCount` command-line access.
+- A `make help` target that prints the common targets plus the full
+  `check-*`/`test-*` catalog, generated from the Makefile so it stays complete.
+
+#### Changed
+- The Kobold compiler is documented as self-hosting inside the sandbox: `kpcom`
+  runs as an RV32 or ColdFire guest ELF under `skj-run` and reproduces the host
+  compiler's output byte for byte, including its own full source.
+
+#### Fixed
+- Several Pascal codegen correctness fixes surfaced by compiling `kpcom.pas`:
+  call arguments evaluate right to left (FPC order), an indexed-store r-value is
+  evaluated before its address (a reallocation hazard), nested-function frame
+  corruption and integer `not`, and the string result of `Exit(value)` is
+  retained.
+
 ### 0.18.0
 
 #### Added

@@ -74,8 +74,8 @@ an executable. It links the libc archive pull-only, so an object is pulled from
 the archive only when a symbol in it is referenced.
 
 The other languages run the stages explicitly: compile to assembly with the
-front end, assemble with `skj-as`, then link with `skj-ld`. The manual example
-for Compact Pascal in the repository `CLAUDE.md` shows the full sequence.
+front end, assemble with `skj-as`, then link with `skj-ld`. The README's "Using
+the Tools Directly" section shows the full sequence.
 
 ## Assembler, linker, and archiver
 
@@ -159,10 +159,12 @@ make clean          # remove build/
 ```
 
 Per-language and per-feature suites (`check-cc`, `check-cpp`, `check-exc`, the
-`test-fpu`/`test-i64`/`test-ops` integration tests, and the Kobold suites) are
-listed with the rest in `CLAUDE.md`. Every binary is built through a Makefile
-target; the test runner only runs a `build/<name>` that has a matching source or
-fixture, so a stray build is skipped rather than reported.
+`test-fpu`/`test-i64`/`test-ops` integration tests, the Compact Pascal
+`check-pc-host` and `check-pc-kpcom` suites, and the Kobold suites) number in
+the hundreds. `make help` prints the full catalog, generated from the Makefile
+so it is always complete. Every binary is built through a Makefile target; the
+test runner only runs a `build/<name>` that has a matching source or fixture, so
+a stray build is skipped rather than reported.
 
 The cross toolchain the build expects is `m68k-linux-gnu-gcc`,
 `riscv64-linux-gnu-{as,ld}`, `nasm`, and the matching `qemu-*` runners. The

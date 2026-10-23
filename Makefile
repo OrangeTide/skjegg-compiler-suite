@@ -118,6 +118,13 @@ SCM_TESTS := $(wildcard tests/scm_*.scm)
 MOO_TESTS := $(filter-out tests/moo_room.moo tests/moo_toy_%.moo,$(wildcard tests/moo_*.moo))
 MOO_TOY_TESTS := $(wildcard tests/moo_toy_*.moo)
 PAS_TESTS := $(wildcard tests/pascal_*.pas)
+# Floating-point tests (name ends in _real) need a libc-backed real formatter,
+# which only the host backends have; they run via check-pc-host / check-pc-arm64
+# and are excluded from the freestanding ColdFire binary builds and runs.
+# Tests ending in _hostio depend on stdout and stderr being separate streams,
+# which the host harness keeps apart but the VM harnesses merge (2>&1), so they
+# are host-only too.
+PAS_TESTS_NOFLOAT := $(filter-out %_real.pas %_hostio.pas,$(PAS_TESTS))
 
 TOOLS := build/skj-tinc build/skj-tinc-rv build/skj-tinc-mips build/skj-tinc-arm64 \
          build/skj-sc build/skj-sc-rv build/skj-sc-mips build/skj-sc-arm64 \
@@ -130,6 +137,24 @@ TOOLS := build/skj-tinc build/skj-tinc-rv build/skj-tinc-mips build/skj-tinc-arm
          build/skj-kp build/libkpaot.a build/skj-kpc
 
 all: $(TOOLS)
+
+## help : print the common targets and the full check-*/test-* catalog.
+## The catalog is generated from this Makefile, so it never falls out of date.
+help:
+	@echo "Skjegg build and test targets."
+	@echo
+	@echo "Common:"
+	@echo "  make              build every tool (front ends, backends, toolchain)"
+	@echo "  make check        ColdFire suite: compile, assemble, link, run under qemu-m68k"
+	@echo "  make check-all    the whole qemu matrix across every backend, plus integration tests"
+	@echo "  make check-smoke  full in-tree toolchain smoke test (no cross toolchain needed)"
+	@echo "  make clean        remove build/"
+	@echo
+	@echo "All check-* and test-* targets (per backend, per feature, and the"
+	@echo "emulator, MIPS, PlayStation, and self-host tiers):"
+	@echo
+	@grep -hoE '^(check|test)[A-Za-z0-9_-]*:' $(MAKEFILE_LIST) | sed 's/:$$//' \
+	    | sort -u | column | sed 's/^/  /'
 
 build/skj-tinc: $(SRC) ir/ir.h tinc/tinc.h | build
 	$(CC) $(CFLAGS) -Iir -Itinc -o $@ $(SRC)
@@ -1469,7 +1494,7 @@ release-check:
 
 FORCE:
 
-check: build/skj-tinc build/skj-mooc build/skj-pc $(TESTS:tests/%.tc=build/%) $(SCM_TESTS:tests/%.scm=build/%) $(MOO_TESTS:tests/%.moo=build/%) $(MOO_TOY_TESTS:tests/%.moo=build/%) $(PAS_TESTS:tests/%.pas=build/%)
+check: build/skj-tinc build/skj-mooc build/skj-pc $(TESTS:tests/%.tc=build/%) $(SCM_TESTS:tests/%.scm=build/%) $(MOO_TESTS:tests/%.moo=build/%) $(MOO_TOY_TESTS:tests/%.moo=build/%) $(PAS_TESTS_NOFLOAT:tests/%.pas=build/%)
 	@sh tests/run-tests.sh "$(QEMU)"
 
 ## RISC-V per-test rules: tests/<name>.tc -> build/rv/<name>.s -> .o -> binary
@@ -1864,7 +1889,7 @@ CF_TC_BINS  := $(TESTS:tests/%.tc=build/cf/%)
 CF_SCM_BINS := $(SCM_TESTS:tests/%.scm=build/cf/%)
 CF_MOO_BINS := $(MOO_TESTS:tests/%.moo=build/cf/%)
 CF_TOY_BINS := $(MOO_TOY_TESTS:tests/%.moo=build/cf/%)
-CF_PAS_BINS := $(PAS_TESTS:tests/%.pas=build/cf/%)
+CF_PAS_BINS := $(PAS_TESTS_NOFLOAT:tests/%.pas=build/cf/%)
 
 $(CF_TC_BINS) $(CF_SCM_BINS): build/cf/%: build/%.o build/start.o build/skj-ld | build/cf
 	./build/skj-ld -o $@ build/start.o $<
@@ -3202,6 +3227,64 @@ PC_SRC := pascal/lex.c pascal/parse.c pascal/lower.c pascal/main.c $(IR_SRC) $(B
 build/skj-pc: $(PC_SRC) pascal/pascal.h ir/ir.h | build
 	$(CC) $(CFLAGS) -Ipascal -Iir -o $@ $(PC_SRC)
 
+## ---- Native host Pascal compilers (x86-64, aarch64) ----
+## The front end is backend-agnostic; each host target is a separate binary
+## linked with that target's shared selector, mirroring skj-cc.  PC_LP64 tells
+## the front end the target is LP64, so it emits the 64-bit address opcodes
+## (IR_LEA64, IR_LDL64, IR_LD64, ...) the IR reserves for a 64-bit pointer.
+PC_FE      := pascal/lex.c pascal/parse.c pascal/lower.c pascal/main.c
+PC_SRC_X64 := $(PC_FE) $(IR_SRC) $(BE_X64_SEL)
+PC_SRC_A64 := $(PC_FE) $(IR_SRC) $(BE_A64_SEL)
+
+build/skj-pc-x86-64: $(PC_SRC_X64) pascal/pascal.h ir/ir.h backend/mc_text.h backend/x86_select.h | build
+	$(CC) $(CFLAGS) -DX86_BITS=64 -DPC_LP64 -Ipascal -Iir -Ibackend -o $@ $(PC_SRC_X64)
+
+build/skj-pc-arm64: $(PC_SRC_A64) pascal/pascal.h ir/ir.h backend/arm64_mc.h backend/arm64_select.h backend/arm64_mc_text.h | build
+	$(CC) $(CFLAGS) -DPC_LP64 -Ipascal -Iir -Ibackend -o $@ $(PC_SRC_A64)
+
+## Host Pascal runtime (native libc): x86-64 built by the host cc, aarch64 by
+## the cross cc for running under qemu.
+build/pascal_rt_host.o: runtime/pascal_rt.c | build
+	$(CC) -std=c99 -O2 -DPAS_HOST -c -o $@ $<
+build/pascal_rt_host_a64.o: runtime/pascal_rt.c | build
+	$(A64_CC) -std=c99 -O2 -DPAS_HOST -c -o $@ $<
+## ASan build of the host runtime, for the leak gate below.  Built with the
+## sanitizer so malloc/free in the runtime are the instrumented allocator and
+## LeakSanitizer runs at exit over the generated program's heap strings.
+build/pascal_rt_host_asan.o: runtime/pascal_rt.c | build
+	$(CC) -std=c99 -O1 -g -fsanitize=address -DPAS_HOST -c -o $@ $<
+
+## Run the existing Pascal suite natively on each host backend.  The x86-64
+## host check also runs the leak gate (check-pc-host-leak) so a leak, double
+## free or use after free in the managed string runtime fails the suite.
+check-pc-host: check-pc-host-leak build/skj-pc-x86-64 build/pascal_rt_host.o
+	@MODE=x64 PC=build/skj-pc-x86-64 RT=build/pascal_rt_host.o \
+	    NASM="$(X64_ASM)" CC="$(CC)" sh tests/run-pc-host.sh $(PAS_TESTS)
+
+check-pc-arm64: build/skj-pc-arm64 build/pascal_rt_host_a64.o
+	@MODE=a64 PC=build/skj-pc-arm64 RT=build/pascal_rt_host_a64.o \
+	    A64CC="$(A64_CC)" QEMU="$(QEMU_A64)" sh tests/run-pc-host.sh $(PAS_TESTS)
+
+## Leak gate: the x86-64 host suite run under AddressSanitizer + LeakSanitizer,
+## so each test also fails on a leak, double free or use after free of the
+## heap managed string/array runtime.  Native x86-64 only (LSan is unreliable
+## under qemu-user, so the aarch64 suite stays value-only).
+check-pc-host-leak: build/skj-pc-x86-64 build/pascal_rt_host_asan.o
+	@MODE=x64 SAN=1 PC=build/skj-pc-x86-64 RT=build/pascal_rt_host_asan.o \
+	    NASM="$(X64_ASM)" CC="$(CC)" sh tests/run-pc-host.sh $(PAS_TESTS)
+.PHONY: check-pc-host-leak
+
+## kpcom acceptance: compile the real Kobold compiler (kobold/kpcom.pas) with
+## the skj-pc front end and check it emits byte-identical KPM to the reference
+## front end (build/skj-kp-jit) over the whole behavioral corpus.  Prints the
+## kpcom build wall time (the long pole) as a metric line.  x86-64 host only.
+check-pc-kpcom: build/skj-pc-x86-64 build/pascal_rt_host.o build/skj-kp-jit
+	@PC=build/skj-pc-x86-64 RT=build/pascal_rt_host.o \
+	    HOST=tests/pascal_kpcom_host.c SRC=$(KPCOM_SRC_PAS) \
+	    REF=build/skj-kp-jit CORPUS=tests/kp-corpus OUT=build \
+	    NASM="$(X64_ASM)" CC="$(CC)" sh tests/run-pc-kpcom.sh
+.PHONY: check-pc-kpcom
+
 ## Pascal runtime (cross-compiled C)
 build/pascal_rt.o: runtime/pascal_rt.c | build
 	$(M68K_CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<
@@ -3288,7 +3371,7 @@ build/pascal_%.s: tests/pascal_%.pas build/skj-pc | build
 	./build/skj-pc -o $@ $<
 
 ## Pascal test binaries need runtime objects
-PAS_BINS := $(PAS_TESTS:tests/%.pas=build/%)
+PAS_BINS := $(PAS_TESTS_NOFLOAT:tests/%.pas=build/%)
 $(PAS_BINS): build/%: build/%.o build/start.o build/pascal_rt.o build/skj-ld
 	./build/skj-ld -o $@ build/start.o build/pascal_rt.o $<
 
@@ -5867,4 +5950,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-exc-rv-emu check-exc-rv-emu-san test-exc-coro-overflow check-emu check-rv-emu check-exc-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-exc-x86-64-asm check-exc-arm64-asm check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke check-exc-jit-arm64 test-gc test-coro test-threads test-libexc-guest32 test-jit-arena test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-exc-rv-emu check-exc-rv-emu-san test-exc-coro-overflow check-emu check-rv-emu check-exc-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-exc-x86-64-asm check-exc-arm64-asm check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke check-exc-jit-arm64 test-gc test-coro test-threads test-libexc-guest32 test-jit-arena test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE

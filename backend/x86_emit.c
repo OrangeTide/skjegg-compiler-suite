@@ -1453,42 +1453,31 @@ emit_fp_constants(FILE *out)
  * Extern declarations (NASM requires explicit extern for undefined symbols)
  ****************************************************************/
 
-static int
-is_defined(struct ir_program *prog, const char *sym)
-{
-    struct ir_func *fn;
-    struct ir_global *g;
-
-    for (fn = prog->funcs; fn; fn = fn->next)
-        if (strcmp(fn->name, sym) == 0)
-            return 1;
-    for (g = prog->globals; g; g = g->next)
-        if (strcmp(g->name, sym) == 0)
-            return 1;
-    return 0;
-}
-
 static void
-emit_extern_once(FILE *out, const char **seen, int *nseen, const char *sym)
+emit_extern_once(FILE *out, struct strset *seen, const char *sym)
 {
-    int k;
-
-    for (k = 0; k < *nseen; k++)
-        if (strcmp(seen[k], sym) == 0)
-            return;
-    if (*nseen < 256)
-        seen[(*nseen)++] = sym;
-    fprintf(out, "extern %s\n", sym);
+    if (strset_add(seen, sym))
+        fprintf(out, "extern %s\n", sym);
 }
 
 static void
 emit_externs(FILE *out, struct ir_program *prog)
 {
     struct ir_func *fn;
+    struct ir_global *g;
     struct ir_insn *i;
-    const char *seen[256];
-    int nseen = 0;
+    struct strset defined, seen;
 
+    /* Every symbol the module defines, built once into a set: a per-reference
+       linear scan of the function and global lists was quadratic in program
+       size (see the same note in x86_aot.c). */
+    strset_init(&defined);
+    for (fn = prog->funcs; fn; fn = fn->next)
+        strset_add(&defined, fn->name);
+    for (g = prog->globals; g; g = g->next)
+        strset_add(&defined, g->name);
+
+    strset_init(&seen);
     for (fn = prog->funcs; fn; fn = fn->next) {
         for (i = fn->head; i; i = i->next) {
             if (i->sym &&
@@ -1498,36 +1487,39 @@ emit_externs(FILE *out, struct ir_program *prog)
                  i->op == IR_LEA || i->op == IR_LEA64)) {
                 /* A symbol-address load (IR_LEA/LEA64) can reference an
                  * external data symbol, e.g. Excelsior's __exc_self, which
-                 * NASM needs declared extern.  is_defined filters out the
+                 * NASM needs declared extern.  The defined set filters out the
                  * program's own globals and functions. */
-                if (!is_defined(prog, i->sym))
-                    emit_extern_once(out, seen, &nseen, i->sym);
+                if (!strset_contains(&defined, i->sym))
+                    emit_extern_once(out, &seen, i->sym);
             }
             switch (i->op) {
             case IR_FLH:
-                emit_extern_once(out, seen, &nseen, "__skj_extendhfsf");
+                emit_extern_once(out, &seen, "__skj_extendhfsf");
                 break;
             case IR_FSH:
-                emit_extern_once(out, seen, &nseen, "__skj_truncsfhf");
+                emit_extern_once(out, &seen, "__skj_truncsfhf");
                 break;
             case IR_CAPTURE:
-                emit_extern_once(out, seen, &nseen, "__cont_capture");
+                emit_extern_once(out, &seen, "__cont_capture");
                 break;
             case IR_RESUME:
-                emit_extern_once(out, seen, &nseen, "__cont_resume");
+                emit_extern_once(out, &seen, "__cont_resume");
                 break;
             case IR_MARK:
-                emit_extern_once(out, seen, &nseen, "__cont_mark_sp");
-                emit_extern_once(out, seen, &nseen, "__cont_arena_ptr");
+                emit_extern_once(out, &seen, "__cont_mark_sp");
+                emit_extern_once(out, &seen, "__cont_arena_ptr");
                 break;
             case IR_CONT_UNWIND:
-                emit_extern_once(out, seen, &nseen, "__cont_arena_ptr");
+                emit_extern_once(out, &seen, "__cont_arena_ptr");
                 break;
             default:
                 break;
             }
         }
     }
+
+    strset_free(&seen);
+    strset_free(&defined);
 }
 
 /* Extended inline asm (an IR_ASM carrying asm_info) is produced only by cc,

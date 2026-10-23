@@ -117,6 +117,38 @@ a C guest and a Kobold-Pascal guest are the same kind of thing to the sandbox,
 both being RV32 ELFs from the one shared IR. See `make test-rv-xlang-sandbox` and
 `doc/tools/emulator.md`.
 
+## The compiler itself in the sandbox
+
+Stage 1 above runs the front end natively on the host, but that is a choice, not
+a requirement. `kpcom` is an ordinary Kobold-Pascal program, so it compiles
+through this same RV32 and ColdFire pipeline into a guest ELF and runs inside
+`skj-run`. The in-guest compiler is a verified fixed point: the KPM1 it emits is
+byte-identical to the KPM1 the host compiler emits for the same source.
+
+Two tiers of check cover it, on both the RV32 and the ColdFire guest:
+
+- `make test-rv-selfhost-kpc` and `make test-cf-selfhost-kpc` compile a small
+  program (`hello.pas`) with the in-guest `skj-kpc` and compare the emitted KPM1
+  to the host compiler's. Fast, suitable for routine runs.
+- `make test-rv-selfhost-kpc-full` and `make test-cf-selfhost-kpc-full` compile
+  `kpcom`'s own source (`kobold/kpcom.pas`, about 480 KB) with the in-guest
+  compiler and compare that KPM1 to the host's. This is the compiler reproducing
+  itself in the sandbox. It is opt-in and slow, since the whole source runs
+  through the RV32 or ColdFire interpreter, and it needs a larger guest heap
+  (the target passes `--heap 256M`).
+
+The guest ELF is built the same way a program is: `skj-kp-rv` (or the ColdFire
+`skj-kp-cf`) compiles the committed `prebuild/kpcom.kpm` seed to assembly,
+`skj-as-rv` assembles, and `skj-ld-rv` links the freestanding crt, the compiler
+object, and the freestanding runtime archive. Byte-identical output means the
+in-guest compiler is a true peer of the host compiler, not an approximation:
+anything the host compiler accepts and lowers, the guest compiler lowers the
+same way, including the threaded-dispatch surface (`@label` computed goto and a
+procedural value called through a computed designator). The host restriction in
+"No fpc is involved" is about regenerating the seed, which still needs the
+x86-64 or aarch64 host JIT; compiling a program, or compiling `kpcom` itself,
+runs in-guest.
+
 ## How the tests exercise this
 
 `tests/run-kp-src-tests.sh` runs exactly this pipeline in its `free` mode: the

@@ -25,6 +25,8 @@ main(int argc, char **argv)
 {
     const char *inpath;
     const char *outpath;
+    const char *defines[64];
+    int ndefines = 0;
     FILE *out;
     char *src;
     struct arena a;
@@ -44,10 +46,15 @@ main(int argc, char **argv)
             printf("skj-pc %s\n", SKJ_VERSION);
             return 0;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            printf("usage: skj-pc [-V] [-o out.s] input.pas\n");
+            printf("usage: skj-pc [-V] [-d SYM] [-o out.s] input.pas\n");
             return 0;
         } else if (strcmp(argv[i], "-g") == 0) {
             pascal_debug = 1;
+        } else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
+            if (ndefines < 64)
+                defines[ndefines++] = argv[++i];
+            else
+                die("too many -d defines");
         } else if (argv[i][0] == '-') {
             die("unknown option: %s", argv[i]);
         } else {
@@ -68,6 +75,8 @@ main(int argc, char **argv)
     util_cleanup_push(cleanup_free, src);
 
     lex_init(&a, src, inpath);
+    for (i = 0; i < ndefines; i++)
+        lex_define(defines[i]);
     ast = parse_program(&a);
     if (pascal_debug)
         pascal_src_file = inpath;

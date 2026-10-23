@@ -1,8 +1,8 @@
-{ Test manual string trimming }
+{ Test manual string trimming with ansistring copy }
 program TestStringTrim;
 var
-  s, t: string[30];
-  i, start, finish, len: integer;
+  s, t: string;
+  start, finish: integer;
 begin
   s := '   HELLO   ';
 
@@ -17,13 +17,7 @@ begin
     finish := finish - 1;
 
   { Extract trimmed substring }
-  t := '';
-  len := 0;
-  for i := start to finish do begin
-    len := len + 1;
-    t[len] := s[i];
-  end;
-  t[0] := chr(len);
+  t := copy(s, start, finish - start + 1);
 
   write('[');
   write(t);

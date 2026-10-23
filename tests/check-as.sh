@@ -114,9 +114,15 @@ for f in "$HERE"/moo_toy_*.moo; do
     run_test "$name"
 done
 
-# Pascal tests
+# Pascal tests.  Tests whose name ends in _real exercise floating point, whose
+# textual output needs a libc-backed formatter; the freestanding ColdFire
+# runtime has none, so they run only on the host backends (check-pc-host).
 for f in "$HERE"/pascal_*.pas; do
     name=$(basename "$f" .pas)
+    case "$name" in
+    *_real) continue ;;
+    *_hostio) continue ;;   # needs separate stdout/stderr; host-only
+    esac
     "$ROOT/build/skj-pc" -o "$BDIR/${name}.s" "$f"
     "$AS" -o "$BDIR/${name}.o" "$BDIR/${name}.s"
     $LD -o "$BDIR/$name" "$BDIR/start.o" "$BDIR/pascal_rt.o" \

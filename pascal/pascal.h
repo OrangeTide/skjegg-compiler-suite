@@ -26,7 +26,7 @@ enum tok {
     T_SHL, T_SHR,
     T_TRUE, T_FALSE,
     T_INTEGER, T_BOOLEAN, T_CHAR, T_BYTE, T_WORD,
-    T_IDENT, T_NUMBER, T_STRING,
+    T_IDENT, T_NUMBER, T_REAL, T_STRING,
     T_LPAREN, T_RPAREN,
     T_LBRACK, T_RBRACK,
     T_COMMA, T_SEMI, T_COLON, T_DOT,
@@ -41,12 +41,15 @@ enum tok {
 struct token {
     int kind;
     long nval;
+    double fval;
     char *sval;
+    char *raw;      /* identifier's original-case spelling (for external names) */
     int slen;
     int line;
 };
 
 void lex_init(struct arena *a, const char *src, const char *filename);
+void lex_define(const char *name);
 struct token lex_next(void);
 struct token lex_peek(void);
 
@@ -68,7 +71,7 @@ enum node_kind {
     N_BREAK, N_CONTINUE, N_CASE, N_CASEARM, N_CASELABEL, N_WITH,
     N_ASSIGN, N_CALL, N_EXPR_STMT,
     N_BINOP, N_UNOP,
-    N_NAME, N_NUM, N_STR, N_BOOL,
+    N_NAME, N_NUM, N_REAL, N_STR, N_BOOL,
     N_TYPEDEF, N_FIELDDECL,
     N_DOT, N_INDEX,
     N_INITLIST,
@@ -86,11 +89,14 @@ struct node {
     struct node *next;
 
     char *name;
+    char *raw_name;     /* original-case spelling of name (for external symbols) */
     long ival;
+    double fval;
     char *sval;
     int slen;
 
     int is_forward;
+    int is_external;
     int downto;
 };
 

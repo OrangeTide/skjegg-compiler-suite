@@ -3,6 +3,7 @@
 #include "pascal.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -25,6 +26,64 @@ static int ndefines;
 #define MAX_IFDEF_DEPTH 16
 static int ifdef_skip[MAX_IFDEF_DEPTH];
 static int ifdef_depth;
+
+/* {$I file} include stack: the lexer splices an included file's text in place,
+   resuming the parent source at the include's end. */
+#define MAX_INCLUDE 8
+static struct {
+    const char *p;
+    int line;
+    const char *src_file;
+} inc_stack[MAX_INCLUDE];
+static int inc_depth;
+
+/* Read a whole file into a NUL-terminated arena buffer, or NULL if it cannot
+   be opened. */
+static char *
+read_file_z(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    long n;
+    char *buf;
+
+    if (!f)
+        return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    n = ftell(f);
+    if (n < 0 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    buf = arena_alloc(lex_arena, (size_t)n + 1);
+    if (fread(buf, 1, (size_t)n, f) != (size_t)n) {
+        fclose(f);
+        return NULL;
+    }
+    buf[n] = '\0';
+    fclose(f);
+    return buf;
+}
+
+/* Resolve an include path relative to the current source file's directory
+   (an absolute path or a src_file with no directory is used as given). */
+static const char *
+resolve_include(const char *arg)
+{
+    const char *slash = strrchr(src_file, '/');
+    size_t dlen;
+    char *full;
+
+    if (arg[0] == '/' || !slash)
+        return arg;
+    dlen = (size_t)(slash - src_file) + 1;
+    full = arena_alloc(lex_arena, dlen + strlen(arg) + 1);
+    memcpy(full, src_file, dlen);
+    strcpy(full + dlen, arg);
+    return full;
+}
 
 static int
 ci_streq(const char *a, const char *b)
@@ -63,6 +122,14 @@ remove_define(const char *name)
             return;
         }
     }
+}
+
+/* Predefine a conditional symbol (the -d command-line option); call after
+   lex_init, which resets the define table. */
+void
+lex_define(const char *name)
+{
+    add_define(name);
 }
 
 static int
@@ -120,7 +187,9 @@ static const struct kw keywords[] = {
     { "var",       T_VAR },
     { "while",     T_WHILE },
     { "with",      T_WITH },
-    { "word",      T_WORD },
+    /* `word` is a predefined type identifier, not a reserved word, so a program
+       may also use it as an ordinary name (kpcom has a local called word);
+       accept_type resolves the bare identifier as the Word type. */
     { NULL, 0 },
 };
 
@@ -135,6 +204,7 @@ lex_init(struct arena *a, const char *src, const char *filename)
     peeked = 0;
     ndefines = 0;
     ifdef_depth = 0;
+    inc_depth = 0;
     lex_align = 4;
     lex_rangechecks = 0;
     lex_overflowchecks = 0;
@@ -145,6 +215,14 @@ static void
 skip_ws(void)
 {
     for (;;) {
+        /* at the end of an included file, resume the parent source */
+        if (*p == '\0' && inc_depth > 0) {
+            inc_depth--;
+            p = inc_stack[inc_depth].p;
+            line = inc_stack[inc_depth].line;
+            src_file = inc_stack[inc_depth].src_file;
+            continue;
+        }
         while (*p == ' ' || *p == '\t' || *p == '\r')
             p++;
         if (*p == '\n') {
@@ -209,7 +287,27 @@ skip_ws(void)
                             src_file, line);
                     ifdef_depth--;
                 } else if (!skipping()) {
-                    if (strcmp(dir, "DEFINE") == 0)
+                    if (strcmp(dir, "I") == 0 ||
+                        strcmp(dir, "INCLUDE") == 0) {
+                        /* splice an included file's text in place */
+                        const char *path = resolve_include(arg);
+                        char *content = read_file_z(path);
+                        if (!content)
+                            content = read_file_z(arg);
+                        if (!content)
+                            die("%s:%d: cannot open include '%s'",
+                                src_file, line, arg);
+                        if (inc_depth >= MAX_INCLUDE)
+                            die("%s:%d: include nesting too deep",
+                                src_file, line);
+                        inc_stack[inc_depth].p = p;
+                        inc_stack[inc_depth].line = line;
+                        inc_stack[inc_depth].src_file = src_file;
+                        inc_depth++;
+                        p = content;
+                        line = 1;
+                        src_file = arena_strdup(lex_arena, arg);
+                    } else if (strcmp(dir, "DEFINE") == 0)
                         add_define(arg);
                     else if (strcmp(dir, "UNDEF") == 0)
                         remove_define(arg);
@@ -297,6 +395,7 @@ make(int k)
 
     t.kind = k;
     t.nval = 0;
+    t.fval = 0;
     t.sval = NULL;
     t.slen = 0;
     t.line = line;
@@ -425,6 +524,7 @@ lex_one(void)
         }
         t = make(T_IDENT);
         t.sval = arena_strndup(lex_arena, start, sz);
+        t.raw = arena_strndup(lex_arena, start, sz);   /* original case */
         /* normalize to lowercase */
         for (size_t i = 0; i < sz; i++)
             t.sval[i] = (char)tolower((unsigned char)t.sval[i]);
@@ -469,10 +569,31 @@ lex_one(void)
                 p++;
             }
         } else {
-            while (isdigit((unsigned char)*p)) {
-                n = n * 10 + (*p - '0');
+            const char *num_start = p;
+            while (isdigit((unsigned char)*p))
                 p++;
+            /* real literal: a fractional part (dot then digit, not the `..`
+               range operator) or an exponent */
+            if ((p[0] == '.' && isdigit((unsigned char)p[1])) ||
+                p[0] == 'e' || p[0] == 'E') {
+                if (p[0] == '.') {
+                    p++;
+                    while (isdigit((unsigned char)*p))
+                        p++;
+                }
+                if (p[0] == 'e' || p[0] == 'E') {
+                    p++;
+                    if (*p == '+' || *p == '-')
+                        p++;
+                    while (isdigit((unsigned char)*p))
+                        p++;
+                }
+                t = make(T_REAL);
+                t.fval = strtod(num_start, NULL);
+                return t;
             }
+            for (const char *q = num_start; q < p; q++)
+                n = n * 10 + (unsigned long)(*q - '0');
         }
         t = make(T_NUMBER);
         t.nval = (long)n;

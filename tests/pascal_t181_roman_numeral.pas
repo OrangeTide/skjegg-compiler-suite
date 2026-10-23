@@ -1,9 +1,9 @@
-{ Test Roman numeral conversion - simple }
+{ Test Roman numeral conversion built with ansistring concatenation }
 program TestRoman;
 var
-  n, i, len: integer;
-  s: string[20];
-  symc: array[1..7] of char;
+  n, i: integer;
+  s: string;
+  symc: array[1..7] of string;
   symv: array[1..7] of integer;
 begin
   symc[1] := 'M'; symv[1] := 1000;
@@ -17,42 +17,30 @@ begin
   { Convert 37: XXXVII }
   n := 37;
   s := '';
-  len := 0;
-  for i := 1 to 7 do begin
+  for i := 1 to 7 do
     while n >= symv[i] do begin
-      len := len + 1;
-      s[len] := symc[i];
+      s := s + symc[i];
       n := n - symv[i];
     end;
-  end;
-  s[0] := chr(len);
   writeln(s);
 
   { Convert 8: VIII }
   n := 8;
   s := '';
-  len := 0;
-  for i := 1 to 7 do begin
+  for i := 1 to 7 do
     while n >= symv[i] do begin
-      len := len + 1;
-      s[len] := symc[i];
+      s := s + symc[i];
       n := n - symv[i];
     end;
-  end;
-  s[0] := chr(len);
   writeln(s);
 
   { Convert 3: III }
   n := 3;
   s := '';
-  len := 0;
-  for i := 1 to 7 do begin
+  for i := 1 to 7 do
     while n >= symv[i] do begin
-      len := len + 1;
-      s[len] := symc[i];
+      s := s + symc[i];
       n := n - symv[i];
     end;
-  end;
-  s[0] := chr(len);
   writeln(s);
 end.

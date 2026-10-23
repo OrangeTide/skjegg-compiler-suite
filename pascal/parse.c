@@ -111,6 +111,12 @@ parse_factor(void)
         n->ival = t.nval;
         return n;
     }
+    if (t.kind == T_REAL) {
+        advance();
+        n = new_node(N_REAL, t.line);
+        n->fval = t.fval;
+        return n;
+    }
     if (t.kind == T_STRING) {
         advance();
         n = new_node(N_STR, t.line);
@@ -248,8 +254,8 @@ parse_term(void)
     int op, line;
 
     lhs = parse_factor();
-    while (cur.kind == T_STAR || cur.kind == T_DIV ||
-           cur.kind == T_MOD  || cur.kind == T_AND ||
+    while (cur.kind == T_STAR || cur.kind == T_SLASH ||
+           cur.kind == T_DIV  || cur.kind == T_MOD  || cur.kind == T_AND ||
            cur.kind == T_SHL  || cur.kind == T_SHR) {
         op = cur.kind;
         line = cur.line;
@@ -576,6 +582,12 @@ parse_stmt(void)
         return n;
     }
 
+    /* an empty statement: a token that ends the enclosing statement list or
+       branch stands for an empty statement (if c then else ..., if c then ; ,
+       a ;; gap, a bare else arm), which is valid Pascal. */
+    if (is_stmt_end(cur.kind) || cur.kind == T_SEMI)
+        return new_node(N_COMPOUND, line);
+
     die("parse:%d: unexpected token in statement", line);
     return NULL;
 }
@@ -638,6 +650,24 @@ accept_type(char **out_name)
         char buf[64];
         int aline = cur.line;
         advance();
+        if (cur.kind == T_OF) {
+            /* dynamic array: array of T */
+            struct node *td;
+            char *etname2 = NULL;
+            advance();
+            if (!accept_type(&etname2))
+                die("parse:%d: expected element type", aline);
+            td = new_node(N_TYPEDEF, aline);
+            td->op = 6;
+            td->sval = etname2;
+            snprintf(buf, sizeof(buf), "__anon_%d", anon_ctr++);
+            td->name = arena_strdup(parse_arena, buf);
+            *anon_ttail = td;
+            anon_ttail = &td->next;
+            if (out_name)
+                *out_name = arena_strdup(parse_arena, buf);
+            return 1;
+        }
         expect(T_LBRACK, "[");
         for (;;) {
             struct node *td;
@@ -646,8 +676,10 @@ accept_type(char **out_name)
             td = new_node(N_TYPEDEF, aline);
             td->op = 1;
             td->b = parse_expr();
-            expect(T_DOTDOT, "..");
-            td->c = parse_expr();
+            if (accept(T_DOTDOT))
+                td->c = parse_expr();
+            else
+                td->c = NULL;   /* array[OrdinalType]: bounds from the type */
             dims[ndims++] = td;
             if (!accept(T_COMMA))
                 break;
@@ -746,6 +778,15 @@ parse_param_list(struct node **out_params)
                 is_var = 1;
             else if (accept(T_CONST))
                 is_var = 2;
+            else if (cur.kind == T_IDENT && strcmp(cur.sval, "out") == 0 &&
+                     lex_peek().kind == T_IDENT) {
+                /* `out p: T` is a by-reference parameter like `var`; the
+                   distinction (the callee must assign it) is not enforced.
+                   `out` is not reserved, so a parameter literally named out
+                   (out: T, or out, x: T) keeps its identifier meaning. */
+                advance();
+                is_var = 1;
+            }
             group_start = NULL;
             for (;;) {
                 if (cur.kind != T_IDENT)
@@ -877,12 +918,18 @@ parse_type_section(void)
     while (cur.kind == T_IDENT) {
         int line = cur.line;
         char *type_name = cur.sval;
-        (void)type_name;
         advance();
         expect(T_EQ, "=");
         if (cur.kind == T_LPAREN) {
-            /* enum type: TypeName = (Id1, Id2, ...); */
+            /* enum type: TypeName = (Id1, Id2, ...).  Each identifier is an
+               integer constant 0, 1, 2, ...; the type itself is registered as
+               an ordinal scalar (op 7) carrying the member count. */
             long ordinal = 0;
+            struct node *et = new_node(N_TYPEDEF, line);
+            et->name = type_name;
+            et->op = 7;
+            *tail = et;
+            tail = &et->next;
             advance();
             for (;;) {
                 struct node *c;
@@ -900,6 +947,7 @@ parse_type_section(void)
                     break;
             }
             expect(T_RPAREN, ")");
+            et->ival = ordinal;         /* member count (cardinality) */
         } else if (cur.kind == T_IDENT &&
                    strcmp(cur.sval, "record") == 0) {
             struct node *td, *fields, **ftail;
@@ -1042,6 +1090,20 @@ parse_type_section(void)
             char *etname = NULL;
             int ndims = 0;
             advance();
+            if (cur.kind == T_OF) {
+                /* dynamic array: TypeName = array of T */
+                char *etname2 = NULL;
+                advance();
+                if (!accept_type(&etname2))
+                    die("parse:%d: expected element type",
+                        cur.line);
+                td = new_node(N_TYPEDEF, line);
+                td->op = 6;
+                td->name = type_name;
+                td->sval = etname2;
+                *tail = td;
+                tail = &td->next;
+            } else {
             expect(T_LBRACK, "[");
             for (;;) {
                 if (ndims >= 8)
@@ -1050,8 +1112,10 @@ parse_type_section(void)
                 td = new_node(N_TYPEDEF, line);
                 td->op = 1;
                 td->b = parse_expr();
-                expect(T_DOTDOT, "..");
-                td->c = parse_expr();
+                if (accept(T_DOTDOT))
+                    td->c = parse_expr();
+                else
+                    td->c = NULL;   /* array[OrdinalType] */
                 dims[ndims++] = td;
                 if (!accept(T_COMMA))
                     break;
@@ -1075,6 +1139,7 @@ parse_type_section(void)
                 *tail = dims[i];
                 tail = &dims[i]->next;
                 etname = dims[i]->name;
+            }
             }
         } else if (cur.kind == T_SET) {
             struct node *td;
@@ -1117,8 +1182,31 @@ parse_type_section(void)
                     cur.line);
             *tail = td;
             tail = &td->next;
+        } else if (cur.kind == T_NUMBER || cur.kind == T_STRING ||
+                   cur.kind == T_MINUS ||
+                   (cur.kind == T_IDENT &&
+                    lex_peek().kind == T_DOTDOT)) {
+            /* subrange: TypeName = lo..hi; */
+            struct node *td = new_node(N_TYPEDEF, line);
+            td->name = type_name;
+            td->op = 5;
+            td->b = parse_expr();
+            expect(T_DOTDOT, "..");
+            td->c = parse_expr();
+            *tail = td;
+            tail = &td->next;
         } else {
-            die("parse:%d: unsupported type declaration", line);
+            /* type alias: TypeName = OtherType; */
+            char *aliased = NULL;
+            struct node *td;
+            if (!accept_type(&aliased))
+                die("parse:%d: unsupported type declaration", line);
+            td = new_node(N_TYPEDEF, line);
+            td->name = type_name;
+            td->op = 4;
+            td->sval = aliased;
+            *tail = td;
+            tail = &td->next;
         }
         expect(T_SEMI, ";");
     }
@@ -1224,21 +1312,42 @@ parse_block(void)
                     cur.line,
                     is_func ? "function" : "procedure");
             decl->name = cur.sval;
+            decl->raw_name = cur.raw;   /* for an external symbol's exact case */
             advance();
 
             if (cur.kind == T_LPAREN)
                 parse_param_list(&decl->a);
 
             if (is_func) {
+                char *rtname = NULL;
                 expect(T_COLON, ":");
-                if (!accept_type(NULL))
+                if (!accept_type(&rtname))
                     die("parse:%d: expected return type",
                         cur.line);
+                decl->sval = rtname;
             }
             expect(T_SEMI, ";");
 
+            /* optional `export;` marks the routine visible across the FFI; for
+               a standalone link it has no effect, so it is consumed. */
+            if (cur.kind == T_IDENT && strcmp(cur.sval, "export") == 0) {
+                advance();
+                expect(T_SEMI, ";");
+            }
+
             if (accept(T_FORWARD)) {
                 decl->is_forward = 1;
+                expect(T_SEMI, ";");
+            } else if (cur.kind == T_IDENT &&
+                       strcmp(cur.sval, "external") == 0) {
+                /* a host import: `external [cdecl];` has no body.  cdecl names
+                   the C/SysV calling convention, which is already how the
+                   compiler emits an external call, so it is accepted and
+                   ignored.  `external`/`cdecl` are not reserved words. */
+                decl->is_external = 1;
+                advance();
+                if (cur.kind == T_IDENT && strcmp(cur.sval, "cdecl") == 0)
+                    advance();
                 expect(T_SEMI, ";");
             } else {
                 decl->b = parse_block();

@@ -41,6 +41,283 @@ new_label(void)
 }
 
 /****************************************************************
+ * Target pointer width
+ *
+ * PC_LP64 is defined by the x86-64 and aarch64 builds, where a pointer is a
+ * full 64-bit value and differs in width from an int.  There the front end
+ * emits the IR's 64-bit address opcodes (IR_LEA64, IR_ADL64, IR_LDL64,
+ * IR_ADD64, IR_ARG64), keeps pointer-carrying slots 8 bytes, and loads a
+ * pointee scalar with the ordinary 32-bit IR_LW / IR_SW.  The ILP32 targets
+ * (ColdFire) leave PC_LP64 undefined and keep the 32-bit address opcodes, so a
+ * single IR_ADD / IR_LEA serves both a value and an address.
+ ****************************************************************/
+
+#ifdef PC_LP64
+#define PC_LP64_ON   1
+#define PC_PTR_BYTES 8
+#else
+#define PC_LP64_ON   0
+#define PC_PTR_BYTES 4
+#endif
+
+/* A heap string value is a pointer to a {refcount, kind, len, cap} descriptor
+   (four 32-bit words, 16 bytes) with the bytes following it; NULL is the empty
+   string.  The bytes of character N (1-based) are at offset PSTR_HDR + (N-1).
+   The layout matches the backend's strobj global emission and the runtime's
+   struct pstr. */
+#define PSTR_HDR 16
+
+/* Per-temp flag: set when a temp holds a pointer / full-width address, so a
+   call passes it as IR_ARG64 under LP64.  Temp ids restart at 0 per function,
+   so the table is cleared at each function's entry. */
+static unsigned char *temp_is_ptr;
+static int temp_is_ptr_cap;
+
+/* Per-temp flag: set when a temp holds a 64-bit (Int64/QWord) value, so the
+   binary operators, loads, stores, arguments and results pick the IR's 64-bit
+   opcodes.  Like temp_is_ptr it is cleared at each function's entry. */
+static unsigned char *temp_is_i64;
+static int temp_is_i64_cap;
+
+/* Per-temp float kind: 0 = integer, 1 = double (fw 0), 2 = single (FWIDTH_F32).
+   Drives the float opcodes, argument width tags and conversions. */
+static unsigned char *temp_fkind;
+static int temp_fkind_cap;
+
+static void
+reset_ptr_flags(void)
+{
+    if (temp_is_ptr)
+        memset(temp_is_ptr, 0, temp_is_ptr_cap);
+    if (temp_is_i64)
+        memset(temp_is_i64, 0, temp_is_i64_cap);
+    if (temp_fkind)
+        memset(temp_fkind, 0, temp_fkind_cap);
+}
+
+static void
+mark_ptr(int t)
+{
+    if (!PC_LP64_ON || t < 0)
+        return;
+    if (t >= temp_is_ptr_cap) {
+        int nc = temp_is_ptr_cap ? temp_is_ptr_cap * 2 : 256;
+        while (t >= nc)
+            nc *= 2;
+        temp_is_ptr = realloc(temp_is_ptr, nc);
+        if (!temp_is_ptr)
+            die("oom");
+        memset(temp_is_ptr + temp_is_ptr_cap, 0, nc - temp_is_ptr_cap);
+        temp_is_ptr_cap = nc;
+    }
+    temp_is_ptr[t] = 1;
+}
+
+static int
+is_ptr(int t)
+{
+    return PC_LP64_ON && t >= 0 && t < temp_is_ptr_cap && temp_is_ptr[t];
+}
+
+static void
+mark_i64(int t)
+{
+    if (t < 0)
+        return;
+    if (t >= temp_is_i64_cap) {
+        int nc = temp_is_i64_cap ? temp_is_i64_cap * 2 : 256;
+        while (t >= nc)
+            nc *= 2;
+        temp_is_i64 = realloc(temp_is_i64, nc);
+        if (!temp_is_i64)
+            die("oom");
+        memset(temp_is_i64 + temp_is_i64_cap, 0, nc - temp_is_i64_cap);
+        temp_is_i64_cap = nc;
+    }
+    temp_is_i64[t] = 1;
+}
+
+static int
+is_i64(int t)
+{
+    return t >= 0 && t < temp_is_i64_cap && temp_is_i64[t];
+}
+
+/* Mark temp t as a float value of the given IR width tag (0 = double,
+   FWIDTH_F32 = single). */
+static void
+mark_float(int t, int fw)
+{
+    if (t < 0)
+        return;
+    if (t >= temp_fkind_cap) {
+        int nc = temp_fkind_cap ? temp_fkind_cap * 2 : 256;
+        while (t >= nc)
+            nc *= 2;
+        temp_fkind = realloc(temp_fkind, nc);
+        if (!temp_fkind)
+            die("oom");
+        memset(temp_fkind + temp_fkind_cap, 0, nc - temp_fkind_cap);
+        temp_fkind_cap = nc;
+    }
+    temp_fkind[t] = (unsigned char)(fw == FWIDTH_F32 ? 2 : 1);
+}
+
+static int
+is_float(int t)
+{
+    return t >= 0 && t < temp_fkind_cap && temp_fkind[t];
+}
+
+/* The IR width tag of a float temp: 0 for double, FWIDTH_F32 for single. */
+static int
+float_fw(int t)
+{
+    return (t >= 0 && t < temp_fkind_cap && temp_fkind[t] == 2)
+           ? FWIDTH_F32 : 0;
+}
+
+/* Address / pointer emit helpers, width-correct for the target.  Each returns
+   a temp marked as a pointer. */
+
+static int
+emit_lea_sym(const char *name)   /* address of a global symbol */
+{
+    struct ir_insn *ins = emit(PC_LP64_ON ? IR_LEA64 : IR_LEA);
+    ins->dst = new_temp();
+    ins->sym = arena_strdup(lower_arena, name);
+    mark_ptr(ins->dst);
+    return ins->dst;
+}
+
+static int
+emit_adl(int slot)               /* address of a local slot */
+{
+    struct ir_insn *ins = emit(PC_LP64_ON ? IR_ADL64 : IR_ADL);
+    ins->dst = new_temp();
+    ins->slot = slot;
+    mark_ptr(ins->dst);
+    return ins->dst;
+}
+
+static int
+emit_load_ptr(int slot)          /* load a pointer value out of a slot */
+{
+    struct ir_insn *ins = emit(PC_LP64_ON ? IR_LDL64 : IR_LDL);
+    ins->dst = new_temp();
+    ins->slot = slot;
+    mark_ptr(ins->dst);
+    return ins->dst;
+}
+
+static void
+emit_store_ptr(int slot, int val) /* store a pointer value into a slot */
+{
+    struct ir_insn *ins = emit(PC_LP64_ON ? IR_STL64 : IR_STL);
+    ins->slot = slot;
+    ins->a = val;
+}
+
+static int
+emit_addp(int base, int off)     /* pointer + integer offset -> pointer */
+{
+    struct ir_insn *ins;
+
+    /* Under LP64 the offset is a signed 32-bit value (an array index times the
+       element size can be negative for a lower bound above 0, or for an
+       out-of-range index a non-short-circuit `and` still evaluates).  A 32-bit
+       op zero-extends its result, so sign-extend the offset to 64 bits before
+       adding it to the 64-bit base, or a small negative offset would become a
+       huge positive address. */
+    if (PC_LP64_ON) {
+        ins = emit(IR_SEXT64);
+        ins->dst = new_temp();
+        ins->a = off;
+        off = ins->dst;
+    }
+    ins = emit(PC_LP64_ON ? IR_ADD64 : IR_ADD);
+    ins->dst = new_temp();
+    ins->a = base;
+    ins->b = off;
+    mark_ptr(ins->dst);
+    return ins->dst;
+}
+
+/* Int64 value helpers.  A 64-bit value lives in a temp flagged by mark_i64; a
+   32-bit value is sign-extended to 64 bits on demand (Integer and LongInt are
+   signed), and a 64-bit value is truncated back where a 32-bit context (an
+   array index, a byte store) needs it. */
+
+static int
+to_i64(int t)
+{
+    struct ir_insn *ins;
+
+    if (is_i64(t))
+        return t;
+    ins = emit(IR_SEXT64);
+    ins->dst = new_temp();
+    ins->a = t;
+    mark_i64(ins->dst);
+    return ins->dst;
+}
+
+static int
+to_i32(int t)
+{
+    struct ir_insn *ins;
+
+    if (!is_i64(t))
+        return t;
+    ins = emit(IR_TRUNC64);
+    ins->dst = new_temp();
+    ins->a = t;
+    return ins->dst;
+}
+
+/* Coerce a value to a floating-point temp of IR width tag fw (0 = double,
+   FWIDTH_F32 = single).  An integer is converted with IR_ITOF; a float of the
+   other width is narrowed or widened with IR_F32TOF64 / IR_F64TOF32. */
+static int
+to_float(int t, int fw)
+{
+    struct ir_insn *ins;
+
+    if (!is_float(t)) {
+        t = to_i32(t);                  /* ITOF takes a 32-bit integer */
+        ins = emit(IR_ITOF);
+        ins->dst = new_temp();
+        ins->a = t;
+        ins->imm = fw;
+        mark_float(ins->dst, fw);
+        return ins->dst;
+    }
+    if (float_fw(t) == fw)
+        return t;
+    ins = emit(fw == FWIDTH_F32 ? IR_F64TOF32 : IR_F32TOF64);
+    ins->dst = new_temp();
+    ins->a = t;
+    ins->imm = fw;
+    mark_float(ins->dst, fw);
+    return ins->dst;
+}
+
+/* Convert a float value to a 32-bit integer (truncation toward zero). */
+static int
+float_to_int(int t)
+{
+    struct ir_insn *ins;
+
+    if (!is_float(t))
+        return t;
+    ins = emit(IR_FTOI);
+    ins->dst = new_temp();
+    ins->a = t;
+    ins->imm = float_fw(t);
+    return ins->dst;
+}
+
+/****************************************************************
  * Symbol table
  ****************************************************************/
 
@@ -136,6 +413,28 @@ static int nwith;
 static struct ir_func *nested_funcs;
 static struct ir_func **nested_ftail;
 
+/****************************************************************
+ * Generated element finalizers for dynamic arrays of managed elements
+ *
+ * A dynamic array of string (or of a record with string members) must drop its
+ * elements' references when the descriptor is freed or shrunk.  The element
+ * count is only known at run time, so the work is a run-time loop in the
+ * runtime (__pascal_arr_release / __pascal_arr_setlength_mgd) over a per-element
+ * callback.  For an element that is a single managed pointer the callback is a
+ * fixed runtime helper; for a record element the compiler generates a small
+ * finalize ('dtor') and retain function here, once per element type.
+ ****************************************************************/
+
+struct elem_fn {
+    char *type_name;        /* element type these functions finalize */
+    char dtor[64];          /* release-one-element function symbol */
+    char retain[64];        /* retain-one-element function symbol */
+};
+static struct elem_fn elem_fns[128];
+static int nelem_fns;
+static struct ir_func *gen_funcs;       /* generated finalizer/retainer list */
+static struct ir_func **gen_ftail;
+
 static void
 collect_names(struct node *n, char **names, int *nn, int cap)
 {
@@ -227,6 +526,13 @@ find_captures(struct node *decl, int outer_start,
 
 static char *cur_func_name;
 static int ret_slot;
+static int ret_is_i64;          /* the current function returns an Int64 */
+static int ret_is_float;        /* the current function returns a real */
+static int ret_fw;              /* its float width tag when ret_is_float */
+static int ret_is_str;          /* the current function returns a heap string */
+static int ret_is_compound;     /* returns a record or fixed array (via sret) */
+static int ret_ptr_slot;        /* hidden sret pointer slot when ret_is_compound */
+static const char *ret_type_name;   /* its declared return type when ret_is_str */
 static int exit_label;
 
 /****************************************************************
@@ -246,13 +552,21 @@ struct type_def {
     int nfields;
     struct type_field *fields;
     int is_array;
+    int is_dynarray;            /* `array of T`: a refcounted heap descriptor */
     int lo_bound;
     int hi_bound;
     int elem_size;
     char *elem_type_name;
+    char *index_type_name;      /* array[OrdinalType]: bounds from this type */
+    struct node *lo_expr;       /* array[lo..hi]: bounds whose consts resolve */
+    struct node *hi_expr;       /* only after the whole const section (fixup) */
     int is_string;
     int maxlen;
     int is_set;
+    int is_scalar;              /* a built-in or aliased ordinal/scalar type */
+    int is_ordinal;             /* an enum or subrange with lo_bound..hi_bound */
+    int is_i64;                 /* a 64-bit scalar (Int64 / QWord) */
+    char *alias_of;             /* `type X = Y;`: resolve X through Y */
 };
 
 static struct type_def *types;
@@ -260,7 +574,218 @@ static int ntypes;
 static int type_cap;
 
 static struct type_def *find_type(const char *name);
+static struct type_def *resolve_type(const char *name);
 static long const_eval(struct node *n);
+
+/* Is a type name a 64-bit scalar?  Resolves built-in names and alias chains. */
+static int
+is_i64_type_name(const char *name)
+{
+    struct type_def *t;
+
+    if (!name)
+        return 0;
+    if (strcmp(name, "int64") == 0 || strcmp(name, "qword") == 0 ||
+        strcmp(name, "uint64") == 0)
+        return 1;
+    t = find_type(name);
+    if (!t)
+        return 0;
+    if (t->is_i64)
+        return 1;
+    if (t->alias_of)
+        return is_i64_type_name(t->alias_of);
+    return 0;
+}
+
+/* Is a type name a floating-point scalar, and if so its IR width tag?
+   real/double/float/extended are double (fw 0); single is f32 (FWIDTH_F32).
+   Returns -1 when the name is not a float type. */
+static int
+float_fw_of_name(const char *name)
+{
+    struct type_def *t;
+
+    if (!name)
+        return -1;
+    if (strcmp(name, "real") == 0 || strcmp(name, "double") == 0 ||
+        strcmp(name, "float") == 0 || strcmp(name, "extended") == 0)
+        return 0;
+    if (strcmp(name, "single") == 0 || strcmp(name, "shortreal") == 0)
+        return FWIDTH_F32;
+    t = find_type(name);
+    if (t && t->alias_of)
+        return float_fw_of_name(t->alias_of);
+    return -1;
+}
+
+static int
+is_float_type_name(const char *name)
+{
+    return float_fw_of_name(name) >= 0;
+}
+
+/* Is a type name a (heap) string type?  Resolves alias chains. */
+static int
+is_string_type_name(const char *name)
+{
+    struct type_def *t;
+
+    if (!name)
+        return 0;
+    t = find_type(name);
+    if (!t)
+        return 0;
+    if (t->is_string)
+        return 1;
+    if (t->alias_of)
+        return is_string_type_name(t->alias_of);
+    return 0;
+}
+
+/* Is a type name a dynamic array (`array of T`)?  Resolves alias chains. */
+static int
+is_dynarray_type_name(const char *name)
+{
+    struct type_def *t;
+
+    if (!name)
+        return 0;
+    t = find_type(name);
+    if (!t)
+        return 0;
+    if (t->is_dynarray)
+        return 1;
+    if (t->alias_of)
+        return is_dynarray_type_name(t->alias_of);
+    return 0;
+}
+
+/* A string-like value: a heap string or a dynamic array.  Both are refcounted
+   heap pointers with the same descriptor header, stored, assigned, retained,
+   released, null-inited and returned the same way; only indexing and the
+   builtins differ. */
+static int
+is_strlike_type_name(const char *name)
+{
+    return is_string_type_name(name) || is_dynarray_type_name(name);
+}
+
+/* Does a value of this type contain any managed (string) member, directly or
+   nested inside a record field or array element?  Used to decide whether an
+   aggregate copy or scope exit needs reference-count maintenance.  Pascal
+   by-value members cannot form a cycle, so the recursion terminates. */
+static int
+type_has_managed(const char *name)
+{
+    struct type_def *t;
+    int i;
+
+    if (!name)
+        return 0;
+    if (is_strlike_type_name(name))
+        return 1;
+    t = find_type(name);
+    if (!t)
+        return 0;
+    if (t->alias_of)
+        return type_has_managed(t->alias_of);
+    if (t->is_array)
+        return type_has_managed(t->elem_type_name);
+    for (i = 0; i < t->nfields; i++)
+        if (type_has_managed(t->fields[i].type_name))
+            return 1;
+    return 0;
+}
+
+/* Storage size in bytes for a type name.  The scalar unit is 4 bytes; Int64,
+   QWord and double-precision reals are 8; single is 4; aggregates carry their
+   own total_size. */
+static int
+type_bytes(const char *name)
+{
+    struct type_def *t;
+    int fw;
+
+    if (!name)
+        return 4;
+    if (is_i64_type_name(name))
+        return 8;
+    fw = float_fw_of_name(name);
+    if (fw == 0)
+        return 8;               /* double / real */
+    if (fw == FWIDTH_F32)
+        return 4;               /* single */
+    t = find_type(name);
+    if (!t)
+        return 4;
+    if (t->is_string)
+        return PC_PTR_BYTES;
+    if (t->alias_of)
+        return type_bytes(t->alias_of);
+    if (t->total_size)
+        return t->total_size;
+    return 4;
+}
+
+/* Whether a constant array bound can be evaluated now: every identifier in it
+   is an already-registered constant.  A built-in call such as ord(...) checks
+   only its argument (the callee name is not a constant). */
+static int
+bound_resolvable(struct node *n)
+{
+    if (!n)
+        return 1;
+    if (n->kind == N_NAME) {
+        struct sym *s = find_sym(n->name);
+        return s && s->is_const;
+    }
+    if (n->kind == N_CALL)
+        return bound_resolvable(n->b);
+    return bound_resolvable(n->a) && bound_resolvable(n->b);
+}
+
+/* Ensure a canonical heap-string type exists and return its name.  Used for
+   string-valued constants, which carry no explicit type name of their own. */
+static const char *
+canonical_string_type_name(void)
+{
+    struct type_def *t;
+
+    t = find_type("$string");
+    if (t)
+        return t->name;
+    if (ntypes == type_cap) {
+        type_cap = type_cap ? type_cap * 2 : 8;
+        types = realloc(types, type_cap * sizeof(*types));
+        if (!types)
+            die("oom");
+    }
+    t = &types[ntypes++];
+    memset(t, 0, sizeof(*t));
+    t->name = "$string";
+    t->is_string = 1;
+    t->maxlen = 255;
+    t->total_size = PC_PTR_BYTES;
+    return t->name;
+}
+
+/* A record or fixed array returned by value: handled with a hidden sret
+   pointer argument.  A string, set, or scalar return type is not. */
+static int
+type_is_sret(const char *name)
+{
+    struct type_def *t;
+
+    if (!name)
+        return 0;
+    if (is_strlike_type_name(name))
+        return 0;
+    t = find_type(name);
+    if (!t)
+        return 0;
+    return !t->is_scalar && !t->is_set;
+}
 
 static void
 register_type(struct node *td)
@@ -283,7 +808,7 @@ register_type(struct node *td)
         int ml = (int)td->ival;
         t->is_string = 1;
         t->maxlen = ml;
-        t->total_size = ml + 1;
+        t->total_size = PC_PTR_BYTES;   /* a heap string slot holds a pointer */
         return;
     }
 
@@ -293,21 +818,97 @@ register_type(struct node *td)
         return;
     }
 
+    if (td->op == 4) {
+        /* `type X = Y;` type alias (Y is a named type). */
+        t->is_scalar = 1;
+        t->alias_of = td->sval;
+        t->is_i64 = is_i64_type_name(td->sval);
+        t->total_size = type_bytes(td->sval);
+        return;
+    }
+
+    if (td->op == 5) {
+        /* `type X = lo..hi;` subrange: an ordinal scalar.  A bound outside the
+           signed 32-bit range makes it a 64-bit scalar. */
+        long long lo = const_eval(td->b);
+        long long hi = const_eval(td->c);
+        t->is_scalar = 1;
+        t->is_ordinal = 1;
+        t->lo_bound = (int)lo;
+        t->hi_bound = (int)hi;
+        if (lo < -2147483647LL - 1 || hi > 2147483647LL) {
+            t->is_i64 = 1;
+            t->total_size = 8;
+        } else {
+            t->total_size = 4;
+        }
+        return;
+    }
+
+    if (td->op == 6) {
+        /* `type X = array of T;` dynamic array: a refcounted heap descriptor
+           ({refcount, kind, len, cap} header, elements at +PSTR_HDR) addressed
+           by a pointer, NULL when empty. */
+        int esz = type_bytes(td->sval);
+        struct type_def *et = td->sval ? find_type(td->sval) : NULL;
+        if (et)
+            esz = et->total_size;
+        t->is_array = 1;
+        t->is_dynarray = 1;
+        t->lo_bound = 0;
+        t->hi_bound = -1;
+        t->elem_size = esz;
+        t->elem_type_name = td->sval;
+        t->total_size = PC_PTR_BYTES;
+        return;
+    }
+
+    if (td->op == 7) {
+        /* `type X = (a, b, c, ...);` enumeration: an ordinal scalar whose
+           values are 0..count-1.  The literals themselves are registered as
+           integer constants by the const section. */
+        t->is_scalar = 1;
+        t->is_ordinal = 1;
+        t->lo_bound = 0;
+        t->hi_bound = (int)td->ival - 1;
+        t->total_size = 4;
+        return;
+    }
+
     if (td->op == 1) {
-        long lo = const_eval(td->b);
-        long hi = const_eval(td->c);
-        int esz = 4;
+        int esz = type_bytes(td->sval);
         if (td->sval) {
             struct type_def *et = find_type(td->sval);
             if (et)
                 esz = et->total_size;
         }
         t->is_array = 1;
-        t->lo_bound = (int)lo;
-        t->hi_bound = (int)hi;
         t->elem_size = esz;
         t->elem_type_name = td->sval;
-        t->total_size = (int)(hi - lo + 1) * esz;
+        if (td->c) {
+            /* [lo..hi]: evaluate now when every name in the bounds is an
+               already-registered const (so a record's array field is sized
+               correctly), otherwise defer to the fixup once the whole const
+               section has been seen (a forward-referenced const). */
+            if (bound_resolvable(td->b) && bound_resolvable(td->c)) {
+                long lo = const_eval(td->b);
+                long hi = const_eval(td->c);
+                t->lo_bound = (int)lo;
+                t->hi_bound = (int)hi;
+                t->total_size = (int)(hi - lo + 1) * esz;
+            } else {
+                t->lo_expr = td->b;
+                t->hi_expr = td->c;
+            }
+        } else {
+            /* array[OrdinalType]: the index is a named ordinal type whose
+               bounds may not be registered yet, so resolve them (and the size)
+               in the fixup pass after every type is registered. */
+            if (!td->b || td->b->kind != N_NAME)
+                die("lower:%d: array index must be a range or ordinal type",
+                    td->line);
+            t->index_type_name = td->b->name;
+        }
         return;
     }
 
@@ -335,7 +936,7 @@ register_type(struct node *td)
             if (f->kind == N_VARIANTPART) {
                 int vbase, max_vsize;
                 if (f->name) {
-                    int tsz = 4;
+                    int tsz = type_bytes(f->sval);
                     if (align > 1 && (off % align) != 0)
                         off += align - (off % align);
                     t->fields[nf].name = f->name;
@@ -354,15 +955,7 @@ register_type(struct node *td)
                     int arm_off = vbase;
                     for (struct node *vf = arm->b;
                         vf; vf = vf->next) {
-                        int fsz = 4;
-                        if (vf->sval) {
-                            struct type_def *ft =
-                                find_type(
-                                vf->sval);
-                            if (ft)
-                                fsz =
-                                    ft->total_size;
-                        }
+                        int fsz = type_bytes(vf->sval);
                         if (align > 1 &&
                             (arm_off % align) != 0)
                             arm_off += align -
@@ -384,15 +977,9 @@ register_type(struct node *td)
                 continue;
             }
             {
-                int fsz = 4;
+                int fsz = type_bytes(f->sval);
                 t->fields[nf].name = f->name;
                 t->fields[nf].type_name = f->sval;
-                if (f->sval) {
-                    struct type_def *ft =
-                        find_type(f->sval);
-                    if (ft)
-                        fsz = ft->total_size;
-                }
                 if (align > 1 && (off % align) != 0)
                     off += align - (off % align);
                 t->fields[nf].offset = off;
@@ -463,6 +1050,58 @@ lower_const(long v)
     return ins->dst;
 }
 
+static int
+lower_const64(long long v)
+{
+    struct ir_insn *ins;
+
+    ins = emit(IR_LIC64);
+    ins->dst = new_temp();
+    ins->imm = v;
+    mark_i64(ins->dst);
+    return ins->dst;
+}
+
+/* Materialise a floating-point constant: emit a read-only global holding the
+   bit pattern, then load it (IR_FLD, width in imm). */
+static int
+lower_real_const(double v, int fw)
+{
+    struct ir_global *g;
+    struct ir_insn *ins;
+    char namebuf[32];
+    int addr;
+
+    snprintf(namebuf, sizeof(namebuf), "__flt_%d", strctr++);
+    g = arena_zalloc(lower_arena, sizeof(*g));
+    g->name = arena_strdup(lower_arena, namebuf);
+    g->is_local = 1;
+    g->is_rodata = 1;
+    g->init_ivals = arena_alloc(lower_arena, sizeof(int64_t));
+    if (fw == FWIDTH_F32) {
+        union { float f; int32_t i; } u;
+        u.f = (float)v;
+        g->base_type = IR_F32;
+        g->init_ivals[0] = u.i;
+    } else {
+        union { double d; int64_t i; } u;
+        u.d = v;
+        g->base_type = IR_F64;
+        g->init_ivals[0] = u.i;
+    }
+    g->init_count = 1;
+    g->next = cur_prog->globals;
+    cur_prog->globals = g;
+
+    addr = emit_lea_sym(namebuf);
+    ins = emit(IR_FLD);
+    ins->dst = new_temp();
+    ins->a = addr;
+    ins->imm = fw;
+    mark_float(ins->dst, fw);
+    return ins->dst;
+}
+
 static void
 emit_block_copy(int dst_addr, int src_addr, int nbytes)
 {
@@ -473,16 +1112,8 @@ emit_block_copy(int dst_addr, int src_addr, int nbytes)
         int sa = src_addr, da = dst_addr, tmp;
         if (i > 0) {
             int off = lower_const(i * 4);
-            ins = emit(IR_ADD);
-            ins->dst = new_temp();
-            ins->a = src_addr;
-            ins->b = off;
-            sa = ins->dst;
-            ins = emit(IR_ADD);
-            ins->dst = new_temp();
-            ins->a = dst_addr;
-            ins->b = off;
-            da = ins->dst;
+            sa = emit_addp(src_addr, off);
+            da = emit_addp(dst_addr, off);
         }
         tmp = new_temp();
         ins = emit(IR_LW);
@@ -532,16 +1163,35 @@ emit_bnz(int t, int lab)
     ins->label = lab;
 }
 
+/* Emit the argument instructions for a call: a float argument becomes an
+   IR_FARG carrying its width, a pointer or Int64 an IR_ARG64, anything else an
+   ordinary IR_ARG. */
+static void
+emit_args(int *args, int nargs)
+{
+    struct ir_insn *ins;
+
+    for (int i = 0; i < nargs; i++) {
+        if (is_float(args[i])) {
+            ins = emit(IR_FARG);
+            ins->a = args[i];
+            ins->imm = float_fw(args[i]);
+        } else if (is_ptr(args[i]) || is_i64(args[i])) {
+            ins = emit(IR_ARG64);
+            ins->a = args[i];
+        } else {
+            ins = emit(IR_ARG);
+            ins->a = args[i];
+        }
+    }
+}
+
 static void
 emit_call(const char *name, int *args, int nargs)
 {
     struct ir_insn *ins;
 
-    for (int i = 0; i < nargs; i++) {
-        ins = emit(IR_ARG);
-        ins->a = args[i];
-        ins->imm = i;
-    }
+    emit_args(args, nargs);
     ins = emit(IR_CALL);
     ins->dst = new_temp();
     ins->sym = arena_strdup(lower_arena,name);
@@ -553,16 +1203,186 @@ emit_call_ret(const char *name, int *args, int nargs)
 {
     struct ir_insn *ins;
 
-    for (int i = 0; i < nargs; i++) {
-        ins = emit(IR_ARG);
-        ins->a = args[i];
-        ins->imm = i;
-    }
+    emit_args(args, nargs);
     ins = emit(IR_CALL);
     ins->dst = new_temp();
     ins->sym = arena_strdup(lower_arena,name);
     ins->nargs = nargs;
     return ins->dst;
+}
+
+/* Like emit_call_ret, but for a callee that returns a 64-bit value.  The
+   backends read the result register's width from the opcode, so an Int64 result
+   must come back through IR_CALL64, not IR_CALL. */
+static int
+emit_call_ret64(const char *name, int *args, int nargs)
+{
+    struct ir_insn *ins;
+
+    emit_args(args, nargs);
+    ins = emit(IR_CALL64);
+    ins->dst = new_temp();
+    ins->sym = arena_strdup(lower_arena, name);
+    ins->nargs = nargs;
+    mark_i64(ins->dst);
+    return ins->dst;
+}
+
+/* A callee that returns a floating-point value (IR_FCALL); the result is a
+   float temp of width fw. */
+static int
+emit_call_retf(const char *name, int *args, int nargs, int fw)
+{
+    struct ir_insn *ins;
+
+    emit_args(args, nargs);
+    ins = emit(IR_FCALL);
+    ins->dst = new_temp();
+    ins->sym = arena_strdup(lower_arena, name);
+    ins->nargs = nargs;
+    ins->imm = fw;
+    mark_float(ins->dst, fw);
+    return ins->dst;
+}
+
+/* A call returning a pointer-width value (a heap string).  The backend reads
+   the result register width from the opcode, so this is a 64-bit call on LP64
+   and a 32-bit call on ILP32; the result is flagged as a pointer. */
+static int
+emit_call_retptr(const char *name, int *args, int nargs)
+{
+    int r = PC_LP64_ON ? emit_call_ret64(name, args, nargs)
+                       : emit_call_ret(name, args, nargs);
+    mark_ptr(r);
+    return r;
+}
+
+/****************************************************************
+ * Owned string temporaries
+ *
+ * A call that allocates a fresh heap string yields an owned reference.  If a
+ * store moves that reference into a destination it is adopted (unregistered);
+ * otherwise it is an expression temporary whose reference nobody keeps, such
+ * as an intermediate concatenation or a string compared in a condition.  Each
+ * expression context (an assignment, a call's arguments, a loop condition)
+ * brackets its lowering with a mark and a release-to-mark, so every temporary
+ * still registered at the end of the context is released there.  A loop
+ * condition is lowered inside the loop body, so its release runs each
+ * iteration.  Over-releasing is impossible: only temporaries this code
+ * allocated are registered, and a move removes them first.
+ ****************************************************************/
+
+#define MAX_STR_TEMPS 1024
+static int str_temps[MAX_STR_TEMPS];
+static int nstr_temps;
+
+static int
+str_temp_mark(void)
+{
+    return nstr_temps;
+}
+
+static void
+register_str_temp(int t)
+{
+    if (nstr_temps < MAX_STR_TEMPS)
+        str_temps[nstr_temps++] = t;
+    /* On overflow the temporary simply leaks; it is never freed wrongly. */
+}
+
+static void
+unregister_str_temp(int t)
+{
+    int i;
+
+    for (i = nstr_temps - 1; i >= 0; i--)
+        if (str_temps[i] == t) {
+            str_temps[i] = str_temps[--nstr_temps];
+            return;
+        }
+}
+
+/* Release and drop every temporary registered since the mark. */
+static void
+release_str_temps_to(int mark)
+{
+    while (nstr_temps > mark) {
+        int t = str_temps[--nstr_temps];
+        emit_call("__pascal_str_release", &t, 1);
+    }
+}
+
+/* A call that returns a fresh, owned heap string, registered as a temporary. */
+static int
+emit_str_new_call(const char *name, int *args, int nargs)
+{
+    int r = emit_call_retptr(name, args, nargs);
+    register_str_temp(r);
+    return r;
+}
+
+/* Load a pointer-width value from a computed address. */
+static int
+emit_load_ptr_at(int addr)
+{
+    struct ir_insn *ins = emit(PC_LP64_ON ? IR_LD64 : IR_LW);
+    ins->dst = new_temp();
+    ins->a = addr;
+    mark_ptr(ins->dst);
+    return ins->dst;
+}
+
+/* Store a pointer-width value to a computed address. */
+static void
+emit_store_ptr_at(int addr, int val)
+{
+    struct ir_insn *ins = emit(PC_LP64_ON ? IR_ST64 : IR_SW);
+    ins->a = addr;
+    ins->b = val;
+}
+
+/* A pointer-width constant NULL (the empty string). */
+static int
+emit_null_ptr(void)
+{
+    int z = PC_LP64_ON ? lower_const64(0) : lower_const(0);
+    mark_ptr(z);
+    return z;
+}
+
+/* Create a static strobj descriptor in rodata for a string literal and return
+   its global name.  The backend emits the {refcount=static, kind, len, cap}
+   header endian-correctly, then the bytes and a trailing NUL. */
+static char *
+intern_strobj(const char *data, int slen)
+{
+    char namebuf[32];
+    struct ir_global *g;
+
+    if (slen < 0)
+        slen = 0;
+    g = arena_zalloc(lower_arena, sizeof(*g));
+    snprintf(namebuf, sizeof(namebuf), "__str_%d", strctr++);
+    g->name = arena_strdup(lower_arena, namebuf);
+    g->base_type = IR_I8;
+    g->is_local = 1;
+    g->is_rodata = 1;
+    g->is_strobj = 1;
+    g->init_string = arena_alloc(lower_arena, slen ? slen : 1);
+    if (slen)
+        memcpy(g->init_string, data, slen);
+    g->init_strlen = slen;
+    g->next = cur_prog->globals;
+    cur_prog->globals = g;
+    return g->name;
+}
+
+/* Materialize a string literal as a static strobj descriptor in rodata and
+   return its base address (the string value). */
+static int
+emit_strobj_literal(const char *data, int slen)
+{
+    return emit_lea_sym(intern_strobj(data, slen));
 }
 
 /****************************************************************
@@ -572,51 +1392,88 @@ emit_call_ret(const char *name, int *args, int nargs)
 static int lower_expr(struct node *n);
 static void lower_stmt(struct node *n);
 static int lower_call(struct node *n);
+static int lower_str_addr(struct node *n);
+static void emit_string_store(int by_slot, int where, int srcptr, int owned,
+                              const char *tname);
+static void emit_managed_walk(int addr, const char *name, int op);
+static void arr_elem_fns(struct type_def *arr, const char **dtor_out,
+                         const char **retain_out);
+static void emit_strlike_release(int ptrval, const char *tname);
+static int lower_str_concat_operand(struct node *n);
+static int node_is_string_valued(struct node *n);
 
 static int
 load_sym(struct sym *s)
 {
     struct ir_insn *ins;
+    int i64 = is_i64_type_name(s->type_name);
+    int ffw = float_fw_of_name(s->type_name);
+
+    int is_str = is_strlike_type_name(s->type_name);
 
     if (s->is_const) {
-        if (s->const_str) {
-            char namebuf[32];
-            snprintf(namebuf, sizeof(namebuf),
-                     "__str_%d", strctr++);
-            add_string_global(namebuf, s->const_str,
-                              s->const_slen + 1);
-            ins = emit(IR_LEA);
-            ins->dst = new_temp();
-            ins->sym = arena_strdup(lower_arena,namebuf);
-            return ins->dst;
-        }
+        if (s->const_str)
+            return emit_strobj_literal(s->const_str, s->const_slen);
         return lower_const(s->const_val);
+    }
+    /* A string value is a pointer; load it, following the var-param and global
+       indirections, and flag the result as a pointer. */
+    if (is_str) {
+        if (s->is_local) {
+            if (s->is_var_param)
+                return emit_load_ptr_at(emit_load_ptr(s->slot));
+            return emit_load_ptr(s->slot);
+        }
+        return emit_load_ptr_at(emit_lea_sym(s->name));
     }
     if (s->is_local) {
         if (s->is_var_param) {
-            int addr = new_temp();
-            ins = emit(IR_LDL);
-            ins->dst = addr;
-            ins->slot = s->slot;
-            ins = emit(IR_LW);
+            int addr = emit_load_ptr(s->slot);
+            if (ffw >= 0) {
+                ins = emit(IR_FLD);
+                ins->dst = new_temp();
+                ins->a = addr;
+                ins->imm = ffw;
+                mark_float(ins->dst, ffw);
+                return ins->dst;
+            }
+            ins = emit(i64 ? IR_LD64 : IR_LW);
             ins->dst = new_temp();
             ins->a = addr;
+            if (i64)
+                mark_i64(ins->dst);
             return ins->dst;
         }
-        ins = emit(IR_LDL);
+        if (ffw >= 0) {
+            ins = emit(IR_FLDL);
+            ins->dst = new_temp();
+            ins->slot = s->slot;
+            ins->imm = ffw;
+            mark_float(ins->dst, ffw);
+            return ins->dst;
+        }
+        ins = emit(i64 ? IR_LDL64 : IR_LDL);
         ins->dst = new_temp();
         ins->slot = s->slot;
+        if (i64)
+            mark_i64(ins->dst);
         return ins->dst;
     }
     {
-        int addr;
-        ins = emit(IR_LEA);
-        ins->dst = new_temp();
-        ins->sym = arena_strdup(lower_arena,s->name);
-        addr = ins->dst;
-        ins = emit(IR_LW);
+        int addr = emit_lea_sym(s->name);
+        if (ffw >= 0) {
+            ins = emit(IR_FLD);
+            ins->dst = new_temp();
+            ins->a = addr;
+            ins->imm = ffw;
+            mark_float(ins->dst, ffw);
+            return ins->dst;
+        }
+        ins = emit(i64 ? IR_LD64 : IR_LW);
         ins->dst = new_temp();
         ins->a = addr;
+        if (i64)
+            mark_i64(ins->dst);
         return ins->dst;
     }
 }
@@ -626,52 +1483,67 @@ addr_sym(struct sym *s)
 {
     struct ir_insn *ins;
 
+    (void)ins;
     if (s->is_local) {
-        if (s->is_var_param) {
-            ins = emit(IR_LDL);
-            ins->dst = new_temp();
-            ins->slot = s->slot;
-            return ins->dst;
-        }
-        ins = emit(IR_ADL);
-        ins->dst = new_temp();
-        ins->slot = s->slot;
-        return ins->dst;
+        if (s->is_var_param)
+            return emit_load_ptr(s->slot);
+        return emit_adl(s->slot);
     }
-    ins = emit(IR_LEA);
-    ins->dst = new_temp();
-    ins->sym = arena_strdup(lower_arena,s->name);
-    return ins->dst;
+    return emit_lea_sym(s->name);
 }
 
 static void
-store_sym(struct sym *s, int val)
+store_sym(struct sym *s, int val, int str_owned)
 {
     struct ir_insn *ins;
+    int i64 = is_i64_type_name(s->type_name);
+    int ffw = float_fw_of_name(s->type_name);
+
+    /* A string assignment shares the value by reference count: retain a
+       borrowed source, move an owned one, and release the previous value.  It
+       follows the var-param and global indirections like any pointer slot. */
+    if (is_strlike_type_name(s->type_name)) {
+        if (s->is_local) {
+            if (s->is_var_param)
+                emit_string_store(0, emit_load_ptr(s->slot), val, str_owned,
+                                  s->type_name);
+            else
+                emit_string_store(1, s->slot, val, str_owned, s->type_name);
+        } else {
+            emit_string_store(0, emit_lea_sym(s->name), val, str_owned,
+                              s->type_name);
+        }
+        return;
+    }
+
+    /* coerce the value to the destination width */
+    if (ffw >= 0)
+        val = to_float(val, ffw);
+    else
+        val = i64 ? to_i64(val) : to_i32(val);
 
     if (s->is_local) {
         if (s->is_var_param) {
-            int addr = new_temp();
-            ins = emit(IR_LDL);
-            ins->dst = addr;
-            ins->slot = s->slot;
-            ins = emit(IR_SW);
+            int addr = emit_load_ptr(s->slot);
+            ins = emit(ffw >= 0 ? IR_FSD : i64 ? IR_ST64 : IR_SW);
             ins->a = addr;
             ins->b = val;
+            if (ffw >= 0)
+                ins->imm = ffw;
         } else {
-            ins = emit(IR_STL);
+            ins = emit(ffw >= 0 ? IR_FSTL : i64 ? IR_STL64 : IR_STL);
             ins->a = val;
             ins->slot = s->slot;
+            if (ffw >= 0)
+                ins->imm = ffw;
         }
     } else {
-        int addr;
-        ins = emit(IR_LEA);
-        ins->dst = new_temp();
-        ins->sym = arena_strdup(lower_arena,s->name);
-        addr = ins->dst;
-        ins = emit(IR_SW);
+        int addr = emit_lea_sym(s->name);
+        ins = emit(ffw >= 0 ? IR_FSD : i64 ? IR_ST64 : IR_SW);
         ins->a = addr;
         ins->b = val;
+        if (ffw >= 0)
+            ins->imm = ffw;
     }
 }
 
@@ -690,25 +1562,13 @@ with_field_type_name(const char *name)
 static int
 with_field_addr(const char *name)
 {
-    struct ir_insn *ins;
-
     for (int i = nwith - 1; i >= 0; i--) {
         struct type_def *td = with_stack[i].td;
         int off = type_field_offset(td, name);
         if (off >= 0) {
-            int base;
-            ins = emit(IR_LDL);
-            ins->dst = new_temp();
-            ins->slot = with_stack[i].base_slot;
-            base = ins->dst;
-            if (off > 0) {
-                int c = lower_const(off);
-                ins = emit(IR_ADD);
-                ins->dst = new_temp();
-                ins->a = base;
-                ins->b = c;
-                return ins->dst;
-            }
+            int base = emit_load_ptr(with_stack[i].base_slot);
+            if (off > 0)
+                return emit_addp(base, lower_const(off));
             return base;
         }
     }
@@ -719,7 +1579,13 @@ static const char *
 lvalue_type_name(struct node *n)
 {
     if (n->kind == N_NAME) {
-        struct sym *s = find_sym(n->name);
+        struct sym *s;
+        /* the enclosing function's name denotes its result variable; this
+           takes priority over the function's own symbol in the table */
+        if (cur_func_name && (ret_slot >= 0 || ret_is_compound) &&
+            strcmp(n->name, cur_func_name) == 0)
+            return ret_type_name;
+        s = find_sym(n->name);
         if (s)
             return s->type_name;
         if (nwith > 0)
@@ -760,7 +1626,18 @@ lower_lvalue_addr(struct node *n)
     struct ir_insn *ins;
 
     if (n->kind == N_NAME) {
-        struct sym *s = find_sym(n->name);
+        struct sym *s;
+        /* the enclosing function's name denotes its result variable; this
+           takes priority over the function's own symbol in the table.  A
+           compound result lives in the caller, reached through the sret
+           pointer; a scalar/string result has a local home slot. */
+        if (cur_func_name && strcmp(n->name, cur_func_name) == 0) {
+            if (ret_is_compound)
+                return emit_load_ptr(ret_ptr_slot);
+            if (ret_slot >= 0)
+                return emit_adl(ret_slot);
+        }
+        s = find_sym(n->name);
         if (!s) {
             if (nwith > 0) {
                 int addr = with_field_addr(n->name);
@@ -786,14 +1663,8 @@ lower_lvalue_addr(struct node *n)
         if (off < 0)
             die("lower:%d: unknown field '%s'",
                 n->line, n->name);
-        if (off > 0) {
-            int c = lower_const(off);
-            ins = emit(IR_ADD);
-            ins->dst = new_temp();
-            ins->a = base;
-            ins->b = c;
-            return ins->dst;
-        }
+        if (off > 0)
+            return emit_addp(base, lower_const(off));
         return base;
     }
     if (n->kind == N_INDEX) {
@@ -801,23 +1672,54 @@ lower_lvalue_addr(struct node *n)
         struct type_def *td;
         int base, idx;
 
-        base = lower_lvalue_addr(n->a);
         if (!parent_tname)
             die("lower:%d: not an array type", n->line);
         td = find_type(parent_tname);
         if (!td)
             die("lower:%d: not an array type", n->line);
         if (td->is_string) {
-            idx = lower_expr(n->b);
+            /* s[i]: character i (1-based) lives at the descriptor base plus
+               PSTR_HDR + (i-1).  The base is the string pointer value.  Both
+               operands are materialized before the add is emitted. */
+            int sp = lower_str_addr(n->a);
+            int off, k;
+            idx = to_i32(lower_expr(n->b));
+            k = lower_const(PSTR_HDR - 1);
             ins = emit(IR_ADD);
             ins->dst = new_temp();
-            ins->a = base;
-            ins->b = idx;
-            return ins->dst;
+            ins->a = idx;
+            ins->b = k;
+            off = ins->dst;
+            return emit_addp(sp, off);
         }
+        if (td->is_dynarray) {
+            /* a[i]: element i (0-based) lives at the descriptor base plus
+               PSTR_HDR + i*elem_size.  The base is the descriptor pointer. */
+            int bptr = lower_expr(n->a);
+            int off, hdr, scaled;
+            idx = to_i32(lower_expr(n->b));
+            if (td->elem_size != 1) {
+                int esz = lower_const(td->elem_size);
+                ins = emit(IR_MUL);
+                ins->dst = new_temp();
+                ins->a = idx;
+                ins->b = esz;
+                scaled = ins->dst;
+            } else {
+                scaled = idx;
+            }
+            hdr = lower_const(PSTR_HDR);
+            ins = emit(IR_ADD);
+            ins->dst = new_temp();
+            ins->a = scaled;
+            ins->b = hdr;
+            off = ins->dst;
+            return emit_addp(bptr, off);
+        }
+        base = lower_lvalue_addr(n->a);
         if (!td->is_array)
             die("lower:%d: not an array type", n->line);
-        idx = lower_expr(n->b);
+        idx = to_i32(lower_expr(n->b));
         if (n->op) {
             int lo = lower_const(td->lo_bound);
             int hi = lower_const(td->hi_bound);
@@ -858,11 +1760,7 @@ lower_lvalue_addr(struct node *n)
             ins->b = esz;
             idx = ins->dst;
         }
-        ins = emit(IR_ADD);
-        ins->dst = new_temp();
-        ins->a = base;
-        ins->b = idx;
-        return ins->dst;
+        return emit_addp(base, idx);
     }
     die("lower:%d: invalid l-value", n->line);
     return 0;
@@ -941,6 +1839,10 @@ const_eval(struct node *n)
         a = const_eval(n->b);
         if (strcmp(fn, "ord") == 0)
             return a;
+        if (strcmp(fn, "int64") == 0 || strcmp(fn, "qword") == 0 ||
+            strcmp(fn, "integer") == 0 || strcmp(fn, "longint") == 0 ||
+            strcmp(fn, "uint64") == 0 || strcmp(fn, "cardinal") == 0)
+            return a;
         if (strcmp(fn, "abs") == 0)
             return a < 0 ? -a : a;
         if (strcmp(fn, "sqr") == 0)
@@ -995,6 +1897,63 @@ flatten_init_list(struct node *n, long *iv, int *pos)
         flatten_init_list(e, iv, pos);
 }
 
+/* Build the aggregate byte image (an ir_init list) for a typed constant whose
+   type contains managed string members, where const_eval cannot fold the whole
+   thing to integers.  A string leaf becomes a pointer to a static strobj (NULL
+   for the empty string); an array walks elements at base + i*elem_size; a
+   record walks fields (the initializer lists values in declared field order);
+   any other scalar leaf is a sized constant.  base is the leaf's byte offset in
+   the image. */
+static void
+build_const_image(struct node *init, const char *tname, int base,
+                  struct ir_init ***tailp, int line)
+{
+    struct type_def *t = resolve_type(tname);
+    struct ir_init *pc;
+
+    if (is_string_type_name(tname)) {
+        pc = arena_zalloc(lower_arena, sizeof(*pc));
+        pc->offset = base;
+        pc->size = PC_PTR_BYTES;
+        if (init && init->kind == N_STR && init->slen > 0)
+            pc->sym = intern_strobj(init->sval, init->slen);
+        else
+            pc->ival = 0;       /* '' is the empty (NULL) string */
+        **tailp = pc;
+        *tailp = &pc->next;
+        return;
+    }
+    if (t && t->is_array && !t->is_dynarray) {
+        int i = 0;
+        struct node *e;
+        if (!init || init->kind != N_INITLIST)
+            die("lower:%d: array constant needs an initializer list", line);
+        for (e = init->a; e; e = e->next, i++)
+            build_const_image(e, t->elem_type_name,
+                              base + i * t->elem_size, tailp, line);
+        return;
+    }
+    if (t && t->nfields > 0) {
+        int fi = 0;
+        struct node *e;
+        if (!init || init->kind != N_INITLIST)
+            die("lower:%d: record constant needs an initializer list", line);
+        for (e = init->a; e && fi < t->nfields; e = e->next, fi++)
+            build_const_image(e, t->fields[fi].type_name,
+                              base + t->fields[fi].offset, tailp, line);
+        return;
+    }
+    /* a scalar leaf */
+    pc = arena_zalloc(lower_arena, sizeof(*pc));
+    pc->offset = base;
+    pc->size = t ? t->total_size : type_bytes(tname);
+    if (pc->size != 1 && pc->size != 2 && pc->size != 8)
+        pc->size = 4;
+    pc->ival = const_eval(init);
+    **tailp = pc;
+    *tailp = &pc->next;
+}
+
 /****************************************************************
  * IR emission helpers
  ****************************************************************/
@@ -1022,31 +1981,541 @@ bin_op_for_tok(int op)
     }
 }
 
+/* The 64-bit opcode for a token.  Arithmetic and bitwise ops produce a 64-bit
+   result; comparisons produce a 32-bit boolean. */
+static int
+bin_op_for_tok64(int op)
+{
+    switch (op) {
+    case T_PLUS:  return IR_ADD64;
+    case T_MINUS: return IR_SUB64;
+    case T_STAR:  return IR_MUL64;
+    case T_DIV:   return IR_DIVS64;
+    case T_MOD:   return IR_MODS64;
+    case T_AND:   return IR_AND64;
+    case T_OR:    return IR_OR64;
+    case T_SHL:   return IR_SHL64;
+    case T_SHR:   return IR_SHRS64;
+    case T_EQ:    return IR_CMP64EQ;
+    case T_NE:    return IR_CMP64NE;
+    case T_LT:    return IR_CMP64LTS;
+    case T_LE:    return IR_CMP64LES;
+    case T_GT:    return IR_CMP64GTS;
+    case T_GE:    return IR_CMP64GES;
+    default:      return -1;
+    }
+}
+
+/* Does a 64-bit binary op produce a 64-bit result (vs a boolean)?  The six
+   comparison tokens form the final contiguous block; everything else we lower
+   as a 64-bit op is value-producing. */
+static int
+op64_is_value(int op)
+{
+    return !(op >= T_EQ && op <= T_GE);
+}
+
+/* The string pointer value (descriptor base) of a string-valued expression.
+   A literal becomes a static strobj; every other form (a variable, field,
+   element, call or concatenation) yields its pointer through lower_expr. */
 static int
 lower_str_addr(struct node *n)
 {
-    struct ir_insn *ins;
+    if (n->kind == N_STR)
+        return emit_strobj_literal(n->sval, n->slen);
+    return lower_expr(n);
+}
 
+/* Whether lowering n yields a fresh, owned heap string that a store may move
+   without retaining.  Sound in the owned direction only: anything not plainly
+   fresh is reported borrowed, so the store retains it.  Over-retaining leaks,
+   but under-retaining would free a shared value too early, so borrowed is the
+   safe default. */
+static int
+str_rvalue_owned(struct node *n)
+{
+    if (!n)
+        return 0;
+    switch (n->kind) {
+    case N_STR:
+        return 1;   /* a static literal; retain and release are no-ops */
+    case N_BINOP:
+        /* a string-valued '+' is concatenation, a fresh allocation */
+        return n->op == T_PLUS;
+    default:
+        return 0;   /* variable, field, element, call result: borrowed */
+    }
+}
+
+/* Install a string pointer into a slot or an address, transferring reference
+   counts: retain a borrowed source before releasing the old value (so a self
+   assignment x := x stays alive), move an owned source as is.  by_slot picks
+   slot-relative (LDL/STL) over address (LD/ST) access. */
+static void
+emit_string_store(int by_slot, int where, int srcptr, int owned,
+                  const char *tname)
+{
+    int old, newv;
+
+    old = by_slot ? emit_load_ptr(where) : emit_load_ptr_at(where);
+    if (owned) {
+        /* adopt the source's reference; it is no longer a loose temporary */
+        unregister_str_temp(srcptr);
+        newv = srcptr;
+    } else {
+        newv = emit_call_retptr("__pascal_str_retain", &srcptr, 1);
+    }
+    emit_strlike_release(old, tname);
+    if (by_slot)
+        emit_store_ptr(where, newv);
+    else
+        emit_store_ptr_at(where, newv);
+}
+
+/* Resolve a string l-value to a destination for emit_string_store: a slot
+   (by_slot = 1) for a plain local, otherwise an address temp (var parameter,
+   global, record field or array element).  The address is computed once. */
+static int
+string_lhs_dest(struct node *lhs, int *by_slot)
+{
+    if (lhs->kind == N_NAME) {
+        struct sym *s;
+        /* the enclosing function's name denotes its (string) result slot */
+        if (cur_func_name && ret_slot >= 0 && ret_is_str &&
+            strcmp(lhs->name, cur_func_name) == 0) {
+            *by_slot = 1;
+            return ret_slot;
+        }
+        s = find_sym(lhs->name);
+        if (!s)
+            die("lower:%d: undefined '%s'", lhs->line, lhs->name);
+        if (s->is_local) {
+            if (s->is_var_param) {
+                *by_slot = 0;
+                return emit_load_ptr(s->slot);
+            }
+            *by_slot = 1;
+            return s->slot;
+        }
+        *by_slot = 0;
+        return emit_lea_sym(s->name);
+    }
+    *by_slot = 0;
+    return lower_lvalue_addr(lhs);
+}
+
+/* Store a string value into a destination l-value (a variable, field or
+   element).  owned says the source is a fresh value to move; otherwise it is
+   retained.  The previous value of the destination is released. */
+static void
+store_string_lvalue(struct node *lhs, int srcptr, int owned)
+{
+    int by_slot, where = string_lhs_dest(lhs, &by_slot);
+    emit_string_store(by_slot, where, srcptr, owned, lvalue_type_name(lhs));
+}
+
+/* Whether two l-value expressions denote the same location, cheaply and
+   conservatively: the same variable, the same field of the same base, or the
+   same element of the same base under a constant or plain-variable index (an
+   index with no re-evaluation hazard).  Used to recognize x := x + e. */
+static int
+same_lvalue(struct node *a, struct node *b)
+{
+    if (!a || !b || a->kind != b->kind)
+        return 0;
+    switch (a->kind) {
+    case N_NAME:
+        return strcmp(a->name, b->name) == 0;
+    case N_DOT:
+        return strcmp(a->name, b->name) == 0 && same_lvalue(a->a, b->a);
+    case N_INDEX:
+        if (!same_lvalue(a->a, b->a))
+            return 0;
+        if (a->b && b->b && a->b->kind == b->b->kind) {
+            if (a->b->kind == N_NUM)
+                return a->b->ival == b->b->ival;
+            if (a->b->kind == N_NAME)
+                return strcmp(a->b->name, b->b->name) == 0;
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+/* Lower x := x + e in place.  __pascal_str_append appends e into x's buffer
+   when x is uniquely owned with spare capacity, otherwise builds a fresh
+   (over-allocated) string; either way it consumes x's old reference and
+   returns an owned result stored straight back, so no separate retain or
+   release is emitted.  e is only read, so an owned e temporary is released at
+   statement end by the registry as usual. */
+static void
+lower_self_append(struct node *lhs, struct node *e)
+{
+    int by_slot, where, xval, eptr, res, args[2];
+
+    where = string_lhs_dest(lhs, &by_slot);
+    xval = by_slot ? emit_load_ptr(where) : emit_load_ptr_at(where);
+    eptr = lower_str_concat_operand(e);
+    args[0] = xval;
+    args[1] = eptr;
+    res = emit_call_retptr("__pascal_str_append", args, 2);
+    if (by_slot)
+        emit_store_ptr(where, res);
+    else
+        emit_store_ptr_at(where, res);
+}
+
+/* Copy on write for an in-place character mutation (s[i] := c): ensure the
+   string l-value owns a private, writable buffer before its bytes are
+   addressed.  __pascal_str_unique returns the value unchanged when it is
+   already uniquely owned, or a fresh copy (dropping the shared reference)
+   when it is shared or a static literal.  The result is moved back into the
+   slot, so no retain or release is emitted here. */
+static void
+make_string_unique(struct node *lhs)
+{
+    int cur, uniq;
+
+    if (lhs->kind == N_NAME) {
+        struct sym *s = find_sym(lhs->name);
+        if (!s)
+            die("lower:%d: undefined '%s'", lhs->line, lhs->name);
+        if (s->is_local && !s->is_var_param) {
+            cur = emit_load_ptr(s->slot);
+            uniq = emit_call_retptr("__pascal_str_unique", &cur, 1);
+            emit_store_ptr(s->slot, uniq);
+        } else {
+            int addr = s->is_local ? emit_load_ptr(s->slot)
+                                   : emit_lea_sym(s->name);
+            cur = emit_load_ptr_at(addr);
+            uniq = emit_call_retptr("__pascal_str_unique", &cur, 1);
+            emit_store_ptr_at(addr, uniq);
+        }
+    } else {
+        int addr = lower_lvalue_addr(lhs);
+        cur = emit_load_ptr_at(addr);
+        uniq = emit_call_retptr("__pascal_str_unique", &cur, 1);
+        emit_store_ptr_at(addr, uniq);
+    }
+}
+
+/* Operation applied to each managed string leaf by emit_managed_walk. */
+#define MGD_RELEASE 0
+#define MGD_RETAIN  1
+#define MGD_NULL    2   /* store NULL (the empty string); for entry init */
+
+/* Apply `op` to every managed string inside a value of type `name` at address
+   `addr`, walking record fields and array elements at compile time.  A plain
+   string is the leaf.  Branches with no managed member emit nothing. */
+static void
+emit_managed_walk(int addr, const char *name, int op)
+{
+    struct type_def *t;
+    int i;
+
+    if (!name)
+        return;
+    if (is_strlike_type_name(name)) {
+        if (op == MGD_NULL) {
+            emit_store_ptr_at(addr, emit_null_ptr());
+        } else if (op == MGD_RETAIN) {
+            /* retaining the descriptor shares the whole value (and with it its
+               elements), so a plain retain is right for an array too. */
+            int p = emit_load_ptr_at(addr);
+            emit_call("__pascal_str_retain", &p, 1);
+        } else {
+            /* release drops the descriptor's reference and, for an array of
+               managed elements, finalizes those elements at the last reference */
+            emit_strlike_release(emit_load_ptr_at(addr), name);
+        }
+        return;
+    }
+    t = find_type(name);
+    if (!t)
+        return;
+    if (t->alias_of) {
+        emit_managed_walk(addr, t->alias_of, op);
+        return;
+    }
+    if (t->is_array) {
+        int n = t->hi_bound - t->lo_bound + 1;
+        if (!type_has_managed(t->elem_type_name))
+            return;
+        for (i = 0; i < n; i++) {
+            int off = lower_const(i * t->elem_size);
+            emit_managed_walk(emit_addp(addr, off), t->elem_type_name, op);
+        }
+        return;
+    }
+    for (i = 0; i < t->nfields; i++) {
+        int off;
+        if (!type_has_managed(t->fields[i].type_name))
+            continue;
+        off = lower_const(t->fields[i].offset);
+        emit_managed_walk(emit_addp(addr, off), t->fields[i].type_name, op);
+    }
+}
+
+/* Copy an aggregate value with reference-count maintenance: retain the
+   source's managed members, release the destination's previous ones, then
+   copy the bytes.  Retaining before releasing keeps a self-assignment safe.
+   An aggregate with no managed member is a plain block copy. */
+static void
+emit_aggregate_copy(int dst, int src, const char *name, int size)
+{
+    if (type_has_managed(name)) {
+        emit_managed_walk(src, name, MGD_RETAIN);
+        emit_managed_walk(dst, name, MGD_RELEASE);
+    }
+    emit_block_copy(dst, src, size);
+}
+
+/* Move an aggregate rvalue (a function's sret result) into a destination:
+   release the destination's previous managed members, then copy the bytes.
+   The source is a temporary that gives up ownership, so its members are not
+   retained and it is not released. */
+static void
+emit_aggregate_move(int dst, int src, const char *name, int size)
+{
+    if (type_has_managed(name))
+        emit_managed_walk(dst, name, MGD_RELEASE);
+    emit_block_copy(dst, src, size);
+}
+
+/* Resolve a type name through its alias chain to the underlying type_def. */
+static struct type_def *
+resolve_type(const char *name)
+{
+    struct type_def *t = name ? find_type(name) : NULL;
+
+    while (t && t->alias_of)
+        t = find_type(t->alias_of);
+    return t;
+}
+
+/* Build a one-argument function that applies `op` (MGD_RELEASE/MGD_RETAIN) to a
+   single element of type `elem_type` at the address passed in.  Used as the
+   per-element callback for a dynamic array of record elements.  The lowering
+   slot and per-temp flag state is swapped out so generating a function in the
+   middle of another function's body cannot disturb it. */
+static struct ir_func *
+gen_managed_elem_fn(const char *fnname, const char *elem_type, int op)
+{
+    struct ir_func *fn, *saved_fn = cur_fn;
+    int *saved_slot_sizes = slot_sizes;
+    int saved_nslots = nslots, saved_slot_cap = slot_cap;
+    unsigned char *saved_is_ptr = temp_is_ptr, *saved_is_i64 = temp_is_i64;
+    unsigned char *saved_fkind = temp_fkind;
+    int saved_is_ptr_cap = temp_is_ptr_cap, saved_is_i64_cap = temp_is_i64_cap;
+    int saved_fkind_cap = temp_fkind_cap;
+    int saved_nloops = nloops, saved_nwith = nwith;
+    int saved_ret_slot = ret_slot, saved_exit = exit_label;
+    const char *saved_func_name = cur_func_name;
+    struct ir_insn *ins;
+    int pslot, addr;
+
+    slot_sizes = NULL;
+    nslots = slot_cap = 0;
+    temp_is_ptr = temp_is_i64 = temp_fkind = NULL;
+    temp_is_ptr_cap = temp_is_i64_cap = temp_fkind_cap = 0;
+    nloops = nwith = 0;
+    ret_slot = -1;
+    cur_func_name = NULL;
+
+    fn = ir_new_func(lower_arena, fnname);
+    cur_fn = fn;
+    exit_label = new_label();
+
+    pslot = alloc_slot(PC_PTR_BYTES);   /* the one pointer parameter */
+    fn->nparams = 1;
+
+    ins = emit(IR_FUNC);
+    ins->sym = arena_strdup(lower_arena, fnname);
+    ins->nargs = 1;
+
+    addr = emit_load_ptr(pslot);        /* the element's address */
+    emit_managed_walk(addr, elem_type, op);
+
+    emit(IR_RET);
+    emit(IR_ENDF);
+
+    fn->nslots = nslots;
+    fn->slot_size = arena_alloc(lower_arena, nslots * sizeof(int));
+    if (nslots)
+        memcpy(fn->slot_size, slot_sizes, nslots * sizeof(int));
+
+    free(slot_sizes);
+    free(temp_is_ptr);
+    free(temp_is_i64);
+    free(temp_fkind);
+    slot_sizes = saved_slot_sizes;
+    nslots = saved_nslots;
+    slot_cap = saved_slot_cap;
+    temp_is_ptr = saved_is_ptr;
+    temp_is_i64 = saved_is_i64;
+    temp_fkind = saved_fkind;
+    temp_is_ptr_cap = saved_is_ptr_cap;
+    temp_is_i64_cap = saved_is_i64_cap;
+    temp_fkind_cap = saved_fkind_cap;
+    nloops = saved_nloops;
+    nwith = saved_nwith;
+    ret_slot = saved_ret_slot;
+    exit_label = saved_exit;
+    cur_func_name = saved_func_name;
+    cur_fn = saved_fn;
+    return fn;
+}
+
+/* The per-element finalize ('dtor') and retain function symbols for a dynamic
+   array of managed elements.  An element that is a single managed pointer (a
+   string, or a dynamic array whose own elements are unmanaged) uses the fixed
+   runtime callbacks; any other managed element type gets a generated pair,
+   memoized so each type is emitted once and self-reference terminates. */
+static void
+arr_elem_fns(struct type_def *arr, const char **dtor_out, const char **retain_out)
+{
+    const char *et = arr->elem_type_name;
+    struct type_def *e = resolve_type(et);
+    int k;
+
+    if (is_string_type_name(et) ||
+        (e && e->is_dynarray && !type_has_managed(e->elem_type_name))) {
+        *dtor_out = "__pascal_elem_release_ptr";
+        *retain_out = "__pascal_elem_retain_ptr";
+        return;
+    }
+    for (k = 0; k < nelem_fns; k++)
+        if (strcmp(elem_fns[k].type_name, et) == 0) {
+            *dtor_out = elem_fns[k].dtor;
+            *retain_out = elem_fns[k].retain;
+            return;
+        }
+    if (nelem_fns >= (int)(sizeof(elem_fns) / sizeof(elem_fns[0])))
+        die("lower: too many managed array element types");
+    k = nelem_fns++;
+    elem_fns[k].type_name = arena_strdup(lower_arena, et);
+    snprintf(elem_fns[k].dtor, sizeof(elem_fns[k].dtor), "__pdtor_%s", et);
+    snprintf(elem_fns[k].retain, sizeof(elem_fns[k].retain), "__pretain_%s", et);
+    *dtor_out = elem_fns[k].dtor;
+    *retain_out = elem_fns[k].retain;
+    /* Reserve the entry before generating so a recursive element type resolves
+       to these names rather than recursing forever. */
+    {
+        struct ir_func *df = gen_managed_elem_fn(elem_fns[k].dtor, et, MGD_RELEASE);
+        struct ir_func *rf = gen_managed_elem_fn(elem_fns[k].retain, et, MGD_RETAIN);
+        *gen_ftail = df;
+        gen_ftail = &df->next;
+        *gen_ftail = rf;
+        gen_ftail = &rf->next;
+    }
+}
+
+/* Release one strlike value (already loaded) by its type name: a dynamic array
+   of managed elements goes through the element-aware runtime release with its
+   finalizer; a string or scalar array is a plain descriptor release. */
+static void
+emit_strlike_release(int ptrval, const char *tname)
+{
+    struct type_def *t = resolve_type(tname);
+
+    if (t && t->is_dynarray && type_has_managed(t->elem_type_name)) {
+        const char *dtor, *retain;
+        int args[3];
+        arr_elem_fns(t, &dtor, &retain);
+        args[0] = ptrval;
+        args[1] = lower_const(t->elem_size);
+        args[2] = emit_lea_sym(dtor);
+        emit_call("__pascal_arr_release", args, 3);
+    } else {
+        emit_call("__pascal_str_release", &ptrval, 1);
+    }
+}
+
+/* Whether an expression yields a boolean value.  FPC's default ({$B-}) makes
+   boolean `and`/`or` short-circuit, so the lowering needs to recognize boolean
+   operands to pick the short-circuit form over the bitwise one. */
+static int
+expr_is_boolean(struct node *n)
+{
+    const char *tn;
+
+    if (!n)
+        return 0;
+    if (n->kind == N_BOOL)
+        return 1;
+    if (n->kind == N_UNOP && n->op == T_NOT)
+        return 1;
+    /* boolean-valued builtins: eof (bare or called) and odd(x) */
+    if (n->kind == N_NAME && strcmp(n->name, "eof") == 0 &&
+        !find_sym(n->name))
+        return 1;
+    if (n->kind == N_CALL && n->a && n->a->kind == N_NAME &&
+        (strcmp(n->a->name, "eof") == 0 || strcmp(n->a->name, "odd") == 0))
+        return 1;
+    if (n->kind == N_BINOP) {
+        if (n->op == T_AND || n->op == T_OR ||
+            n->op == T_AND_THEN || n->op == T_OR_ELSE ||
+            n->op == T_IN ||
+            (n->op >= T_EQ && n->op <= T_GE))
+            return 1;
+        return 0;
+    }
+    if (n->kind == N_NAME || n->kind == N_DOT || n->kind == N_INDEX) {
+        tn = lvalue_type_name(n);
+        if (tn && strcmp(tn, "boolean") == 0)
+            return 1;
+    }
     if (n->kind == N_NAME) {
         struct sym *s = find_sym(n->name);
-        if (!s)
-            die("lower:%d: undefined '%s'", n->line, n->name);
-        return addr_sym(s);
+        if (s && s->is_func && s->decl &&
+            s->decl->kind == N_FUNCDECL && s->decl->sval &&
+            strcmp(s->decl->sval, "boolean") == 0)
+            return 1;
     }
-    if (n->kind == N_STR) {
-        char namebuf[32];
-        int padded = ((n->slen + 1) + 3) & ~3;
-        char *buf = arena_zalloc(lower_arena, padded);
-        buf[0] = (char)n->slen;
-        memcpy(buf + 1, n->sval, n->slen);
-        snprintf(namebuf, sizeof(namebuf), "__str_%d", strctr++);
-        add_string_global(namebuf, buf, padded);
-        ins = emit(IR_LEA);
-        ins->dst = new_temp();
-        ins->sym = arena_strdup(lower_arena,namebuf);
-        return ins->dst;
+    if (n->kind == N_CALL && n->a && n->a->kind == N_NAME) {
+        struct sym *s = find_sym(n->a->name);
+        if (s && s->is_func && s->decl &&
+            s->decl->kind == N_FUNCDECL && s->decl->sval &&
+            strcmp(s->decl->sval, "boolean") == 0)
+            return 1;
     }
-    return lower_expr(n);
+    return 0;
+}
+
+/* Lower a short-circuit boolean `and`/`or`: evaluate the right operand only
+   when the left does not already settle the result.  `is_and` picks `and`
+   (false short-circuits) from `or` (true short-circuits). */
+static int
+lower_short_circuit(struct node *n, int is_and)
+{
+    struct ir_insn *ins;
+    int result_slot, lshort, lend, res, l, r, cshort;
+
+    result_slot = alloc_slot(4);
+    l = lower_expr(n->a);
+    lshort = new_label();
+    lend = new_label();
+    if (is_and)
+        emit_bz(l, lshort);     /* left false: result is false */
+    else
+        emit_bnz(l, lshort);    /* left true: result is true */
+    r = lower_expr(n->b);
+    ins = emit(IR_STL);
+    ins->a = r;
+    ins->slot = result_slot;
+    emit_jmp(lend);
+    emit_label(lshort);
+    cshort = lower_const(is_and ? 0 : 1);
+    ins = emit(IR_STL);
+    ins->a = cshort;
+    ins->slot = result_slot;
+    emit_label(lend);
+    res = new_temp();
+    ins = emit(IR_LDL);
+    ins->dst = res;
+    ins->slot = result_slot;
+    return res;
 }
 
 static int
@@ -1060,29 +2529,60 @@ lower_expr(struct node *n)
 
     switch (n->kind) {
     case N_NUM:
+        /* A literal outside the signed 32-bit range is a 64-bit constant. */
+        if (n->ival < -2147483647L - 1 || n->ival > 2147483647L)
+            return lower_const64(n->ival);
         return lower_const(n->ival);
+
+    case N_REAL:
+        return lower_real_const(n->fval, 0);
 
     case N_BOOL:
         return lower_const(n->ival);
 
     case N_STR:
+        /* A one-character literal is a char constant in an arbitrary
+           expression; a longer literal is a string value (a strobj pointer).
+           String context forces even a one-char literal to a string through
+           lower_str_addr. */
         if (n->slen == 1)
             return lower_const((unsigned char)n->sval[0]);
-        {
-            char namebuf[32];
-
-            snprintf(namebuf, sizeof(namebuf), "__str_%d", strctr++);
-            add_string_global(namebuf, n->sval, n->slen + 1);
-            ins = emit(IR_LEA);
-            ins->dst = new_temp();
-            ins->sym = arena_strdup(lower_arena,namebuf);
-            return ins->dst;
-        }
+        return emit_strobj_literal(n->sval, n->slen);
 
     case N_NAME: {
         struct sym *s;
         if (strcmp(n->name, "eof") == 0)
             return emit_call_ret("__pascal_eof", NULL, 0);
+        if (strcmp(n->name, "paramcount") == 0 && !find_sym(n->name))
+            return emit_call_ret("__pascal_param_count", NULL, 0);
+        /* nil is the null pointer: an empty string/dynamic array handle and the
+           null value compared against pointers */
+        if (strcmp(n->name, "nil") == 0 && !find_sym(n->name))
+            return emit_null_ptr();
+        /* The enclosing function's own name used as an r-value reads its
+           result variable, it is not a recursive call.  This takes priority
+           over the function's symbol in the table. */
+        if (cur_func_name && strcmp(n->name, cur_func_name) == 0 &&
+            (ret_slot >= 0 || ret_is_compound)) {
+            if (ret_is_compound)
+                return emit_load_ptr(ret_ptr_slot);
+            if (ret_is_float) {
+                ins = emit(IR_FLDL);
+                ins->dst = new_temp();
+                ins->slot = ret_slot;
+                ins->imm = ret_fw;
+                mark_float(ins->dst, ret_fw);
+                return ins->dst;
+            }
+            if (ret_is_str)
+                return emit_load_ptr(ret_slot);
+            ins = emit(ret_is_i64 ? IR_LDL64 : IR_LDL);
+            ins->dst = new_temp();
+            ins->slot = ret_slot;
+            if (ret_is_i64)
+                mark_i64(ins->dst);
+            return ins->dst;
+        }
         s = find_sym(n->name);
         if (!s) {
             if (nwith > 0) {
@@ -1096,36 +2596,105 @@ lower_expr(struct node *n)
             }
             die("lower:%d: undefined '%s'", n->line, n->name);
         }
-        if (s->is_func)
+        if (s->is_func) {
+            if (s->decl && s->decl->kind == N_FUNCDECL) {
+                int rfw = float_fw_of_name(s->decl->sval);
+                if (rfw >= 0)
+                    return emit_call_retf(n->name, NULL, 0, rfw);
+                if (is_i64_type_name(s->decl->sval))
+                    return emit_call_ret64(n->name, NULL, 0);
+                if (is_strlike_type_name(s->decl->sval))
+                    return emit_str_new_call(n->name, NULL, 0);
+            }
             return emit_call_ret(n->name, NULL, 0);
+        }
         return load_sym(s);
     }
 
     case N_DOT:
     case N_INDEX: {
-        int addr = lower_lvalue_addr(n);
-        const char *ptname = lvalue_type_name(n->a);
-        struct type_def *ptd = ptname ? find_type(ptname) : NULL;
+        const char *etname = lvalue_type_name(n);
+        const char *ptname;
+        struct type_def *ptd;
+        int addr, efw;
+        /* A string-typed field or element holds a pointer; load it. */
+        if (is_strlike_type_name(etname))
+            return emit_load_ptr_at(lower_lvalue_addr(n));
+        addr = lower_lvalue_addr(n);
+        ptname = lvalue_type_name(n->a);
+        ptd = ptname ? find_type(ptname) : NULL;
+        efw = float_fw_of_name(etname);
         if (ptd && ptd->is_string)
             ins = emit(IR_LB);
+        else if (efw >= 0)
+            ins = emit(IR_FLD);
+        else if (is_i64_type_name(etname))
+            ins = emit(IR_LD64);
         else
             ins = emit(IR_LW);
         ins->dst = new_temp();
         ins->a = addr;
+        if (ins->op == IR_LD64)
+            mark_i64(ins->dst);
+        else if (ins->op == IR_FLD) {
+            ins->imm = efw;
+            mark_float(ins->dst, efw);
+        }
         return ins->dst;
     }
 
     case N_UNOP:
         if (n->op == T_MINUS) {
             l = lower_expr(n->a);
+            if (is_float(l)) {
+                int w = float_fw(l);
+                ins = emit(IR_FNEG);
+                ins->dst = new_temp();
+                ins->a = l;
+                ins->imm = w;
+                mark_float(ins->dst, w);
+                return ins->dst;
+            }
+            if (is_i64(l)) {
+                ins = emit(IR_NEG64);
+                ins->dst = new_temp();
+                ins->a = l;
+                mark_i64(ins->dst);
+                return ins->dst;
+            }
             ins = emit(IR_NEG);
             ins->dst = new_temp();
             ins->a = l;
             return ins->dst;
         }
         if (n->op == T_NOT) {
-            int zero;
+            int zero, is_bool;
+            /* `not` is a bitwise complement on an integer and a logical
+               negation only on a boolean.  Classify the operand before
+               lowering it (expr_is_boolean inspects the node, not the
+               lowered value). */
+            is_bool = expr_is_boolean(n->a);
             l = lower_expr(n->a);
+            if (is_i64(l)) {
+                /* compute the mask into a local before emitting the XOR, so
+                   its defining instruction precedes the use */
+                int neg1 = lower_const64(-1);
+                ins = emit(IR_XOR64);
+                ins->dst = new_temp();
+                ins->a = l;
+                ins->b = neg1;
+                mark_i64(ins->dst);
+                return ins->dst;
+            }
+            if (!is_bool) {
+                /* bitwise complement of a 32-bit integer */
+                int neg1 = lower_const(-1);
+                ins = emit(IR_XOR);
+                ins->dst = new_temp();
+                ins->a = l;
+                ins->b = neg1;
+                return ins->dst;
+            }
             zero = lower_const(0);
             ins = emit(IR_CMPEQ);
             ins->dst = new_temp();
@@ -1185,6 +2754,11 @@ lower_expr(struct node *n)
             ins->slot = result_slot;
             return res;
         }
+        /* Boolean and/or short-circuit (FPC default {$B-}); a bitwise and/or
+           on integer operands keeps the full-evaluation generic path. */
+        if ((n->op == T_AND || n->op == T_OR) &&
+            expr_is_boolean(n->a) && expr_is_boolean(n->b))
+            return lower_short_circuit(n, n->op == T_AND);
         if (n->op == T_IN) {
             int args[2];
             args[0] = lower_expr(n->a);
@@ -1196,10 +2770,7 @@ lower_expr(struct node *n)
             if (is_set_type(n->a) || is_set_type(n->b)) {
                 int slot, args[3], dst;
                 slot = alloc_slot(32);
-                ins = emit(IR_ADL);
-                ins->dst = new_temp();
-                ins->slot = slot;
-                dst = ins->dst;
+                dst = emit_adl(slot);
                 args[0] = dst;
                 args[1] = lower_set_addr(n->a);
                 args[2] = lower_set_addr(n->b);
@@ -1212,10 +2783,7 @@ lower_expr(struct node *n)
             if (is_set_type(n->a) || is_set_type(n->b)) {
                 int slot, args[3], dst;
                 slot = alloc_slot(32);
-                ins = emit(IR_ADL);
-                ins->dst = new_temp();
-                ins->slot = slot;
-                dst = ins->dst;
+                dst = emit_adl(slot);
                 args[0] = dst;
                 args[1] = lower_set_addr(n->a);
                 args[2] = lower_set_addr(n->b);
@@ -1228,10 +2796,7 @@ lower_expr(struct node *n)
             if (is_set_type(n->a) || is_set_type(n->b)) {
                 int slot, args[3], dst;
                 slot = alloc_slot(32);
-                ins = emit(IR_ADL);
-                ins->dst = new_temp();
-                ins->slot = slot;
-                dst = ins->dst;
+                dst = emit_adl(slot);
                 args[0] = dst;
                 args[1] = lower_set_addr(n->a);
                 args[2] = lower_set_addr(n->b);
@@ -1242,26 +2807,22 @@ lower_expr(struct node *n)
         }
         if (n->op == T_PLUS) {
             int is_str = 0;
-            if (is_string_type(n->a) || is_string_type(n->b))
+            /* a '+' is string concatenation when either operand is a
+               string value: a string l-value or call, a multi-character
+               literal, or (recursively) a nested concatenation.  A nested
+               concat operand is why node_is_string_valued is used rather
+               than is_string_type, which does not see through a binop. */
+            if (node_is_string_valued(n->a) || node_is_string_valued(n->b))
                 is_str = 1;
             else if (n->a->kind == N_STR && n->a->slen != 1)
                 is_str = 1;
             else if (n->b->kind == N_STR && n->b->slen != 1)
                 is_str = 1;
             if (is_str) {
-                int slot, args[4], dst;
-                slot = alloc_slot(256);
-                ins = emit(IR_ADL);
-                ins->dst = new_temp();
-                ins->slot = slot;
-                dst = ins->dst;
-                args[0] = dst;
-                args[1] = lower_str_addr(n->a);
-                args[2] = lower_str_addr(n->b);
-                args[3] = lower_const(255);
-                emit_call("__pascal_str_concat",
-                          args, 4);
-                return dst;
+                int args[2];
+                args[0] = lower_str_concat_operand(n->a);
+                args[1] = lower_str_concat_operand(n->b);
+                return emit_str_new_call("__pascal_str_concat", args, 2);
             }
         }
         if (n->op >= T_EQ && n->op <= T_GE) {
@@ -1316,6 +2877,72 @@ lower_expr(struct node *n)
         }
         l = lower_expr(n->a);
         r = lower_expr(n->b);
+        /* floating-point operation if either operand is a real, or for the `/`
+           operator which always yields a real in Pascal: promote both to the
+           common width (double if either is double) and pick the float opcode.
+           A comparison yields a 32-bit boolean. */
+        if (is_float(l) || is_float(r) || n->op == T_SLASH) {
+            int w = (is_float(l) ? float_fw(l) : 0) == FWIDTH_F32 &&
+                    (is_float(r) ? float_fw(r) : 0) == FWIDTH_F32
+                    ? FWIDTH_F32 : 0;
+            int fop;
+            l = to_float(l, w);
+            r = to_float(r, w);
+            switch (n->op) {
+            case T_PLUS:  fop = IR_FADD; break;
+            case T_MINUS: fop = IR_FSUB; break;
+            case T_STAR:  fop = IR_FMUL; break;
+            case T_SLASH: fop = IR_FDIV; break;
+            case T_EQ:    fop = IR_FCMPEQ; break;
+            case T_LT:    fop = IR_FCMPLT; break;
+            case T_LE:    fop = IR_FCMPLE; break;
+            case T_GT:    fop = IR_FCMPLT; { int t = l; l = r; r = t; } break;
+            case T_GE:    fop = IR_FCMPLE; { int t = l; l = r; r = t; } break;
+            case T_NE: {
+                int eq, zero;
+                ins = emit(IR_FCMPEQ);
+                ins->dst = new_temp();
+                ins->a = l;
+                ins->b = r;
+                ins->imm = w;
+                eq = ins->dst;
+                zero = lower_const(0);
+                ins = emit(IR_CMPEQ);
+                ins->dst = new_temp();
+                ins->a = eq;
+                ins->b = zero;
+                return ins->dst;
+            }
+            default:
+                die("lower:%d: bad float binary op", n->line);
+                return 0;
+            }
+            ins = emit(fop);
+            ins->dst = new_temp();
+            ins->a = l;
+            ins->b = r;
+            ins->imm = w;
+            if (fop == IR_FADD || fop == IR_FSUB ||
+                fop == IR_FMUL || fop == IR_FDIV)
+                mark_float(ins->dst, w);
+            return ins->dst;
+        }
+        /* 64-bit operation if either operand is Int64: promote both and pick
+           the 64-bit opcode.  A comparison still yields a 32-bit boolean. */
+        if (is_i64(l) || is_i64(r)) {
+            int op64 = bin_op_for_tok64(n->op);
+            if (op64 < 0)
+                die("lower:%d: bad binary op", n->line);
+            l = to_i64(l);
+            r = to_i64(r);
+            ins = emit(op64);
+            ins->dst = new_temp();
+            ins->a = l;
+            ins->b = r;
+            if (op64_is_value(n->op))
+                mark_i64(ins->dst);
+            return ins->dst;
+        }
         op = bin_op_for_tok(n->op);
         if (op < 0)
             die("lower:%d: bad binary op", n->line);
@@ -1416,10 +3043,7 @@ lower_expr(struct node *n)
         struct node *e;
 
         slot = alloc_slot(32);
-        ins = emit(IR_ADL);
-        ins->dst = new_temp();
-        ins->slot = slot;
-        dst = ins->dst;
+        dst = emit_adl(slot);
         {
             int args[1];
             args[0] = dst;
@@ -1468,21 +3092,20 @@ static void
 write_str_literal(const char *str, int slen)
 {
     char namebuf[32];
-    int args[3];
+    int args[2];
     struct ir_insn *lea;
-    int fd, clen;
 
     snprintf(namebuf, sizeof(namebuf), "__str_%d", strctr++);
     add_string_global(namebuf, str, slen + 1);
-    lea = emit(IR_LEA);
+    lea = emit(PC_LP64_ON ? IR_LEA64 : IR_LEA);
     lea->dst = new_temp();
     lea->sym = arena_strdup(lower_arena,namebuf);
-    fd = lower_const(1);
-    clen = lower_const(slen);
-    args[0] = fd;
-    args[1] = lea->dst;
-    args[2] = clen;
-    emit_call("write", args, 3);
+    mark_ptr(lea->dst);
+    /* route through the runtime so it honors the current output stream
+       (Output or ErrOutput) rather than writing straight to fd 1 */
+    args[0] = lea->dst;
+    args[1] = lower_const(slen);
+    emit_call("__pascal_write_raw", args, 2);
 }
 
 static int
@@ -1495,6 +3118,20 @@ is_char_call(struct node *n)
            strcmp(n->a->name, "lowercase") == 0;
 }
 
+/* Whether an expression evaluates to a heap string: a literal, a string-typed
+   l-value or string-returning call (is_string_type), or a concatenation. */
+static int
+node_is_string_valued(struct node *n)
+{
+    if (!n)
+        return 0;
+    if (n->kind == N_STR)
+        return 1;
+    if (n->kind == N_BINOP && n->op == T_PLUS)
+        return node_is_string_valued(n->a) || node_is_string_valued(n->b);
+    return is_string_type(n);
+}
+
 static int
 is_char_type(struct node *n)
 {
@@ -1502,15 +3139,82 @@ is_char_type(struct node *n)
     return tn && strcmp(tn, "char") == 0;
 }
 
+/* Whether an expression yields a char ordinal (a plain integer value) rather
+   than a heap string: a char l-value (var, field, s[i]), a char-returning
+   builtin (chr/upcase/lowercase), or a user function declared to return char.
+   A one-character string literal is already materialized as a string, so it
+   is not counted here. */
+static int
+expr_is_char_value(struct node *n)
+{
+    if (!n)
+        return 0;
+    if (is_char_type(n) || is_char_call(n))
+        return 1;
+    /* a call (with args) or a bare name (a parameterless function) whose
+       callee is declared to return char */
+    if (n->kind == N_CALL && n->a && n->a->kind == N_NAME) {
+        struct sym *s = find_sym(n->a->name);
+        if (s && s->is_func && s->decl &&
+            s->decl->kind == N_FUNCDECL && s->decl->sval &&
+            strcmp(s->decl->sval, "char") == 0)
+            return 1;
+    }
+    if (n->kind == N_NAME) {
+        struct sym *s = find_sym(n->name);
+        if (s && s->is_func && s->decl &&
+            s->decl->kind == N_FUNCDECL && s->decl->sval &&
+            strcmp(s->decl->sval, "char") == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* Lower an operand of string concatenation to a heap-string pointer.  A char
+   value is promoted to a fresh one-character string; anything else goes
+   through lower_str_addr unchanged. */
+static int
+lower_str_concat_operand(struct node *n)
+{
+    if (expr_is_char_value(n)) {
+        int c = lower_expr(n);
+        return emit_str_new_call("__pascal_str_ofchar", &c, 1);
+    }
+    return lower_str_addr(n);
+}
+
 static int
 is_string_type(struct node *n)
 {
+    struct sym *s;
+
+    if (!n)
+        return 0;
+    /* a string-typed l-value: a variable, a record field or an array element.
+       lvalue_type_name resolves the field/element type and alias chains. */
+    if (n->kind == N_NAME || n->kind == N_DOT || n->kind == N_INDEX) {
+        const char *tn = lvalue_type_name(n);
+        if (tn && is_string_type_name(tn))
+            return 1;
+    }
+    /* a call whose result is a string (a bare function name, or a call with
+       arguments whose callee name resolves to a string-returning function). */
     if (n->kind == N_NAME) {
-        struct sym *s = find_sym(n->name);
-        if (s && s->type_name) {
-            struct type_def *td = find_type(s->type_name);
-            return td && td->is_string;
-        }
+        s = find_sym(n->name);
+        if (s && s->is_func && s->decl &&
+            is_string_type_name(s->decl->sval))
+            return 1;
+    }
+    if (n->kind == N_CALL && n->a && n->a->kind == N_NAME) {
+        const char *cn = n->a->name;
+        /* string-returning builtins the front end lowers directly */
+        if (strcmp(cn, "copy") == 0 || strcmp(cn, "paramstr") == 0 ||
+            strcmp(cn, "concat") == 0)
+            return 1;
+        s = find_sym(cn);
+        if (s && s->is_func && s->decl &&
+            is_string_type_name(s->decl->sval))
+            return 1;
     }
     return 0;
 }
@@ -1542,22 +3246,36 @@ lower_set_addr(struct node *n)
     return lower_expr(n);
 }
 
+/* Write an already-lowered numeric value, choosing the real, Int64 or 32-bit
+   integer formatter by the temp's kind. */
+static void
+emit_write_number(int v)
+{
+    if (is_float(v)) {
+        int d = to_float(v, 0);
+        emit_call("__pascal_write_real", &d, 1);
+    } else if (is_i64(v)) {
+        emit_call("__pascal_write_int64", &v, 1);
+    } else {
+        emit_call("__pascal_write_int", &v, 1);
+    }
+}
+
 static void
 lower_write_arg(struct node *arg)
 {
     if (arg->kind == N_STR) {
         write_str_literal(arg->sval, arg->slen);
     } else if (arg->kind == N_NAME && is_string_type(arg)) {
-        struct sym *s = find_sym(arg->name);
         int args[1];
-        args[0] = addr_sym(s);
+        args[0] = lower_str_addr(arg);
         emit_call("__pascal_write_str", args, 1);
     } else if (arg->kind == N_DOT || arg->kind == N_INDEX) {
         const char *tn = lvalue_type_name(arg);
         struct type_def *td = tn ? find_type(tn) : NULL;
         if (td && td->is_string) {
             int args[1];
-            args[0] = lower_lvalue_addr(arg);
+            args[0] = lower_str_addr(arg);
             emit_call("__pascal_write_str", args, 1);
         } else {
             const char *ptname = lvalue_type_name(arg->a);
@@ -1572,11 +3290,14 @@ lower_write_arg(struct node *arg)
                 args[0] = lower_expr(arg);
                 emit_call("__pascal_write_char", args, 1);
             } else {
-                int args[1];
-                args[0] = lower_expr(arg);
-                emit_call("__pascal_write_int", args, 1);
+                emit_write_number(lower_expr(arg));
             }
         }
+    } else if (arg->kind == N_CALL && is_string_type(arg)) {
+        /* writeln(f(...)) where f returns a string: write the result bytes */
+        int args[1];
+        args[0] = lower_expr(arg);
+        emit_call("__pascal_write_str", args, 1);
     } else if (arg->kind == N_NAME) {
         struct sym *s = find_sym(arg->name);
         if (s && s->is_const && s->const_str) {
@@ -1586,48 +3307,288 @@ lower_write_arg(struct node *arg)
             args[0] = lower_expr(arg);
             emit_call("__pascal_write_char", args, 1);
         } else {
-            int args[1];
-            args[0] = lower_expr(arg);
-            emit_call("__pascal_write_int", args, 1);
+            emit_write_number(lower_expr(arg));
         }
     } else if (is_char_call(arg) || is_char_type(arg)) {
         int args[1];
         args[0] = lower_expr(arg);
         emit_call("__pascal_write_char", args, 1);
-    } else {
+    } else if (node_is_string_valued(arg)) {
+        /* a string-valued expression such as a concatenation (a + b) */
         int args[1];
         args[0] = lower_expr(arg);
-        emit_call("__pascal_write_int", args, 1);
+        emit_call("__pascal_write_str", args, 1);
+    } else {
+        emit_write_number(lower_expr(arg));
     }
 }
 
 static void
 lower_write(struct node *n, int newline)
 {
-    struct node *arg;
+    struct node *arg = n->b;
+    int errstream = 0;
 
-    for (arg = n->b; arg; arg = arg->next)
-        lower_write_arg(arg);
-    if (newline) {
-        int args[3];
-        char namebuf[32];
-        snprintf(namebuf, sizeof(namebuf), "__str_%d", strctr++);
-        add_string_global(namebuf, "\n", 2);
-        {
-            struct ir_insn *lea = emit(IR_LEA);
-            lea->dst = new_temp();
-            lea->sym = arena_strdup(lower_arena,namebuf);
-            args[0] = lower_const(1);
-            args[1] = lea->dst;
-            args[2] = lower_const(1);
+    /* an optional leading Output/ErrOutput selects the stream (fd 1/2) */
+    if (arg && arg->kind == N_NAME &&
+        (strcmp(arg->name, "output") == 0 ||
+         strcmp(arg->name, "erroutput") == 0)) {
+        if (strcmp(arg->name, "erroutput") == 0) {
+            int two = lower_const(2);
+            emit_call("__pascal_set_outfd", &two, 1);
+            errstream = 1;
         }
-        emit_call("write", args, 3);
+        arg = arg->next;
+    }
+
+    for (; arg; arg = arg->next)
+        lower_write_arg(arg);
+    if (newline)
+        write_str_literal("\n", 1);
+    if (errstream) {
+        int one = lower_const(1);
+        emit_call("__pascal_set_outfd", &one, 1);
     }
 }
 
 /****************************************************************
  * Call lowering
  ****************************************************************/
+
+/* Build a dynamic-array descriptor from an array constructor ([e1, e2, ...] or
+   the empty []) passed where an open-array (dynamic-array) parameter is
+   expected.  An empty constructor is the empty (NULL) array.  Otherwise a fresh
+   descriptor is allocated and each element stored at its scalar width; the
+   caller owns it for the duration of the statement (registered as a temp), and
+   a `const`/value open-array parameter only borrows it.  Element types are
+   scalar (the only open-array elements the front end builds a constructor for);
+   a managed element type would need element retain/release and is rejected. */
+static int
+lower_open_array_ctor(struct node *setnode, struct type_def *arr)
+{
+    int count = 0, i, desc, elsize = arr->elem_size;
+    int elem_i64 = is_i64_type_name(arr->elem_type_name);
+    int elem_fw = float_fw_of_name(arr->elem_type_name);
+    struct node *e;
+
+    if (type_has_managed(arr->elem_type_name))
+        die("lower:%d: array constructor of a managed element type is "
+            "unsupported", setnode->line);
+    for (e = setnode->a; e; e = e->next) {
+        if (e->kind == N_SETRANGE)
+            die("lower:%d: a range is not valid in an array constructor",
+                setnode->line);
+        count++;
+    }
+    if (count == 0)
+        return emit_null_ptr();
+    {
+        int a3[3];
+        a3[0] = emit_null_ptr();
+        a3[1] = lower_const(count);
+        a3[2] = lower_const(elsize);
+        desc = emit_call_retptr("__pascal_arr_setlength", a3, 3);
+    }
+    i = 0;
+    for (e = setnode->a; e; e = e->next, i++) {
+        int addr = emit_addp(desc, lower_const(PSTR_HDR + i * elsize));
+        int val = lower_expr(e);
+        struct ir_insn *si;
+        if (elem_fw >= 0) {
+            val = to_float(val, elem_fw);
+            si = emit(IR_FSD);
+            si->imm = elem_fw;
+        } else if (elem_i64) {
+            val = to_i64(val);
+            si = emit(IR_ST64);
+        } else {
+            val = to_i32(val);
+            si = emit(IR_SW);
+        }
+        si->a = addr;
+        si->b = val;
+    }
+    register_str_temp(desc);
+    return desc;
+}
+
+/****************************************************************
+ * Overloading by arity and type
+ *
+ * Several routines may share a name with different parameter lists (kpcom's
+ * AddMember).  A forward declaration and its body share a signature and one
+ * mangled name; genuinely different signatures get distinct names.  A call site
+ * picks the overload whose arity matches the argument count, with a light type
+ * score to break ties and prefer the body over a forward declaration.
+ ****************************************************************/
+
+/* Parameter count of a routine declaration. */
+static int
+decl_arity(struct node *d)
+{
+    int n = 0;
+    struct node *p;
+    for (p = d->a; p; p = p->next)
+        n++;
+    return n;
+}
+
+/* Whether two routine declarations have the same signature (kind, return type,
+   and each parameter's mode and type name), so a forward and its body match
+   while a real overload does not. */
+static int
+same_signature(struct node *a, struct node *b)
+{
+    struct node *pa, *pb;
+
+    if (a->kind != b->kind)
+        return 0;
+    if (a->kind == N_FUNCDECL) {
+        if ((a->sval == NULL) != (b->sval == NULL))
+            return 0;
+        if (a->sval && b->sval && strcmp(a->sval, b->sval) != 0)
+            return 0;
+    }
+    for (pa = a->a, pb = b->a; pa && pb; pa = pa->next, pb = pb->next) {
+        if (pa->op != pb->op)
+            return 0;
+        if ((pa->sval == NULL) != (pb->sval == NULL))
+            return 0;
+        if (pa->sval && pb->sval && strcmp(pa->sval, pb->sval) != 0)
+            return 0;
+    }
+    return pa == NULL && pb == NULL;
+}
+
+/* Assign the IR symbol name for a routine among the whole routine list.  A name
+   with a single signature keeps its plain spelling; an overloaded name gets a
+   per-signature suffix (__ovl<k>) shared by that signature's forward and body
+   so every reference and definition agree. */
+static char *
+overload_ir_name(struct node *d, struct node *all)
+{
+    struct node *o;
+    int distinct = 0, myidx = -1;
+    int overloaded = 0;
+    char buf[256];
+
+    for (o = all; o; o = o->next) {
+        if (o->kind != N_FUNCDECL && o->kind != N_PROCDECL)
+            continue;
+        if (strcmp(o->name, d->name) != 0)
+            continue;
+        if (o != d && !same_signature(o, d))
+            overloaded = 1;
+    }
+    if (!overloaded)
+        return NULL;    /* plain name */
+    /* index of d's signature among the distinct signatures seen in order */
+    for (o = all; o; o = o->next) {
+        int seen = 0;
+        struct node *q;
+        if (o->kind != N_FUNCDECL && o->kind != N_PROCDECL)
+            continue;
+        if (strcmp(o->name, d->name) != 0)
+            continue;
+        for (q = all; q != o; q = q->next) {
+            if (q->kind != N_FUNCDECL && q->kind != N_PROCDECL)
+                continue;
+            if (strcmp(q->name, d->name) == 0 && same_signature(q, o)) {
+                seen = 1;
+                break;
+            }
+        }
+        if (seen)
+            continue;           /* a signature already counted */
+        if (same_signature(o, d))
+            myidx = distinct;
+        distinct++;
+    }
+    snprintf(buf, sizeof(buf), "%s__ovl%d", d->name, myidx < 0 ? 0 : myidx);
+    return arena_strdup(lower_arena, buf);
+}
+
+/* The function sym registered for a specific declaration node (overloads share
+   a name, so a by-name lookup is not enough). */
+static struct sym *
+find_func_sym_by_decl(struct node *decl)
+{
+    int i;
+    for (i = nsyms - 1; i >= 0; i--)
+        if (syms[i].is_func && syms[i].decl == decl)
+            return &syms[i];
+    return NULL;
+}
+
+/* Rough type class of an argument expression, for overload tie-breaking:
+   1 = string-like, 2 = real, 0 = everything else (integers, ordinals, ...). */
+static int
+arg_class(struct node *a)
+{
+    if (a->kind == N_STR || is_string_type(a))
+        return 1;
+    return 0;
+}
+
+/* Type class a parameter expects, by the same coarse scheme. */
+static int
+param_class(struct node *p)
+{
+    if (p->sval && is_strlike_type_name(p->sval))
+        return 1;
+    if (p->sval && is_float_type_name(p->sval))
+        return 2;
+    return 0;
+}
+
+/* Resolve a call to the best same-named routine: the arity must match the
+   argument count; among those, the higher type-match score wins, then the body
+   over a forward declaration.  Returns NULL when no routine has the name (the
+   caller then treats it as a builtin or external). */
+static struct sym *
+resolve_overload(const char *name, struct node *args)
+{
+    int nargs = 0, i;
+    struct node *a;
+    struct sym *best = NULL;
+    int best_score = -1, best_forward = 1, nfunc = 0;
+
+    for (a = args; a; a = a->next)
+        nargs++;
+    for (i = 0; i < nsyms; i++) {
+        struct node *d;
+        struct node *p;
+        int score, forward;
+        if (!syms[i].is_func || !syms[i].decl)
+            continue;
+        if (strcmp(syms[i].name, name) != 0)
+            continue;
+        nfunc++;
+        d = syms[i].decl;
+        if (decl_arity(d) != nargs)
+            continue;
+        score = 0;
+        for (p = d->a, a = args; p && a; p = p->next, a = a->next)
+            if (param_class(p) == arg_class(a))
+                score++;
+        forward = d->is_forward ? 1 : 0;
+        if (score > best_score ||
+            (score == best_score && best_forward && !forward)) {
+            best = &syms[i];
+            best_score = score;
+            best_forward = forward;
+        }
+    }
+    if (best)
+        return best;
+    /* no arity match: fall back to any same-named routine (lets the existing
+       diagnostics and single-overload calls work unchanged) */
+    if (nfunc > 0)
+        for (i = nsyms - 1; i >= 0; i--)
+            if (syms[i].is_func && strcmp(syms[i].name, name) == 0)
+                return &syms[i];
+    return NULL;
+}
 
 static int
 lower_call(struct node *n)
@@ -1659,11 +3620,31 @@ lower_call(struct node *n)
     }
 
     if (strcmp(name, "exit") == 0) {
-        if (n->b && cur_func_name) {
-            int val = lower_expr(n->b);
-            ins = emit(IR_STL);
-            ins->a = val;
-            ins->slot = ret_slot;
+        /* Exit(v) sets the function result like `funcname := v`, so it must
+           maintain reference counts the same way: a borrowed string source is
+           retained (a plain store would hand the caller a value it then frees,
+           dropping a reference it never owned), and a real, int64, or 32-bit
+           result each stores through its own width. */
+        if (n->b && cur_func_name && ret_slot >= 0) {
+            if (ret_is_str) {
+                int src = lower_str_addr(n->b);
+                emit_string_store(1, ret_slot, src,
+                                  str_rvalue_owned(n->b), ret_type_name);
+            } else {
+                int val = lower_expr(n->b);
+                if (ret_is_float) {
+                    val = to_float(val, ret_fw);
+                    ins = emit(IR_FSTL);
+                    ins->a = val;
+                    ins->slot = ret_slot;
+                    ins->imm = ret_fw;
+                } else {
+                    val = ret_is_i64 ? to_i64(val) : to_i32(val);
+                    ins = emit(ret_is_i64 ? IR_STL64 : IR_STL);
+                    ins->a = val;
+                    ins->slot = ret_slot;
+                }
+            }
         }
         emit_jmp(exit_label);
         return 0;
@@ -1676,6 +3657,20 @@ lower_call(struct node *n)
     if (strcmp(name, "writeln") == 0) {
         lower_write(n, 1);
         return 0;
+    }
+    if (strcmp(name, "flush") == 0) {
+        /* output is unbuffered (direct write), so Flush(stream) is a no-op */
+        return 0;
+    }
+    if (strcmp(name, "paramcount") == 0) {
+        return emit_call_ret("__pascal_param_count", NULL, 0);
+    }
+    if (strcmp(name, "paramstr") == 0) {
+        int a;
+        if (!n->b)
+            die("lower:%d: paramstr requires an argument", n->line);
+        a = to_i32(lower_expr(n->b));
+        return emit_str_new_call("__pascal_param_str", &a, 1);
     }
 
     if (strcmp(name, "read") == 0 ||
@@ -1699,13 +3694,9 @@ lower_call(struct node *n)
                     n->line);
             }
             if (is_string_type(a)) {
-                struct sym *s = find_sym(a->name);
-                struct type_def *td =
-                    find_type(s->type_name);
-                int rargs[2];
-                rargs[0] = addr;
-                rargs[1] = lower_const(td->maxlen);
-                emit_call("__pascal_read_str", rargs, 2);
+                int p = emit_str_new_call("__pascal_read_str",
+                                         NULL, 0);
+                store_string_lvalue(a, p, 1);
                 read_str = 1;
             } else {
                 const char *rt_fn =
@@ -1729,29 +3720,33 @@ lower_call(struct node *n)
     /* str(value, s) — integer to string */
     if (strcmp(name, "str") == 0) {
         struct node *val_node, *dst_node;
-        struct sym *ds;
-        struct type_def *dtd;
-        int sargs[3];
+        int v, p;
         if (!n->b || !n->b->next)
             die("lower:%d: str requires two arguments",
                 n->line);
         val_node = n->b;
         dst_node = n->b->next;
-        if (dst_node->kind != N_NAME)
-            die("lower:%d: str destination must be a "
-                "variable", n->line);
-        ds = find_sym(dst_node->name);
-        if (!ds || !ds->type_name)
-            die("lower:%d: str destination must be a "
-                "string", n->line);
-        dtd = find_type(ds->type_name);
-        if (!dtd || !dtd->is_string)
-            die("lower:%d: str destination must be a "
-                "string", n->line);
-        sargs[0] = lower_expr(val_node);
-        sargs[1] = addr_sym(ds);
-        sargs[2] = lower_const(dtd->maxlen);
-        emit_call("__pascal_str_from_int", sargs, 3);
+        v = lower_expr(val_node);
+        if (is_float(v)) {
+            v = to_float(v, 0);
+            p = emit_str_new_call("__pascal_str_from_real", &v, 1);
+        } else if (is_i64(v)) {
+            p = emit_str_new_call("__pascal_str_from_int64", &v, 1);
+        } else {
+            p = emit_str_new_call("__pascal_str_from_int", &v, 1);
+        }
+        /* the destination is the enclosing function's string result (Str(v, F)
+           inside function F) or an ordinary string l-value */
+        if (dst_node->kind == N_NAME && cur_func_name &&
+            strcmp(dst_node->name, cur_func_name) == 0 &&
+            ret_slot >= 0 && ret_is_str) {
+            emit_string_store(1, ret_slot, p, 1, ret_type_name);
+        } else {
+            const char *dtn = lvalue_type_name(dst_node);
+            if (!dtn || !is_string_type_name(dtn))
+                die("lower:%d: str destination must be a string", n->line);
+            store_string_lvalue(dst_node, p, 1);
+        }
         return 0;
     }
 
@@ -1762,11 +3757,61 @@ lower_call(struct node *n)
         return lower_expr(n->b);
     }
 
-    /* integer(x) — identity cast */
-    if (strcmp(name, "integer") == 0) {
+    /* integer(x) / longint(x) — truncate to a 32-bit integer */
+    if (strcmp(name, "integer") == 0 || strcmp(name, "longint") == 0 ||
+        strcmp(name, "cardinal") == 0 || strcmp(name, "longword") == 0) {
         if (!n->b)
-            die("lower:%d: integer() requires argument", n->line);
-        return lower_expr(n->b);
+            die("lower:%d: %s() requires argument", n->line, name);
+        return to_i32(lower_expr(n->b));
+    }
+
+    /* int64(x) / qword(x) — sign-extend to a 64-bit integer */
+    if (strcmp(name, "int64") == 0 || strcmp(name, "qword") == 0 ||
+        strcmp(name, "uint64") == 0) {
+        if (!n->b)
+            die("lower:%d: %s() requires argument", n->line, name);
+        return to_i64(lower_expr(n->b));
+    }
+
+    /* real(x) / double(x) / single(x) — convert to a floating-point value */
+    if (strcmp(name, "real") == 0 || strcmp(name, "double") == 0 ||
+        strcmp(name, "single") == 0 || strcmp(name, "float") == 0) {
+        if (!n->b)
+            die("lower:%d: %s() requires argument", n->line, name);
+        return to_float(lower_expr(n->b),
+                        strcmp(name, "single") == 0 ? FWIDTH_F32 : 0);
+    }
+
+    /* trunc(x) — real to integer, toward zero */
+    if (strcmp(name, "trunc") == 0) {
+        if (!n->b)
+            die("lower:%d: trunc requires argument", n->line);
+        return float_to_int(to_float(lower_expr(n->b), 0));
+    }
+
+    /* round(x) — real to nearest integer */
+    if (strcmp(name, "round") == 0) {
+        int fa[1];
+        if (!n->b)
+            die("lower:%d: round requires argument", n->line);
+        fa[0] = to_float(lower_expr(n->b), 0);
+        return emit_call_ret("__pascal_round", fa, 1);
+    }
+
+    /* int(x) — integer part of a real, as a real */
+    if (strcmp(name, "int") == 0) {
+        if (!n->b)
+            die("lower:%d: int requires argument", n->line);
+        return to_float(float_to_int(to_float(lower_expr(n->b), 0)), 0);
+    }
+
+    /* sqrt(x) — real square root */
+    if (strcmp(name, "sqrt") == 0) {
+        int fa[1];
+        if (!n->b)
+            die("lower:%d: sqrt requires argument", n->line);
+        fa[0] = to_float(lower_expr(n->b), 0);
+        return emit_call_retf("__pascal_sqrt", fa, 1, 0);
     }
 
     /* chr(x), char(x), byte(x) — mask to 8 bits */
@@ -1775,7 +3820,7 @@ lower_call(struct node *n)
         int val, cmask;
         if (!n->b)
             die("lower:%d: %s() requires argument", n->line, name);
-        val = lower_expr(n->b);
+        val = to_i32(lower_expr(n->b));
         cmask = lower_const(0xFF);
         ins = emit(IR_AND);
         ins->dst = new_temp();
@@ -1789,7 +3834,7 @@ lower_call(struct node *n)
         int val, cmask;
         if (!n->b)
             die("lower:%d: word() requires argument", n->line);
-        val = lower_expr(n->b);
+        val = to_i32(lower_expr(n->b));
         cmask = lower_const(0xFFFF);
         ins = emit(IR_AND);
         ins->dst = new_temp();
@@ -1798,12 +3843,33 @@ lower_call(struct node *n)
         return ins->dst;
     }
 
-    /* abs(x) — branchless: mask=x>>31, (x^mask)-mask */
+    /* abs(x) — branchless: mask=x>>(w-1), (x^mask)-mask */
     if (strcmp(name, "abs") == 0) {
         int val, c31, mask, xored;
         if (!n->b)
             die("lower:%d: abs requires argument", n->line);
         val = lower_expr(n->b);
+        if (is_i64(val)) {
+            int c63 = lower_const(63);
+            ins = emit(IR_SHRS64);
+            ins->dst = new_temp();
+            ins->a = val;
+            ins->b = c63;
+            mark_i64(ins->dst);
+            mask = ins->dst;
+            ins = emit(IR_XOR64);
+            ins->dst = new_temp();
+            ins->a = val;
+            ins->b = mask;
+            mark_i64(ins->dst);
+            xored = ins->dst;
+            ins = emit(IR_SUB64);
+            ins->dst = new_temp();
+            ins->a = xored;
+            ins->b = mask;
+            mark_i64(ins->dst);
+            return ins->dst;
+        }
         c31 = lower_const(31);
         ins = emit(IR_SHRS);
         ins->dst = new_temp();
@@ -1866,54 +3932,115 @@ lower_call(struct node *n)
 
     /* length(s) — string length */
     if (strcmp(name, "length") == 0) {
+        const char *tn;
         if (!n->b)
             die("lower:%d: length requires argument", n->line);
         if (n->b->kind == N_STR)
             return lower_const(n->b->slen);
-        if (n->b->kind == N_NAME && is_string_type(n->b)) {
-            struct sym *s = find_sym(n->b->name);
-            int addr = addr_sym(s);
-            ins = emit(IR_LB);
-            ins->dst = new_temp();
-            ins->a = addr;
-            return ins->dst;
+        tn = lvalue_type_name(n->b);
+        if (is_string_type(n->b) || (tn && is_strlike_type_name(tn))) {
+            /* a string or dynamic array: both read element count from the
+               descriptor's len field (NULL reads as 0). */
+            int sp = lower_str_addr(n->b);
+            return emit_call_ret("__pascal_str_length", &sp, 1);
         }
-        if (n->b->kind == N_DOT || n->b->kind == N_INDEX) {
-            const char *tn = lvalue_type_name(n->b);
-            struct type_def *td = tn ? find_type(tn) : NULL;
-            if (td && td->is_string) {
-                int addr = lower_lvalue_addr(n->b);
-                ins = emit(IR_LB);
+        die("lower:%d: length requires a string or dynamic array",
+            n->line);
+    }
+
+    /* high(a) / low(a) on a dynamic array (length-1 and 0); for a fixed array
+       the static bounds. */
+    if (strcmp(name, "high") == 0 || strcmp(name, "low") == 0) {
+        const char *tn;
+        struct type_def *at;
+        if (!n->b)
+            die("lower:%d: %s requires argument", n->line, name);
+        /* High/Low of an ordinal type (an enum or subrange) or of an
+           ordinal-typed value: the type's static bounds.  Accept a bare type
+           name, High(TColor), or an ordinal variable, High(c). */
+        {
+            struct type_def *ot = NULL;
+            if (n->b->kind == N_NAME)
+                ot = resolve_type(n->b->name);
+            if (!ot) {
+                const char *vt = lvalue_type_name(n->b);
+                ot = vt ? resolve_type(vt) : NULL;
+            }
+            if (ot && ot->is_ordinal)
+                return lower_const(name[0] == 'l' ? ot->lo_bound
+                                                  : ot->hi_bound);
+        }
+        tn = lvalue_type_name(n->b);
+        at = tn ? find_type(tn) : NULL;
+        if (at && at->is_dynarray) {
+            if (name[0] == 'l')
+                return lower_const(0);
+            {
+                int sp = lower_str_addr(n->b);
+                int len = emit_call_ret("__pascal_str_length", &sp, 1);
+                int one = lower_const(1);
+                ins = emit(IR_SUB);
                 ins->dst = new_temp();
-                ins->a = addr;
+                ins->a = len;
+                ins->b = one;
                 return ins->dst;
             }
         }
-        die("lower:%d: length requires string argument",
-            n->line);
+        if (at && at->is_array)
+            return lower_const(name[0] == 'l' ? at->lo_bound
+                                              : at->hi_bound);
+        die("lower:%d: %s requires an array", n->line, name);
+    }
+
+    /* setlength(a, n): resize a dynamic array in place, rebinding a. */
+    if (strcmp(name, "setlength") == 0) {
+        const char *tn;
+        struct type_def *at;
+        int by_slot, where, cur, newlen, res, args[5];
+        if (!n->b || !n->b->next)
+            die("lower:%d: setlength requires 2 arguments", n->line);
+        tn = lvalue_type_name(n->b);
+        at = resolve_type(tn);
+        if (!at || !at->is_dynarray)
+            die("lower:%d: setlength requires a dynamic array", n->line);
+        where = string_lhs_dest(n->b, &by_slot);
+        cur = by_slot ? emit_load_ptr(where) : emit_load_ptr_at(where);
+        newlen = to_i32(lower_expr(n->b->next));
+        args[0] = cur;
+        args[1] = newlen;
+        args[2] = lower_const(at->elem_size);
+        if (type_has_managed(at->elem_type_name)) {
+            /* managed elements: pass the per-element finalize and retain
+               callbacks so a shrink drops dropped elements and a shared resize
+               retains the copied ones */
+            const char *dtor, *retain;
+            arr_elem_fns(at, &dtor, &retain);
+            args[3] = emit_lea_sym(dtor);
+            args[4] = emit_lea_sym(retain);
+            res = emit_call_retptr("__pascal_arr_setlength_mgd", args, 5);
+        } else {
+            res = emit_call_retptr("__pascal_arr_setlength", args, 3);
+        }
+        if (by_slot)
+            emit_store_ptr(where, res);
+        else
+            emit_store_ptr_at(where, res);
+        return 0;
     }
 
     /* copy(s, index, count) — substring */
     if (strcmp(name, "copy") == 0) {
         struct node *a1, *a2, *a3;
-        int slot, dst, cargs[5];
+        int cargs[3];
         if (!n->b || !n->b->next || !n->b->next->next)
             die("lower:%d: copy requires 3 arguments", n->line);
         a1 = n->b;
         a2 = n->b->next;
         a3 = n->b->next->next;
-        slot = alloc_slot(256);
-        ins = emit(IR_ADL);
-        ins->dst = new_temp();
-        ins->slot = slot;
-        dst = ins->dst;
-        cargs[0] = dst;
-        cargs[1] = lower_str_addr(a1);
-        cargs[2] = lower_expr(a2);
-        cargs[3] = lower_expr(a3);
-        cargs[4] = lower_const(255);
-        emit_call("__pascal_str_copy", cargs, 5);
-        return dst;
+        cargs[0] = lower_str_addr(a1);
+        cargs[1] = lower_expr(a2);
+        cargs[2] = lower_expr(a3);
+        return emit_str_new_call("__pascal_str_copy", cargs, 3);
     }
 
     /* pos(substr, str) — find substring position */
@@ -1926,83 +4053,72 @@ lower_call(struct node *n)
         return emit_call_ret("__pascal_str_pos", pargs, 2);
     }
 
-    /* delete(s, index, count) — remove characters in place */
+    /* delete(s, index, count) — remove characters, rebinding s */
     if (strcmp(name, "delete") == 0) {
         struct node *a1, *a2, *a3;
-        int dargs[3];
+        int dargs[3], p;
         if (!n->b || !n->b->next || !n->b->next->next)
             die("lower:%d: delete requires 3 arguments",
                 n->line);
         a1 = n->b;
         a2 = n->b->next;
         a3 = n->b->next->next;
-        if (a1->kind != N_NAME)
+        if (a1->kind != N_NAME && a1->kind != N_DOT &&
+            a1->kind != N_INDEX)
             die("lower:%d: delete requires a variable",
                 n->line);
         dargs[0] = lower_str_addr(a1);
         dargs[1] = lower_expr(a2);
         dargs[2] = lower_expr(a3);
-        emit_call("__pascal_str_delete", dargs, 3);
+        p = emit_str_new_call("__pascal_str_delete", dargs, 3);
+        store_string_lvalue(a1, p, 1);
         return 0;
     }
 
-    /* insert(source, dest, index) — insert string in place */
+    /* insert(source, dest, index) — insert string, rebinding dest */
     if (strcmp(name, "insert") == 0) {
         struct node *src_node, *dst_node, *idx_node;
-        struct sym *ds;
-        struct type_def *dtd;
-        int iargs[4];
+        int iargs[3], p;
         if (!n->b || !n->b->next || !n->b->next->next)
             die("lower:%d: insert requires 3 arguments",
                 n->line);
         src_node = n->b;
         dst_node = n->b->next;
         idx_node = n->b->next->next;
-        if (dst_node->kind != N_NAME)
+        if (dst_node->kind != N_NAME && dst_node->kind != N_DOT &&
+            dst_node->kind != N_INDEX)
             die("lower:%d: insert dest must be a variable",
                 n->line);
-        ds = find_sym(dst_node->name);
-        if (!ds || !ds->type_name)
-            die("lower:%d: insert dest must be a string",
-                n->line);
-        dtd = find_type(ds->type_name);
-        if (!dtd || !dtd->is_string)
+        if (!is_string_type_name(lvalue_type_name(dst_node)))
             die("lower:%d: insert dest must be a string",
                 n->line);
         iargs[0] = lower_str_addr(src_node);
-        iargs[1] = addr_sym(ds);
+        iargs[1] = lower_str_addr(dst_node);
         iargs[2] = lower_expr(idx_node);
-        iargs[3] = lower_const(dtd->maxlen);
-        emit_call("__pascal_str_insert", iargs, 4);
+        p = emit_str_new_call("__pascal_str_insert", iargs, 3);
+        store_string_lvalue(dst_node, p, 1);
         return 0;
     }
 
     /* concat(s1, s2, ...) — concatenate multiple strings */
     if (strcmp(name, "concat") == 0) {
         struct node *a;
-        int slot, dst, prev;
+        int prev;
         if (!n->b || !n->b->next)
             die("lower:%d: concat requires at least 2 arguments",
                 n->line);
-        slot = alloc_slot(256);
-        ins = emit(IR_ADL);
-        ins->dst = new_temp();
-        ins->slot = slot;
-        dst = ins->dst;
         a = n->b;
         prev = lower_str_addr(a);
         a = a->next;
         while (a) {
-            int cargs[4];
-            cargs[0] = dst;
-            cargs[1] = prev;
-            cargs[2] = lower_str_addr(a);
-            cargs[3] = lower_const(255);
-            emit_call("__pascal_str_concat", cargs, 4);
-            prev = dst;
+            int cargs[2];
+            cargs[0] = prev;
+            cargs[1] = lower_str_addr(a);
+            prev = emit_str_new_call("__pascal_str_concat",
+                                    cargs, 2);
             a = a->next;
         }
-        return dst;
+        return prev;
     }
 
     /* sqr(x) — x * x */
@@ -2179,50 +4295,60 @@ lower_call(struct node *n)
         return ins->dst;
     }
 
-    /* inc(x) / inc(x, n) */
-    if (strcmp(name, "inc") == 0) {
-        struct sym *s;
-        int cur_val, amount;
-        if (!n->b || n->b->kind != N_NAME)
-            die("lower:%d: inc requires a variable", n->line);
-        s = find_sym(n->b->name);
-        if (!s)
-            die("lower:%d: undefined '%s'", n->line, n->b->name);
-        cur_val = load_sym(s);
-        amount = n->b->next ? lower_expr(n->b->next) :
-                               lower_const(1);
-        ins = emit(IR_ADD);
-        ins->dst = new_temp();
-        ins->a = cur_val;
-        ins->b = amount;
-        store_sym(s, ins->dst);
-        return 0;
+    /* inc(x)/inc(x,n) and dec(x)/dec(x,n).  The target is an ordinal
+       l-value: a plain variable, or a record field or array element. */
+    if (strcmp(name, "inc") == 0 || strcmp(name, "dec") == 0) {
+        int is_add = (name[0] == 'i');
+        struct node *tgt = n->b;
+        int cur_val, amount, nv;
+        if (!tgt)
+            die("lower:%d: %s requires a variable", n->line, name);
+        amount = tgt->next ? lower_expr(tgt->next) : lower_const(1);
+        if (tgt->kind == N_NAME && find_sym(tgt->name)) {
+            struct sym *s = find_sym(tgt->name);
+            cur_val = load_sym(s);
+            ins = emit(is_add ? IR_ADD : IR_SUB);
+            ins->dst = new_temp();
+            ins->a = cur_val;
+            ins->b = amount;
+            store_sym(s, ins->dst, 0);
+            return 0;
+        }
+        if (tgt->kind == N_DOT || tgt->kind == N_INDEX ||
+            tgt->kind == N_NAME) {
+            const char *tn = lvalue_type_name(tgt);
+            int i64 = is_i64_type_name(tn);
+            int addr = lower_lvalue_addr(tgt);
+            cur_val = lower_expr(tgt);
+            if (i64) {
+                amount = to_i64(amount);
+                cur_val = to_i64(cur_val);
+            }
+            ins = emit(is_add ? IR_ADD : IR_SUB);
+            ins->dst = new_temp();
+            ins->a = cur_val;
+            ins->b = amount;
+            nv = ins->dst;
+            if (i64) {
+                mark_i64(nv);
+                ins = emit(IR_ST64);
+            } else {
+                ins = emit(IR_SW);
+            }
+            ins->a = addr;
+            ins->b = nv;
+            return 0;
+        }
+        die("lower:%d: %s requires a variable", n->line, name);
     }
 
-    /* dec(x) / dec(x, n) */
-    if (strcmp(name, "dec") == 0) {
-        struct sym *s;
-        int cur_val, amount;
-        if (!n->b || n->b->kind != N_NAME)
-            die("lower:%d: dec requires a variable", n->line);
-        s = find_sym(n->b->name);
-        if (!s)
-            die("lower:%d: undefined '%s'", n->line, n->b->name);
-        cur_val = load_sym(s);
-        amount = n->b->next ? lower_expr(n->b->next) :
-                               lower_const(1);
-        ins = emit(IR_SUB);
-        ins->dst = new_temp();
-        ins->a = cur_val;
-        ins->b = amount;
-        store_sym(s, ins->dst);
-        return 0;
-    }
-
-    /* val(s: string; var v: integer; var code: integer) */
+    /* val(s: string; var v; var code: integer)
+       v may be an integer, int64, or real lvalue (name, field, or
+       element). Dispatch to the runtime helper matching v's type. */
     if (strcmp(name, "val") == 0) {
         struct node *a1, *a2, *a3;
-        struct sym *vs, *cs;
+        const char *vtn;
+        const char *fn;
         int saddr, vaddr, caddr, fargs[3];
         if (!n->b || !n->b->next || !n->b->next->next)
             die("lower:%d: val requires 3 arguments",
@@ -2231,26 +4357,27 @@ lower_call(struct node *n)
         a2 = n->b->next;
         a3 = n->b->next->next;
         saddr = lower_str_addr(a1);
-        if (a2->kind != N_NAME)
+        if (a2->kind != N_NAME && a2->kind != N_DOT &&
+            a2->kind != N_INDEX)
             die("lower:%d: val result must be a variable",
                 n->line);
-        vs = find_sym(a2->name);
-        if (!vs)
-            die("lower:%d: undefined '%s'",
-                n->line, a2->name);
-        vaddr = addr_sym(vs);
-        if (a3->kind != N_NAME)
+        vaddr = lower_lvalue_addr(a2);
+        if (a3->kind != N_NAME && a3->kind != N_DOT &&
+            a3->kind != N_INDEX)
             die("lower:%d: val code must be a variable",
                 n->line);
-        cs = find_sym(a3->name);
-        if (!cs)
-            die("lower:%d: undefined '%s'",
-                n->line, a3->name);
-        caddr = addr_sym(cs);
+        caddr = lower_lvalue_addr(a3);
+        vtn = lvalue_type_name(a2);
+        if (vtn && is_float_type_name(vtn))
+            fn = "__pascal_val_real";
+        else if (vtn && is_i64_type_name(vtn))
+            fn = "__pascal_val_int64";
+        else
+            fn = "__pascal_val";
         fargs[0] = saddr;
         fargs[1] = vaddr;
         fargs[2] = caddr;
-        emit_call("__pascal_val", fargs, 3);
+        emit_call(fn, fargs, 3);
         return 0;
     }
 
@@ -2333,18 +4460,36 @@ lower_call(struct node *n)
         return 0;
     }
 
-    /* look up callee to check for var/const/compound parameters */
+    /* look up callee to check for var/const/compound parameters, resolving an
+       overloaded name by the argument list */
 user_call:
     {
-        struct sym *callee = find_sym(name);
+        struct sym *callee = resolve_overload(name, n->b);
         struct node *param = callee && callee->decl ?
                              callee->decl->a : NULL;
         const char *call_name = name;
+        int sret_is = callee && callee->decl &&
+                      callee->decl->kind == N_FUNCDECL &&
+                      type_is_sret(callee->decl->sval);
+        int sret_slot = -1;
 
         if (callee && callee->ir_name)
             call_name = callee->ir_name;
 
         nargs = 0;
+
+        /* hidden sret argument: a caller-side temporary that receives the
+           compound result, passed as the first argument.  Its managed members
+           are null-initialized so the callee's first field stores release a
+           clean (empty) value rather than following a garbage pointer. */
+        if (sret_is) {
+            struct type_def *rtd = find_type(callee->decl->sval);
+            sret_slot = alloc_slot(rtd->total_size);
+            if (type_has_managed(callee->decl->sval))
+                emit_managed_walk(emit_adl(sret_slot),
+                                  callee->decl->sval, MGD_NULL);
+            args[nargs++] = emit_adl(sret_slot);
+        }
 
         /* hidden capture arguments for nested functions */
         if (callee && callee->ncaptures > 0) {
@@ -2362,38 +4507,107 @@ user_call:
             }
         }
 
-        for (arg = n->b; arg; arg = arg->next) {
-            int pass_addr = 0;
-            if (nargs >= 16)
-                die("lower: too many args");
-            if (param && param->op == 1)
-                pass_addr = 1;
-            else if (param && param->sval &&
-                     find_type(param->sval))
-                pass_addr = 1;
-            if (pass_addr) {
-                if (arg->kind == N_NAME) {
-                    struct sym *vs;
-                    vs = find_sym(arg->name);
-                    if (!vs)
-                        die("lower:%d: undefined "
-                            "variable '%s'",
-                            n->line, arg->name);
-                    args[nargs++] = addr_sym(vs);
-                } else if (arg->kind == N_DOT ||
-                           arg->kind == N_INDEX) {
-                    args[nargs++] =
-                        lower_lvalue_addr(arg);
-                } else {
-                    die("lower:%d: parameter "
-                        "requires a variable",
-                        n->line);
-                }
-            } else {
-                args[nargs++] = lower_expr(arg);
+        /* Collect the user arguments with their matching parameter nodes
+           (left to right), then evaluate them right to left.  Right-to-left
+           is FPC's argument evaluation order; matching it keeps the emitted
+           IR temp numbering identical to the reference front end.  Each
+           argument's value still lands in its positional slot in args[]. */
+        {
+            struct node *uargs[16], *uparams[16];
+            int ucount = 0;
+            int base, ui;
+            for (arg = n->b; arg; arg = arg->next) {
+                if (ucount >= 16)
+                    die("lower: too many args");
+                uargs[ucount] = arg;
+                uparams[ucount] = param;
+                ucount++;
+                if (param)
+                    param = param->next;
             }
-            if (param)
-                param = param->next;
+            base = nargs;
+            if (base + ucount > 16)
+                die("lower: too many args");
+            nargs += ucount;
+            for (ui = ucount - 1; ui >= 0; ui--) {
+                struct node *p = uparams[ui];
+                int slot = base + ui;
+                int pass_addr = 0;
+                arg = uargs[ui];
+                if (p && p->op == 1)
+                    pass_addr = 1;
+                else if (p && p->sval &&
+                         find_type(p->sval) &&
+                         !is_strlike_type_name(p->sval) &&
+                         !(resolve_type(p->sval) &&
+                           resolve_type(p->sval)->is_scalar))
+                    pass_addr = 1;
+                if (pass_addr && p && p->sval &&
+                    resolve_type(p->sval) &&
+                    resolve_type(p->sval)->is_set) {
+                    /* a set-typed value parameter: materialize the set
+                       expression and pass the address of the 32-byte value. */
+                    args[slot] = lower_set_addr(arg);
+                } else if (pass_addr) {
+                    if (arg->kind == N_NAME) {
+                        struct sym *vs;
+                        vs = find_sym(arg->name);
+                        if (!vs)
+                            die("lower:%d: undefined "
+                                "variable '%s'",
+                                n->line, arg->name);
+                        args[slot] = addr_sym(vs);
+                    } else if (arg->kind == N_DOT ||
+                               arg->kind == N_INDEX) {
+                        args[slot] = lower_lvalue_addr(arg);
+                    } else {
+                        die("lower:%d: parameter "
+                            "requires a variable",
+                            n->line);
+                    }
+                } else if (arg->kind == N_SET && p &&
+                           resolve_type(p->sval) &&
+                           resolve_type(p->sval)->is_dynarray) {
+                    /* an array constructor ([...] or []) passed to an
+                       open-array parameter builds a dynamic-array
+                       descriptor, not a set */
+                    args[slot] =
+                        lower_open_array_ctor(arg, resolve_type(p->sval));
+                } else {
+                    int av = lower_expr(arg);
+                    int pfw = p ? float_fw_of_name(p->sval) : -1;
+                    /* coerce a scalar argument to the parameter's width.  A
+                       string is a pointer value passed as-is (no integer
+                       coercion, which would truncate it on LP64). */
+                    if (p && is_strlike_type_name(p->sval))
+                        ;
+                    else if (pfw >= 0)
+                        av = to_float(av, pfw);
+                    else if (p && is_i64_type_name(p->sval))
+                        av = to_i64(av);
+                    else if (p && p->sval && is_i64(av))
+                        av = to_i32(av);
+                    else if (p && p->sval && is_float(av))
+                        av = float_to_int(av);
+                    args[slot] = av;
+                }
+            }
+        }
+        if (sret_is) {
+            /* void call; the result sits in the sret temporary, whose address
+               is the value of the call expression */
+            emit_call(call_name, args, nargs);
+            return emit_adl(sret_slot);
+        }
+        if (callee && callee->decl &&
+            callee->decl->kind == N_FUNCDECL) {
+            int rfw = float_fw_of_name(callee->decl->sval);
+            if (rfw >= 0)
+                return emit_call_retf(call_name, args, nargs, rfw);
+            if (is_i64_type_name(callee->decl->sval))
+                return emit_call_ret64(call_name, args, nargs);
+            if (is_strlike_type_name(callee->decl->sval))
+                return emit_str_new_call(call_name, args, nargs);
         }
         return emit_call_ret(call_name, args, nargs);
     }
@@ -2403,6 +4617,8 @@ user_call:
  * Statement lowering
  ****************************************************************/
 
+static void lower_stmt_inner(struct node *n);
+
 static void
 lower_stmts(struct node *n)
 {
@@ -2410,8 +4626,21 @@ lower_stmts(struct node *n)
         lower_stmt(n);
 }
 
+/* Lower one statement, then release the owned string temporaries it left
+   behind (intermediate concatenations, a string compared in a condition, an
+   argument built on the fly).  Loops that re-evaluate a condition release
+   its temporaries inside the loop as well, so the per-iteration values do not
+   accumulate; this wrapper then finds nothing more to drop. */
 static void
 lower_stmt(struct node *n)
+{
+    int mark = str_temp_mark();
+    lower_stmt_inner(n);
+    release_str_temps_to(mark);
+}
+
+static void
+lower_stmt_inner(struct node *n)
 {
     struct ir_insn *ins;
     int ltrue, lfalse, lend, ltop, lbrk;
@@ -2439,20 +4668,19 @@ lower_stmt(struct node *n)
         struct sym *s;
         const char *lhs_name;
 
+        /* self-append: x := x + e, where x is a string l-value.  Append e into
+           x's buffer in place when possible rather than allocating a fresh
+           concatenation and releasing the old value. */
+        if (n->b->kind == N_BINOP && n->b->op == T_PLUS &&
+            is_string_type(n->a) && same_lvalue(n->a, n->b->a)) {
+            lower_self_append(n->a, n->b->b);
+            return;
+        }
+
         if (n->a->kind == N_DOT || n->a->kind == N_INDEX) {
             const char *tn = lvalue_type_name(n->a);
-            struct type_def *td =
-                tn ? find_type(tn) : NULL;
-            if (td && td->is_string) {
-                int dst = lower_lvalue_addr(n->a);
-                int src = lower_str_addr(n->b);
-                int maxl = lower_const(td->maxlen);
-                int sargs[3];
-                sargs[0] = dst;
-                sargs[1] = src;
-                sargs[2] = maxl;
-                emit_call("__pascal_str_assign",
-                          sargs, 3);
+            if (tn && is_strlike_type_name(tn)) {
+                store_string_lvalue(n->a, lower_str_addr(n->b), str_rvalue_owned(n->b));
                 return;
             }
             {
@@ -2460,12 +4688,32 @@ lower_stmt(struct node *n)
                     lvalue_type_name(n->a->a);
                 struct type_def *ptd =
                     ptname ? find_type(ptname) : NULL;
-                int addr = lower_lvalue_addr(n->a);
+                int elem_i64 = is_i64_type_name(tn);
+                int elem_fw = float_fw_of_name(tn);
+                int addr;
+                /* s[i] := c mutates the buffer in place; make the string a
+                   private writable copy first (copy on write). */
+                if (n->a->kind == N_INDEX && ptd && ptd->is_string)
+                    make_string_unique(n->a->a);
+                /* evaluate the r-value before taking the destination address:
+                   the r-value may be a call that grows (reallocates) the very
+                   array this l-value indexes, which would move its base and
+                   leave an address computed first pointing into freed memory. */
                 val = lower_expr(n->b);
+                addr = lower_lvalue_addr(n->a);
                 if (ptd && ptd->is_string)
                     ins = emit(IR_SB);
-                else
+                else if (elem_fw >= 0) {
+                    val = to_float(val, elem_fw);
+                    ins = emit(IR_FSD);
+                    ins->imm = elem_fw;
+                } else if (elem_i64) {
+                    val = to_i64(val);
+                    ins = emit(IR_ST64);
+                } else {
+                    val = to_i32(val);
                     ins = emit(IR_SW);
+                }
                 ins->a = addr;
                 ins->b = val;
                 return;
@@ -2479,8 +4727,23 @@ lower_stmt(struct node *n)
         if (cur_func_name &&
             strcmp(lhs_name, cur_func_name) == 0 &&
             ret_slot >= 0) {
+            if (ret_is_str) {
+                int src = lower_str_addr(n->b);
+                emit_string_store(1, ret_slot, src,
+                                  str_rvalue_owned(n->b), ret_type_name);
+                return;
+            }
             val = lower_expr(n->b);
-            ins = emit(IR_STL);
+            if (ret_is_float) {
+                val = to_float(val, ret_fw);
+                ins = emit(IR_FSTL);
+                ins->a = val;
+                ins->slot = ret_slot;
+                ins->imm = ret_fw;
+                return;
+            }
+            val = ret_is_i64 ? to_i64(val) : to_i32(val);
+            ins = emit(ret_is_i64 ? IR_STL64 : IR_STL);
             ins->a = val;
             ins->slot = ret_slot;
             return;
@@ -2504,50 +4767,8 @@ lower_stmt(struct node *n)
 
         if (s->type_name) {
             struct type_def *td = find_type(s->type_name);
-            if (td && td->is_string) {
-                int dst = addr_sym(s);
-                int src = 0, maxl;
-                int args[3];
-                if (n->b->kind == N_STR) {
-                    char namebuf[32];
-                    int slen = n->b->slen;
-                    int ml = td->maxlen;
-                    int copylen = slen < ml ?
-                                  slen : ml;
-                    char *buf;
-                    struct ir_insn *lea;
-                    int padded = ((copylen + 1) +
-                                  3) & ~3;
-                    buf = arena_zalloc(lower_arena, padded);
-                    buf[0] = (char)copylen;
-                    memcpy(buf + 1, n->b->sval,
-                           copylen);
-                    snprintf(namebuf, sizeof(namebuf),
-                             "__str_%d", strctr++);
-                    add_string_global(namebuf, buf,
-                                      padded);
-                    lea = emit(IR_LEA);
-                    lea->dst = new_temp();
-                    lea->sym = arena_strdup(lower_arena,namebuf);
-                    src = lea->dst;
-                } else if (n->b->kind == N_NAME) {
-                    struct sym *rs;
-                    rs = find_sym(n->b->name);
-                    if (!rs)
-                        die("lower:%d: "
-                            "undefined '%s'",
-                            n->line,
-                            n->b->name);
-                    src = addr_sym(rs);
-                } else {
-                    src = lower_expr(n->b);
-                }
-                maxl = lower_const(td->maxlen);
-                args[0] = dst;
-                args[1] = src;
-                args[2] = maxl;
-                emit_call("__pascal_str_assign",
-                          args, 3);
+            if (is_strlike_type_name(s->type_name)) {
+                store_string_lvalue(n->a, lower_str_addr(n->b), str_rvalue_owned(n->b));
                 return;
             }
             if (td && td->is_set) {
@@ -2556,7 +4777,9 @@ lower_stmt(struct node *n)
                 emit_block_copy(dst, src, 32);
                 return;
             }
-            if (td) {
+            /* a genuine compound (record or fixed array); a scalar type such as
+               an enum, subrange or alias stores its value like any ordinal */
+            if (td && !td->is_scalar) {
                 int dst = addr_sym(s);
                 int src = 0;
                 if (n->b->kind == N_NAME) {
@@ -2569,18 +4792,27 @@ lower_stmt(struct node *n)
                 } else if (n->b->kind == N_DOT ||
                            n->b->kind == N_INDEX) {
                     src = lower_lvalue_addr(n->b);
+                } else if (n->b->kind == N_CALL) {
+                    /* a function returning a compound by value: the call
+                       yields the address of its sret result, whose managed
+                       members move into the destination */
+                    src = lower_call(n->b);
+                    emit_aggregate_move(dst, src, s->type_name,
+                                        td->total_size);
+                    return;
                 } else {
                     die("lower:%d: cannot copy compound "
                         "type from expression",
                         n->line);
                 }
-                emit_block_copy(dst, src, td->total_size);
+                emit_aggregate_copy(dst, src, s->type_name,
+                                    td->total_size);
                 return;
             }
         }
 
         val = lower_expr(n->b);
-        store_sym(s, val);
+        store_sym(s, val, str_rvalue_owned(n->b));
         return;
     }
 
@@ -2610,7 +4842,14 @@ lower_stmt(struct node *n)
         ltop = new_label();
         lbrk = new_label();
         emit_label(ltop);
-        emit_bz(lower_expr(n->a), lbrk);
+        {
+            /* evaluate the condition, release its string temporaries on both
+               the continue and exit paths (before the branch), then test */
+            int cm = str_temp_mark();
+            int c = lower_expr(n->a);
+            release_str_temps_to(cm);
+            emit_bz(c, lbrk);
+        }
         if (nloops >= 64)
             die("lower: nested loops too deep");
         loops[nloops].brk = lbrk;
@@ -2644,7 +4883,7 @@ lower_stmt(struct node *n)
         /* init: var := start */
         {
             int start = lower_expr(n->a);
-            store_sym(s, start);
+            store_sym(s, start, 0);
         }
 
         ltop_f = new_label();
@@ -2696,7 +4935,7 @@ lower_stmt(struct node *n)
             ins->a = cur_val;
             ins->b = step;
             result = ins->dst;
-            store_sym(s, result);
+            store_sym(s, result, 0);
         }
         emit_jmp(ltop_f);
         emit_label(lbrk_f);
@@ -2716,7 +4955,13 @@ lower_stmt(struct node *n)
         nloops++;
         lower_stmts(n->a);
         nloops--;
-        emit_bz(lower_expr(n->b), ltop_r);
+        {
+            /* release the until-condition's temporaries each iteration */
+            int cm = str_temp_mark();
+            int c = lower_expr(n->b);
+            release_str_temps_to(cm);
+            emit_bz(c, ltop_r);
+        }
         emit_label(lbrk_r);
         return;
     }
@@ -2816,10 +5061,8 @@ lower_stmt(struct node *n)
                 die("lower:%d: with requires a record",
                     n->line);
             base_addr = lower_lvalue_addr(w);
-            wslot = alloc_slot(4);
-            ins = emit(IR_STL);
-            ins->a = base_addr;
-            ins->slot = wslot;
+            wslot = alloc_slot(PC_PTR_BYTES);
+            emit_store_ptr(wslot, base_addr);
             if (nwith >= 16)
                 die("lower:%d: too many nested with",
                     n->line);
@@ -2859,22 +5102,36 @@ lower_const_section(struct node *consts)
             s.const_slen = c->a->slen;
             if (c->a->slen == 1)
                 s.const_val = (unsigned char)c->a->sval[0];
+            else
+                s.type_name = (char *)canonical_string_type_name();
         } else {
             s.const_val = const_eval(c->a);
         }
         push_sym(s);
     }
-    /* fixup array element sizes that couldn't resolve at registration */
+    /* fixup array bounds and element sizes that couldn't resolve at
+       registration (a forward-referenced ordinal index type or element type) */
     for (int i = 0; i < ntypes; i++) {
         struct type_def *t = &types[i];
+        if (t->is_array && t->index_type_name) {
+            struct type_def *it = resolve_type(t->index_type_name);
+            if (!it || !it->is_ordinal)
+                die("lower: array index type '%s' is not an ordinal type",
+                    t->index_type_name);
+            t->lo_bound = it->lo_bound;
+            t->hi_bound = it->hi_bound;
+        }
+        if (t->is_array && t->lo_expr) {
+            t->lo_bound = (int)const_eval(t->lo_expr);
+            t->hi_bound = (int)const_eval(t->hi_expr);
+        }
         if (t->is_array && t->elem_type_name) {
             struct type_def *et = find_type(t->elem_type_name);
-            if (et && et->total_size != t->elem_size) {
+            if (et)
                 t->elem_size = et->total_size;
-                t->total_size = (t->hi_bound - t->lo_bound + 1)
-                                * t->elem_size;
-            }
         }
+        if (t->is_array && !t->is_dynarray)
+            t->total_size = (t->hi_bound - t->lo_bound + 1) * t->elem_size;
     }
 }
 
@@ -2885,15 +5142,11 @@ lower_var_section(struct node *vars)
 
     for (v = vars; v; v = v->next) {
         struct sym s = {0};
-        int sz = 4;
+        int sz;
         s.name = v->name;
         s.is_local = 1;
         s.type_name = v->sval;
-        if (v->sval) {
-            struct type_def *td = find_type(v->sval);
-            if (td)
-                sz = td->total_size;
-        }
+        sz = type_bytes(v->sval);
         s.slot = alloc_slot(sz);
         push_sym(s);
     }
@@ -2910,36 +5163,13 @@ lower_var_inits(struct node *vars)
         struct sym *s = find_sym(v->name);
         if (!s)
             continue;
-        if (s->type_name && v->a->kind == N_STR) {
-            struct type_def *td = find_type(s->type_name);
-            if (td && td->is_string) {
-                char namebuf[32];
-                int slen = v->a->slen;
-                int ml = td->maxlen;
-                int copylen = slen < ml ? slen : ml;
-                int padded = ((copylen + 1) + 3) & ~3;
-                char *buf = arena_zalloc(lower_arena, padded);
-                struct ir_insn *lea;
-                int args[3];
-                buf[0] = (char)copylen;
-                memcpy(buf + 1, v->a->sval, copylen);
-                snprintf(namebuf, sizeof(namebuf),
-                         "__str_%d", strctr++);
-                add_string_global(namebuf, buf, padded);
-                lea = emit(IR_LEA);
-                lea->dst = new_temp();
-                lea->sym = arena_strdup(lower_arena, namebuf);
-                args[0] = addr_sym(s);
-                args[1] = lea->dst;
-                args[2] = lower_const(ml);
-                emit_call("__pascal_str_assign",
-                          args, 3);
-                continue;
-            }
+        if (is_strlike_type_name(s->type_name)) {
+            store_sym(s, lower_str_addr(v->a), str_rvalue_owned(v->a));
+            continue;
         }
         {
             int val = lower_expr(v->a);
-            store_sym(s, val);
+            store_sym(s, val, 0);
         }
     }
 }
@@ -2955,13 +5185,22 @@ lower_function(struct node *decl, int is_func,
     struct ir_func *fn, *saved_fn;
     struct ir_insn *ins;
     struct node *p, *d, *block;
-    int nparams, saved_nsyms, saved_nslots;
+    int nparams, saved_nsyms, saved_nslots, saved_slot_cap;
+    int *saved_slot_sizes;
     char *saved_func_name;
     int saved_ret_slot, saved_exit_label, saved_nloops, saved_nwith;
+    int saved_ret_is_i64, saved_ret_is_float, saved_ret_fw, saved_ret_is_str;
+    int saved_ret_is_compound, saved_ret_ptr_slot;
+    const char *saved_ret_type_name;
     const char *ir_name = decl->name;
+    int is_sret;
 
     {
-        struct sym *fs = find_sym(decl->name);
+        /* match the sym for THIS declaration, not just the name: overloads
+           share a name but each has its own mangled ir_name */
+        struct sym *fs = find_func_sym_by_decl(decl);
+        if (!fs)
+            fs = find_sym(decl->name);
         if (fs && fs->ir_name)
             ir_name = fs->ir_name;
     }
@@ -2977,14 +5216,48 @@ lower_function(struct node *decl, int is_func,
     nwith = 0;
     saved_func_name = cur_func_name;
     saved_ret_slot = ret_slot;
+    saved_ret_is_i64 = ret_is_i64;
+    saved_ret_is_float = ret_is_float;
+    saved_ret_fw = ret_fw;
+    saved_ret_is_str = ret_is_str;
+    saved_ret_is_compound = ret_is_compound;
+    saved_ret_ptr_slot = ret_ptr_slot;
+    saved_ret_type_name = ret_type_name;
     saved_exit_label = exit_label;
     exit_label = new_label();
 
     saved_nsyms = nsyms;
+    /* Isolate this function's slot allocation.  A nested procedure is lowered
+       while its parent's slots are live, and it shares the slot_sizes array;
+       without a fresh array it would overwrite the parent's slot sizes and
+       corrupt the parent's frame layout.  Save the array, start empty, and
+       restore it after copying this function's sizes out. */
+    saved_slot_sizes = slot_sizes;
     saved_nslots = nslots;
+    saved_slot_cap = slot_cap;
+    slot_sizes = NULL;
     nslots = 0;
+    slot_cap = 0;
 
     nparams = 0;
+
+    /* Per-parameter float classification (0 integer/pointer, 1 float) and the
+       single-precision flag, filled as params are built and threaded to the
+       backend below only if any parameter is a real. */
+    signed char pfcls[64] = {0};
+    signed char pffw[64] = {0};
+    int any_float_param = 0;
+
+    /* hidden sret parameter (passed as a pointer, before every other
+       argument): the caller's address for a record or array returned by
+       value.  The callee writes its result through this pointer. */
+    is_sret = is_func && type_is_sret(decl->sval);
+    if (is_sret) {
+        ret_ptr_slot = alloc_slot(PC_PTR_BYTES);
+        nparams++;
+    } else {
+        ret_ptr_slot = -1;
+    }
 
     /* hidden capture parameters (passed as pointers) */
     for (int i = 0; i < ncaps; i++) {
@@ -2992,7 +5265,7 @@ lower_function(struct node *decl, int is_func,
         s.name = caps[i];
         s.is_local = 1;
         s.is_var_param = 1;
-        s.slot = alloc_slot(4);
+        s.slot = alloc_slot(PC_PTR_BYTES);
         push_sym(s);
         nparams++;
     }
@@ -3000,27 +5273,82 @@ lower_function(struct node *decl, int is_func,
     for (p = decl->a; p; p = p->next) {
         struct sym s = {0};
         int is_compound = 0;
+        int receives_addr;
+        int pfw;
         s.name = p->name;
         s.is_local = 1;
         s.type_name = p->sval;
-        if (p->sval && find_type(p->sval))
+        /* A string is a pointer scalar, and an enum/subrange/alias is an
+           ordinal scalar: neither is a compound passed by address. */
+        if (p->sval && find_type(p->sval) && !is_strlike_type_name(p->sval) &&
+            !(resolve_type(p->sval) && resolve_type(p->sval)->is_scalar))
             is_compound = 1;
         if (p->op == 1)
             s.is_var_param = 1;
         else if (p->op == 2 && is_compound)
             s.is_var_param = 1;
-        s.slot = alloc_slot(4);
+        /* The caller passes an address for a `var` parameter or any
+           compound-typed parameter (see the pass_addr rule in lower_call),
+           so the incoming slot is pointer-sized.  A compound value parameter
+           arrives as an address and is copied to a local below. */
+        receives_addr = (p->op == 1) || is_compound;
+        pfw = (!receives_addr) ? float_fw_of_name(p->sval) : -1;
+        if (pfw >= 0) {
+            /* A real passed by value rides a float register; its home slot is
+               8 bytes (single or double), as in the C front end. */
+            s.slot = alloc_slot(8);
+            if (nparams < 64) {
+                pfcls[nparams] = 1;
+                pffw[nparams] = (pfw == FWIDTH_F32) ? 1 : 0;
+            }
+            any_float_param = 1;
+        } else {
+            s.slot = alloc_slot(receives_addr ? PC_PTR_BYTES
+                                              : type_bytes(p->sval));
+        }
         push_sym(s);
         nparams++;
     }
     fn->nparams = nparams;
 
+    /* Thread the float parameter classes to the register ABI.  Only needed when
+       a real parameter exists; integer and pointer params default to class 0. */
+    if (any_float_param && nparams <= 64) {
+        fn->param_class = arena_zalloc(lower_arena, nparams * sizeof(int));
+        fn->param_neb = arena_zalloc(lower_arena, nparams * sizeof(signed char));
+        fn->param_cls = arena_zalloc(lower_arena,
+                                     4 * nparams * sizeof(signed char));
+        fn->param_fw = arena_zalloc(lower_arena, nparams * sizeof(signed char));
+        for (int i = 0; i < nparams; i++) {
+            fn->param_neb[i] = 1;
+            fn->param_class[i] = pfcls[i];
+            fn->param_cls[4 * i] = pfcls[i];
+            fn->param_cls[4 * i + 1] = -1;
+            fn->param_cls[4 * i + 2] = -1;
+            fn->param_cls[4 * i + 3] = -1;
+            fn->param_fw[i] = pffw[i];
+        }
+    }
+
     /* function return value slot */
     if (is_func) {
         cur_func_name = decl->name;
-        ret_slot = alloc_slot(4);
+        ret_is_compound = is_sret;
+        ret_is_i64 = is_i64_type_name(decl->sval);
+        ret_fw = float_fw_of_name(decl->sval);
+        ret_is_float = ret_fw >= 0;
+        ret_is_str = is_strlike_type_name(decl->sval);
+        ret_type_name = decl->sval;
+        /* a compound result lives in the caller via ret_ptr_slot; only a
+           scalar/string result needs its own home slot */
+        ret_slot = is_sret ? -1 : alloc_slot(type_bytes(decl->sval));
     } else {
         cur_func_name = NULL;
+        ret_is_compound = 0;
+        ret_is_i64 = 0;
+        ret_is_float = 0;
+        ret_is_str = 0;
+        ret_type_name = NULL;
         ret_slot = -1;
     }
 
@@ -3058,7 +5386,7 @@ lower_function(struct node *decl, int is_func,
             struct ir_func *nfn;
             struct sym *fs;
 
-            if (d->is_forward)
+            if (d->is_forward || d->is_external)
                 continue;
             fs = find_sym(d->name);
             nfn = lower_function(d,
@@ -3070,47 +5398,101 @@ lower_function(struct node *decl, int is_func,
         }
     }
 
+    reset_ptr_flags();
     ins = emit(IR_FUNC);
     ins->sym = arena_strdup(lower_arena,ir_name);
     ins->nargs = nparams;
 
-    /* init return slot to 0 */
-    if (is_func) {
-        int zero = lower_const(0);
-        ins = emit(IR_STL);
-        ins->a = zero;
-        ins->slot = ret_slot;
+    /* init return slot to 0 (a compound result is pre-initialized by the
+       caller through the sret pointer, so it has no local slot to clear) */
+    if (is_func && !ret_is_compound) {
+        if (ret_is_float) {
+            int zero = lower_real_const(0.0, ret_fw);
+            ins = emit(IR_FSTL);
+            ins->a = zero;
+            ins->slot = ret_slot;
+            ins->imm = ret_fw;
+        } else if (ret_is_str) {
+            emit_store_ptr(ret_slot, emit_null_ptr());
+        } else {
+            int zero = ret_is_i64 ? lower_const64(0) : lower_const(0);
+            ins = emit(ret_is_i64 ? IR_STL64 : IR_STL);
+            ins->a = zero;
+            ins->slot = ret_slot;
+        }
     }
 
-    /* compound value params: copy from caller address to local slot */
+    /* string value parameters: the slot holds the caller's pointer by value.
+       Retain it so the callee owns its own reference, which matches value
+       semantics (the callee's mutations never reach the caller) and lets an
+       assignment release the previous value safely.  The reference is dropped
+       again on scope exit, below. */
+    for (p = decl->a; p; p = p->next) {
+        if (p->op != 0 || !p->sval)
+            continue;
+        if (is_strlike_type_name(p->sval)) {
+            struct sym *ps = find_sym(p->name);
+            int cur;
+            if (!ps)
+                continue;
+            cur = emit_load_ptr(ps->slot);
+            emit_store_ptr(ps->slot,
+                           emit_call_retptr("__pascal_str_retain",
+                                            &cur, 1));
+        }
+    }
+
+    /* compound value params: copy from caller address to local slot. */
     for (p = decl->a; p; p = p->next) {
         struct type_def *td;
         if (p->op != 0 || !p->sval)
             continue;
         td = find_type(p->sval);
-        if (!td)
+        /* a string or dynamic array is a pointer scalar handled by the retain
+           loop above, and an enum/subrange/alias is an ordinal scalar passed
+           by value: neither is a by-address compound to copy here. */
+        if (!td || is_strlike_type_name(p->sval) ||
+            (resolve_type(p->sval) && resolve_type(p->sval)->is_scalar))
             continue;
         {
             struct sym *ps = find_sym(p->name);
             int param_slot = ps->slot;
             int copy_slot = alloc_slot(td->total_size);
             int src_addr, dst_addr;
-            ins = emit(IR_LDL);
-            ins->dst = new_temp();
-            ins->slot = param_slot;
-            src_addr = ins->dst;
-            ins = emit(IR_ADL);
-            ins->dst = new_temp();
-            ins->slot = copy_slot;
-            dst_addr = ins->dst;
+            src_addr = emit_load_ptr(param_slot);
+            dst_addr = emit_adl(copy_slot);
             emit_block_copy(dst_addr, src_addr, td->total_size);
+            /* the callee's copy shares the caller's managed members; retain
+               them so it owns a reference, released again on scope exit */
+            if (type_has_managed(p->sval))
+                emit_managed_walk(dst_addr, p->sval, MGD_RETAIN);
             ps->slot = copy_slot;
             ps->is_var_param = 0;
         }
     }
 
+    /* null-init managed locals so an unassigned string reads as '' (a NULL
+       pointer) and a record or array's string members start empty rather than
+       as garbage pointers that scope-exit release would follow. */
     if (block && block->b)
+        for (struct node *vv = block->b; vv; vv = vv->next) {
+            struct sym *vs;
+            if (is_strlike_type_name(vv->sval)) {
+                vs = find_sym(vv->name);
+                if (vs)
+                    emit_store_ptr(vs->slot, emit_null_ptr());
+            } else if (type_has_managed(vv->sval)) {
+                vs = find_sym(vv->name);
+                if (vs)
+                    emit_managed_walk(emit_adl(vs->slot), vv->sval, MGD_NULL);
+            }
+        }
+
+    if (block && block->b) {
+        int m = str_temp_mark();
         lower_var_inits(block->b);
+        release_str_temps_to(m);
+    }
 
     /* reset again: a nested function lowered above shares last_loc_line, so
        the body must start fresh to mark its first statement's line (-g). */
@@ -3120,14 +5502,77 @@ lower_function(struct node *decl, int is_func,
 
     emit_label(exit_label);
 
+    /* Release managed string locals and retained string value parameters on
+       the way out; every exit path (fall-through or Exit) jumps here.  The
+       result slot is excluded: a string function result's reference belongs
+       to the caller.  Halt leaves through libc exit instead and does not run
+       these, which only matters to a leak checker, not to correctness. */
+    for (p = decl->a; p; p = p->next) {
+        struct sym *ps;
+        if (p->op != 0 || !p->sval)
+            continue;
+        if (is_strlike_type_name(p->sval)) {
+            int cur;
+            ps = find_sym(p->name);
+            if (!ps)
+                continue;
+            cur = emit_load_ptr(ps->slot);
+            emit_strlike_release(cur, p->sval);
+        } else if (type_has_managed(p->sval)) {
+            /* a record or array value parameter, retained on entry */
+            ps = find_sym(p->name);
+            if (ps)
+                emit_managed_walk(emit_adl(ps->slot), p->sval, MGD_RELEASE);
+        }
+    }
+    if (block && block->b)
+        for (struct node *vv = block->b; vv; vv = vv->next) {
+            struct sym *vs;
+            if (is_strlike_type_name(vv->sval)) {
+                int cur;
+                vs = find_sym(vv->name);
+                if (!vs)
+                    continue;
+                cur = emit_load_ptr(vs->slot);
+                emit_strlike_release(cur, vv->sval);
+            } else if (type_has_managed(vv->sval)) {
+                /* a record or array local with managed members */
+                vs = find_sym(vv->name);
+                if (vs)
+                    emit_managed_walk(emit_adl(vs->slot), vv->sval, MGD_RELEASE);
+            }
+        }
+
     /* emit return */
-    if (is_func) {
+    if (is_func && ret_is_compound) {
+        /* the result was written through the sret pointer; the caller holds
+           the destination address, so no value is returned in a register */
+        emit(IR_RET);
+    } else if (is_func) {
         int rv = new_temp();
-        ins = emit(IR_LDL);
-        ins->dst = rv;
-        ins->slot = ret_slot;
-        ins = emit(IR_RETV);
-        ins->a = rv;
+        if (ret_is_float) {
+            ins = emit(IR_FLDL);
+            ins->dst = rv;
+            ins->slot = ret_slot;
+            ins->imm = ret_fw;
+            mark_float(rv, ret_fw);
+            ins = emit(IR_FRETV);
+            ins->a = rv;
+            ins->imm = ret_fw;
+        } else if (ret_is_str) {
+            /* a heap string result is a pointer: return it at pointer width */
+            rv = emit_load_ptr(ret_slot);
+            ins = emit(PC_LP64_ON ? IR_RETV64 : IR_RETV);
+            ins->a = rv;
+        } else {
+            ins = emit(ret_is_i64 ? IR_LDL64 : IR_LDL);
+            ins->dst = rv;
+            ins->slot = ret_slot;
+            if (ret_is_i64)
+                mark_i64(rv);
+            ins = emit(ret_is_i64 ? IR_RETV64 : IR_RETV);
+            ins->a = rv;
+        }
     } else {
         emit(IR_RET);
     }
@@ -3139,11 +5584,21 @@ lower_function(struct node *decl, int is_func,
     if (nslots)
         memcpy(fn->slot_size, slot_sizes, nslots * sizeof(int));
 
+    free(slot_sizes);
+    slot_sizes = saved_slot_sizes;
+    slot_cap = saved_slot_cap;
     nsyms = saved_nsyms;
     nslots = saved_nslots;
     cur_fn = saved_fn;
     cur_func_name = saved_func_name;
     ret_slot = saved_ret_slot;
+    ret_is_i64 = saved_ret_is_i64;
+    ret_is_float = saved_ret_is_float;
+    ret_fw = saved_ret_fw;
+    ret_is_str = saved_ret_is_str;
+    ret_is_compound = saved_ret_is_compound;
+    ret_ptr_slot = saved_ret_ptr_slot;
+    ret_type_name = saved_ret_type_name;
     exit_label = saved_exit_label;
     nloops = saved_nloops;
     nwith = saved_nwith;
@@ -3176,6 +5631,9 @@ lower_program(struct arena *a, struct node *ast)
        with_field_addr would then dereference. */
     nwith = 0;
     nloops = 0;
+    nelem_fns = 0;
+    gen_funcs = NULL;
+    gen_ftail = &gen_funcs;
 
     if (!ast || ast->kind != N_PROGRAM)
         die("lower: expected program node");
@@ -3196,10 +5654,19 @@ lower_program(struct arena *a, struct node *ast)
         g = arena_zalloc(lower_arena, sizeof(*g));
         g->name = arena_strdup(lower_arena, d->name);
         g->base_type = IR_I32;
-        if (d->sval) {
-            vtd = find_type(d->sval);
-            if (vtd)
-                g->arr_size = vtd->total_size / 4;
+        {
+            int gfw = d->sval ? float_fw_of_name(d->sval) : -1;
+            if (gfw == FWIDTH_F32) {
+                g->base_type = IR_F32;
+            } else if (gfw == 0) {
+                g->base_type = IR_F64;
+            } else if (d->sval) {
+                vtd = find_type(d->sval);
+                if (vtd)
+                    g->arr_size = vtd->total_size / 4;
+                else if (is_i64_type_name(d->sval))
+                    g->arr_size = 2;    /* 8 bytes, two i32 words */
+            }
         }
         if (vtd && vtd->is_set) {
             g->base_type = IR_I8;
@@ -3236,22 +5703,65 @@ lower_program(struct arena *a, struct node *ast)
             push_sym(s);
             continue;
         }
+        if (vtd && vtd->is_dynarray) {
+            /* a dynamic array global is a single pointer word, NULL (the empty
+               array) until SetLength or assignment gives it a descriptor. */
+            g->base_type = PC_LP64_ON ? IR_I64 : IR_I32;
+            g->is_ptr = 1;
+            g->arr_size = 1;
+            g->init_ivals = NULL;
+            g->init_count = 0;
+            g->next = prog->globals;
+            prog->globals = g;
+            s.name = d->name;
+            s.is_local = 0;
+            s.type_name = d->sval;
+            push_sym(s);
+            continue;
+        }
         if (vtd && vtd->is_string) {
-            int ml = vtd->maxlen;
-            int tsz = vtd->total_size;
-            g->base_type = IR_I8;
-            g->arr_size = tsz;
+            /* a heap string global is a single pointer word, NULL (the empty
+               string) unless initialized with a literal, in which case it
+               points at a static strobj object. */
+            g->base_type = PC_LP64_ON ? IR_I64 : IR_I32;
+            g->is_ptr = 1;
+            g->arr_size = 1;
+            g->init_ivals = NULL;
+            g->init_count = 0;
             if (d->a && d->a->kind == N_STR) {
+                struct ir_global *lit = arena_zalloc(lower_arena,
+                                                     sizeof(*lit));
+                char litname[32];
                 int slen = d->a->slen;
-                int copylen = slen < ml ? slen : ml;
-                g->init_ivals = arena_zalloc(lower_arena, (copylen + 1) *
-                    sizeof(*g->init_ivals));
-                g->init_ivals[0] = copylen;
-                for (int i = 0; i < copylen; i++)
-                    g->init_ivals[i + 1] =
-                        (unsigned char)d->a->sval[i];
-                g->init_count = copylen + 1;
+                snprintf(litname, sizeof(litname), "__str_%d", strctr++);
+                lit->name = arena_strdup(lower_arena, litname);
+                lit->base_type = IR_I8;
+                lit->is_local = 1;
+                lit->is_rodata = 1;
+                lit->is_strobj = 1;
+                lit->init_string = arena_alloc(lower_arena,
+                                               slen ? slen : 1);
+                if (slen)
+                    memcpy(lit->init_string, d->a->sval, slen);
+                lit->init_strlen = slen;
+                lit->next = prog->globals;
+                prog->globals = lit;
+                g->init_syms = arena_zalloc(lower_arena,
+                                            sizeof(char *));
+                g->init_syms[0] = arena_strdup(lower_arena, litname);
+                g->init_ivals = arena_zalloc(lower_arena,
+                                             sizeof(*g->init_ivals));
+                g->init_ivals[0] = 0;
+                g->init_count = 1;
             }
+        } else if (d->a && d->a->kind == N_INITLIST &&
+                   vtd && type_has_managed(d->sval)) {
+            /* an array or record constant with string members: a relocatable
+               byte image whose string slots point at static strobj literals */
+            struct ir_init **itail = &g->inits;
+            build_const_image(d->a, d->sval, 0, &itail, d->line);
+            g->base_type = IR_I8;
+            g->arr_size = vtd->total_size;
         } else if (d->a && d->a->kind == N_INITLIST) {
             int cnt = count_init_list(d->a);
             int pos = 0;
@@ -3266,11 +5776,38 @@ lower_program(struct arena *a, struct node *ast)
                 g->init_ivals[i] =
                     (unsigned char)d->a->sval[i];
             g->init_count = slen;
+        } else if (d->a && is_float_type_name(d->sval)) {
+            double dv = d->a->kind == N_REAL ? d->a->fval
+                                             : (double)const_eval(d->a);
+            g->init_ivals = arena_zalloc(lower_arena, sizeof(*g->init_ivals));
+            if (float_fw_of_name(d->sval) == FWIDTH_F32) {
+                union { float f; int32_t i; } u;
+                u.f = (float)dv;
+                g->init_ivals[0] = u.i;
+            } else {
+                union { double d; int64_t i; } u;
+                u.d = dv;
+                g->init_ivals[0] = u.i;
+            }
+            g->init_count = 1;
+        } else if (d->a && is_i64_type_name(d->sval)) {
+            long long v = const_eval(d->a);
+            g->init_ivals = arena_zalloc(lower_arena, 2 * sizeof(*g->init_ivals));
+            g->init_ivals[0] = (int)(v & 0xFFFFFFFF);
+            g->init_ivals[1] = (int)((v >> 32) & 0xFFFFFFFF);
+            g->init_count = 2;
         } else if (d->a) {
             g->init_ivals = arena_zalloc(lower_arena, 1 * sizeof(*g->init_ivals));
             g->init_ivals[0] = const_eval(d->a);
             g->init_count = 1;
         }
+        /* On LP64 a record or array global holding a managed string member must
+           be pointer-aligned so the member sits on a natural 8-byte boundary.
+           Besides correctness this lets a conservative leak checker see the
+           heap pointer as a root, since such a global is never released. */
+        if (PC_LP64_ON && vtd && type_has_managed(d->sval) &&
+            g->align < PC_PTR_BYTES)
+            g->align = PC_PTR_BYTES;
         g->next = prog->globals;
         prog->globals = g;
 
@@ -3280,12 +5817,19 @@ lower_program(struct arena *a, struct node *ast)
         push_sym(s);
     }
 
-    /* register all procedures/functions in symbol table */
+    /* register all procedures/functions in symbol table, giving an overloaded
+       name a distinct mangled ir_name per signature */
     for (d = block->c; d; d = d->next) {
         struct sym s = {0};
         s.name = d->name;
         s.is_func = 1;
         s.decl = d;
+        if (d->is_external)
+            /* a host import links by its exact source spelling, not lowercased
+               or overload-mangled (the C runtime exports e.g. ReadFileStr) */
+            s.ir_name = d->raw_name ? d->raw_name : d->name;
+        else
+            s.ir_name = overload_ir_name(d, block->c);
         push_sym(s);
     }
 
@@ -3295,8 +5839,8 @@ lower_program(struct arena *a, struct node *ast)
 
     /* lower each procedure/function */
     for (d = block->c; d; d = d->next) {
-        if (d->is_forward)
-            continue;
+        if (d->is_forward || d->is_external)
+            continue;       /* no body: a forward or a host import */
         fn = lower_function(d, d->kind == N_FUNCDECL,
                             NULL, 0);
         *ftail = fn;
@@ -3325,9 +5869,27 @@ lower_program(struct arena *a, struct node *ast)
         /* main block may have its own locals (though unusual) */
         sym_base = nsyms;
 
-        ins = emit(IR_FUNC);
-        ins->sym = arena_strdup(lower_arena,"main");
-        ins->nargs = 0;
+        /* main(argc, argv): two incoming argument slots so the program can read
+           the command line (ParamStr/ParamCount).  A freestanding host that
+           passes none leaves them unused. */
+        {
+            int argc_slot = alloc_slot(4);
+            int argv_slot = alloc_slot(PC_PTR_BYTES);
+            nparams = 2;
+            reset_ptr_flags();
+            ins = emit(IR_FUNC);
+            ins->sym = arena_strdup(lower_arena, "main");
+            ins->nargs = 2;
+            {
+                int sargs[2];
+                struct ir_insn *ld = emit(IR_LDL);
+                ld->dst = new_temp();
+                ld->slot = argc_slot;
+                sargs[0] = ld->dst;
+                sargs[1] = emit_load_ptr(argv_slot);
+                emit_call("__pascal_set_args", sargs, 2);
+            }
+        }
 
         if (block->d)
             lower_stmt(block->d);
@@ -3354,7 +5916,12 @@ lower_program(struct arena *a, struct node *ast)
         }
 
         *ftail = main_fn;
+        ftail = &main_fn->next;
     }
+
+    /* append element finalize/retain functions generated for arrays of managed
+       elements (all produced during the lowering above) */
+    *ftail = gen_funcs;
 
     free(syms);
     syms = NULL;
