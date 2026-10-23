@@ -1085,6 +1085,14 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
     }
 
+    case IR_LABADDR: {
+        const char *sd = rd(fn, i->dst, 0);
+        fprintf(out, "\tlea .L%d_%d, %%a0\n", label_prefix, i->label);
+        fprintf(out, "\tmove.l %%a0, %s\n", sd);
+        wd(out, fn, i->dst, sd);
+        break;
+    }
+
     case IR_ADL: {
         const char *sd = rd(fn, i->dst, 0);
         int off = slot_offset(fn, i->slot);
@@ -1206,6 +1214,12 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_JMP:
         fprintf(out, "\tbra .L%d_%d\n", label_prefix, i->label);
         break;
+    case IR_IJMP: {
+        const char *sa = rs(out, fn, i->a, 0);
+        fprintf(out, "\tmove.l %s, %%a0\n", sa);
+        fprintf(out, "\tjmp (%%a0)\n");
+        break;
+    }
     case IR_BZ:
     case IR_BNZ: {
         const char *bcc = (i->op == IR_BZ) ? "beq" : "bne";

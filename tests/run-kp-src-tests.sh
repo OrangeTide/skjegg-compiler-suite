@@ -89,6 +89,43 @@ run_one() {
     expcode=0
     [ -f "$SRCDIR/$name.exitcode" ] && expcode=$(cat "$SRCDIR/$name.exitcode")
 
+    # A .experror fixture is a compile-fail test: the front end must reject the
+    # source, and its stderr must contain every non-blank, non-'#' line of the
+    # fixture as a fixed substring (the .experror convention shared with
+    # tests/kp and the Excelsior suite).  It is compile-only, so it runs the
+    # same way in every mode, using the mode's front end.
+    errspec="$SRCDIR/$name.experror"
+    if [ -f "$errspec" ]; then
+        # the mode's front end (the jit compiler runs under the emulator; the aot
+        # and free front ends are native host binaries, so no emulator prefix)
+        case "$MODE" in
+        jit) comp="$JIT"; pre="$QEMU" ;;
+        *)   comp="$FRONTEND"; pre="" ;;
+        esac
+        set +e
+        $pre "$comp" --emit-kpm "$pas" >"$out" 2>"$err"
+        got=$?
+        set -e
+        if [ "$got" -eq 0 ]; then
+            ok=0; reason="compiled, expected a compile error"
+        else
+            while IFS= read -r want; do
+                case $want in '' | '#'*) continue ;; esac
+                if ! grep -qF -- "$want" "$err"; then
+                    ok=0; reason="${reason:+$reason; }missing: $want"
+                fi
+            done < "$errspec"
+        fi
+        if [ "$ok" -eq 1 ]; then
+            pass=$((pass + 1))
+        else
+            fail=$((fail + 1))
+            printf 'FAIL %s: %s\n' "$name" "$reason"
+            [ -s "$err" ] && sed 's/^/    /' "$err"
+        fi
+        return
+    fi
+
     case "$MODE" in
     frontend)
         set +e

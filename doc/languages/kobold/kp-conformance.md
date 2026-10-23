@@ -55,7 +55,8 @@ a conformance claim.
 | `set of` an ordinal base | Done | |
 | `packed` structures | Omitted | No `packed` keyword; layout is the host's concern. |
 | `file of T` and `text` | Omitted | No file type. File input is a host `external` primitive. |
-| Pointer types (`^T`), `@`, `nil` pointers | Omitted | No pointers by design. Host objects are opaque handles; `nil` is the empty handle. |
+| Pointer types (`^T`), `nil` pointers | Omitted | No pointers by design. Host objects are opaque handles; `nil` is the empty handle. |
+| `@` address-of | Extension (labels only) | `@name` takes the address of a code label, yielding a second-class `label` value for a computed `goto` (threaded dispatch). It is not a general address-of: the only operand is a label name. |
 
 ### Constants and expressions
 
@@ -78,7 +79,7 @@ a conformance claim.
 | `case` on an ordinal | Done | Labels may be ranges. |
 | `while`, `repeat` / `until`, `for` (`to` / `downto`) | Done | For-counter is undefined after the loop. |
 | `with` | Done | |
-| `goto` / labels | Omitted | No `goto`; structured `break` and `continue` instead. |
+| `goto` / labels | Computed form only (extension) | No unstructured `goto`: a bare `goto name` is a compile error, and `break` / `continue` remain the structured exits. A `name:` label and `goto EXPR` where `EXPR` is a `label` value (from `@name`) give the threaded-dispatch primitive `goto table[token]`. The `label` value is second-class (local frame only), so a computed jump always lands in a live frame. |
 
 ### Routines
 
@@ -203,7 +204,9 @@ What remains is polish and packaging, not language surface:
 
 Deliberate omissions that are unlikely to change. Some conflict with the embedded,
 sandboxed, no-pointer design: pointers and `new` / `dispose`, `file` / `text` types,
-`goto` / labels, `packed`, and a class model with exceptions. A host reaches these
+unstructured `goto`, `packed`, and a class model with exceptions. (Labels and a
+computed `goto` through a second-class `label` value are supported for threaded
+dispatch, but a bare `goto name` stays omitted.) A host reaches these
 capabilities on the script's behalf through the FFI and handles. Another omission is
 the `write` / `read` field-width and precision formatting (`x:width[:decimals]`),
 where a script formats through the string builtins or a host routine instead.

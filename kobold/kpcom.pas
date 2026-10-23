@@ -30,6 +30,9 @@ type
     tkIf, tkIn, tkInterface, tkMod, tkNil, tkNot, tkOf, tkOr, tkProcedure,
     tkProgram, tkRecord, tkRepeat, tkStart, tkSet, tkBind, tkString, tkThen,
     tkTo, tkType, tkUntil, tkVar, tkWhile, tkWith, tkYield,
+    { threaded-code dispatch: `label` value type, `goto` computed jump
+      (doc/languages/kobold/kp-grammar.md, the `label` type) }
+    tkGoto, tkLabel,
     { the units surface (doc/languages/kobold/kp-units.md), implemented; `property` is reserved for the
       deferred uniform-access feature (doc/languages/kobold/kp-property.md) }
     tkImplementation, tkProperty, tkShared, tkUnit, tkUses, tkReexport, tkAs,
@@ -42,7 +45,7 @@ type
     tkImplement,
     { punctuation and operators }
     tkAssign, tkColon, tkSemicolon, tkComma, tkDot, tkDotDot,
-    tkUnderscore,
+    tkUnderscore, tkAt,
     tkLParen, tkRParen, tkLBracket, tkRBracket,
     tkEq, tkNeq, tkLt, tkLe, tkGt, tkGe,
     tkPlus, tkMinus, tkStar, tkSlash,
@@ -93,6 +96,10 @@ type
     nkCompound, nkEmpty, nkAssign, nkCallStmt, nkIf, nkWhile, nkFor, nkRepeat,
     nkCase, nkCaseElement, nkWith, nkBreak, nkContinue, nkStart, nkYield,
     nkBind,
+    { threaded-code dispatch (doc/languages/kobold/kp-grammar.md, the `label` type):
+      nkLabelStmt is a `name:` labeled statement, nkGoto a computed `goto EXPR`,
+      nkLabelAddr an `@name` label-address expression }
+    nkLabelStmt, nkGoto, nkLabelAddr,
     nkBinary, nkUnary, nkIntLit, nkRealLit, nkStrLit, nkNil, nkIdent,
     nkField, nkIndex, nkCall, nkSetConstructor, nkSetElement, nkAggregate,
     nkRecordLit, nkFieldInit,
@@ -130,7 +137,10 @@ type
   TSemKind = (
     skError, skVoid, skInteger, skReal, skBoolean, skChar, skString,
     skProcess, skNil, skEnum, skSubrange, skArray, skRecord, skSet,
-    skInterface, skProc, skMap, skMapIter, skErrorVal
+    skInterface, skProc, skMap, skMapIter, skErrorVal,
+    { the code-address value type of the threaded-dispatch primitive
+      (doc/languages/kobold/kp-grammar.md, the `label` type); second-class }
+    skLabel
   );
 
   TSemType = record
@@ -235,18 +245,19 @@ const
     'tkNot', 'tkOf', 'tkOr', 'tkProcedure', 'tkProgram', 'tkRecord', 'tkRepeat',
     'tkStart', 'tkSet', 'tkBind', 'tkString', 'tkThen', 'tkTo', 'tkType',
     'tkUntil', 'tkVar', 'tkWhile', 'tkWith', 'tkYield',
+    'tkGoto', 'tkLabel',
     'tkImplementation', 'tkProperty', 'tkShared', 'tkUnit', 'tkUses',
     'tkReexport', 'tkAs',
     'tkRef', 'tkSlice', 'tkBuffer', 'tkMap', 'tkImplement',
     'tkAssign', 'tkColon', 'tkSemicolon', 'tkComma', 'tkDot', 'tkDotDot',
-    'tkUnderscore',
+    'tkUnderscore', 'tkAt',
     'tkLParen', 'tkRParen', 'tkLBracket', 'tkRBracket',
     'tkEq', 'tkNeq', 'tkLt', 'tkLe', 'tkGt', 'tkGe',
     'tkPlus', 'tkMinus', 'tkStar', 'tkSlash',
     'tkShl', 'tkShr'
   );
 
-  KeywordCount = 54;
+  KeywordCount = 56;
   Keywords: array[1..KeywordCount] of TKeyword = (
     (Name: 'and';       Kind: tkAnd),
     (Name: 'array';     Kind: tkArray),
@@ -267,11 +278,13 @@ const
     (Name: 'for';       Kind: tkFor),
     (Name: 'forward';   Kind: tkForward),
     (Name: 'function';  Kind: tkFunction),
+    (Name: 'goto';      Kind: tkGoto),
     (Name: 'if';        Kind: tkIf),
     (Name: 'implement';  Kind: tkImplement),
     (Name: 'implementation'; Kind: tkImplementation),
     (Name: 'in';        Kind: tkIn),
     (Name: 'interface'; Kind: tkInterface),
+    (Name: 'label';     Kind: tkLabel),
     (Name: 'map';       Kind: tkMap),
     (Name: 'mod';       Kind: tkMod),
     (Name: 'nil';       Kind: tkNil),
@@ -316,6 +329,7 @@ const
     'Compound', 'Empty', 'Assign', 'CallStmt', 'If', 'While', 'For', 'Repeat',
     'Case', 'CaseElement', 'With', 'Break', 'Continue', 'Start', 'Yield',
     'Bind',
+    'LabelStmt', 'Goto', 'LabelAddr',
     'Binary', 'Unary', 'IntLit', 'RealLit', 'StrLit', 'Nil', 'Ident',
     'Field', 'Index', 'Call', 'SetConstructor', 'SetElement', 'Aggregate',
     'RecordLit', 'FieldInit',
@@ -335,11 +349,11 @@ const
     [tkConst, tkType, tkVar, tkProcedure, tkFunction, tkImplement, tkProperty];
   StmtStart:    set of TTokenKind =
     [tkBegin, tkIf, tkWhile, tkFor, tkRepeat, tkCase, tkWith, tkStart, tkBind,
-     tkYield, tkBreak, tkContinue, tkIdent];
+     tkYield, tkBreak, tkContinue, tkGoto, tkIdent];
   StmtTerm:     set of TTokenKind = [tkEnd, tkUntil, tkEOF];
   ExprStart:    set of TTokenKind =
     [tkIntLit, tkRealLit, tkStrLit, tkNil, tkLParen, tkNot, tkLBracket,
-     tkStart, tkBind, tkYield, tkIdent, tkPlus, tkMinus];
+     tkStart, tkBind, tkYield, tkIdent, tkPlus, tkMinus, tkAt];
 
 { ---- Global variables ---- }
 
@@ -383,6 +397,18 @@ var
   SymIdxNext: array of LongInt;     { entry -> next entry in the same bucket }
   SymIdxCount: LongInt;             { number of membership entries in use }
   LoopDepth: LongInt;     { > 0 inside a loop, for break/continue }
+  { Per-routine label table for threaded dispatch (the `name:` / `@name` / `goto`
+    surface). Entries are scoped to the current routine by LabelBase: a nested
+    routine raises LabelBase to the current count on entry and restores it on
+    exit, so @name and a label definition only ever see the current routine's
+    labels. Used in both passes: sema sets LabelDefd (name resolution and the
+    second-class checks), lowering sets LabelIrId (name -> IR label id, shared by
+    the label definition and every @name so forward references resolve). }
+  LabelBase, LabelCount: LongInt;
+  LabelNames: array of string;
+  LabelIrId: array of LongInt;
+  LabelDefd: array of Boolean;
+  LabelNode: array of LongInt;   { the node that first mentioned the label, for diagnostics }
   CurFailable: Boolean;   { true while analyzing a failable routine's body, for `or fail` / `fail` }
   FailTargetNode: LongInt;{ the call node currently analyzed as a fail-form target, for must-consume }
   StartDepth: LongInt;    { > 0 inside a start body, for yield/bind }
@@ -440,6 +466,8 @@ var
   tyInt64: LongInt;     { 64-bit integer; tyInt is 32-bit }
   tyText: LongInt;      { a text stream; Output and ErrOutput are its only values }
   tyMapIter: LongInt;   { a map iterator handle, produced by MapFirst, advanced by MapNext }
+  tyLabel: LongInt;     { the `label` code-address value type; second-class, @name makes it,
+                          computed `goto` consumes it (doc/languages/kobold/kp-grammar.md) }
   tyErrorVal: LongInt;  { the language `error` type for failable routines; opaque, an i32 code
                           for now (0 = success), built by fail() and read by code(). Distinct
                           from tyErr, the compiler's internal bottom type. See doc/languages/kobold/kp-errors.md }
@@ -501,6 +529,58 @@ begin
       Exit;
     end;
   SameTextCI := True;
+end;
+
+{ ---- Per-routine label table (threaded-dispatch primitive) ---- }
+
+function LabelFind(const name: string): LongInt;
+{ the label of this name in the current routine, or -1 (case-insensitive,
+  searching only [LabelBase, LabelCount) so a nested routine cannot see an
+  outer label) }
+var
+  i: LongInt;
+begin
+  LabelFind := -1;
+  for i := LabelBase to LabelCount - 1 do
+    if SameTextCI(LabelNames[i], name) then begin LabelFind := i; Exit; end;
+end;
+
+function LabelIntern(const name: string; node: LongInt): LongInt;
+{ the label of this name in the current routine, creating the entry (with no
+  IR id yet and undefined) if it is the first mention; node is recorded for a
+  diagnostic when the label turns out never to be defined }
+begin
+  LabelIntern := LabelFind(name);
+  if LabelIntern >= 0 then Exit;
+  if LabelCount > High(LabelNames) then begin
+    SetLength(LabelNames, LabelCount * 2 + 8);
+    SetLength(LabelIrId, LabelCount * 2 + 8);
+    SetLength(LabelDefd, LabelCount * 2 + 8);
+    SetLength(LabelNode, LabelCount * 2 + 8);
+  end;
+  LabelNames[LabelCount] := name;
+  LabelIrId[LabelCount] := -1;
+  LabelDefd[LabelCount] := False;
+  LabelNode[LabelCount] := node;
+  LabelIntern := LabelCount;
+  Inc(LabelCount);
+end;
+
+function TypeMentionsLabel(ty: LongInt): Boolean;
+{ true when ty is the `label` type or a container (array/buffer/map/set) whose
+  element is label-bearing. It does not recurse through a record, because a
+  record field that mentions label is rejected when that record is declared, so
+  a record is always label-free by the time it is named here (this also keeps a
+  recursive record type from looping). Used to keep a label value second-class:
+  it may be only a local variable or a routine-local array of label, never a
+  global, a field, a parameter, a return, or a map/set element. }
+begin
+  TypeMentionsLabel := False;
+  if (ty < 0) or (ty >= SemCount) then Exit;
+  case SemTypes[ty].Kind of
+    skLabel: TypeMentionsLabel := True;
+    skArray, skMap, skSet: TypeMentionsLabel := TypeMentionsLabel(SemTypes[ty].Base);
+  end;
 end;
 
 { The last segment of a dotted unit name is its default qualifier: core.strings
@@ -1220,6 +1300,7 @@ begin
     '-': begin Tok.Kind := tkMinus; Tok.Text := '-'; Adv; end;
     '*': begin Tok.Kind := tkStar; Tok.Text := '*'; Adv; end;
     '/': begin Tok.Kind := tkSlash; Tok.Text := '/'; Adv; end;
+    '@': begin Tok.Kind := tkAt; Tok.Text := '@'; Adv; end;
   else
     begin
       LexError(CurLine, CurCol, 'unexpected character ''' + c + '''');
@@ -1593,6 +1674,13 @@ begin
     tkNot: begin
       n := NewNode(nkUnary); Nodes[n].Op := tkNot; NextToken;
       Nodes[n].A := ParseFactor();   { () forces the recursive call }
+    end;
+    tkAt: begin
+      { `@name` takes the address of a label in the current routine, yielding a
+        `label` value for a computed `goto`. The only legal operand is a label
+        name (checked in sema). }
+      n := NewNode(nkLabelAddr); NextToken;
+      Nodes[n].Text := EatIdent('a label name after ''@''');
     end;
     tkLBracket: n := ParseSetConstructor;
     tkStart: n := ParseStart;
@@ -2007,6 +2095,10 @@ begin
     tkString: begin
       n := NewNode(nkTypeRef); Nodes[n].Text := 'string'; NextToken;
     end;
+    tkLabel: begin
+      { the `label` code-address type (threaded dispatch); resolved to tyLabel }
+      n := NewNode(nkTypeRef); Nodes[n].Text := 'label'; NextToken;
+    end;
     tkIdent: begin
       name := Tok.StrVal; ln := Tok.Line; cl := Tok.Col; NextToken;
       if Tok.Kind = tkLParen then begin
@@ -2116,6 +2208,18 @@ begin
   { A statement may nest another statement. The recursive calls use () because a
     bare function name inside its own body denotes the result variable, not a
     call. }
+  { a `name:` label prefix (threaded dispatch): an identifier immediately
+    followed by a lone colon names the statement that follows as a jump target.
+    Told apart from an assignment (`name :=`) and a call (`name(` / `name.`) by
+    the single colon. }
+  if (Tok.Kind = tkIdent) and (PeekTokenKind = tkColon) then begin
+    n := NewNode(nkLabelStmt);
+    Nodes[n].Text := Tok.StrVal; NextToken;   { the label name }
+    Expect(tkColon);
+    Nodes[n].A := ParseStatement();           { the labeled statement }
+    ParseStatement := n;
+    Exit;
+  end;
   case Tok.Kind of
     tkBegin: n := ParseCompound;
     tkIf: begin
@@ -2159,6 +2263,13 @@ begin
     tkYield: n := ParseYield;
     tkBreak: begin n := NewNode(nkBreak); NextToken; end;
     tkContinue: begin n := NewNode(nkContinue); NextToken; end;
+    tkGoto: begin
+      { a computed jump: `goto EXPR` where EXPR has type label. A bare
+        `goto name` to a label identifier is rejected in sema, so there is no
+        unstructured goto. }
+      n := NewNode(nkGoto); NextToken;
+      Nodes[n].A := ParseExpression;
+    end;
     tkIdent: begin
       d := ParseDesignator;
       if Accept(tkAssign) then begin
@@ -2916,6 +3027,7 @@ begin
     skErrorVal:  TypeName := 'error';
     skInterface: TypeName := 'interface';
     skProc:      TypeName := 'procedure';
+    skLabel:     TypeName := 'label';
     skNil:       TypeName := 'nil';
     skError:     TypeName := '<error>';
   else
@@ -3774,6 +3886,8 @@ begin
     nkSetType: begin
       ty := NewSemType(skSet);
       SemTypes[ty].Base := ResolveType(Nodes[node].A);
+      if TypeMentionsLabel(SemTypes[ty].Base) then
+        SemErr(node, 'a ''label'' value cannot be a set element');
       ResolveType := ty;
     end;
     nkMapType: begin
@@ -3783,6 +3897,8 @@ begin
         reference-free, so its slot needs no handle layout. }
       ty := NewSemType(skMap);
       SemTypes[ty].Base := ResolveType(Nodes[node].A);
+      if TypeMentionsLabel(SemTypes[ty].Base) then
+        SemErr(node, 'a ''label'' value cannot be a map value');
       s := SemTypes[ty].Base;
       if not ((s >= 0) and (s < SemCount) and
               ((SemTypes[s].Kind in [skInteger, skBoolean, skChar, skEnum, skSubrange,
@@ -3798,6 +3914,11 @@ begin
         f := Nodes[node].Kids[i];
         if Nodes[f].Kind = nkFieldDecl then begin
           fld := ResolveType(Nodes[f].A);
+          { a `label` value is second-class: a record field would let it escape
+            the frame, so it may not be a field (nor an array-of-label field) }
+          if TypeMentionsLabel(fld) then
+            SemErr(f, 'a ''label'' value cannot be a record field; it may live ' +
+              'only in a local variable or a routine-local array of label');
           if Nodes[f].Flag = 1 then begin
             { a computed field: accessor-backed, no storage (doc/languages/kobold/kp-property.md).
               Its accessors are methods of this record, resolved at the use site like any
@@ -4562,6 +4683,13 @@ begin
     nkRealLit: AnalyzeExpr := tyReal;
     nkStrLit:  AnalyzeExpr := tyStr;
     nkNil:     AnalyzeExpr := tyNil;
+    nkLabelAddr: begin
+      { `@name` is a label value; register the mention against the current
+        routine (an undefined label is caught at routine exit). The type is
+        `label`; the IR label id is assigned in lowering. }
+      LabelIntern(Nodes[node].Text, node);
+      AnalyzeExpr := tyLabel;
+    end;
     nkIdent: begin
       s := Lookup(Nodes[node].Text);
       Nodes[node].Sym := s;
@@ -4985,6 +5113,32 @@ begin
     nkBreak, nkContinue:
       if LoopDepth = 0 then
         SemErr(node, 'break or continue outside of a loop');
+    nkLabelStmt: begin
+      { a `name:` label definition; register it in the current routine's table,
+        rejecting a duplicate, then analyze the statement it marks }
+      i := LabelIntern(Nodes[node].Text, node);
+      if LabelDefd[i] then
+        SemErr(node, 'duplicate label ''' + Nodes[node].Text +
+          ''' in this routine')
+      else
+        LabelDefd[i] := True;
+      AnalyzeStmt(Nodes[node].A);
+    end;
+    nkGoto: begin
+      { a computed jump: the operand must be a `label` value. A bare
+        `goto name` naming a label is the unstructured goto, which stays
+        omitted, so it gets a teaching error pointing at the computed form. }
+      d := Nodes[node].A;
+      if (Nodes[d].Kind = nkIdent) and (LabelFind(Nodes[d].Text) >= 0) then
+        SemErr(node, '''goto'' takes a label value, not a label name: write ' +
+          '''goto @' + Nodes[d].Text + ''' for a computed jump, or use ' +
+          'break/continue')
+      else begin
+        ct := AnalyzeExpr(d);
+        if (ct >= 0) and (ct <> tyErr) and (SemTypes[ct].Kind <> skLabel) then
+          SemErr(node, '''goto'' requires a label value, found ' + TypeName(ct));
+      end;
+    end;
     nkStart, nkYield, nkBind: AnalyzeExpr(node);
   end;
 end;
@@ -5295,6 +5449,12 @@ var
   vt, i, s: LongInt;
 begin
   vt := ResolveType(Nodes[node].A);
+  { a `label` value is second-class: it may live only in the frame of the
+    routine that made it, so a global (module-level) variable may not hold one.
+    A local `label` or routine-local `array of label` is the only legal home. }
+  if (CurRoutineSym < 0) and TypeMentionsLabel(vt) then
+    SemErr(node, 'a ''label'' value cannot be a global; it may live only in a ' +
+      'local variable or a routine-local array of label');
   for i := 0 to High(Nodes[node].Kids) do begin
     s := Declare(Nodes[Nodes[node].Kids[i]].Text, syVar, Nodes[node].Kids[i]);
     Syms[s].TypeId := vt;
@@ -5474,6 +5634,7 @@ var
   isFunc, completedHeading: Boolean;
   sig, s, i, v, body, recv, pty, ps, recvTy: LongInt;
   savedFunc, savedRSym, savedRScope, savedAnswer: LongInt;
+  savedLabelBase: LongInt;
   savedFailable: Boolean;
 begin
   isFunc := Nodes[node].Kind = nkFuncDecl;
@@ -5482,11 +5643,20 @@ begin
   for i := 0 to High(Nodes[node].Kids) do
     if Nodes[Nodes[node].Kids[i]].Kind = nkParam then begin
       pty := ResolveType(Nodes[Nodes[node].Kids[i]].A);
+      { a `label` value is second-class: it crosses no routine boundary, so it
+        cannot be a parameter (nor an array of label passed in) }
+      if TypeMentionsLabel(pty) then
+        SemErr(Nodes[node].Kids[i], 'a ''label'' value cannot be a parameter; ' +
+          'it may live only in the frame of the routine that made it');
       for v := 0 to High(Nodes[Nodes[node].Kids[i]].Kids) do
         AddSigParam(sig, pty, Nodes[Nodes[node].Kids[i]].Flag);
     end;
   if isFunc then SemTypes[sig].RetType := ResolveType(Nodes[node].B)
   else SemTypes[sig].RetType := -1;
+  { a `label` value cannot be returned either (the frame it names is gone) }
+  if isFunc and TypeMentionsLabel(SemTypes[sig].RetType) then
+    SemErr(node, 'a routine cannot return a ''label'' value; it may live only ' +
+      'in the frame of the routine that made it');
   SemTypes[sig].Failable := Nodes[node].Failable = 1;
   { a failable routine returns its value through a hidden caller buffer (sret) and the error in
     the integer register, so a real, int64, or record result works; an integer-class result
@@ -5571,7 +5741,18 @@ begin
   AnswerType := -1;
   savedFailable := CurFailable;
   CurFailable := SemTypes[Syms[s].TypeId].Failable;   { `or fail` / `fail` are legal in a failable body }
+  { open this routine's label scope: @name and a label definition see only
+    labels in [savedLabelBase, LabelCount) from here on }
+  savedLabelBase := LabelBase;
+  LabelBase := LabelCount;
   AnalyzeBlock(body);
+  { any label reached by @name but never defined by a `name:` prefix }
+  for i := LabelBase to LabelCount - 1 do
+    if not LabelDefd[i] then
+      SemErr(LabelNode[i], 'no label named ''' + LabelNames[i] +
+        ''' in this routine (reached by ''@'')');
+  LabelCount := LabelBase;
+  LabelBase := savedLabelBase;
   CurFailable := savedFailable;
   AnswerType := savedAnswer;
   WarnUnusedInScope(CurScope);   { the routine's locals, before the scope closes }
@@ -5645,6 +5826,7 @@ begin
   LoopDepth := 0; StartDepth := 0; AnswerType := -1; CurFuncSym := -1;
   CurFailable := False; FailTargetNode := -1;
   CurRoutineSym := -1; CurRoutineScope := -1;
+  LabelBase := 0; LabelCount := 0;
   StrConstArrayCount := 0; SetLength(StrConstArrays, 0);
   RecConstArrayCount := 0; SetLength(RecConstArrays, 0);
   { cross-unit resolution state (the -U path persists across files, so it is not reset here) }
@@ -5671,6 +5853,7 @@ begin
   tyNil  := NewSemType(skNil);          SemTypes[tyNil].Name  := 'nil';
   tyText := NewSemType(skInteger);      SemTypes[tyText].Name := 'text';
   tyMapIter := NewSemType(skMapIter);   SemTypes[tyMapIter].Name := 'mapiter';
+  tyLabel := NewSemType(skLabel);       SemTypes[tyLabel].Name := 'label';
   tyErrorVal := NewSemType(skErrorVal); SemTypes[tyErrorVal].Name := 'error';
   OpenScope;   { the system scope: predefined identifiers live in an outer scope that the
                  program's own scope nests inside, so a user declaration of the same name
@@ -5685,6 +5868,7 @@ begin
   RegType('string', tyStr);
   RegType('process', tyProcess);
   RegType('mapiter', tyMapIter);
+  RegType('label', tyLabel);
   RegType('error', tyErrorVal);
   RegType('byte', tyInt);
   RegType('shortint', tyInt);
@@ -7203,6 +7387,34 @@ end;
 procedure EmitJmp(l: LongInt);
 begin
   PushInsn('JMP', 'label=' + IntToStr(l));
+end;
+
+function EmitLabAddr(l: LongInt): LongInt;
+{ materialize the address of local code label l into a temp (threaded dispatch) }
+var
+  d: LongInt;
+begin
+  d := NewTemp;
+  PushInsn('LABADDR', 'dst=' + IntToStr(d) + ' label=' + IntToStr(l));
+  EmitLabAddr := d;
+end;
+
+procedure EmitIJmp(a: LongInt);
+{ an indirect jump through the address in temp a (a computed goto) }
+begin
+  PushInsn('IJMP', 'a=' + IntToStr(a));
+end;
+
+function LowerLabelId(const name: string): LongInt;
+{ the IR label id of a routine label, allocating it on first mention so a `name:`
+  definition and every `@name` in the routine share one id (forward references
+  resolve, since the id is created by whichever comes first) }
+var
+  i: LongInt;
+begin
+  i := LabelIntern(name, -1);
+  if LabelIrId[i] < 0 then LabelIrId[i] := NewLabel;
+  LowerLabelId := LabelIrId[i];
 end;
 
 procedure EmitBZ(a, l: LongInt);
@@ -9188,6 +9400,15 @@ begin
         argNodes, wantVal);
     Exit;
   end;
+  { a computed designator of procedural type (an array element, table[i], or any
+    other non-identifier, non-field callee) holds a code pointer: call it
+    indirectly through its value, mirroring the process-resume path above. An
+    identifier variable or parameter is handled by the LoadSym path below. }
+  if (cty >= 0) and (cty < SemCount) and (SemTypes[cty].Kind = skProc) and
+     (Nodes[callee].Kind <> nkIdent) then begin
+    LowerCallSym := LowerIndirectCall(LowerExpr(callee), cty, argNodes, wantVal);
+    Exit;
+  end;
   s := Nodes[callee].Sym;
   if s < 0 then Exit;
   { a built-in name resolves to a symbol with no defining node; bname is its lowercased
@@ -9712,6 +9933,9 @@ begin
       if IsInt64(Nodes[node].Ty) then LowerExpr := EmitLIC64(Nodes[node].IntVal)
       else LowerExpr := EmitLIC(Nodes[node].IntVal);
     nkRealLit: LowerExpr := EmitRealConst(Nodes[node].Text);
+    nkLabelAddr:
+      { `@name` is the address of a local code label, a label value }
+      LowerExpr := EmitLabAddr(LowerLabelId(Nodes[node].Text));
     nkStrLit:
       { a one-character literal retyped to char by its context lowers as a character code }
       if Nodes[node].Ty = tyChar then
@@ -11065,6 +11289,15 @@ begin
       if LoopSP > 0 then EmitJmp(LoopBreak[LoopSP - 1]);
     nkContinue:
       if LoopSP > 0 then EmitJmp(LoopCont[LoopSP - 1]);
+    nkLabelStmt: begin
+      { a `name:` label marks a jump target: emit its IR label here, then the
+        statement it labels }
+      EmitLabel(LowerLabelId(Nodes[node].Text));
+      LowerStmt(Nodes[node].A);
+    end;
+    nkGoto:
+      { a computed jump through the label value the operand evaluates to }
+      EmitIJmp(LowerExpr(Nodes[node].A));
     nkWith:
       { the field aliases resolve to base.field through their WithBase link, so
         the body lowers directly }
@@ -11218,6 +11451,7 @@ procedure LowerRoutine(node: LongInt);
 var
   isFunc, realRet, wideRet, byref, failRet, failWide: Boolean;
   s, i, j, prm, sym, sl, block, comp, pty, retTy, z, rsym, savedFunc, failPtrSlot: LongInt;
+  savedLabelBase: LongInt;
   fname: string;
   hslots, hoffs: TIntArray;
 begin
@@ -11249,6 +11483,10 @@ begin
   FailCaptureSlot := -1;
   LoopSP := 0;
   PendingMapInsert := -1;
+  { open this routine's label-id scope (threaded dispatch): @name and a `name:`
+    definition share one IR label id, allocated on first mention }
+  savedLabelBase := LabelBase;
+  LabelBase := LabelCount;
   { parameters occupy the first slots, in declaration order }
   prm := 0;
   { a method receiver is parameter 0, passed by reference: its slot holds a
@@ -11382,6 +11620,9 @@ begin
   CurExitFunc := -1;
   CurErrorSlot := -1;
   CurFuncSym := savedFunc;
+  { close this routine's label-id scope }
+  LabelCount := LabelBase;
+  LabelBase := savedLabelBase;
   { the capture mapping is scoped to this routine's body }
   for i := 0 to High(RoutineCaptures[s]) do CapSlot[RoutineCaptures[s][i]] := -1;
 end;
@@ -11989,6 +12230,7 @@ begin
   StartEntrySeq := 0;
   CoThunkCount := 0; SetLength(CoThunkName, 0); SetLength(CoThunkWorker, 0);
   LoopSP := 0;
+  LabelBase := 0; LabelCount := 0;   { the per-routine label table (threaded dispatch) }
   PendingMapInsert := -1;
   SetLength(RoutineCaptures, SymCount);
   SetLength(CallsOf, SymCount);

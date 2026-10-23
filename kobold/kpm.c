@@ -77,6 +77,8 @@ static const struct op_entry op_table[] = {
     { "CALLI_AGG", IR_CALLI_AGG },
     { "RETV2", IR_RETV2 }, { "CALL2", IR_CALL2 }, { "CALLI2", IR_CALLI2 },
     { "ARG_MEM", IR_ARG_MEM }, { "ARG_X8", IR_ARG_X8 }, { "ASM", IR_ASM },
+    { "LABADDR", IR_LABADDR }, { "IJMP", IR_IJMP },
+    { "LABADDR64", IR_LABADDR64 }, { "IJMP64", IR_IJMP64 },
 };
 
 static const int op_count = sizeof(op_table) / sizeof(op_table[0]);
@@ -120,6 +122,7 @@ op_needs_label(int op)
 {
     switch (op) {
     case IR_JMP: case IR_BZ: case IR_BNZ: case IR_LABEL:
+    case IR_LABADDR: case IR_LABADDR64:
         return 1;
     default:
         return 0;

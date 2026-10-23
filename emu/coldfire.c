@@ -311,6 +311,11 @@ vec_to_trace_type(int vector)
 void cf_exception(cf_cpu *cpu, int vector)
 {
     uint8_t tt = vec_to_trace_type(vector);
+
+    /* The faulting pc, before it is redirected to the handler.  The user-mode
+     * driver reads this for a symbolized backtrace, since cpu->pc then points
+     * into the magic vector window rather than at the fault site. */
+    cpu->except_pc = cpu->pc;
     if (tt != CF_TR_NONE) {
         uint16_t opword = 0;
         if (cpu->pc >= 2)

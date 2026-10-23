@@ -524,6 +524,13 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
     }
 
+    case IR_LABADDR: {
+        const char *sd = rd(fn, i->dst, 0);
+        fprintf(out, "\tmov %s, .L%d_%d\n", sd, label_prefix, i->label);
+        wd(out, fn, i->dst, sd);
+        break;
+    }
+
     case IR_ADL: {
         const char *sd = rd(fn, i->dst, 0);
         int off = slot_offset(fn, i->slot);
@@ -744,6 +751,11 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_JMP:
         fprintf(out, "\tjmp .L%d_%d\n", label_prefix, i->label);
         break;
+    case IR_IJMP: {
+        const char *sa = rsq(out, fn, i->a, 0);
+        fprintf(out, "\tjmp %s\n", sa);
+        break;
+    }
     case IR_BZ: {
         const char *sa = rs(out, fn, i->a, 0);
         fprintf(out, "\ttest %s, %s\n", sa, sa);

@@ -910,6 +910,13 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
     }
 
+    case IR_LABADDR: {
+        const char *sd = rd(fn, i->dst, 0);
+        fprintf(out, "\tldr %s, =.L%d_%d\n", sd, label_prefix, i->label);
+        wd32(out, fn, i->dst, sd);
+        break;
+    }
+
     case IR_ADL: {
         int r = fn->temp_reg[i->dst];
         const char *dx = r >= 0 ? xr[r] : xr[0];
@@ -1004,6 +1011,11 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_JMP:
         fprintf(out, "\tb .L%d_%d\n", label_prefix, i->label);
         break;
+    case IR_IJMP: {
+        const char *sa = ra(out, fn, i->a, 0);
+        fprintf(out, "\tbr %s\n", sa);
+        break;
+    }
     case IR_BZ: {
         const char *sa = rs(out, fn, i->a, 0);
         fprintf(out, "\tcbz %s, .L%d_%d\n",

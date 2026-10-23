@@ -78,7 +78,7 @@ main(int argc, char **argv)
     elf = read_file(elf_path, &elf_len);
     arena_init(&a);
     if (dw_read_elf(&a, &r, elf, elf_len) != 0)
-        die("%s: not a readable little-endian ELF32", elf_path);
+        die("%s: not a readable ELF32 with debug line info", elf_path);
 
     for (; i < argc; i++) {
         uint32_t addr = (uint32_t)strtoul(argv[i], NULL, 0);

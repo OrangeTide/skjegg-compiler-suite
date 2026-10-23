@@ -887,6 +887,18 @@ x86_select_func(struct mc *m, struct ir_func *fn, int tp,
             wd(m, fn, &fr, in->dst, sd);
             break;
         }
+        case IR_LABADDR:
+        case IR_LABADDR64: {
+            /* the address of a local code label, for a threaded/computed jump:
+               the IR_LEA analog over a label id rather than a symbol name.  The
+               x86 spill path is uniformly 64-bit (wd / rs use mc_store64 /
+               mc_load64), so the 32- and 64-bit pointer forms select the same
+               code: mc_lea_label is a REX.W RIP-relative lea either way. */
+            int sd = rd(fn, in->dst, SC0);
+            mc_lea_label(m, sd, il(m, lbl, in->label));
+            wd(m, fn, &fr, in->dst, sd);
+            break;
+        }
         case IR_LB:            /* load one byte, zero-extended (a string character) */
         case IR_LBS:           /* load one byte, sign-extended (signed char) */
         case IR_LH:            /* load a halfword, zero-extended (unsigned short) */
@@ -1202,6 +1214,16 @@ x86_select_func(struct mc *m, struct ir_func *fn, int tp,
         case IR_JMP:
             mc_jmp(m, il(m, lbl, in->label));
             break;
+        case IR_IJMP:
+        case IR_IJMP64: {
+            /* indirect jump through the address in operand `a` (a threaded
+               dispatch); the JMP analog through a register.  rs reloads a
+               spilled operand at full 64-bit width on x86, so one case serves
+               both pointer widths. */
+            int sa = rs(m, fn, &fr, in->a, SC0);
+            mc_jmp_reg(m, sa);
+            break;
+        }
         case IR_BZ: case IR_BNZ: {
             int sa = rs(m, fn, &fr, in->a, SC0);
             mc_test32_rr(m, sa, sa);

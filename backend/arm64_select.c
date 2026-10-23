@@ -870,6 +870,21 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
             wd32(m, fn, in->dst, sd);
             break;
         }
+        case IR_LABADDR: {
+            int sd = rd(fn, in->dst, SC0);
+            mc64_lea_label(m, sd, il(m, lbl, in->label));
+            wd32(m, fn, in->dst, sd);   /* ILP32: a 32-bit code address */
+            break;
+        }
+        case IR_LABADDR64: {
+            /* LP64 (skj-cc): a label address is a full 64-bit pointer, so the
+               result spills at 64-bit width (the adr already writes the whole
+               x-register). */
+            int sd = rd(fn, in->dst, SC0);
+            mc64_lea_label(m, sd, il(m, lbl, in->label));
+            wd64(m, fn, in->dst, sd);
+            break;
+        }
         case IR_LEA64: {
             int sd = rd(fn, in->dst, SC0);
             mc64_lea_sym(m, 1, sd, in->sym);
@@ -1072,6 +1087,18 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
         case IR_JMP:
             mc64_b(m, il(m, lbl, in->label));
             break;
+        case IR_IJMP: {
+            int sa = rs(m, fn, in->a, SC0);    /* ILP32: 32-bit address operand */
+            mc64_br(m, sa);
+            break;
+        }
+        case IR_IJMP64: {
+            /* LP64 (skj-cc): the label-address operand is a full 64-bit pointer,
+               so it reloads at 64-bit width (rsx) rather than zero-extended. */
+            int sa = rsx(m, fn, in->a, SC0);
+            mc64_br(m, sa);
+            break;
+        }
         case IR_BZ: {
             int sa = rs(m, fn, in->a, SC0);
             mc64_cbz(m, 0, sa, il(m, lbl, in->label));

@@ -119,6 +119,15 @@ All C statements are supported: `if` / `else`, `while`, `do` / `while`, `for`
 expression statements. A basic `asm` / `asm volatile` statement emits one
 verbatim instruction string per backend.
 
+The GNU **labels as values** extension is supported: `&&label` is the address of
+a label (a `void *`) and `goto *expr` is a computed jump through such a value, so
+a bytecode interpreter can use a threaded-dispatch inner loop, `goto
+table[op];`. The dispatch table is filled at run time (`void *tab[N]; tab[0] =
+&&op0; ...`). A label address used as a **static or aggregate initializer**
+(`static void *tab[] = {&&a, &&b};`) is not supported and is reported as "expected
+constant expression" rather than miscompiled; build the table with run-time
+assignments instead.
+
 ## Expressions
 
 The full C operator set is supported: arithmetic, bitwise, shifts, logical and
@@ -225,3 +234,7 @@ Not yet implemented, with no fundamental obstacle:
 - `_Noreturn`.
 - The `_Pragma` operator.
 - Old-style (K&R) function definitions.
+- A label address (`&&label`) as a static or aggregate initializer. The computed
+  goto itself and a run-time-filled dispatch table work on every backend; only the
+  constant-initializer form is missing (it needs a data relocation to a local
+  label), and it is a clean compile error rather than a miscompile.

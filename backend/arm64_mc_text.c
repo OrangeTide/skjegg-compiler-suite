@@ -157,6 +157,8 @@ void mc64_cbnz(struct mc64 *m, int sf, int Rt, int id)
 void mc64_ret(struct mc64 *m) { fprintf(m->out, "\tret\n"); }
 void mc64_blr(struct mc64 *m, int Rn) { fprintf(m->out, "\tblr %s\n", xn(Rn)); }
 void mc64_br(struct mc64 *m, int Rn) { fprintf(m->out, "\tbr %s\n", xn(Rn)); }
+void mc64_lea_label(struct mc64 *m, int Rd, int id)
+{ fprintf(m->out, "\tadr %s, .L%d_%d\n", xn(Rd), m->serial, id); }
 
 /****************************************************************
  * Moves / immediates / addresses

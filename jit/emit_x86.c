@@ -391,6 +391,18 @@ x_call_rel32(struct code *c)
 }
 
 size_t
+x_lea_rip_rel32(struct code *c, int dst)
+{
+    size_t at;
+    rex(c, 1, dst, 0, 0, 0);   /* REX.W + REX.R if dst extended */
+    emit8(c, 0x8D);            /* lea r64, m */
+    emit8(c, (uint8_t)(((dst & 7) << 3) | 0x05));  /* mod=00, reg=dst, rm=101 (RIP) */
+    at = c->len;
+    emit32(c, 0);
+    return at;
+}
+
+size_t
 x_jmp_rel32(struct code *c)
 {
     size_t at;

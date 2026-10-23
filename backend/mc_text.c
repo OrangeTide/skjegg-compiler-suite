@@ -216,6 +216,8 @@ void mc_leave(struct mc *m) { fputs("\tleave\n", m->out); }
 void mc_nop(struct mc *m) { fputs("\tnop\n", m->out); }
 void mc_call_reg(struct mc *m, int r) { fprintf(m->out, "\tcall %s\n", reg64[r]); }
 void mc_jmp_reg(struct mc *m, int r) { fprintf(m->out, "\tjmp %s\n", reg64[r]); }
+void mc_lea_label(struct mc *m, int r, int id)
+{ fprintf(m->out, "\tlea %s, [rel .Lf%d_%d]\n", reg64[r], m->serial, id); }
 
 /* NASM reserves many words (the SEG and WRT operators, the size specifiers, every
    instruction mnemonic), so a guest symbol that happens to match one breaks

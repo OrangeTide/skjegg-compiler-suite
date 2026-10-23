@@ -1825,6 +1825,9 @@ lvalue_type(struct cc_node *n)
         struct cc_type *base = lvalue_type(n->a);
         return cc_type_ptr(lower_arena,base);
     }
+    case ND_LABELADDR:
+        /* &&label is a void* (GNU labels as values) */
+        return cc_type_ptr(lower_arena, cc_type_void());
     /* ++x, x++, --x, x-- have the type of their operand.  Without this a
        dereference or index of the result (e.g. *p++ on a char*) loses the
        pointee size and defaults to an int-width access. */
@@ -2418,6 +2421,18 @@ lower_expr(struct cc_node *n)
 
     case ND_ADDR:
         return lower_addr(n->a);
+
+    case ND_LABELADDR: {
+        /* &&label: the address of a code label as a void* (GNU labels as
+           values), for a computed goto / dispatch table.  A void* is 64-bit on
+           an LP64 target, so pick the 64-bit opcode there (it governs the spill
+           width), the 32-bit one on an ILP32 target. */
+        struct ir_insn *ins = emit(CC_PTR_SIZE == 8 ? IR_LABADDR64
+                                                     : IR_LABADDR);
+        ins->dst = new_temp();
+        ins->label = get_named_label(n->name);
+        return ins->dst;
+    }
 
     case ND_COMPOUND_LIT: {
         /* an aggregate literal is its address (a struct rvalue / array decay),
@@ -4349,7 +4364,18 @@ lower_stmt(struct cc_node *n)
         return;
 
     case ND_GOTO:
-        emit_jmp(get_named_label(n->name));
+        if (n->a) {
+            /* GNU computed goto: goto *expr, an indirect jump through a label
+               address (from &&label).  The operand is a void*, 64-bit on LP64,
+               so pick the matching-width jump (it governs the operand reload).
+               Compute the target before emitting the jump: lower_expr emits the
+               address computation, which must precede the IJMP, not follow it. */
+            int target = lower_expr(n->a);
+            struct ir_insn *ins = emit(CC_PTR_SIZE == 8 ? IR_IJMP64 : IR_IJMP);
+            ins->a = target;
+        } else {
+            emit_jmp(get_named_label(n->name));
+        }
         return;
 
     case ND_LABEL:

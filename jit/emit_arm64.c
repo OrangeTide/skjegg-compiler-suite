@@ -321,6 +321,14 @@ a_bcond(struct code *c, int cc)
 }
 
 size_t
+a_adr(struct code *c, int Rd)
+{
+    size_t site = c->len;
+    w(c, 0x10000000u | (uint32_t)(Rd & 31));    /* adr Rd, #0 */
+    return site;
+}
+
+size_t
 a_cbz(struct code *c, int sf, int Rt)
 {
     size_t site = c->len;
@@ -360,6 +368,24 @@ a_patch_imm19(struct code *c, size_t site, size_t target)
         return -1;
     memcpy(&insn, c->buf + site, 4);
     insn = (insn & 0xFF00001Fu) | (((uint32_t)rel & 0x7FFFFu) << 5);
+    memcpy(c->buf + site, &insn, 4);
+    return 0;
+}
+
+/* Patch an adr at site to reach byte offset target.  The imm21 is a byte
+   displacement from the instruction (not scaled), split across immlo (bits
+   30:29) and immhi (bits 23:5); range is +/- 1MB. */
+int
+a_patch_adr(struct code *c, size_t site, size_t target)
+{
+    long rel = (long)target - (long)site;
+    uint32_t insn, immlo, immhi;
+    if (rel < -(1L << 20) || rel >= (1L << 20))
+        return -1;
+    immlo = (uint32_t)rel & 0x3u;
+    immhi = ((uint32_t)rel >> 2) & 0x7FFFFu;
+    memcpy(&insn, c->buf + site, 4);
+    insn = (insn & 0x9F00001Fu) | (immlo << 29) | (immhi << 5);
     memcpy(c->buf + site, &insn, 4);
     return 0;
 }

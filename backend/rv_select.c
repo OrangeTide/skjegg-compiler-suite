@@ -1260,6 +1260,13 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
         break;
     }
 
+    case IR_LABADDR: {
+        int sd = rd(fn, i->dst, 0);
+        rv_mc_lea_label(m, sd, il(m, lbl, i->label));
+        wd(m, fn, i->dst, sd);
+        break;
+    }
+
     case IR_ADL: {
         int sd = rd(fn, i->dst, 0);
         rv_mc_addbig(m, sd, FP, slot_offset(fn, i->slot));
@@ -1340,6 +1347,11 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
     case IR_JMP:
         rv_mc_j(m, il(m, lbl, i->label));
         break;
+    case IR_IJMP: {
+        int sa = rs(m, fn, i->a, 0);
+        rv_mc_jr(m, sa);
+        break;
+    }
     case IR_BZ: {
         int sa = rs(m, fn, i->a, 0);
         rv_mc_beqz(m, sa, il(m, lbl, i->label));

@@ -4,6 +4,15 @@
 #include "elf32.h"
 #include "guest.h"
 
+/* The DWARF backtrace symbolizer is an optional add-on: the in-tree skj-run
+ * build defines SKJ_DWARF_BACKTRACE and links dwarf/dwread.c + ir/arena.c, so a
+ * guest fault prints a symbolized backtrace.  A bare emu-cf vendoring without
+ * dwarf/ leaves it undefined and still builds, reporting the fault pc alone. */
+#ifdef SKJ_DWARF_BACKTRACE
+#include "dwread.h"
+#include "arena.h"
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +31,12 @@
 #define CF_MAGIC_BASE   0xFFFF0000u
 #define CF_MAGIC_END    (CF_MAGIC_BASE + 64 * 4)
 #define CF_VECTOR_PAGE  0x00000000u
+
+/* A reserved TRAP #0 selector (in %d0) for a guest-signalled runtime fault:
+ * the crt's __skj_trap_backtrace issues it so the host symbolizes the stack
+ * before the guest exits.  Outside the Linux/m68k syscall range, the ColdFire
+ * twin of the RISC-V RV_SYS_FATAL ecall (boris VM_SYS_TRAP). */
+#define CF_SYS_FATAL    0x000f0000u
 
 /* Linux/m68k syscall numbers. */
 #define M68K_NR_EXIT        1
@@ -201,20 +216,109 @@ vector_name(int vec)
  * The run loop
  ****************************************************************/
 
+#ifdef SKJ_DWARF_BACKTRACE
+
+#define BT_MAX_FRAMES   32
+
+/* Guest-memory read adapter for dw_backtrace.  gm_read_out never faults (an
+ * unmapped byte reads as zero), so a frame pointer off the end of the stack
+ * yields a zero return address, which ends the walk.  dw_backtrace reads each
+ * saved-fp / return-address slot as a native uint32, but a ColdFire guest is
+ * big-endian, so a 4-byte slot is byte-swapped into host order (composed
+ * host-endian-agnostically). */
+static int
+bt_read(void *ctx, uint32_t addr, void *dst, uint32_t len)
+{
+    gm_read_out((guest_mem *)ctx, addr, dst, len);
+    if (len == 4) {
+        uint8_t *b = (uint8_t *)dst;
+        uint32_t v = (uint32_t)b[0] << 24 | (uint32_t)b[1] << 16
+                   | (uint32_t)b[2] << 8 | (uint32_t)b[3];
+        memcpy(dst, &v, 4);
+    }
+    return 1;
+}
+
+/* Print a symbolized backtrace for a faulting ColdFire guest to stderr.  pc is
+ * the faulting instruction (the exception frame's saved pc, or the live pc on a
+ * bus fault); the frame pointer is a6, whose link/unlk frame stores the saved
+ * fp at [a6] and the return address at [a6+4], the layout dw_backtrace walks.
+ * skj-run runs one process, so the root ELF is read fresh from o->path rather
+ * than cached. */
+static void
+print_backtrace(const run_opts *o, guest *g, cf_cpu *cpu, uint32_t pc)
+{
+    struct arena arena;
+    struct dw_reader reader;
+    uint32_t pcs[BT_MAX_FRAMES];
+    char buf[2048];
+    uint8_t *elf;
+    long n;
+    size_t got;
+    int frames;
+    FILE *f;
+
+    f = fopen(o->path, "rb");
+    if (!f)
+        return;
+    if (fseek(f, 0, SEEK_END) != 0 || (n = ftell(f)) <= 0) {
+        fclose(f);
+        return;
+    }
+    rewind(f);
+    elf = malloc((size_t)n);
+    if (!elf) {
+        fclose(f);
+        return;
+    }
+    got = fread(elf, 1, (size_t)n, f);
+    fclose(f);
+    if (got != (size_t)n) {
+        free(elf);
+        return;
+    }
+    arena_init(&arena);
+    if (dw_read_elf(&arena, &reader, elf, (size_t)n) != 0) {
+        arena_free(&arena);
+        free(elf);
+        return;
+    }
+    frames = dw_backtrace(pc, cpu->a[6], bt_read, &g->mem, pcs, BT_MAX_FRAMES);
+    if (frames > 0) {
+        dw_backtrace_format(&reader, pcs, frames, buf, sizeof buf);
+        fprintf(stderr, "skj-run: backtrace:\n%s", buf);
+    }
+    arena_free(&arena);
+    free(elf);
+}
+
+#else
+#define print_backtrace(o, g, cpu, pc)      ((void)0)
+#endif /* SKJ_DWARF_BACKTRACE */
+
 /** Service TRAP #0 and return to the instruction after it. */
 static void
-do_syscall(guest *g, cf_cpu *cpu)
+do_syscall(const run_opts *o, guest *g, cf_cpu *cpu)
 {
     uint32_t sp = cpu->a[7];
     uint32_t sr = gm_load(&g->mem, sp + 2, 2, 1);
     uint32_t ret = gm_load(&g->mem, sp + 4, 4, 1);
-    int sys = sys_of_m68k(cpu->d[0]);
+    int sys;
     int32_t r;
 
     cpu->a[7] = sp + 8;
     cpu->sr = (cpu->sr & ~0xFFFFu) | sr;
     cpu->pc = ret;
 
+    if (cpu->d[0] == CF_SYS_FATAL) {
+        /* A guest-signalled runtime fault (Kobold trap, C abort): symbolize
+         * the stack, then return so the guest runs its own exit.  ret is the
+         * caller's return address; a6 is the caller's frame pointer. */
+        print_backtrace(o, g, cpu, ret);
+        return;
+    }
+
+    sys = sys_of_m68k(cpu->d[0]);
     r = guest_syscall(g, sys, cpu->d[1], cpu->d[2], cpu->d[3], cpu->d[4],
                       cpu->d[5], cpu->a[0]);
     cpu->d[0] = (uint32_t)r;
@@ -284,12 +388,13 @@ run_coldfire(const run_opts *o, int *status)
         if (cpu.pc >= CF_MAGIC_BASE && cpu.pc < CF_MAGIC_END) {
             int vec = (int)((cpu.pc - CF_MAGIC_BASE) / 4);
             if (vec == CF_VEC_TRAP(0)) {
-                do_syscall(&g, &cpu);
+                do_syscall(o, &g, &cpu);
                 continue;
             }
             fprintf(stderr, "skj-run: %s (vector %d)\n", vector_name(vec),
                     vec);
             dump_regs(&cpu);
+            print_backtrace(o, &g, &cpu, cpu.except_pc);
             if (o->trace)
                 dump_trace(&cpu);
             rc = 128 + signal_of_vector(vec);
@@ -302,6 +407,7 @@ run_coldfire(const run_opts *o, int *status)
             fprintf(stderr, "skj-run: bad memory %s at 0x%08x (%s), "
                     "pc=0x%08x\n", g.mem.fault_write ? "write" : "read",
                     g.mem.fault_addr, g.mem.fault_why, cpu.pc);
+            print_backtrace(o, &g, &cpu, cpu.pc);
             if (o->trace)
                 dump_trace(&cpu);
             rc = 128 + 11;

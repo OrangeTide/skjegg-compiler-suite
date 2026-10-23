@@ -203,6 +203,7 @@ enum cc_node_kind {
     ND_MEMBER,
     ND_DEREF,
     ND_ADDR,
+    ND_LABELADDR,   /* GNU labels as values: &&label; name = the label, type void* */
     ND_POST_INC,
     ND_POST_DEC,
     ND_PRE_INC,

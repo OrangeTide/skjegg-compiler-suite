@@ -117,11 +117,14 @@ size_t a_bl(struct code *c);
 size_t a_bcond(struct code *c, int cc);
 size_t a_cbz(struct code *c, int sf, int Rt);
 size_t a_cbnz(struct code *c, int sf, int Rt);
+size_t a_adr(struct code *c, int Rd);   /* adr Rd, <label>: PC-relative address */
 /* Patch a branch's immediate to reach byte offset target.  Returns 0, or -1 if
    the word-scaled displacement does not fit the field (imm26: +/-128MB; imm19:
    +/-1MB), so the caller can reject the program rather than emit a wrong jump. */
 int a_patch_imm26(struct code *c, size_t site, size_t target);
 int a_patch_imm19(struct code *c, size_t site, size_t target);
+/* Patch an adr's imm21 (byte displacement, +/-1MB) to reach byte offset target. */
+int a_patch_adr(struct code *c, size_t site, size_t target);
 void a_blr(struct code *c, int Rn);
 void a_br(struct code *c, int Rn);
 void a_ret(struct code *c);       /* ret x30 */

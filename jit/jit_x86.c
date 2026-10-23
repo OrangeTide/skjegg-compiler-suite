@@ -108,6 +108,11 @@ mc_ref(struct mc *m, int id, size_t site)
 void mc_jmp(struct mc *m, int id) { mc_ref(m, id, x_jmp_rel32(m->c)); }
 void mc_jcc(struct mc *m, int cc, int id) { mc_ref(m, id, x_jcc_rel32(m->c, cc)); }
 
+/* Materialize a local label's address into a register: a RIP-relative lea whose
+   disp32 is a label reference, patched by the same fixup machinery as a branch
+   (both are rel32 fields measured from the end of the instruction). */
+void mc_lea_label(struct mc *m, int reg, int id) { mc_ref(m, id, x_lea_rip_rel32(m->c, reg)); }
+
 /* Data movement. */
 void mc_mov_ri32(struct mc *m, int r, uint32_t v) { x_mov_ri32(m->c, r, v); }
 void mc_mov_ri64(struct mc *m, int r, uint64_t v) { x_mov_ri64(m->c, r, v); }

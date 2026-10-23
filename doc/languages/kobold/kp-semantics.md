@@ -62,6 +62,32 @@ A dynamic array is a handle, not an aggregate; a small set is a Wide64 scalar, n
 an aggregate; a large set is an aggregate, not a handle. These three distinctions
 decide how a value is passed, returned, copied, and reclaimed.
 
+### The `label` type
+
+`label` is the code-address value type for threaded dispatch (the computed `goto`,
+kp-language.md). It is a pointer-sized scalar (one word, like a handle in width) but
+not reference-counted and not a handle: it names a code label, not host storage, so
+assignment copies the word and nothing is retained or released.
+
+A `label` value is **second-class**, the one escape-restricted type in the language.
+It can be produced only by `@name`, where `name` is a label in the current routine,
+and it may live only in that routine's own frame. The compiler rejects every path
+that would let one outlive the frame it names:
+
+- not a global (module-level) variable;
+- not a record or object field;
+- not a routine's return type;
+- not a parameter (nor an `array of label` parameter);
+- not a `map` value or a `set` element.
+
+The only legal homes are a **local variable** of type `label` and a routine-local
+**`array of label`** (the dispatch table, filled at loop entry with `@name`
+addresses). Because a label value cannot leave its frame, and `@name` resolves only
+against the current routine's labels, a `goto` through a label value always targets a
+live frame: the safety guarantee is purely static, with no escape analysis and no
+runtime frame check. This mirrors the second-class disciplines elsewhere in the
+toolkit (a `shared` parameter is call-scoped, never stored or returned).
+
 ## Arrays, sets, and maps
 
 - An **array** with one or more index ranges is a **fixed array**: an inline
@@ -134,7 +160,10 @@ of the following holds, tested in order:
 
 1. Either type is the error type (an error was already reported).
 2. `D` and `S` are the identical type. This is the nominal base case: it covers
-   records, fixed arrays, enumerations, and any two uses of one named type.
+   records, fixed arrays, enumerations, and any two uses of one named type. There is
+   one `label` type, so a `label` value is assignable to a `label` variable or
+   dispatch-table element by this rule (subject to the second-class placement rules
+   above, which bar every non-local home).
 3. `S` is `nil` and `D` is a handle able to hold `nil`: an interface, a string, a
    process, a procedural type, or a dynamic array.
 4. `D` and `S` are compatible dynamic arrays (equal element type, same array kind).

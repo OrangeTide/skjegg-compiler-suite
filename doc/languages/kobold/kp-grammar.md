@@ -184,7 +184,10 @@ TypeIdentifier   = Identifier .
                     int64/qword, real/double, single, boolean, char, process, mapiter.
                     'string' is a predefined host handle type (see below); 'mapiter' is a
                     predefined map-cursor handle (see MapType).
-                    A host handle type is one declared with InterfaceType. *)
+                    A host handle type is one declared with InterfaceType.
+                    'label' is the code-address value type (see below); it is
+                    second-class, so it names a type only for a local variable or a
+                    routine-local 'array of label' (the dispatch table). *)
 
 EnumType         = '(' IdentList ')' .
 
@@ -253,9 +256,14 @@ ImplementDecl    = 'implement' Identifier 'for' Identifier ';' .
                     another unit. *)
 ```
 
-There are no pointer types. There is no `^` type constructor, no `@` address-of
-operator, and no pointer arithmetic. A reference to a host object is a handle, a
-value of a host-registered type, not a pointer.
+There are no pointer types. There is no `^` type constructor and no pointer
+arithmetic. A reference to a host object is a handle, a value of a
+host-registered type, not a pointer. The one address-like value is `label`: a
+`label`-typed value holds the address of a code label in the current routine,
+made by the `@` operator and consumed by a computed `goto` (the threaded-dispatch
+primitive). It is second-class (see `label` below), so it is not a general
+pointer: it cannot be stored outside its routine's frame, and `@` accepts only a
+label name, never a data object.
 
 `string` is not a value type. It is a predefined host handle type, so a `string`
 variable holds a handle to a host-owned string. There is no `string[n]` sizing,
@@ -264,6 +272,20 @@ host create call, and string operations are host FFI calls.
 
 `nil` is the null handle. It is assignable to and comparable with any handle type,
 including `string`. Calling a method on `nil` faults in safe mode.
+
+### The `label` type
+
+`label` is the one code-address value type, for writing a threaded-dispatch inner
+loop (a bytecode interpreter's `NEXT`: `goto table[token]`). A `label` value is
+made only by `@name`, where `name` is a label in the current routine, and is
+consumed only by a computed `goto`. It is **second-class**: it may live only in
+the routine that made it, as a local variable or a routine-local `array of label`
+(the dispatch table, filled at loop entry). It may not be a global, a record or
+object field, a routine's return type, a parameter, or a map or set element. Those
+rules are what keep a computed `goto` provably landing in a live frame, so no
+escape analysis or runtime frame check is needed. There is no general `goto`: a
+bare `goto name` naming a label is rejected, and `break`/`continue` remain the
+structured exits.
 
 ### Handle types
 
@@ -396,12 +418,15 @@ scope. The front end lowers nesting away before the IR, so it is purely a source
 convenience (see `kobold.md`).
 
 **Procedure values.** A value of a `ProceduralType` (a variable, parameter, record
-field, or interface field) is a bare code pointer with no captured environment. It
-may hold a top-level routine or a nested routine that captures nothing from its
-enclosing scope. Taking the value of a nested routine that reads or writes an
-enclosing local is a compile-time error: there are no closures. A procedure value is
-called through the ordinary call syntax in `Designator`, and interface method fields
-(host handle methods) are the common case.
+field, interface field, or array element) is a bare code pointer with no captured
+environment. It may hold a top-level routine or a nested routine that captures
+nothing from its enclosing scope. Taking the value of a nested routine that reads or
+writes an enclosing local is a compile-time error: there are no closures. A procedure
+value is called through the ordinary call syntax in `Designator`, whatever the
+callee designator is: a name, an interface method field (host handle methods, the
+common case), or a computed element such as `table[op](args)`. The last is the
+direct-threaded dispatch shape, an array of routine values walked and called in a
+loop.
 
 ## Statements
 
@@ -409,7 +434,8 @@ called through the ordinary call syntax in `Designator`, and interface method fi
 CompoundStmt     = 'begin' StmtSequence 'end' .
 StmtSequence     = Statement { ';' Statement } .
 
-Statement        = [ AssignOrCallStmt
+Statement        = [ LabelPrefix ]
+                   [ AssignOrCallStmt
                    | CompoundStmt
                    | IfStmt
                    | WhileStmt
@@ -421,10 +447,23 @@ Statement        = [ AssignOrCallStmt
                    | BindExpr
                    | YieldExpr
                    | BreakStmt
-                   | ContinueStmt ] .
+                   | ContinueStmt
+                   | GotoStmt ] .
                  (* StartExpr, BindExpr, and YieldExpr are also expressions; as
                     statements their value is discarded. See Coroutine
                     constructs. *)
+
+LabelPrefix      = Identifier ':' .
+                 (* names the statement that follows as a jump target, scoped to
+                    the enclosing routine. The only use of a label name is in '@'
+                    (take its address, below); a bare 'goto name' is rejected, so
+                    there is no unstructured goto. *)
+GotoStmt         = 'goto' Expression .
+                 (* a computed jump: the Expression must have type 'label'. The
+                    label value can only be made by '@' on a current-routine
+                    label, so the jump always lands in a live frame. This is the
+                    threaded-dispatch primitive (goto table[token]); a bare
+                    'goto name' to a label identifier is a compile error. *)
 
 AssignOrCallStmt = Designator ( ':=' Expression | [ FailableSuffix ] ) .
                  (* a bare Designator is a procedure or method call; with ':='
@@ -562,10 +601,15 @@ Factor           = INTEGER_LITERAL
                  | Aggregate
                  | RecordLiteral
                  | 'not' Factor
+                 | '@' Identifier
                  | SetConstructor
                  | StartExpr
                  | BindExpr
                  | YieldExpr .
+                 (* '@' name takes the address of a label in the current routine,
+                    yielding a 'label' value for a computed 'goto'. It is the only
+                    use of '@', and the only operand it accepts is a label name;
+                    there is no general address-of operator. *)
 
 Aggregate        = '(' Expression ',' Expression { ',' Expression } ')' .
                  (* an array constant's elements, one nested Aggregate per dimension
@@ -604,7 +648,7 @@ From highest to lowest:
 
 | Precedence | Operators | Associativity |
 |---|---|---|
-| 1 | `not`, unary `+` / `-` | Right |
+| 1 | `not`, unary `+` / `-`, `@` | Right |
 | 2 | `*`, `/`, `div`, `mod`, `and`, `shl`, `shr` | Left |
 | 3 | `+`, `-`, `or` | Left |
 | 4 | `=`, `<>`, `<`, `>`, `<=`, `>=`, `in` | None |
@@ -653,8 +697,8 @@ the end of the line.
 and       array     as        begin     bind      break     buffer
 case      const     continue  div       do        downto
 else      end       external  for       forward
-function  if        implement implementation     in        interface
-map       mod       nil       not       of        or        procedure
+function  goto      if        implement implementation     in        interface
+label     map       mod       nil       not       of        or        procedure
 program   property  record    reexport  ref       repeat    set
 shared    shl       shr       slice     start     string
 then      to        type      unit      until     uses
@@ -665,6 +709,11 @@ var       while     with      yield
 `bind` also uses the reserved `in`. `shl` and `shr` are the bitwise shift
 operators. `interface` opens a host handle type. `external` is reserved for
 routines provided by the host FFI. `for` doubles as the loop keyword and the method-receiver keyword.
+
+`goto` is the computed jump of the threaded-dispatch primitive and `label` is the
+code-address value type it jumps through (see the `label` type above). `goto`
+takes a `label`-valued expression only; a bare `goto name` to a label identifier
+is rejected, so there is no unstructured goto.
 
 `map` opens `map of T`, a string-keyed associative array with value type `T` (see MapType).
 

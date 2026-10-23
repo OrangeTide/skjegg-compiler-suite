@@ -1345,16 +1345,19 @@ endif
 ifeq ($(EMU_RV32),1)
 EMU_SRC += emu/rv32.c emu/rv_user.c
 EMU_HDR += emu/rv32.h
-## The RV32 skj-run links the shared DWARF reader so a guest fault prints a
-## symbolized backtrace (debugger item 5).  SKJ_DWARF_BACKTRACE gates the code
-## in rv_user.c; a bare emu-rv vendoring without dwarf/ leaves it undefined.
-EMU_SRC += dwarf/dwread.c ir/arena.c
-EMU_FLAGS += -DSKJ_DWARF_BACKTRACE -Idwarf -Iir
 ## The GDB remote-protocol stub (debugger item 6, --gdb PORT), gated by
 ## SKJ_RV_GDB; a bare emu-rv vendoring omits it.
 EMU_SRC += emu/rv_gdb.c
 EMU_HDR += emu/rv_gdb.h
 EMU_FLAGS += -DSKJ_RV_GDB
+endif
+## The shared DWARF reader links whenever either core is present, so a guest
+## fault prints a symbolized backtrace (debugger item 5).  SKJ_DWARF_BACKTRACE
+## gates the code in rv_user.c and cf_user.c; a bare vendoring without dwarf/
+## leaves it undefined and still builds, reporting the fault pc alone.
+ifneq (,$(filter 1,$(EMU_COLDFIRE) $(EMU_RV32)))
+EMU_SRC += dwarf/dwread.c ir/arena.c
+EMU_FLAGS += -DSKJ_DWARF_BACKTRACE -Idwarf -Iir
 endif
 
 build/skj-run: $(EMU_SRC) $(EMU_HDR) dwarf/dwread.h build/version.h | build
@@ -3741,6 +3744,100 @@ test-cf-addr2line: build/skj-cc build/skj-as build/skj-ld build/skj-addr2line bu
 	     echo "PASS: skj-addr2line matches GNU addr2line on $$n ColdFire statements (function + line)"; \
 	 else exit 1; fi
 
+## The ColdFire twin of test-rv-wild-backtrace: a call through a garbage pointer
+## faults with a wild pc, so skj-run starts its backtrace from a bogus top frame
+## and must still unwind the intact a6 chain below it (to main) and exit 139
+## (SIGSEGV), proving the in-emulator ColdFire fault backtrace (emu/cf_user.c).
+test-cf-wild-backtrace: build/skj-cc build/skj-as build/skj-ld build/skj-run build/start.o
+	@mkdir -p build/debug
+	@./build/skj-cc -g -o build/debug/cfwild.s tests/debug/wildjump.c
+	@./build/skj-as -o build/debug/cfwild.o build/debug/cfwild.s
+	@./build/skj-ld -o build/debug/cfwild.elf build/start.o build/debug/cfwild.o
+	@./build/skj-run build/debug/cfwild.elf 2>build/debug/cfwild.err; rc=$$?; \
+	 [ "$$rc" = 139 ] || { echo "FAIL: wild jump exit $$rc (want 139)"; cat build/debug/cfwild.err; exit 1; }; \
+	 grep -q "backtrace:" build/debug/cfwild.err || { echo "FAIL: no backtrace"; cat build/debug/cfwild.err; exit 1; }; \
+	 grep -qE '  main( at |$$)' build/debug/cfwild.err || { echo "FAIL: chain below the wild frame not unwound"; cat build/debug/cfwild.err; exit 1; }; \
+	 echo "PASS: skj-run survives a wild ColdFire frame, unwinds to main, exit 139"
+
+## The ColdFire twin of test-rv-abort-backtrace: a failed assert calls abort(),
+## which issues the CF_SYS_FATAL trap (__skj_trap_backtrace); skj-run symbolizes
+## the a6 chain and returns, and the guest exits 134 (128 + SIGABRT).  Exercises
+## the controlled-trap backtrace path through the C libc.
+test-cf-abort-backtrace: build/skj-cc build/skj-as build/skj-ld build/skj-run \
+                         build/lib/coldfire/crt0.o build/lib/coldfire/va_cf.o \
+                         build/lib/coldfire/fini.o build/lib/coldfire/libc.a
+	@mkdir -p build/debug
+	@./build/skj-cc -g -Iinclude -o build/debug/cfaborts.s tests/debug/aborts.c
+	@./build/skj-as -o build/debug/cfaborts.o build/debug/cfaborts.s
+	@./build/skj-ld -o build/debug/cfaborts.elf build/lib/coldfire/crt0.o \
+	     build/debug/cfaborts.o build/lib/coldfire/va_cf.o \
+	     build/lib/coldfire/fini.o build/lib/coldfire/libc.a
+	@./build/skj-run build/debug/cfaborts.elf 2>build/debug/cfaborts.err; rc=$$?; \
+	 [ "$$rc" = 134 ] || { echo "FAIL: abort exit $$rc (want 134)"; cat build/debug/cfaborts.err; exit 1; }; \
+	 grep -q "assertion failed" build/debug/cfaborts.err || { echo "FAIL: no assert message"; cat build/debug/cfaborts.err; exit 1; }; \
+	 grep -q "backtrace:" build/debug/cfaborts.err || { echo "FAIL: no backtrace"; cat build/debug/cfaborts.err; exit 1; }; \
+	 bt=`grep '^#' build/debug/cfaborts.err | sed 's/.*0x[0-9a-f]* *//; s/ at .*//'`; \
+	 order=`echo "$$bt" | grep -E 'deep|mid|main' | tr '\n' ' '`; \
+	 if [ "$$order" = "deep mid main " ]; then \
+	     echo "PASS: skj-run ColdFire abort backtrace walks deep -> mid -> main, exit 134"; \
+	 else \
+	     echo "FAIL: abort backtrace order was [$$order]"; \
+	     cat build/debug/cfaborts.err; exit 1; \
+	 fi
+
+## The ColdFire twin of test-kp-rv-dwarf: a -g Kobold module compiles to a linked
+## m68k executable whose DWARF a stock toolchain reads.  skj-kp-cf shares the cf
+## backend (so .loc/.type/.size come for free), skj-as builds the big-endian
+## .debug_* sections (R_68K_32), and skj-ld relocates them; skj-addr2line must
+## then agree with GNU addr2line on function and line for every statement.
+test-kp-cf-dwarf: build/skj-kpc build/skj-kp-cf build/skj-as build/skj-ld \
+                  build/skj-addr2line build/kpfree-cf/kp_crt_cf.o build/libkpaot-cf-free.a
+	@mkdir -p build/debug
+	@./build/skj-kpc --emit-kpm -g -o build/debug/kdwcf.kpm tests/debug/loc.pas
+	@./build/skj-kp-cf -o build/debug/kdwcf.s build/debug/kdwcf.kpm
+	@./build/skj-as -o build/debug/kdwcf.o build/debug/kdwcf.s
+	@./build/skj-ld -o build/debug/kdwcf.elf build/kpfree-cf/kp_crt_cf.o \
+	     build/debug/kdwcf.o build/libkpaot-cf-free.a
+	@llvm-dwarfdump --debug-line build/debug/kdwcf.elf > build/debug/kdwcf.line
+	@ok=1; n=0; \
+	 for addr in `awk '/ is_stmt/ && !/end_sequence/ {print $$1}' build/debug/kdwcf.line`; do \
+	     n=`expr $$n + 1`; \
+	     sf=`./build/skj-addr2line -f -e build/debug/kdwcf.elf $$addr | sed 's:.*/::'`; \
+	     gf=`$(M68K_ADDR2LINE) -f -e build/debug/kdwcf.elf $$addr | sed 's:.*/::'`; \
+	     if [ "$$sf" != "$$gf" ]; then \
+	         echo "FAIL: $$addr skj[$$sf] != gnu[$$gf]"; ok=0; \
+	     fi; \
+	 done; \
+	 if [ "$$n" -lt 1 ]; then echo "FAIL: no statement addresses found"; ok=0; fi; \
+	 if [ "$$ok" = 1 ]; then \
+	     echo "PASS: Kobold -g ColdFire executable symbolizes, skj-addr2line matches GNU on $$n statements"; \
+	 else exit 1; fi
+
+## The ColdFire twin of test-kp-rv-trap-backtrace: a Kobold runtime fault routes
+## through the freestanding trap (rt_free.c), which calls __skj_trap_backtrace
+## (the CF_SYS_FATAL trap); under skj-run it shows a source-level stack
+## (deep -> mid) and exits 70.  Exercises the controlled-trap path end to end.
+test-kp-cf-trap-backtrace: build/skj-kpc build/skj-kp-cf build/skj-as build/skj-ld \
+                           build/skj-run build/kpfree-cf/kp_crt_cf.o build/libkpaot-cf-free.a
+	@mkdir -p build/debug
+	@./build/skj-kpc --emit-kpm -g -o build/debug/ktrapcf.kpm tests/debug/ktrap.pas
+	@./build/skj-kp-cf -o build/debug/ktrapcf.s build/debug/ktrapcf.kpm
+	@./build/skj-as -o build/debug/ktrapcf.o build/debug/ktrapcf.s
+	@./build/skj-ld -o build/debug/ktrapcf.elf build/kpfree-cf/kp_crt_cf.o \
+	     build/debug/ktrapcf.o build/libkpaot-cf-free.a
+	@./build/skj-run build/debug/ktrapcf.elf 2>build/debug/ktrapcf.err; rc=$$?; \
+	 [ "$$rc" = 70 ] || { echo "FAIL: trap exit $$rc (want 70)"; cat build/debug/ktrapcf.err; exit 1; }; \
+	 grep -q "assertion failed" build/debug/ktrapcf.err || { echo "FAIL: no assert message"; cat build/debug/ktrapcf.err; exit 1; }; \
+	 grep -q "backtrace:" build/debug/ktrapcf.err || { echo "FAIL: no backtrace"; cat build/debug/ktrapcf.err; exit 1; }; \
+	 bt=`grep '^#' build/debug/ktrapcf.err | sed 's/.*0x[0-9a-f]* *//; s/ at .*//'`; \
+	 order=`echo "$$bt" | grep -E 'deep|mid' | tr '\n' ' '`; \
+	 if [ "$$order" = "deep mid " ]; then \
+	     echo "PASS: skj-run Kobold ColdFire trap backtrace walks deep -> mid, exit 70"; \
+	 else \
+	     echo "FAIL: Kobold trap backtrace order was [$$order]"; \
+	     cat build/debug/ktrapcf.err; exit 1; \
+	 fi
+
 ## The MIPS twin of test-rv-addr2line: skj-cc-mips / skj-as-mips / skj-ld-mips
 ## emit little-endian DWARF (REL relocations) through to a linked mipsel
 ## executable, and skj-addr2line must agree with GNU addr2line on every
@@ -4460,6 +4557,82 @@ build/x86_64/i64_test: build/x86_64/i64_test.o build/x86_64/start.o
 test-i64-x86-64: build/x86_64/i64_test
 	@echo "Running I64 test under qemu-x86_64..."
 	@$(QEMU_X64) ./build/x86_64/i64_test && echo "PASS: i64_test (x86-64)" || (echo "FAIL: i64_test (x86-64)"; exit 1)
+
+## Threaded-dispatch integration test (IR builder → x86-64 asm → qemu-x86_64):
+## IR_LABADDR + IR_IJMP, the computed-goto primitive, self-checking.
+THREADED_TEST_X64_SRC := tests/test_threaded.c $(IR_SRC) $(BE_X64)
+
+build/test_threaded_x64: $(THREADED_TEST_X64_SRC) ir/ir.h | build
+	$(CC) $(CFLAGS) -DX86_BITS=64 -Iir -o $@ $(THREADED_TEST_X64_SRC)
+
+build/x86_64/threaded_test.s: build/test_threaded_x64 | build/x86_64
+	./build/test_threaded_x64 -o $@
+
+build/x86_64/threaded_test.o: build/x86_64/threaded_test.s
+	$(X64_ASM) -f elf64 -o $@ $<
+
+build/x86_64/threaded_test: build/x86_64/threaded_test.o build/x86_64/start.o
+	$(X64_LD) -m elf_x86_64 -o $@ build/x86_64/start.o $<
+
+test-threaded-x86-64: build/x86_64/threaded_test
+	@echo "Running threaded-dispatch test under qemu-x86_64..."
+	@$(QEMU_X64) ./build/x86_64/threaded_test && echo "PASS: threaded_test (x86-64)" || (echo "FAIL: threaded_test (x86-64)"; exit 1)
+
+## Threaded-dispatch test on ColdFire (IR builder → ColdFire asm → qemu-m68k)
+THREADED_TEST_CF_SRC := tests/test_threaded.c $(IR_SRC) $(BE_CF)
+build/test_threaded_cf: $(THREADED_TEST_CF_SRC) ir/ir.h | build
+	$(CC) $(CFLAGS) -Iir -o $@ $(THREADED_TEST_CF_SRC)
+build/threaded_test_cf.s: build/test_threaded_cf | build
+	./build/test_threaded_cf -o $@
+build/threaded_test_cf.o: build/threaded_test_cf.s
+	$(M68K_AS) -o $@ $<
+build/threaded_test_cf: build/threaded_test_cf.o build/start.o build/skj-ld
+	./build/skj-ld -o $@ build/start.o $<
+test-threaded: build/threaded_test_cf
+	@echo "Running threaded-dispatch test under qemu-m68k..."
+	@$(QEMU) ./build/threaded_test_cf && echo "PASS: threaded_test (ColdFire)" || (echo "FAIL: threaded_test (ColdFire)"; exit 1)
+
+## Threaded-dispatch test on RISC-V (IR builder → RISC-V asm → qemu-riscv32)
+THREADED_TEST_RV_SRC := tests/test_threaded.c $(IR_SRC) $(BE_RV)
+build/test_threaded_rv: $(THREADED_TEST_RV_SRC) ir/ir.h | build
+	$(CC) $(CFLAGS) -Iir -o $@ $(THREADED_TEST_RV_SRC)
+build/rv/threaded_test.s: build/test_threaded_rv | build/rv
+	./build/test_threaded_rv -o $@
+build/rv/threaded_test.o: build/rv/threaded_test.s
+	$(RV_AS) -march=rv32im -mabi=ilp32 -o $@ $<
+build/rv/threaded_test: build/rv/threaded_test.o build/rv/start.o
+	$(RV_LD) -m elf32lriscv -o $@ build/rv/start.o $<
+test-threaded-rv: build/rv/threaded_test
+	@echo "Running threaded-dispatch test under qemu-riscv32..."
+	@$(QEMU_RV) ./build/rv/threaded_test && echo "PASS: threaded_test (RISC-V)" || (echo "FAIL: threaded_test (RISC-V)"; exit 1)
+
+## Threaded-dispatch test on arm64 (IR builder → arm64 asm → qemu-aarch64)
+THREADED_TEST_A64_SRC := tests/test_threaded.c $(IR_SRC) $(BE_A64)
+build/test_threaded_arm64: $(THREADED_TEST_A64_SRC) ir/ir.h | build
+	$(CC) $(CFLAGS) -Iir -o $@ $(THREADED_TEST_A64_SRC)
+build/arm64/threaded_test.s: build/test_threaded_arm64 | build/arm64
+	./build/test_threaded_arm64 -o $@
+build/arm64/threaded_test.o: build/arm64/threaded_test.s
+	$(A64_AS) -o $@ $<
+build/arm64/threaded_test: build/arm64/threaded_test.o build/arm64/start.o
+	$(A64_LD) -o $@ build/arm64/start.o $<
+test-threaded-arm64: build/arm64/threaded_test
+	@echo "Running threaded-dispatch test under qemu-aarch64..."
+	@$(QEMU_A64) ./build/arm64/threaded_test && echo "PASS: threaded_test (arm64)" || (echo "FAIL: threaded_test (arm64)"; exit 1)
+
+## Threaded-dispatch test on MIPS (IR builder → MIPS asm → qemu-mipsel)
+THREADED_TEST_MIPS_SRC := tests/test_threaded.c $(IR_SRC) $(BE_MIPS)
+build/test_threaded_mips: $(THREADED_TEST_MIPS_SRC) ir/ir.h | build
+	$(CC) $(CFLAGS) -Iir -o $@ $(THREADED_TEST_MIPS_SRC)
+build/mips/threaded_test.s: build/test_threaded_mips | build/mips
+	./build/test_threaded_mips -o $@
+build/mips/threaded_test.o: build/mips/threaded_test.s
+	$(MIPS_AS) -march=mips1 -EL -o $@ $<
+build/mips/threaded_test: build/mips/threaded_test.o build/mips/start_rt.o
+	$(MIPS_LD) -o $@ build/mips/start_rt.o $<
+test-threaded-mips: build/mips/threaded_test
+	@echo "Running threaded-dispatch test under qemu-mipsel..."
+	@$(QEMU_MIPS) ./build/mips/threaded_test && echo "PASS: threaded_test (mips)" || (echo "FAIL: threaded_test (mips)"; exit 1)
 
 ## Unsigned 32-bit ops integration test (IR builder → ColdFire asm → qemu-m68k)
 OPS_TEST_CF_SRC := tests/test_ops.c $(IR_SRC) $(BE_CF)
@@ -5598,7 +5771,7 @@ check-mips-all: check-mips check-mips-noreorder \
                 check-cc-mips check-cc-mips-noreorder \
                 check-exc-mips check-exc-mips-noreorder \
                 check-mipsas check-cc-mips-skj test-mips-archive test-mips-psexe \
-                test-cc-mips-asm check-mips-sf
+                test-cc-mips-asm check-mips-sf test-threaded-mips
 	@echo "All MIPS test suites passed."
 
 check-cpp: build/skj-cpp
@@ -5661,11 +5834,15 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp c
            test-f32-diff \
            test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 \
            test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 \
+           test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 \
            check-rvas check-cc-rv-skj check-exc-rv-skj \
            test-cc-rv-loc test-kp-rv-loc test-kp-rv-dwarf test-kp-rv-trap-backtrace test-pc-loc test-moo-loc test-tinc-loc \
            test-exc-loc test-dwarf-line test-rv-stt-func test-rv-debug-sections \
            test-rv-debug-link test-rv-addr2line test-rv-backtrace test-rv-abort-backtrace \
            test-bt-loop test-bt-trim test-rv-wild-backtrace \
+           test-cf-addr2line test-mips-addr2line \
+           test-cf-wild-backtrace test-cf-abort-backtrace \
+           test-kp-cf-dwarf test-kp-cf-trap-backtrace \
            test-rv-dbg test-rv-gdb test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-help \
            check-cc-rv-psabi test-cc-rv-psabi-interop \
            test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive \
@@ -5690,4 +5867,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-exc-rv-emu check-exc-rv-emu-san test-exc-coro-overflow check-emu check-rv-emu check-exc-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-exc-x86-64-asm check-exc-arm64-asm check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke check-exc-jit-arm64 test-gc test-coro test-threads test-libexc-guest32 test-jit-arena test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE
+.PHONY: all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-exc-rv-emu check-exc-rv-emu-san test-exc-coro-overflow check-emu check-rv-emu check-exc-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-exc-x86-64-asm check-exc-arm64-asm check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke check-exc-jit-arm64 test-gc test-coro test-threads test-libexc-guest32 test-jit-arena test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE

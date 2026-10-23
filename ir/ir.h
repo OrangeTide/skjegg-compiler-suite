@@ -204,6 +204,23 @@ enum ir_op {
        value is internal. */
     IR_RETV2,
     IR_CALL2, IR_CALLI2,
+
+    /* Threaded-code dispatch (Kobold computed goto, doc/languages/kobold).
+       LABADDR materializes the address of a local code label (carried in
+       `label`, as IR_JMP does) into `dst` -- the IR_LEA analog for a label.
+       IJMP is an indirect jump through the address in operand `a`, a block
+       terminator -- the IR_JMP analog through a register.  Appended last so the
+       existing opcode numbers are undisturbed; the KPM1 reader maps by
+       mnemonic, so the value is internal.
+
+       LABADDR64 / IJMP64 are the 64-bit-pointer twins, for an LP64 front end
+       (skj-cc on x86-64 and arm64) where a label address is a full 64-bit
+       value: they differ from the 32-bit forms only in the spill/reload width
+       of the result and the jump operand, exactly as IR_LEA64 does for IR_LEA.
+       An ILP32 front end (skj-kp, and skj-cc on the 32-bit targets) uses the
+       plain LABADDR / IJMP. */
+    IR_LABADDR, IR_IJMP,
+    IR_LABADDR64, IR_IJMP64,
 };
 
 /****************************************************************

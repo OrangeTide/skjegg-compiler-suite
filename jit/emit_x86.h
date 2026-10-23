@@ -133,6 +133,12 @@ size_t x_call_rel32(struct code *c);
 size_t x_jmp_rel32(struct code *c);
 size_t x_jcc_rel32(struct code *c, int cc);
 
+/* lea dst, [rip + disp32]: materialize a code address into dst.  Like the
+   rel32 encoders, it leaves a zero disp32 and returns that field's buffer
+   offset for x_patch_rel32 (the disp is RIP-relative, measured from the end
+   of the instruction, so the same patcher applies). */
+size_t x_lea_rip_rel32(struct code *c, int dst);
+
 /* Patch a rel32 field (at buffer offset `at`, as returned above) so the
    instruction jumps to buffer offset `target`. */
 void x_patch_rel32(struct code *c, size_t at, size_t target);

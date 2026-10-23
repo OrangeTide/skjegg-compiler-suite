@@ -169,6 +169,10 @@ rm -rf "$DEST"
 mkdir -p "$DEST"
 cp "$S/version.mk" "$DEST/"
 
+# release notes (always present), so a consuming project carries the history of
+# what it pulled in; re-copied by update-skjegg.sh on each re-vendoring
+cp "$S/CHANGELOG.md" "$DEST/"
+
 # IR core (always present)
 mkdir -p "$DEST/ir"
 cp "$S/ir/ir.c" "$S/ir/ir.h" "$S/ir/util.c" "$S/ir/util.h" \
@@ -381,8 +385,23 @@ fi
 if [ "$has_pascal" -eq 1 ]; then
     cp "$S/doc/languages/pascal.md" "$DEST/doc/"
 fi
+# MooScript: the smolmoo language reference and the scripting overview (the
+# latter also covers TinScheme-style scripting, so a scheme vendor gets it too)
+if [ "$has_moo" -eq 1 ]; then
+    cp "$S/doc/languages/smolmoo-v1.md" "$DEST/doc/"
+fi
+if [ "$has_moo" -eq 1 ] || [ "$has_scheme" -eq 1 ]; then
+    cp "$S/doc/languages/game-scripting.md" "$DEST/doc/"
+fi
 if [ "$has_mips" -eq 1 ]; then
     cp "$S/doc/tools/mips.md" "$DEST/doc/"
+fi
+# the assembler/linker/archiver family: one toolchain manual covers how they
+# fit the pipeline, so any of them pulls it
+if [ "$has_as" -eq 1 ] || [ "$has_ld" -eq 1 ] || [ "$has_ar" -eq 1 ] \
+   || [ "$has_as_rv" -eq 1 ] || [ "$has_ld_rv" -eq 1 ] \
+   || [ "$has_as_mips" -eq 1 ] || [ "$has_ld_mips" -eq 1 ]; then
+    cp "$S/doc/tools/toolchain.md" "$DEST/doc/"
 fi
 if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ]; then
     cp "$S/doc/tools/emulator.md" "$DEST/doc/"
@@ -396,6 +415,8 @@ fi
 if [ "$has_kp" -eq 1 ]; then
     mkdir -p "$DEST/doc/kobold"
     cp "$S"/doc/languages/kobold/*.md "$DEST/doc/kobold/"
+    # the JIT ships with Kobold, so its manual rides along
+    cp "$S/doc/tools/jit.md" "$DEST/doc/"
 fi
 
 # LICENSE

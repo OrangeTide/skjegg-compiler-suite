@@ -6,6 +6,31 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.18.0
+
+#### Added
+- Kobold can express both classic bytecode-dispatch shapes in the language. A
+  procedural value may now be called through a computed designator
+  (`table[i](args)`), which is the direct-threaded loop, and a new second-class
+  `label` value type with the `@label` address-of operator and a computed
+  `goto <expr>` is the indirect (token-threaded) inner loop. A bare
+  `goto name` stays a compile error, so general structured goto remains omitted.
+- The `label` value is statically second-class: it can only be made from a
+  label in the current routine and stored in that routine's own frame, never in
+  a global, a field, a return, a parameter, or a collection. A computed jump can
+  therefore only land in a live frame, closing the escaping-label-address
+  footgun without any runtime check.
+- skj-cc gains the GNU C extensions labels as values (`&&label`) and computed
+  goto (`goto *expr`), reusing the new dispatch IR opcodes, so a C bytecode
+  interpreter can thread its inner loop on every backend.
+- Two shared-IR opcodes carry threaded dispatch across all backends:
+  `IR_LABADDR` (the address of a local code label) and `IR_IJMP` (an indirect
+  jump through a register), with 64-bit twins for the LP64 C targets.
+
+#### Changed
+- ColdFire guest faults in the emulator are symbolized through DWARF line info,
+  so a trap reports source file and line rather than a bare address.
+
 ### 0.17.0
 
 #### Added

@@ -1088,6 +1088,17 @@ parse_unary(void)
         n->a = parse_cast();
         return n;
     }
+    case TOK_ANDAND: {
+        /* GNU labels as values: &&label is the address of a label, a void*.
+           A prefix && is unambiguous (logical-and is strictly binary). */
+        struct cc_token lab;
+        struct cc_node *n;
+        next();
+        lab = expect(TOK_IDENT);
+        n = node(ND_LABELADDR, ln);
+        n->name = lab.sval;
+        return n;
+    }
     case TOK_STAR: {
         next();
         struct cc_node *n = node(ND_DEREF, ln);
@@ -1431,8 +1442,14 @@ parse_stmt(void)
     case TOK_GOTO: {
         next();
         struct cc_node *n = node(ND_GOTO, ln);
-        struct cc_token lab = expect(TOK_IDENT);
-        n->name = lab.sval;
+        if (consume(TOK_STAR)) {
+            /* GNU computed goto: goto *expr, where expr is a label address.
+               The target expression is carried in a; name stays null. */
+            n->a = parse_expr();
+        } else {
+            struct cc_token lab = expect(TOK_IDENT);
+            n->name = lab.sval;
+        }
         expect(TOK_SEMI);
         return n;
     }

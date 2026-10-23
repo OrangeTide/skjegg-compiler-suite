@@ -162,6 +162,7 @@ typedef struct cf_cpu {
     int      fault;         /* set on bus/address error */
     uint8_t  fault_status;  /* FS bits for access error frame */
     int      in_exception;  /* double-fault detection */
+    uint32_t except_pc;     /* faulting pc, saved when an exception vectors */
     cf_trace_t trace;       /* diagnostic event ring buffer */
 
     /* Memory bus callbacks */

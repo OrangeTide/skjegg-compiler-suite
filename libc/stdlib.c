@@ -317,11 +317,12 @@ qsort(void *base, size_t n, size_t size,
     }
 }
 
-/* Ask the host for a symbolized backtrace before terminating.  On RISC-V the crt
-   provides __skj_trap_backtrace (the skj-run RV_SYS_FATAL ecall, a no-op off
-   skj-run); elsewhere there is no such facility yet, so a file-local no-op keeps
-   abort portable and control falls through to the plain exit below. */
-#if defined(__skj_riscv__)
+/* Ask the host for a symbolized backtrace before terminating.  On RISC-V and
+   ColdFire the crt provides __skj_trap_backtrace (the skj-run RV_SYS_FATAL ecall
+   / CF_SYS_FATAL trap, a no-op off skj-run); elsewhere there is no such facility
+   yet, so a file-local no-op keeps abort portable and control falls through to
+   the plain exit below. */
+#if defined(__skj_riscv__) || defined(__skj_m68k__)
 extern void __skj_trap_backtrace(int code);
 #else
 static void __skj_trap_backtrace(int code) { (void)code; }

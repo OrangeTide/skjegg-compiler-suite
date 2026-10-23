@@ -54,6 +54,10 @@ void mc64_cbnz(struct mc64 *m, int sf, int Rt, int id);
 void mc64_ret(struct mc64 *m);
 void mc64_blr(struct mc64 *m, int Rn);
 void mc64_br(struct mc64 *m, int Rn);
+/* Materialize a local code label's address into Rd (the IR_LABADDR analog of
+   mc64_lea_sym over a label id), for a computed/threaded jump.  The text sink
+   emits a literal-pool load; the byte sink an adr with a deferred label fixup. */
+void mc64_lea_label(struct mc64 *m, int Rd, int id);
 
 /* ---- Moves and immediates.  mc64_mov is a register copy; mc64_movimm loads an
    arbitrary constant; mc64_lea_sym loads a data global's or function's address. */

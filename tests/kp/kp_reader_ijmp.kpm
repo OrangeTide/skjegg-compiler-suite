@@ -1,0 +1,8 @@
+.kpm 1
+.func main params 0 slots 0 temps 2 labels 1
+LABADDR dst=0 label=0
+IJMP a=0
+LABEL label=0
+LIC dst=1 imm=0
+RETV a=1
+.endfunc

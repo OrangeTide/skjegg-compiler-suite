@@ -29,7 +29,7 @@
 
 struct mc64fix {
     size_t site;
-    int imm19;              /* 1 = 19-bit field (cbz/cbnz), 0 = 26-bit (b) */
+    int kind;              /* 0 = imm26 (b/bl), 1 = imm19 (cbz/cbnz), 2 = adr */
 };
 
 struct mc64lab {
@@ -85,8 +85,11 @@ mc64_new_label(struct mc64 *m)
 static int
 patch(struct code *c, struct mc64fix *f, size_t target)
 {
-    return f->imm19 ? a_patch_imm19(c, f->site, target)
-                    : a_patch_imm26(c, f->site, target);
+    switch (f->kind) {
+    case 2:  return a_patch_adr(c, f->site, target);
+    case 1:  return a_patch_imm19(c, f->site, target);
+    default: return a_patch_imm26(c, f->site, target);
+    }
 }
 
 void
@@ -103,11 +106,11 @@ mc64_label(struct mc64 *m, int id)
 }
 
 static void
-mc64_ref(struct mc64 *m, int id, size_t site, int imm19)
+mc64_ref(struct mc64 *m, int id, size_t site, int kind)
 {
     struct mc64lab *l = &m->lab[id];
     if (l->off >= 0) {
-        struct mc64fix f = { site, imm19 };
+        struct mc64fix f = { site, kind };
         if (patch(m->c, &f, (size_t)l->off) != 0)
             m->errsym = "branch target out of range";
         return;
@@ -117,7 +120,7 @@ mc64_ref(struct mc64 *m, int id, size_t site, int imm19)
         l->fix = realloc(l->fix, (size_t)l->cfix * sizeof(*l->fix));
     }
     l->fix[l->nfix].site = site;
-    l->fix[l->nfix].imm19 = imm19;
+    l->fix[l->nfix].kind = kind;
     l->nfix++;
 }
 
@@ -127,6 +130,7 @@ void mc64_cbnz(struct mc64 *m, int sf, int Rt, int id) { mc64_ref(m, id, a_cbnz(
 void mc64_ret(struct mc64 *m) { a_ret(m->c); }
 void mc64_blr(struct mc64 *m, int Rn) { a_blr(m->c, Rn); }
 void mc64_br(struct mc64 *m, int Rn) { a_br(m->c, Rn); }
+void mc64_lea_label(struct mc64 *m, int Rd, int id) { mc64_ref(m, id, a_adr(m->c, Rd), 2); }
 
 /* Moves / immediates / addresses. */
 void mc64_mov(struct mc64 *m, int sf, int Rd, int Rn) { a_mov_reg(m->c, sf, Rd, Rn); }

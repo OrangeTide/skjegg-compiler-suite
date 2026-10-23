@@ -56,9 +56,9 @@ Reserved words:
 
 ```
 and array as begin bind break buffer case const continue div do downto else end
-external for forward function if implement implementation in interface map mod
-nil not of or procedure program property record reexport ref repeat set shared
-shl shr slice start string then to type unit until uses var while with yield
+external for forward function goto if implement implementation in interface label
+map mod nil not of or procedure program property record reexport ref repeat set
+shared shl shr slice start string then to type unit until uses var while with yield
 ```
 
 `ref` and `slice` are reserved but not parsed: `slice` is held for a future windowed
@@ -402,6 +402,15 @@ Argument and operand evaluation order is right to left.
   undefined after the loop; do not read it once the loop ends.
 - **with.** `with recordExpr do stmt` opens a record's fields as bare names in the body.
 - **break / continue.** Exit the nearest enclosing loop, or skip to its next iteration.
+- **computed goto.** For a bytecode interpreter's inner loop, a `name:` label marks a
+  statement and `goto EXPR` jumps to a `label` value. A `label` value is made only by
+  `@name` (the address of a label in the current routine) and is **second-class**: it
+  may live only in that routine's frame, as a local variable or a routine-local
+  `array of label` (the dispatch table). So the usual shape is a table of label
+  addresses indexed by the next token, `goto disp[code[pc]]`, the threaded-dispatch
+  `NEXT`. There is no unstructured `goto`: a bare `goto name` to a label is a compile
+  error, and because a label value cannot leave its frame, a computed jump always
+  lands in a live frame. See kp-semantics.md for the `label` type's rules.
 
 ## Routines
 

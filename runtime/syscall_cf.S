@@ -152,10 +152,16 @@ _exit:
 1:  bra     1b
 
 | void __skj_trap_backtrace(int code);
-| ColdFire has no skj-run backtrace facility yet (that is RISC-V only), so this
-| is a no-op; a fatal path calls it then falls through to its own exit.  It
-| exists so rt_free.c (shared with the RISC-V tier, where the crt provides the
-| real RV_SYS_FATAL ecall) links the same on both targets.
+| Ask the host for a symbolized stack before a fatal exit: a TRAP #0 with the
+| reserved CF_SYS_FATAL selector (0x000f0000) in %d0, outside the Linux/m68k
+| syscall range.  It is the ColdFire twin of the RISC-V RV_SYS_FATAL ecall
+| (boris VM_SYS_TRAP).  skj-run walks the a6 frame chain, symbolizes it, and
+| returns, so the caller (rt_free.c's trap, C abort) falls through to its own
+| exit.  A bare m68k kernel sees an unknown syscall and ignores it, so the path
+| degrades to a plain exit off skj-run.
     .globl __skj_trap_backtrace
 __skj_trap_backtrace:
+    move.l  4(%sp), %d1        | exit code (informational; the caller exits)
+    move.l  #0x000f0000, %d0   | CF_SYS_FATAL
+    trap    #0
     rts
