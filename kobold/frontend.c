@@ -22,14 +22,14 @@
 
 /* kpcom imports ReadFileStr (its command-line driver reads source files), so it
    must be bound even though the `compile` export takes its source as a string. */
-static uint32_t
-fe_read_file_str(uint32_t pathstr)
+static kp_gptr
+fe_read_file_str(kp_gptr pathstr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
     char *buf;
     size_t n = 0;
-    uint32_t s;
+    kp_gptr s;
 
     if (plen < 0 || plen >= (int)sizeof path)
         return kp_str_new("", 0);
@@ -45,7 +45,7 @@ fe_read_file_str(uint32_t pathstr)
    embedded seed is run as a standalone front end, not through the `compile`
    export), so it must be bound too or the seed fails to link under the JIT. */
 static int
-fe_write_file_str(uint32_t pathstr, uint32_t datastr)
+fe_write_file_str(kp_gptr pathstr, kp_gptr datastr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
@@ -66,7 +66,7 @@ fe_write_file_str(uint32_t pathstr, uint32_t datastr)
 static DIR *fe_kpd_tab[FE_KPD_MAX];
 
 static int
-fe_kpd_open(uint32_t pathstr)
+fe_kpd_open(kp_gptr pathstr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
@@ -85,7 +85,7 @@ fe_kpd_open(uint32_t pathstr)
     return fe_kpd_tab[i] ? i : -1;
 }
 
-static uint32_t
+static kp_gptr
 fe_kpd_next(int h)
 {
     struct dirent *e;
@@ -129,7 +129,7 @@ kp_compile_pas(const char *pas_path, char **module_text, size_t *out_len,
     struct kp_jit j;
     char *src = NULL;
     size_t srclen = 0;
-    uint32_t name_s, text_s;
+    kp_gptr name_s, text_s;
     void *entry;
     int64_t iargs[6] = { 0 };
     double fargs[8] = { 0 };
@@ -198,7 +198,9 @@ kp_compile_pas(const char *pas_path, char **module_text, size_t *out_len,
         goto done;
     }
 
-    /* compile(srcName, srcText): two guest strings in, a guest string out. */
+    /* compile(srcName, srcText): two guest strings in, a guest string out. The
+       front end's pointer width is baked into its binary (native per target), so
+       the export sets its own target and takes no width argument. */
     name_s = kp_str_new(pas_path, (int)strlen(pas_path));
     text_s = kp_str_new(src, (int)srclen);
     iargs[0] = name_s;
@@ -214,8 +216,8 @@ kp_compile_pas(const char *pas_path, char **module_text, size_t *out_len,
         goto done;
     }
     {
-        int rlen = kp_str_len((uint32_t)result);
-        const char *rbytes = kp_str_bytes((uint32_t)result);
+        int rlen = kp_str_len((kp_gptr)result);
+        const char *rbytes = kp_str_bytes((kp_gptr)result);
         char *copy;
 
         if (rlen < 0)

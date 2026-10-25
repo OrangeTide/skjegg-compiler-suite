@@ -23,6 +23,15 @@ end;
 function ReadFile(const path: string): string;
 function WriteFile(const path, data: string): boolean;
 
+{ Path metadata and operations, no handle needed. }
+function Exists(const path: string): boolean;                { true if the path exists }
+function FileSize(const path: string): Int64;                { size in bytes, -1 if absent }
+function IsDir(const path: string): boolean;                 { true if the path is a directory }
+function DeleteFile(const path: string): boolean;            { remove a file; true on success }
+function RenameFile(const oldPath, newPath: string): boolean;{ rename or move; true on success }
+function MakeDir(const path: string): boolean;               { create a directory; true on success }
+function RemoveDir(const path: string): boolean;             { remove an empty directory; true on success }
+
 function Open(const path: string; var f: TextFile): boolean;
 function Create(const path: string; var f: TextFile): boolean;
 function ReadLine(var f: TextFile; var line: string): boolean;
@@ -41,6 +50,13 @@ function kpf_open_write(const path: string): integer; external cdecl;
 function kpf_read(fd: integer): string; external cdecl;
 function kpf_write(fd: integer; const data: string): integer; external cdecl;
 procedure kpf_close(fd: integer); external cdecl;
+function kpf_exists(const path: string): integer; external cdecl;
+function kpf_size(const path: string): Int64; external cdecl;
+function kpf_isdir(const path: string): integer; external cdecl;
+function kpf_delete(const path: string): integer; external cdecl;
+function kpf_rename(const oldPath, newPath: string): integer; external cdecl;
+function kpf_mkdir(const path: string): integer; external cdecl;
+function kpf_rmdir(const path: string): integer; external cdecl;
 
 { Read a whole file and return its contents, or the empty string if it cannot
   be read. }
@@ -53,6 +69,48 @@ end;
 function WriteFile(const path, data: string): boolean;
 begin
   WriteFile := WriteFileStr(path, data) <> 0;
+end;
+
+{ True if the path exists (a file or a directory). }
+function Exists(const path: string): boolean;
+begin
+  Exists := kpf_exists(path) <> 0;
+end;
+
+{ The file's size in bytes, or -1 if it does not exist. }
+function FileSize(const path: string): Int64;
+begin
+  FileSize := kpf_size(path);
+end;
+
+{ True if the path exists and is a directory. }
+function IsDir(const path: string): boolean;
+begin
+  IsDir := kpf_isdir(path) <> 0;
+end;
+
+{ Remove a file.  Returns True on success. }
+function DeleteFile(const path: string): boolean;
+begin
+  DeleteFile := kpf_delete(path) <> 0;
+end;
+
+{ Rename or move a file.  Returns True on success. }
+function RenameFile(const oldPath, newPath: string): boolean;
+begin
+  RenameFile := kpf_rename(oldPath, newPath) <> 0;
+end;
+
+{ Create a directory.  Returns True on success. }
+function MakeDir(const path: string): boolean;
+begin
+  MakeDir := kpf_mkdir(path) <> 0;
+end;
+
+{ Remove an empty directory.  Returns True on success. }
+function RemoveDir(const path: string): boolean;
+begin
+  RemoveDir := kpf_rmdir(path) <> 0;
 end;
 
 { Open a file for reading (the `reset` analog).  True on success. }

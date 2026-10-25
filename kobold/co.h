@@ -4,6 +4,7 @@
 #define KP_CO_H
 
 #include <stdint.h>
+#include "obj.h"   /* kp_gptr: a coroutine id is a pointer-width guest handle */
 
 /* The coroutine helpers carry a kp_vm pointer for ABI compatibility with the
    calls the front end emits, but the core does not dereference it. */
@@ -23,9 +24,9 @@ typedef int64_t (*kp_co_entry)(kp_vm *vm, const int64_t *args, int nargs);
    interns the coroutine in the VM handle table, and release is an ordinary kp_release
    on that id. kp_co_drop is not called directly by the front end; it is the reclaimer
    the handle table runs at refcount zero, so its signature matches kp_finalize. */
-uint32_t kp_co_new(kp_vm *vm, void *entry, const void *args, int nargs);
-uint32_t kp_co_self(kp_vm *vm);
-int64_t  kp_co_resume(kp_vm *vm, uint32_t co, int64_t value);
+kp_gptr  kp_co_new(kp_vm *vm, void *entry, const void *args, int nargs);
+kp_gptr  kp_co_self(kp_vm *vm);
+int64_t  kp_co_resume(kp_vm *vm, kp_gptr co, int64_t value);
 int64_t  kp_co_yield(kp_vm *vm, int64_t value);
 void     kp_co_drop(kp_vm *vm, void *obj);
 

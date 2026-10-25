@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
@@ -61,26 +62,29 @@ void kp_assert(uint32_t cond) { if (!cond) aot_trap("assertion failed"); }
  * The kprun-compatible debug/test surface (mirrors jit_main.c)
  ****************************************************************/
 
-void printInt(int n) { printf("%d\n", n); }
-void emit(int n)     { printf("%d\n", n); }
-void emit64(int64_t n) { printf("%lld\n", (long long)n); }
+/* The console seam writes straight to the fd (kp_io.c), so these printf-based
+   debug stubs flush after each line to stay in order with a program's own
+   writeln output. */
+void printInt(int n) { printf("%d\n", n); fflush(stdout); }
+void emit(int n)     { printf("%d\n", n); fflush(stdout); }
+void emit64(int64_t n) { printf("%lld\n", (long long)n); fflush(stdout); }
 
 /* emitf takes a real.  On rv32 the backend's soft-float call ABI hands it over as
    the double's bits in an integer register pair, not in a float register, so it
    arrives as a uint64_t (mirrors jit_main.c:h_emitf). */
 #if defined(__riscv) && __riscv_xlen == 32
-void emitf(uint64_t xb) { double x; memcpy(&x, &xb, sizeof x); printf("%g\n", x); }
+void emitf(uint64_t xb) { double x; memcpy(&x, &xb, sizeof x); printf("%g\n", x); fflush(stdout); }
 #else
-void emitf(double x) { printf("%g\n", x); }
+void emitf(double x) { printf("%g\n", x); fflush(stdout); }
 #endif
 
-uint32_t ReadFileStr(uint32_t pathstr)
+kp_gptr ReadFileStr(kp_gptr pathstr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
     char *buf;
     size_t n = 0;
-    uint32_t s;
+    kp_gptr s;
 
     if (plen < 0 || plen >= (int)sizeof(path))
         return kp_str_new("", 0);
@@ -95,7 +99,7 @@ uint32_t ReadFileStr(uint32_t pathstr)
 /* WriteFileStr(path, data): write a guest string to a host file named by another
    guest string, returning 1 on success and 0 on failure.  The front end's `-o`
    uses it to write the KPM1 module without a shell redirect. */
-int WriteFileStr(uint32_t pathstr, uint32_t datastr)
+int WriteFileStr(kp_gptr pathstr, kp_gptr datastr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
@@ -112,7 +116,7 @@ int WriteFileStr(uint32_t pathstr, uint32_t datastr)
    its own line buffering), mirroring jit_main.c and io_free.c. */
 #define KPF_CHUNK 4096
 
-int kpf_open_read(uint32_t pathstr)
+int kpf_open_read(kp_gptr pathstr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
@@ -123,7 +127,7 @@ int kpf_open_read(uint32_t pathstr)
     return open(path, O_RDONLY);
 }
 
-int kpf_open_write(uint32_t pathstr)
+int kpf_open_write(kp_gptr pathstr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
@@ -134,7 +138,7 @@ int kpf_open_write(uint32_t pathstr)
     return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 }
 
-uint32_t kpf_read(int fd)
+kp_gptr kpf_read(int fd)
 {
     char tmp[KPF_CHUNK];
     ssize_t n = (fd < 0) ? -1 : read(fd, tmp, sizeof tmp);
@@ -143,7 +147,7 @@ uint32_t kpf_read(int fd)
     return kp_str_new(tmp, (int)n);
 }
 
-int kpf_write(int fd, uint32_t datastr)
+int kpf_write(int fd, kp_gptr datastr)
 {
     if (fd < 0)
         return -1;
@@ -156,13 +160,92 @@ void kpf_close(int fd)
         close(fd);
 }
 
+/* Path metadata and operations the `files` unit exposes Pascal-style: existence,
+   size, a directory test, and delete/rename/mkdir, over the host stat/unlink/
+   rename/mkdir.  The freestanding io_free.c mirrors them over the same POSIX
+   names.  A guest string is copied to a NUL-terminated path first. */
+static int kpf_pathcopy(kp_gptr s, char *buf, int cap)
+{
+    int n = kp_str_len(s);
+    if (n < 0 || n >= cap)
+        return -1;
+    memcpy(buf, kp_str_bytes(s), (size_t)n);
+    buf[n] = '\0';
+    return n;
+}
+
+int kpf_exists(kp_gptr pathstr)
+{
+    char path[1024];
+    struct stat st;
+    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return 0;
+    return stat(path, &st) == 0;
+}
+
+int64_t kpf_size(kp_gptr pathstr)
+{
+    char path[1024];
+    struct stat st;
+    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return -1;
+    if (stat(path, &st) != 0)
+        return -1;
+    return (int64_t)st.st_size;
+}
+
+int kpf_isdir(kp_gptr pathstr)
+{
+    char path[1024];
+    struct stat st;
+    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return 0;
+    if (stat(path, &st) != 0)
+        return 0;
+    return S_ISDIR(st.st_mode) ? 1 : 0;
+}
+
+int kpf_delete(kp_gptr pathstr)
+{
+    char path[1024];
+    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return 0;
+    return unlink(path) == 0;
+}
+
+int kpf_rename(kp_gptr oldstr, kp_gptr newstr)
+{
+    char oldp[1024], newp[1024];
+    if (kpf_pathcopy(oldstr, oldp, sizeof oldp) < 0)
+        return 0;
+    if (kpf_pathcopy(newstr, newp, sizeof newp) < 0)
+        return 0;
+    return rename(oldp, newp) == 0;
+}
+
+int kpf_mkdir(kp_gptr pathstr)
+{
+    char path[1024];
+    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return 0;
+    return mkdir(path, 0755) == 0;
+}
+
+int kpf_rmdir(kp_gptr pathstr)
+{
+    char path[1024];
+    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return 0;
+    return rmdir(path) == 0;
+}
+
 /* Directory reads for the `dirs` unit, over the host opendir/readdir.  A Kobold
    handle is an index into a small table of open DIR*; kpd_next returns one
    entry name at a time (or the empty string at end). */
 #define KPD_MAX 16
 static DIR *kpd_tab[KPD_MAX];
 
-int kpd_open(uint32_t pathstr)
+int kpd_open(kp_gptr pathstr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
@@ -180,7 +263,7 @@ int kpd_open(uint32_t pathstr)
     return kpd_tab[i] ? i : -1;
 }
 
-uint32_t kpd_next(int h)
+kp_gptr kpd_next(int h)
 {
     struct dirent *e;
     if (h < 0 || h >= KPD_MAX || !kpd_tab[h])
@@ -211,7 +294,12 @@ void kpd_close(int h)
    fight the guest heap's probe region. */
 static void *aot_map_low(size_t len)
 {
-#if defined(MAP_32BIT)
+#if defined(KP_LP64)
+    /* LP64: guest addresses are full 64-bit host pointers, so the execution stack
+       can live anywhere; no low-memory constraint. */
+    return mmap(NULL, len, PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#elif defined(MAP_32BIT)
     return mmap(NULL, len, PROT_READ | PROT_WRITE,
                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
 #elif UINTPTR_MAX <= 0xffffffffULL

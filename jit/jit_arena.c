@@ -18,15 +18,23 @@
    regions. */
 #define KP_ARENA_LEN (16u << 20)
 
-/* Map a region in low memory so a guest pointer fits the front end's 32-bit
-   address model.  On x86-64 that is MAP_32BIT; elsewhere there is no such flag,
-   so request successive low addresses with MAP_FIXED_NOREPLACE and take the
-   first that lands (and stays) below 4GB.  PROT_READ|PROT_WRITE; a caller that
-   wants executable memory mprotects it afterward. */
+/* Map a region for the guest code, data, and stack.  Under LP64 a guest address
+   is a full 64-bit host pointer, so the mapping can live anywhere.  Otherwise the
+   guest is 32-bit and the region must sit below 4GB: on x86-64 that is MAP_32BIT;
+   a 32-bit host is low by construction; any other 64-bit host (arm64 cross JIT)
+   has neither, so request successive low addresses with MAP_FIXED_NOREPLACE and
+   take the first that lands (and stays) below 4GB.  Mirrors rt_host.c:rt_map_low.
+   PROT_READ|PROT_WRITE; a caller that wants executable memory mprotects it
+   afterward. */
 void *
 kp_map_low(size_t len)
 {
-#if UINTPTR_MAX <= 0xffffffffULL
+#if defined(KP_LP64)
+    /* LP64: guest addresses are full 64-bit host pointers, so the region can live
+       anywhere; no low-memory constraint. */
+    return mmap(NULL, len, PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#elif UINTPTR_MAX <= 0xffffffffULL
     /* A 32-bit host (e.g. rv32): every address already fits the front end's
        32-bit model, so a plain mapping is low by construction. */
     return mmap(NULL, len, PROT_READ | PROT_WRITE,

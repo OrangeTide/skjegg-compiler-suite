@@ -73,8 +73,18 @@ framework](#module-kinds-and-the-section-framework).
 
 - `.kpm <version>` is required and must be the first non-comment line. Version `1`
   is this document. A backend rejects a version it does not implement.
-- `.target <arch>` is a hint (`x86-64` for now). The backend may honor or override
-  it; the IR itself is architecture-neutral.
+- `.target <class>` is the module's pointer-width class, and it is authoritative,
+  not a hint: `ilp32` for the 32-bit targets (rv32, ColdFire, MIPS) and `lp64` for
+  the 64-bit ones (x86-64, arm64). A KPM1 module is **not** architecture-agnostic.
+  Its opcodes bake in the guest pointer width (the `*64` family and the `ptr`
+  global flag below are chosen by width), so a module and the backend that loads
+  it must agree. The reader rejects a module of the other class with a clear
+  pointer-width-mismatch error rather than silently truncating a 64-bit handle to
+  32 bits. A legacy value (`agnostic`) or a bare arch name is left unchecked, so an
+  older module or a hand-written reader fixture still loads. The integer core,
+  control flow, and the rest of the IR are width-independent; only the pointer and
+  `int64` opcodes differ, which is why one front end emits both widths from one
+  source (gcc `-m32`/`-m64` style).
 - `.file "<path>"` is an optional debug hint, written when the front end is run
   with `-g`. It names the source file for the module's address-to-line table (the
   `LOC` opcode below), so a trap can report where it came from. Absent, traps carry

@@ -6,6 +6,23 @@
 #include <string.h>
 #include <stdio.h>
 
+/* The pointer-width class this backend reads modules for.  A KPM1 module is NOT
+   architecture-agnostic: its opcodes bake in the guest pointer width (ADD vs
+   ADD64, LDL vs LDL64, ARG vs ARG64, the `ptr` global flag), so a module and the
+   backend that loads it must agree.  The front end stamps the class in the
+   `.target` header (ilp32 for rv32/cf/mips, lp64 for x86-64/arm64); the reader
+   rejects a module of the other class rather than silently truncating a 64-bit
+   handle to 32 bits (or sign-confusing a 32-bit one).  This tool's own class is
+   fixed at compile time by the backend-width defines: KP_LP64 (the JIT and the
+   arm64 AOT) or X86_BITS == 64 (the x86-64 AOT, whose selector is unconditionally
+   64-bit, so it carries no KP_LP64).  The 32-bit backends (rv32 via KP_AOT_RV,
+   ColdFire, MIPS) define neither. */
+#if defined(KP_LP64) || (defined(X86_BITS) && X86_BITS == 64)
+#define KPM_NATIVE_TARGET "lp64"
+#else
+#define KPM_NATIVE_TARGET "ilp32"
+#endif
+
 /****************************************************************
  * Opcode names
  *
@@ -22,6 +39,7 @@ struct op_entry {
 static const struct op_entry op_table[] = {
     { "NOP", IR_NOP }, { "LIC", IR_LIC }, { "LEA", IR_LEA },
     { "ADL", IR_ADL }, { "MOV", IR_MOV },
+    { "LEA64", IR_LEA64 }, { "ADL64", IR_ADL64 },
     { "ADD", IR_ADD }, { "SUB", IR_SUB }, { "MUL", IR_MUL },
     { "ADDO", IR_ADDO }, { "SUBO", IR_SUBO }, { "MULO", IR_MULO },
     { "LOC", IR_LOC },
@@ -799,8 +817,21 @@ kpm_read(struct kpm_module *m, const char *text, size_t len,
            read_global, and read_func each tokenize it from the top. */
         if (kw(line, ".target")) {
             n = tokenize(line, tok);
-            if (n >= 2)
+            if (n >= 2) {
                 m->target = arena_strdup(&m->arena, tok[1]);
+                /* Reject a pointer-width mismatch outright.  Only the two width
+                   classes are checked; a legacy or hint value (agnostic, an arch
+                   name) is left unchecked so old modules and hand-written reader
+                   fixtures still load. */
+                if ((strcmp(tok[1], "ilp32") == 0 || strcmp(tok[1], "lp64") == 0)
+                    && strcmp(tok[1], KPM_NATIVE_TARGET) != 0) {
+                    fail(&r, r.pos + 1,
+                         strcmp(KPM_NATIVE_TARGET, "lp64") == 0
+                         ? "KPM pointer-width mismatch: module is ilp32, this backend is lp64"
+                         : "KPM pointer-width mismatch: module is lp64, this backend is ilp32");
+                    goto err;
+                }
+            }
         } else if (kw(line, ".module")) {
             n = tokenize(line, tok);
             if (n >= 2) {

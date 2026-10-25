@@ -153,13 +153,13 @@ void kp_assert(uint32_t cond) { if (!cond) trap_die("skj-kp: assertion failed");
  * region (boris A3).
  ****************************************************************/
 
-/* The raw Linux brk, from the shared syscall seam (syscall_rv.S / syscall_cf.S):
-   returns the new program break, or the unchanged break when the request cannot
-   be met. */
-extern void *__sys_brk(void *addr);
-
-/* The current break, queried lazily from the host on first use. */
-static uint8_t *g_brk;
+/* The core's memory source is __libc_sbrk (libc/sbrk.c): the one brk-bump both
+   runtimes grow their heap through, over the shared __sys_brk seam.  It queries
+   the break lazily, guards address wrap, and returns the old break or (void *)-1
+   when the host cannot satisfy the request, which is exactly gheap's GH_SBRK
+   contract.  The freestanding skj-cc defines __skj_ilp32__, so sbrk.c takes its
+   brk path (not the LP64 fixed-region path); this tier is rv/cf only. */
+extern void *__libc_sbrk(long incr);
 
 /* Install the guest heap.  The break is the memory source now, so a host no
    longer hands in a region; this is retained as a no-op for hosts still calling
@@ -171,61 +171,36 @@ kp_rt_init(uint32_t base, uint32_t size)
     (void)size;
 }
 
-/* The core's memory source: grow the break by `incr`, return the old break, or
-   (uint8_t *)-1 if the host cannot satisfy it. */
-static uint8_t *
-gh_sbrk(long incr)
-{
-    uint8_t *old, *want, *got;
-
-    if (g_brk == NULL) {
-        g_brk = (uint8_t *)__sys_brk((void *)0);
-        if (g_brk == (uint8_t *)-1 || g_brk == NULL)
-            return (uint8_t *)-1;
-    }
-    old = g_brk;
-    want = old + incr;
-    if (incr > 0 && want < old)                 /* address wrap */
-        return (uint8_t *)-1;
-    if (incr < 0 && want > old)
-        return (uint8_t *)-1;
-    got = (uint8_t *)__sys_brk(want);
-    if (incr > 0 && got < want)                 /* host would not grow this far */
-        return (uint8_t *)-1;
-    g_brk = got;
-    return old;
-}
-
-#define GH_SBRK(incr) gh_sbrk((long)(incr))
+#define GH_SBRK(incr) ((uint8_t *)__libc_sbrk((long)(incr)))
 #include "gheap_core.h"
 
 /* The guest-address wrappers rt_glue.h declares: convert a native payload
    pointer to and from a 32-bit guest address, and turn exhaustion into a fatal
    trap (the guest has no way to recover). */
-uint32_t
+kp_gptr
 gheap_alloc(uint32_t nbytes)
 {
     void *p = gh_alloc(nbytes);
 
     if (p == NULL && nbytes != 0)
         rt_trap(0);             /* heap exhausted (or not installed): fatal */
-    return (uint32_t)(uintptr_t)p;
+    return (kp_gptr)(uintptr_t)p;
 }
 
 void
-gheap_free(uint32_t addr)
+gheap_free(kp_gptr addr)
 {
     gh_free((void *)(uintptr_t)addr);
 }
 
-uint32_t
-gheap_realloc(uint32_t addr, uint32_t nbytes)
+kp_gptr
+gheap_realloc(kp_gptr addr, uint32_t nbytes)
 {
     void *p = gh_realloc((void *)(uintptr_t)addr, nbytes);
 
     if (p == NULL && nbytes != 0)
         rt_trap(0);
-    return (uint32_t)(uintptr_t)p;
+    return (kp_gptr)(uintptr_t)p;
 }
 
 /* Live guest-heap bytes (allocated, not freed); a guest leak check diffs it. */
@@ -244,17 +219,17 @@ kp_gheap_live(void)
  * tier is an ordinary gheap object, counted here like any other.
  ****************************************************************/
 
-static void (*g_final[KP_OBJ_NKINDS])(uint32_t addr);
+static void (*g_final[KP_OBJ_NKINDS])(kp_gptr addr);
 
 void
-rt_register_final(uint32_t kind, void (*fn)(uint32_t addr))
+rt_register_final(uint32_t kind, void (*fn)(kp_gptr addr))
 {
     if (kind < KP_OBJ_NKINDS)
         g_final[kind] = fn;
 }
 
 void
-kp_retain(uint32_t v)
+kp_retain(kp_gptr v)
 {
     struct kp_obj_hdr *h;
 
@@ -266,10 +241,10 @@ kp_retain(uint32_t v)
 }
 
 void
-kp_release(uint32_t v)
+kp_release(kp_gptr v)
 {
     struct kp_obj_hdr *h;
-    void (*fin)(uint32_t);
+    void (*fin)(kp_gptr);
 
     if (v == 0)
         return;

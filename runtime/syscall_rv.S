@@ -20,6 +20,11 @@
 	.globl close
 	.globl lseek
 	.globl getdents64
+	.globl statx
+	.globl mkdirat
+	.globl unlinkat
+	.globl fchmodat
+	.globl renameat2
 	.globl clock_gettime
 	.globl getrandom
 	.globl nanosleep
@@ -101,6 +106,47 @@ getdents64:
 	ret
 	.size	getdents64,.-getdents64
 
+/* The file-metadata and path syscalls the libc wraps (libc/stat.c over statx,
+   libc/fileops.c over the *at forms with AT_FDCWD).  rv32 has no bare stat /
+   mkdir / unlink / rename, so these *at forms are the primitives.  Shared with
+   the Kobold freestanding runtime (the files unit's Exists/FileSize/IsDir and
+   Delete/Rename/MakeDir/RemoveDir), hence here rather than in start_rv.S.  All
+   arguments are already in a0.. on the ILP32 psABI. */
+	.type	statx,@function
+statx:
+	li	a7, 291
+	ecall
+	ret
+	.size	statx,.-statx
+
+	.type	mkdirat,@function
+mkdirat:
+	li	a7, 34
+	ecall
+	ret
+	.size	mkdirat,.-mkdirat
+
+	.type	unlinkat,@function
+unlinkat:
+	li	a7, 35
+	ecall
+	ret
+	.size	unlinkat,.-unlinkat
+
+	.type	fchmodat,@function
+fchmodat:
+	li	a7, 53
+	ecall
+	ret
+	.size	fchmodat,.-fchmodat
+
+	.type	renameat2,@function
+renameat2:
+	li	a7, 276
+	ecall
+	ret
+	.size	renameat2,.-renameat2
+
 /* int clock_gettime(int clk_id, void *ts); writes a 32-bit {tv_sec, tv_nsec}
    through ts (see the seam note on the 32-bit timespec convention).  Args in
    a0..a1. */
@@ -142,9 +188,9 @@ sched_yield:
 	.size	sched_yield,.-sched_yield
 
 /* void *__sys_brk(void *addr); the raw Linux brk (#214), returning the new
-   program break.  Both heaps grow through it: libc/sbrk.c on the hosted ILP32
-   targets and the Kobold freestanding gheap (rt_free.c), so it lives in the
-   shared seam. */
+   program break.  Both heaps grow through one brk-bump, libc/sbrk.c's
+   __libc_sbrk: libc's malloc on the hosted ILP32 targets and the Kobold
+   freestanding gheap (rt_free.c) call it alike, so it lives in the shared seam. */
 	.type	__sys_brk,@function
 __sys_brk:
 	li	a7, 214

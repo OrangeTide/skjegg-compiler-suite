@@ -172,9 +172,13 @@ running untrusted scripts safely is in `kp-hardening.md`.
 
 A script that uses `write`, `writeln`, `read`, `readln`, or the program-argument
 builtins imports host functions named `io_write_*`, `io_read_*`, `ParamCount`, and
-`ParamStr`. Rather than registering each by hand, call `kp_register_io(vm)` (from
-`rt.h`) once after `kp_new` and before `kp_link`, and they resolve to a native
-stdio implementation. `kp_io_set_args(argc, argv)` records the command line for the
+`ParamStr`. Each `io_*` function carries the stream as a POSIX-style file
+descriptor (fd 1 is standard output, fd 2 standard error, input is fd 0), not a
+stdio `FILE*`, so the seam matches the VM boundary and needs no guest pointer.
+Rather than registering each by hand, call `kp_register_io(vm)` (from `rt.h`) once
+after `kp_new` and before `kp_link`, and they resolve to a native implementation
+over the OS `read`/`write` calls, with one byte of input pushback for the numeric
+and line reads. `kp_io_set_args(argc, argv)` records the command line for the
 argument builtins. A host that provides its own I/O can register those names itself
 instead.
 

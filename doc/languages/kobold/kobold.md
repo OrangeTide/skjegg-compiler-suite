@@ -141,8 +141,13 @@ two steps: the host `skj-kpc` emits the module, then the cross backend
 `skj-kpc-arm64` exist only to prove the seed AOT-compiles and runs on each
 backend; the build uses the host `skj-kpc`.
 
-The seed is arch-neutral IR: its `.target` line is a hint, so one committed seed
-drives every backend's JIT and AOT front end.
+The seed is pointer-width-specific, not arch-neutral: its `.target` line records
+the width class (`ilp32` or `lp64`) and a backend rejects a module of the other
+class. The committed `prebuild/kpcom.kpm` is the ILP32 seed for the 32-bit
+self-host; the LP64 front end the x86-64/arm64 JIT and AOT embed is regenerated
+from source at build time. The integer core and control flow are width-neutral;
+only the pointer and `int64` opcodes differ, so one front-end source emits both
+widths (gcc `-m32`/`-m64` style).
 
 ## The KPM1 text module format
 
@@ -293,11 +298,16 @@ and run it in the `skj-run` emulator, see `kp-sandbox.md`.
   so the host places the region below 4 GB. It also holds the reference counter,
   the finalizer registry, the `mem*` primitives, and the traps, which write a
   one-line diagnostic and `exit(70)`.
-- `kobold/io_free.c` is the console and the integer `Str`/`Val`, the freestanding
-  `kp_host.c`. Output goes straight to the `write` syscall (no stdio), input
-  through `read`; the integer formatting and parsing are hand-rolled with no libc
-  (the hosted `str_fmt.c` uses `snprintf`/`strtod`, which this tier cannot). It
-  also carries `ParamCount`/`ParamStr` over the entry argument vector.
+- `kobold/kp_io.c` is the one console implementation, shared by the freestanding
+  and the hosted runtimes. Output goes straight to the `write` syscall (no stdio),
+  input through `read` with a single byte of pushback for the numeric and line
+  reads; the integer formatting and parsing are hand-rolled with no libc (the
+  hosted `str_fmt.c` uses `snprintf`/`strtod`, which this tier cannot). Only
+  `io_write_real` is per tier, since its `%g` renderer differs.
+- `kobold/io_free.c` is the rest of the freestanding `kp_host.c`: the per-tier
+  real output (`io_write_real`), the integer `Str`/`Val`, file I/O, the `brv_*`
+  soft-float real bridges, and `ParamCount`/`ParamStr` over the entry argument
+  vector.
 - `kobold/kp_crt_rv.S` is the skjegg test crt: `_start` runs on the entry stack, hands
   the runtime a reserved bss heap region and the argument vector, enters
   `kp_guest_entry`, and exits 0 on return (a program ends nonzero only through
@@ -310,13 +320,14 @@ and `_exit` (plus `open` and `close` on ColdFire), the same names the C libc
 links, so the Kobold freestanding runtime and the C runtime speak one syscall
 seam (`runtime/io_free_rv.S`, `runtime/io_free_cf.S`).
 
-`io_free.c`'s console I/O delegates to libc's buffered-stream core
-(`libc/stdio_core.c`, the three standard streams and
-`fputc` / `fgetc` / `fwrite` / `fflush` over that one `write` / `read` seam), so
-both runtimes share a single stdio buffering layer. Because output is buffered, a
-crt must flush before the process ends: the shipped crts and `io_halt`
-call `fflush` then `_exit`, which is why the normal-return path goes through
-`io_halt` (ABI version 3).
+The console in `kp_io.c` writes and reads that seam directly rather than through a
+buffered-stream core: the only state it keeps is one byte of input pushback (the
+irreducible lookahead the numeric and line reads need), not a `BUFSIZ` stdio
+buffer. Output is therefore unbuffered, so nothing has to be flushed before the
+process ends; `io_halt` simply `_exit`s, and the normal-return path still goes
+through it (ABI version 3). (The C libc's own `libc/stdio_core.c` is unaffected: it
+is still the buffered-stream core for C programs; the Kobold console no longer
+routes through it.)
 
 The entry seam (`kp_set_raw_args`, `kp_rt_init`, `kp_guest_entry`, `_exit`)
 is a published ABI a downstream host links against, so it is versioned

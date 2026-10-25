@@ -40,8 +40,12 @@ __libc_sbrk(long incr)
     }
     old = cur_brk;
     want = old + incr;
+    if (incr > 0 && want < old)         /* address wrap on grow */
+        return (void *)-1;
+    if (incr < 0 && want > old)         /* address wrap on shrink */
+        return (void *)-1;
     got = (char *)__sys_brk(want);
-    if (got < want)                     /* the region could not grow that far */
+    if (incr > 0 && got < want)         /* the region could not grow that far */
         return (void *)-1;
     cur_brk = got;
     return old;

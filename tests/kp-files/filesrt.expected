@@ -4,3 +4,11 @@ L1=one
 L2=two
 L3=three
 lines=3
+exists=yes
+size=14
+isdir=no
+nope=no
+renamed=yes gone=yes
+mkdir isdir=yes
+rmdir=yes
+delete=yes gone=yes

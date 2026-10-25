@@ -35,31 +35,35 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <sys/stat.h>
 
 /* The same small debug/test surface Kobold's kprun binds on top of the standard
    runtime, so this runner is a drop-in for the end-to-end runcheck corpus.  In the
    JIT's register ABI each is a plain C function (kprun uses the value-stack ABI). */
-static void h_printInt(int n) { printf("%d\n", n); }
-static void h_emit64(int64_t n) { printf("%lld\n", (long long)n); }
+/* The console seam writes straight to the fd (kp_io.c), so these printf-based
+   debug stubs flush after each line to stay in order with a program's own
+   writeln output. */
+static void h_printInt(int n) { printf("%d\n", n); fflush(stdout); }
+static void h_emit64(int64_t n) { printf("%lld\n", (long long)n); fflush(stdout); }
 
 /* emitf takes a real.  On rv32 the JIT's soft-float call ABI passes it as the
    double's bits in an integer register pair (see the bridge in kp_host.c), so the
    harness receives those bits; every other target passes a native double. */
 #if defined(__riscv) && __riscv_xlen == 32
-static void h_emitf(uint64_t xb) { double x; memcpy(&x, &xb, sizeof x); printf("%g\n", x); }
+static void h_emitf(uint64_t xb) { double x; memcpy(&x, &xb, sizeof x); printf("%g\n", x); fflush(stdout); }
 #else
-static void h_emitf(double x) { printf("%g\n", x); }
+static void h_emitf(double x) { printf("%g\n", x); fflush(stdout); }
 #endif
 
 /* ReadFileStr(path): read a host file named by a guest string, returning its
    contents as a fresh guest string (empty on any failure), mirroring kprun. */
-static uint32_t h_readFileStr(uint32_t pathstr)
+static kp_gptr h_readFileStr(kp_gptr pathstr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
     char *buf;
     size_t n = 0;
-    uint32_t s;
+    kp_gptr s;
 
     if (plen < 0 || plen >= (int)sizeof(path))
         return kp_str_new("", 0);
@@ -73,7 +77,7 @@ static uint32_t h_readFileStr(uint32_t pathstr)
 
 /* WriteFileStr(path, data): write a guest string to a host file, 1 ok / 0 fail.
    Bound for a guest that imports it (the front end's own `-o` path). */
-static int h_writeFileStr(uint32_t pathstr, uint32_t datastr)
+static int h_writeFileStr(kp_gptr pathstr, kp_gptr datastr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
@@ -91,7 +95,7 @@ static int h_writeFileStr(uint32_t pathstr, uint32_t datastr)
    runtime tier (here, aot_rt.c, and io_free.c). */
 #define KPF_CHUNK 4096
 
-static int h_kpf_open_read(uint32_t pathstr)
+static int h_kpf_open_read(kp_gptr pathstr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
@@ -102,7 +106,7 @@ static int h_kpf_open_read(uint32_t pathstr)
     return open(path, O_RDONLY);
 }
 
-static int h_kpf_open_write(uint32_t pathstr)
+static int h_kpf_open_write(kp_gptr pathstr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
@@ -113,7 +117,7 @@ static int h_kpf_open_write(uint32_t pathstr)
     return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 }
 
-static uint32_t h_kpf_read(int fd)
+static kp_gptr h_kpf_read(int fd)
 {
     char tmp[KPF_CHUNK];
     ssize_t n = (fd < 0) ? -1 : read(fd, tmp, sizeof tmp);
@@ -122,7 +126,7 @@ static uint32_t h_kpf_read(int fd)
     return kp_str_new(tmp, (int)n);
 }
 
-static int h_kpf_write(int fd, uint32_t datastr)
+static int h_kpf_write(int fd, kp_gptr datastr)
 {
     if (fd < 0)
         return -1;
@@ -135,11 +139,89 @@ static void h_kpf_close(int fd)
         close(fd);
 }
 
+/* Path metadata and operations the `files` unit exposes Pascal-style, over the
+   host stat/unlink/rename/mkdir (the AOT aot_rt.c and freestanding io_free.c
+   mirror them under the same names). */
+static int h_kpf_pathcopy(kp_gptr s, char *buf, int cap)
+{
+    int n = kp_str_len(s);
+    if (n < 0 || n >= cap)
+        return -1;
+    memcpy(buf, kp_str_bytes(s), (size_t)n);
+    buf[n] = '\0';
+    return n;
+}
+
+static int h_kpf_exists(kp_gptr pathstr)
+{
+    char path[1024];
+    struct stat st;
+    if (h_kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return 0;
+    return stat(path, &st) == 0;
+}
+
+static int64_t h_kpf_size(kp_gptr pathstr)
+{
+    char path[1024];
+    struct stat st;
+    if (h_kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return -1;
+    if (stat(path, &st) != 0)
+        return -1;
+    return (int64_t)st.st_size;
+}
+
+static int h_kpf_isdir(kp_gptr pathstr)
+{
+    char path[1024];
+    struct stat st;
+    if (h_kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return 0;
+    if (stat(path, &st) != 0)
+        return 0;
+    return S_ISDIR(st.st_mode) ? 1 : 0;
+}
+
+static int h_kpf_delete(kp_gptr pathstr)
+{
+    char path[1024];
+    if (h_kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return 0;
+    return unlink(path) == 0;
+}
+
+static int h_kpf_rename(kp_gptr oldstr, kp_gptr newstr)
+{
+    char oldp[1024], newp[1024];
+    if (h_kpf_pathcopy(oldstr, oldp, sizeof oldp) < 0)
+        return 0;
+    if (h_kpf_pathcopy(newstr, newp, sizeof newp) < 0)
+        return 0;
+    return rename(oldp, newp) == 0;
+}
+
+static int h_kpf_mkdir(kp_gptr pathstr)
+{
+    char path[1024];
+    if (h_kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return 0;
+    return mkdir(path, 0755) == 0;
+}
+
+static int h_kpf_rmdir(kp_gptr pathstr)
+{
+    char path[1024];
+    if (h_kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return 0;
+    return rmdir(path) == 0;
+}
+
 /* Directory reads for the `dirs` unit, over host opendir/readdir. */
 #define H_KPD_MAX 16
 static DIR *h_kpd_tab[H_KPD_MAX];
 
-static int h_kpd_open(uint32_t pathstr)
+static int h_kpd_open(kp_gptr pathstr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
@@ -157,7 +239,7 @@ static int h_kpd_open(uint32_t pathstr)
     return h_kpd_tab[i] ? i : -1;
 }
 
-static uint32_t h_kpd_next(int h)
+static kp_gptr h_kpd_next(int h)
 {
     struct dirent *e;
     if (h < 0 || h >= H_KPD_MAX || !h_kpd_tab[h])
@@ -567,6 +649,13 @@ int main(int argc, char **argv)
         add_binding("kpf_read", jit_as_addr((void (*)(void))h_kpf_read), err, sizeof err) ||
         add_binding("kpf_write", jit_as_addr((void (*)(void))h_kpf_write), err, sizeof err) ||
         add_binding("kpf_close", jit_as_addr((void (*)(void))h_kpf_close), err, sizeof err) ||
+        add_binding("kpf_exists", jit_as_addr((void (*)(void))h_kpf_exists), err, sizeof err) ||
+        add_binding("kpf_size", jit_as_addr((void (*)(void))h_kpf_size), err, sizeof err) ||
+        add_binding("kpf_isdir", jit_as_addr((void (*)(void))h_kpf_isdir), err, sizeof err) ||
+        add_binding("kpf_delete", jit_as_addr((void (*)(void))h_kpf_delete), err, sizeof err) ||
+        add_binding("kpf_rename", jit_as_addr((void (*)(void))h_kpf_rename), err, sizeof err) ||
+        add_binding("kpf_mkdir", jit_as_addr((void (*)(void))h_kpf_mkdir), err, sizeof err) ||
+        add_binding("kpf_rmdir", jit_as_addr((void (*)(void))h_kpf_rmdir), err, sizeof err) ||
         add_binding("kpd_open", jit_as_addr((void (*)(void))h_kpd_open), err, sizeof err) ||
         add_binding("kpd_next", jit_as_addr((void (*)(void))h_kpd_next), err, sizeof err) ||
         add_binding("kpd_close", jit_as_addr((void (*)(void))h_kpd_close), err, sizeof err)) {

@@ -27,14 +27,14 @@
    tests membership. kp_map_del removes a key, returning an owned reference like kp_map_reserve.
    kp_map_len is the entry count. kp_map_clone is an independent copy (value assignment). The slot
    address kp_map_get returns is valid only until the next structural change to the map. */
-uint32_t kp_map_new(KP_VM_P int32_t elemsize, uint32_t layout);
-uint32_t kp_map_reserve(KP_VM_P uint32_t m, uint32_t key, int32_t elemsize, uint32_t layout);
-uint32_t kp_map_get(KP_VM_P uint32_t m, uint32_t key);
-int32_t  kp_map_tryget(KP_VM_P uint32_t m, uint32_t key, uint32_t vaddr);
-int32_t  kp_map_has(KP_VM_P uint32_t m, uint32_t key);
-uint32_t kp_map_del(KP_VM_P uint32_t m, uint32_t key);
-int32_t  kp_map_len(KP_VM_P uint32_t m);
-uint32_t kp_map_clone(KP_VM_P uint32_t m);
+kp_gptr  kp_map_new(KP_VM_P int32_t elemsize, kp_gptr layout);
+kp_gptr  kp_map_reserve(KP_VM_P kp_gptr m, kp_gptr key, int32_t elemsize, kp_gptr layout);
+kp_gptr  kp_map_get(KP_VM_P kp_gptr m, kp_gptr key);
+int32_t  kp_map_tryget(KP_VM_P kp_gptr m, kp_gptr key, kp_gptr vaddr);
+int32_t  kp_map_has(KP_VM_P kp_gptr m, kp_gptr key);
+kp_gptr  kp_map_del(KP_VM_P kp_gptr m, kp_gptr key);
+int32_t  kp_map_len(KP_VM_P kp_gptr m);
+kp_gptr  kp_map_clone(KP_VM_P kp_gptr m);
 
 /* An iterator is a separate guest-heap object that holds the map (retained), the next slot to
    scan, and a snapshot of the map's modification counter. kp_mapiter_new makes one; kp_mapiter_next
@@ -42,7 +42,7 @@ uint32_t kp_map_clone(KP_VM_P uint32_t m);
    addresses `kaddr` and `vaddr` and returns 1, or 0 at the end. It traps if the map was structurally
    changed (a key inserted or removed) since the iterator was made; updating an existing key's value
    is allowed. */
-uint32_t kp_mapiter_new(KP_VM_P uint32_t m);
-int32_t  kp_mapiter_next(KP_VM_P uint32_t it, uint32_t kaddr, uint32_t vaddr);
+kp_gptr  kp_mapiter_new(KP_VM_P kp_gptr m);
+int32_t  kp_mapiter_next(KP_VM_P kp_gptr it, kp_gptr kaddr, kp_gptr vaddr);
 
 #endif /* KP_MAP_H */

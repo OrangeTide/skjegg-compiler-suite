@@ -18,25 +18,25 @@
 #include "rt_glue.h"
 
 struct kp_str {
-    uint32_t refcount;
+    uint32_t refcount;          /* width-neutral header, matching kp_obj_hdr */
     uint32_t kind;              /* KP_OBJ_STRING */
     int32_t  len;
     int32_t  cap;               /* allocated byte capacity (>= len); bytes[cap] is the NUL slot */
     char     bytes[1];         /* len bytes then a trailing NUL, with room up to cap */
 };
 
-#define STRHDR  ((uint32_t)(4 * sizeof(uint32_t)))   /* 16: refcount, kind, len, cap */
+#define STRHDR  ((kp_gptr)(4 * sizeof(uint32_t)))   /* 16: refcount, kind, len, cap */
 
 /* The string object at a guest address, or NULL for nil. */
 static struct kp_str *
-str_ptr(KP_VM_P uint32_t s)
+str_ptr(KP_VM_P kp_gptr s)
 {
     return s ? (struct kp_str *)RT_PTR(s) : (struct kp_str *)0;
 }
 
 /* The KP_OBJ_STRING reclaimer: the bytes are inline, so the whole object is one block. */
 static void
-str_finalize(KP_VM_P uint32_t s)
+str_finalize(KP_VM_P kp_gptr s)
 {
     RT_FREE(s);
 }
@@ -45,10 +45,10 @@ str_finalize(KP_VM_P uint32_t s)
    guest address and, through out, its object pointer. An empty string (len 0) is nil
    (address 0) regardless of cap, which keeps the "nil is the empty string" invariant.
    The bytes are uninitialized apart from the trailing NUL; the caller fills them. */
-static uint32_t
+static kp_gptr
 str_make(KP_VM_P int32_t len, int32_t cap, struct kp_str **out)
 {
-    uint32_t s;
+    kp_gptr s;
     struct kp_str *d;
 
     RT_REGISTER(KP_OBJ_STRING, str_finalize);   /* idempotent */
@@ -58,7 +58,7 @@ str_make(KP_VM_P int32_t len, int32_t cap, struct kp_str **out)
     }
     if (cap < len)
         cap = len;
-    s = RT_ALLOC(STRHDR + (uint32_t)cap + 1u);
+    s = RT_ALLOC(STRHDR + (kp_gptr)cap + 1u);
     d = RT_PTR(s);
     d->refcount = 1;
     d->kind = KP_OBJ_STRING;
@@ -86,14 +86,14 @@ str_grow_cap(int32_t need, int32_t oldcap)
    the bytes are written in place and s is returned unchanged; otherwise a fresh copy
    is built and the handed-in reference is released. src must not alias s's storage past
    its length (it is read before any release). */
-static uint32_t
-str_append_bytes(KP_VM_P uint32_t s, const char *src, int32_t add)
+static kp_gptr
+str_append_bytes(KP_VM_P kp_gptr s, const char *src, int32_t add)
 {
     struct kp_str *d = str_ptr(KP_VM_A s);
     int32_t len = d ? d->len : 0;
     int32_t nlen = len + add;
     struct kp_str *nd;
-    uint32_t ns;
+    kp_gptr ns;
 
     if (add <= 0)
         return s;               /* nothing to add; keep the handed-in reference */
@@ -111,11 +111,11 @@ str_append_bytes(KP_VM_P uint32_t s, const char *src, int32_t add)
     return ns;
 }
 
-uint32_t
+kp_gptr
 kp_str_new(KP_VM_P const char *bytes, int len)
 {
     struct kp_str *d;
-    uint32_t s;
+    kp_gptr s;
 
     if (len < 0)
         len = 0;
@@ -131,23 +131,23 @@ kp_str_new(KP_VM_P const char *bytes, int len)
 
 /* The guest-facing constructor: a literal or constant passes the guest address of its
    byte blob, translated to a real pointer for the copy. */
-uint32_t
-kp_str_new_guest(KP_VM_P uint32_t addr, int len)
+kp_gptr
+kp_str_new_guest(KP_VM_P kp_gptr addr, int len)
 {
     const char *bytes = (len > 0) ? (const char *)RT_PTR(addr) : (const char *)0;
 
     return kp_str_new(KP_VM_A bytes, len);
 }
 
-uint32_t
-kp_str_concat(KP_VM_P uint32_t a, uint32_t b)
+kp_gptr
+kp_str_concat(KP_VM_P kp_gptr a, kp_gptr b)
 {
     struct kp_str *sa = str_ptr(KP_VM_A a);
     struct kp_str *sb = str_ptr(KP_VM_A b);
     int32_t la = sa ? sa->len : 0;
     int32_t lb = sb ? sb->len : 0;
     struct kp_str *d;
-    uint32_t s;
+    kp_gptr s;
 
     /* The guest heap never moves an existing block, so sa and sb stay valid across the
        allocation below. */
@@ -160,7 +160,7 @@ kp_str_concat(KP_VM_P uint32_t a, uint32_t b)
 }
 
 int32_t
-kp_str_len(KP_VM_P uint32_t s)
+kp_str_len(KP_VM_P kp_gptr s)
 {
     struct kp_str *d = str_ptr(KP_VM_A s);
 
@@ -168,21 +168,21 @@ kp_str_len(KP_VM_P uint32_t s)
 }
 
 const char *
-kp_str_bytes(KP_VM_P uint32_t s)
+kp_str_bytes(KP_VM_P kp_gptr s)
 {
     struct kp_str *d = str_ptr(KP_VM_A s);
 
     return (d && d->len) ? d->bytes : "";
 }
 
-uint32_t
-kp_str_base(KP_VM_P uint32_t s)
+kp_gptr
+kp_str_base(KP_VM_P kp_gptr s)
 {
     KP_VM_UNUSED();              /* the value is the object address; bytes follow the header */
     return s ? s + STRHDR : 0;
 }
 
-uint32_t
+kp_gptr
 kp_str_from_char(KP_VM_P int32_t code)
 {
     char c = (char)(code & 0xFF);
@@ -190,16 +190,16 @@ kp_str_from_char(KP_VM_P int32_t code)
     return kp_str_new(KP_VM_A &c, 1);
 }
 
-uint32_t
-kp_str_append_char(KP_VM_P uint32_t s, int32_t code)
+kp_gptr
+kp_str_append_char(KP_VM_P kp_gptr s, int32_t code)
 {
     char c = (char)(code & 0xFF);
 
     return str_append_bytes(KP_VM_A s, &c, 1);
 }
 
-uint32_t
-kp_str_append(KP_VM_P uint32_t s, uint32_t t)
+kp_gptr
+kp_str_append(KP_VM_P kp_gptr s, kp_gptr t)
 {
     struct kp_str *dt = str_ptr(KP_VM_A t);
 
@@ -209,7 +209,7 @@ kp_str_append(KP_VM_P uint32_t s, uint32_t t)
 }
 
 int32_t
-kp_str_cmp(KP_VM_P uint32_t a, uint32_t b)
+kp_str_cmp(KP_VM_P kp_gptr a, kp_gptr b)
 {
     int32_t la = kp_str_len(KP_VM_A a);
     int32_t lb = kp_str_len(KP_VM_A b);
@@ -224,7 +224,7 @@ kp_str_cmp(KP_VM_P uint32_t a, uint32_t b)
 }
 
 int32_t
-kp_str_pos(KP_VM_P uint32_t sub, uint32_t s)
+kp_str_pos(KP_VM_P kp_gptr sub, kp_gptr s)
 {
     struct kp_str *ds = str_ptr(KP_VM_A sub);
     struct kp_str *dd = str_ptr(KP_VM_A s);
@@ -240,14 +240,14 @@ kp_str_pos(KP_VM_P uint32_t sub, uint32_t s)
     return 0;
 }
 
-uint32_t
-kp_str_copy(KP_VM_P uint32_t s, int32_t index, int32_t count)
+kp_gptr
+kp_str_copy(KP_VM_P kp_gptr s, int32_t index, int32_t count)
 {
     struct kp_str *d = str_ptr(KP_VM_A s);
     int32_t len = d ? d->len : 0;
     int32_t avail;
     struct kp_str *ns;
-    uint32_t id;
+    kp_gptr id;
 
     if (index < 1)
         index = 1;

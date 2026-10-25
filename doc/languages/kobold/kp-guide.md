@@ -178,8 +178,10 @@ sh kobold/aot-run.sh hello.kpm
 ```
 
 `skj-kpc` is the front end compiled to a native binary, so it runs on the host
-and emits an arch-neutral module. `skj-kp` (and `skj-kp-rv`, `skj-kp-arm64`)
-is the backend that compiles a module to assembly for each target.
+and emits a module for a pointer-width class: `skj-kpc` (LP64) for the 64-bit
+backends, `skj-kpc-32` (ILP32) for the 32-bit ones. The module's `.target` line
+records that class and the backend rejects a mismatch. `skj-kp` (and `skj-kp-rv`,
+`skj-kp-arm64`) is the backend that compiles a module to assembly for each target.
 
 ### Emit a module without running
 

@@ -1,16 +1,17 @@
-/* io_free.c : the freestanding console and number surface for a Kobold guest.
+/* io_free.c : the freestanding number, file, and entry surface for a Kobold guest.
 
-   The re-bottoming of kp_host.c for a host whose only output seam is the write
-   syscall and whose only input seam is read.  kp_host.c backs these on stdio
-   (fprintf, fgetc); here they go straight to the seam, with no libc.  Integer Str
-   and Val stay hand-rolled here (the same approach as the upstream sandbox):
-   Pascal's Val carries a '$' hex prefix and 1-based error-offset codes that C's
-   strtol does not model.  Real parsing, a plain decimal-float scan, is shared
-   instead: scan_real routes to libc's strtod, so this runtime and a C program
-   built against the same libc parse a real the one way.  Real formatting is
-   shared too: io_write_real goes through libc's __fmt_greal (numfmt.c), the
-   same libgcc-free %g renderer the C libc's printf uses, so neither tier pulls
-   the double-to-u64 helper the rv32 freestanding tier has no libgcc for.
+   The console seam proper (io_write_str/int/char, io_flush, io_halt, and the
+   whole read side) is the shared POSIX-fd implementation in kobold/kp_io.c, the
+   same code the hosted runtime (kp_host.c) links; this file is the freestanding
+   remainder.  io_write_real lives here because the %g renderer is per tier: it
+   goes through libc's __fmt_greal (numfmt.c), the same libgcc-free renderer the
+   C libc's printf uses, so the rv32 tier pulls no double-to-u64 helper (the
+   hosted tier's io_write_real uses the host libc instead).  Integer Str and Val
+   stay hand-rolled here (the upstream sandbox's approach): Pascal's Val carries a
+   '$' hex prefix and 1-based error-offset codes that C's strtol does not model.
+   Real parsing, a plain decimal-float scan, is shared: scan_real routes to libc's
+   strtod, so this runtime and a C program built against the same libc parse a
+   real the one way.
 
    The syscall wrappers are the one target-specific piece.  Each is a single trap
    (trap #0 on ColdFire, ecall on rv32) with register-bound operands, which needs
@@ -20,9 +21,11 @@
 
 #include "str.h"
 #include "rt_glue.h"
+#include "kp_io.h"
 
 #include <stdint.h>
 #include <stddef.h>
+#include <sys/stat.h>   /* struct stat, stat, mkdir (over the crt's statx/mkdirat) */
 
 /****************************************************************
  * The host seam: write, read, exit
@@ -52,205 +55,27 @@ int open(const char *path, int flags, int mode);
 int close(int fd);
 long lseek(int fd, long offset, int whence);
 int getdents64(int fd, void *buf, int count);
+int unlink(const char *path);                               /* libc/fileops.c */
+int rename(const char *oldpath, const char *newpath);       /* libc/fileops.c */
+int rmdir(const char *path);                                /* libc/fileops.c */
 #endif
 
 /****************************************************************
- * The buffered-stream seam: libc's stdio_core.c
+ * The number formatter: libc's numfmt.c, shared with the C runtime
  *
- * The console I/O below buffers through libc's standard streams rather than
- * hitting the write/read seam a byte at a time, so the Kobold freestanding
- * runtime and the C runtime share one buffering implementation.  Declared
- * opaquely here so this freestanding file needs no -Iinclude; keep in step with
- * include/stdio.h.
- ****************************************************************/
-struct __FILE;
-extern struct __FILE __libc_stdin, __libc_stdout, __libc_stderr;
-extern int fputc(int c, struct __FILE *f);
-extern int fgetc(struct __FILE *f);
-extern size_t fwrite(const void *p, size_t sz, size_t n, struct __FILE *f);
-extern int fflush(struct __FILE *f);
-
-/****************************************************************
- * The number formatters: libc's numfmt.c, shared with the C runtime
- *
- * __fmt_udec writes an unsigned value's decimal digits (most significant
- * first, no NUL, no sign) and returns the count.  __fmt_greal renders a finite,
- * non-negative double like "%g" (sig significant digits; alt keeps trailing
- * zeros, upper selects 'E') and returns the byte count.  Both are libgcc-free,
- * so the rv32 freestanding tier links them with no double-to-u64 helper.
- * Declared opaquely here so this file still needs no -Ilibc; keep in step with
- * libc/fmt.h.
+ * __fmt_greal renders a finite, non-negative double like "%g" (sig significant
+ * digits; alt keeps trailing zeros, upper selects 'E') and returns the byte
+ * count.  It is libgcc-free, so the rv32 freestanding tier links it with no
+ * double-to-u64 helper.  io_write_real (below) is the one console write defined
+ * here; the rest of the console seam (io_write_str/int/char, io_flush, io_halt,
+ * and the whole read side with its one byte of pushback) is the shared
+ * kobold/kp_io.c over the raw write/read syscalls.  Declared opaquely so this
+ * file needs no -Ilibc; keep in step with libc/fmt.h.  __fmt_udec writes an
+ * unsigned value's decimal digits (no NUL, no sign) and returns the count; the
+ * integer Str helpers below share it.
  ****************************************************************/
 extern int __fmt_udec(char *out, uint64_t v);
 extern int __fmt_greal(char *out, double v, int sig, int alt, int upper);
-
-/****************************************************************
- * Console output (the io_* names the guest emits)
- ****************************************************************/
-
-static struct __FILE *
-io_stream(int fd)
-{
-    return (fd == 2) ? &__libc_stderr : &__libc_stdout;
-}
-
-void
-io_write_str(int fd, uint32_t s)
-{
-    int32_t len = kp_str_len(s);
-
-    if (len > 0)
-        fwrite((const void *)(uintptr_t)kp_str_base(s), 1, (size_t)len, io_stream(fd));
-}
-
-void
-io_write_char(int fd, int ch)
-{
-    fputc((unsigned char)ch, io_stream(fd));
-}
-
-/* A decimal integer formatted into a stack buffer, no heap string.  INT_MIN is
-   safe: the magnitude is taken in unsigned.  Digits come from the shared
-   __fmt_udec. */
-void
-io_write_int(int fd, int v)
-{
-    char out[12];
-    int j = 0;
-    uint32_t m = v < 0 ? 0u - (uint32_t)v : (uint32_t)v;
-
-    if (v < 0)
-        out[j++] = '-';
-    j += __fmt_udec(out + j, m);
-    fwrite(out, 1, (size_t)j, io_stream(fd));
-}
-
-/* A real flush now; halt flushes every stream, then exits (buffered output must
-   reach the seam before the process ends). */
-void io_flush(int fd) { fflush(io_stream(fd)); }
-void io_halt(int code) { fflush((struct __FILE *)0); _exit(code); }
-
-/****************************************************************
- * Console input (over the read syscall, one byte at a time)
- ****************************************************************/
-
-static int
-read_byte(void)
-{
-    return fgetc(&__libc_stdin);        /* libc buffering; EOF (-1) at end */
-}
-
-static int g_peek = -2;         /* -2 empty, else a buffered byte (0..255) */
-static int g_eof;               /* sticky: set once a read hits end of input */
-
-static int
-next_byte(void)
-{
-    int c;
-
-    if (g_peek != -2) {
-        c = g_peek;
-        g_peek = -2;
-        return c;
-    }
-    c = read_byte();
-    if (c == -1)
-        g_eof = 1;              /* latch: EOF stays set for every later read */
-    return c;
-}
-
-static void
-push_byte(int c)
-{
-    g_peek = c;
-}
-
-/* The sticky end-of-input latch the guest's Eof() reads: a one-byte lookahead
-   over the console, true when no buffered byte remains and the stream has
-   ended.  A newline-less final line is still delivered by the reads above
-   before this latches, since the latch is set only when a read returns no byte.
-   On skj-run the read syscall blocks until input or close (a close returns 0,
-   which libc reports as EOF); on boris the host binds read to the same
-   close-signalled end.  This is guest runtime, not a host service (it buffers
-   over read); a program reaches it through the FFI, and the Kobold-level Eof
-   that calls it belongs in a shipped unit, not a compiler builtin (Kobold moves
-   calls that need no special lowering out of the front end into units). */
-int
-io_eof(void)
-{
-    int c;
-
-    if (g_peek != -2)
-        return 0;
-    if (g_eof)
-        return 1;
-    c = read_byte();
-    if (c == -1) {
-        g_eof = 1;
-        return 1;
-    }
-    g_peek = c;
-    return 0;
-}
-
-static int
-skip_space(void)
-{
-    int c;
-
-    do {
-        c = next_byte();
-    } while (c == ' ' || c == '\t' || c == '\n' || c == '\r');
-    return c;
-}
-
-int64_t
-io_read_int(void)
-{
-    int c = skip_space();
-    int neg = 0;
-    int64_t v = 0;
-
-    if (c == '+' || c == '-') {
-        neg = c == '-';
-        c = next_byte();
-    }
-    while (c >= '0' && c <= '9') {
-        v = v * 10 + (c - '0');
-        c = next_byte();
-    }
-    if (c != -1)
-        push_byte(c);
-    return neg ? -v : v;
-}
-
-int
-io_read_char(void)
-{
-    return next_byte();
-}
-
-void
-io_read_ln(void)
-{
-    int c;
-
-    do {
-        c = next_byte();
-    } while (c != '\n' && c != -1);
-}
-
-uint32_t
-io_read_str(void)
-{
-    char buf[256];
-    int n = 0;
-    int c = next_byte();
-
-    while (c != '\n' && c != -1 && n < (int)sizeof buf)
-        buf[n++] = (char)c, c = next_byte();
-    return kp_str_new(buf, n);
-}
 
 /****************************************************************
  * Str and Val for integers (hand-rolled, no libc; the real side is in the
@@ -330,7 +155,7 @@ scan_int64(const char *b, int32_t len, int64_t *iv, int32_t *code)
     *code = 0;
 }
 
-uint32_t
+kp_gptr
 kp_str_from_int(int32_t x)
 {
     char buf[16];
@@ -343,7 +168,7 @@ kp_str_from_int(int32_t x)
     return kp_str_new(buf, n);
 }
 
-uint32_t
+kp_gptr
 kp_str_from_int64(int64_t x)
 {
     char buf[24];
@@ -357,7 +182,7 @@ kp_str_from_int64(int64_t x)
 }
 
 int32_t
-kp_str_val_int(uint32_t s)
+kp_str_val_int(kp_gptr s)
 {
     int64_t iv;
     int32_t code;
@@ -368,7 +193,7 @@ kp_str_val_int(uint32_t s)
 }
 
 int64_t
-kp_str_val_int64(uint32_t s)
+kp_str_val_int64(kp_gptr s)
 {
     int64_t iv;
     int32_t code;
@@ -378,21 +203,21 @@ kp_str_val_int64(uint32_t s)
     return iv;
 }
 
-static double scan_real(const char *b, int32_t len);   /* defined below */
+static double scan_real(const char *b, int32_t len, int32_t *code);   /* defined below */
 
 /* Pascal Val's error code: 0 for a fully valid parse, else the 1-based offset of
-   the offending character (kind 0 int32, 1 real, 2 int64).  This tier's scan_real
-   is lenient and reports no code, so a real parse is taken as valid, matching the
-   tier's existing real handling. */
+   the offending character (kind 0 int32, 1 real, 2 int64).  scan_real reports the
+   code the same way the hosted tier (str_fmt.c) does, so a bad real is caught on
+   this tier too (the io.console Val surface relies on it). */
 int32_t
-kp_str_valcode(uint32_t s, int32_t kind)
+kp_str_valcode(kp_gptr s, int32_t kind)
 {
     int64_t iv;
     int32_t code;
 
     if (kind == 1) {
-        (void)scan_real(kp_str_bytes(s), kp_str_len(s));
-        return 0;
+        (void)scan_real(kp_str_bytes(s), kp_str_len(s), &code);
+        return code;
     }
     if (kind == 2)
         scan_int64(kp_str_bytes(s), kp_str_len(s), &iv, &code);
@@ -452,8 +277,10 @@ void
 io_write_real(int fd, double x)
 {
     char buf[40];
+    int n = fmt_g(x, buf);
 
-    fwrite(buf, 1, (size_t)fmt_g(x, buf), io_stream(fd));
+    if (n > 0)
+        write(fd, buf, n);
 }
 
 /* Scan a real: the freestanding tier parses it with libc's strtod
@@ -462,37 +289,42 @@ io_write_real(int fd, double x)
    NUL-terminated string while this tier's callers pass a counted buffer, so copy
    the (bounded) token into a local NUL-terminated scratch first: a real literal
    never needs more than a few dozen characters, and a double cannot resolve more
-   digits than this buffer holds. */
+   digits than this buffer holds.  When code is non-NULL it carries Val's status:
+   0 for a parse that consumes the whole token, else the 1-based offset of the
+   first character strtod could not use (empty or no leading number is offset 1),
+   matching the hosted str_fmt.c scan_real; on a bad parse the value is 0. */
 extern double strtod(const char *s, char **end);
 
 static double
-scan_real(const char *b, int32_t len)
+scan_real(const char *b, int32_t len, int32_t *code)
 {
-    char buf[64];
+    char buf[64], *end;
     int32_t n = len < 0 ? 0 : (len > 63 ? 63 : len);
+    double rv;
 
+    if (n == 0) {
+        if (code) *code = 1;
+        return 0;
+    }
     memcpy(buf, b, (size_t)n);
     buf[n] = '\0';
-    return strtod(buf, (char **)0);
+    rv = strtod(buf, &end);
+    if (end == buf) {
+        if (code) *code = 1;
+        return 0;
+    }
+    if (*end != '\0') {
+        if (code) *code = (int32_t)(end - buf) + 1;
+        return 0;
+    }
+    if (code) *code = 0;
+    return rv;
 }
 
 double
-kp_str_val_real(uint32_t s)
+kp_str_val_real(kp_gptr s)
 {
-    return scan_real(kp_str_bytes(s), kp_str_len(s));
-}
-
-double
-io_read_real(void)
-{
-    char tok[64];
-    int n = 0, c = skip_space();
-
-    while (c != -1 && c != ' ' && c != '\t' && c != '\n' && c != '\r' && n < (int)sizeof tok)
-        tok[n++] = (char)c, c = next_byte();
-    if (c != -1)
-        push_byte(c);
-    return scan_real(tok, n);
+    return scan_real(kp_str_bytes(s), kp_str_len(s), (int32_t *)0);
 }
 
 /* The rv soft-float bridges: a double rides a call as its 64-bit bits.  Only the
@@ -501,7 +333,7 @@ io_read_real(void)
 #if (defined(__riscv) && __riscv_xlen == 32) || defined(__skj_riscv__)
 void     brv_write_real(int fd, uint64_t x) { io_write_real(fd, b2d(x)); }
 uint64_t brv_read_real(void)                { return d2b(io_read_real()); }
-uint64_t brv_val_real(uint32_t s)           { return d2b(kp_str_val_real(s)); }
+uint64_t brv_val_real(kp_gptr s)            { return d2b(kp_str_val_real(s)); }
 #endif
 
 /****************************************************************
@@ -533,7 +365,7 @@ rt_param_count(void)
     return g_argc > 0 ? g_argc - 1 : 0;
 }
 
-uint32_t
+kp_gptr
 rt_param_str(int i)
 {
     const char *p;
@@ -557,9 +389,10 @@ rt_param_str(int i)
  * Kobold guest, main records the args for ParamStr / ParamCount and runs the
  * program through kp_guest_entry, the entry skj-kp emits; a normal return
  * exits 0 (a nonzero status comes only from Halt, through io_halt).  The shared
- * _start then runs __libc_fini to flush buffered stdio before it exits,
- * matching io_halt's flush-then-exit.  environ is defined, not just weak, so
- * the Kobold link needs no weak-undefined resolution when _start sets it.
+ * _start then runs __libc_fini before it exits; console I/O is unbuffered now
+ * (kp_io.c writes straight to the fd), so that is a no-op for a Kobold guest.
+ * environ is defined, not just weak, so the Kobold link needs no weak-undefined
+ * resolution when _start sets it.
  ****************************************************************/
 
 char **environ;
@@ -578,7 +411,8 @@ main(int argc, char **argv)
 void
 __libc_fini(void)
 {
-    fflush((struct __FILE *)0);         /* flush every stream (stdio_core) */
+    /* Console I/O is unbuffered now (kp_io.c writes straight to the fd), so there
+       is no stream to flush at exit. */
 }
 
 #ifdef KP_HAVE_FILE_IO
@@ -605,13 +439,14 @@ __libc_fini(void)
 #define KP_SEEK_SET  0
 #define KP_SEEK_END  2
 
-uint32_t
-ReadFileStr(uint32_t pathstr)
+kp_gptr
+ReadFileStr(kp_gptr pathstr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
-    uint32_t cap, len = 0, buf;
-    uint32_t s;
+    uint32_t cap, len = 0;      /* byte counts */
+    kp_gptr buf;                /* guest heap address of the read buffer */
+    kp_gptr s;                  /* the result string handle */
     int fd;
     long n, size;
 
@@ -659,11 +494,11 @@ ReadFileStr(uint32_t pathstr)
 }
 
 int
-WriteFileStr(uint32_t pathstr, uint32_t datastr)
+WriteFileStr(kp_gptr pathstr, kp_gptr datastr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
-    uint32_t len;
+    uint32_t len;               /* byte count */
     int fd;
     long n;
 
@@ -688,7 +523,7 @@ WriteFileStr(uint32_t pathstr, uint32_t datastr)
 #define KPF_CHUNK 4096
 
 int
-kpf_open_read(uint32_t pathstr)
+kpf_open_read(kp_gptr pathstr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
@@ -701,7 +536,7 @@ kpf_open_read(uint32_t pathstr)
 }
 
 int
-kpf_open_write(uint32_t pathstr)
+kpf_open_write(kp_gptr pathstr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
@@ -713,7 +548,7 @@ kpf_open_write(uint32_t pathstr)
     return (int)open(path, KP_O_WRONLY | KP_O_CREAT | KP_O_TRUNC, 0644);
 }
 
-uint32_t
+kp_gptr
 kpf_read(int fd)
 {
     char tmp[KPF_CHUNK];
@@ -725,7 +560,7 @@ kpf_read(int fd)
 }
 
 int
-kpf_write(int fd, uint32_t datastr)
+kpf_write(int fd, kp_gptr datastr)
 {
     if (fd < 0)
         return -1;
@@ -737,6 +572,94 @@ kpf_close(int fd)
 {
     if (fd >= 0)
         close(fd);
+}
+
+/* Path metadata and operations the `files` unit exposes Pascal-style: existence,
+   size, a directory test, and delete/rename/mkdir, over the libc stat/unlink/
+   rename/mkdir, which the crt serves from the statx and *at syscalls (the only
+   file-metadata syscalls the rv32 and ColdFire kernels give).  The AOT aot_rt.c
+   and JIT jit_main.c mirror these under the same names over the host libc. */
+static int
+kpf_pathcopy(kp_gptr s, char *buf, int cap)
+{
+    int n = kp_str_len(s);
+    if (n < 0 || n >= cap)
+        return -1;
+    memcpy(buf, kp_str_bytes(s), (size_t)n);
+    buf[n] = '\0';
+    return n;
+}
+
+int
+kpf_exists(kp_gptr pathstr)
+{
+    char path[1024];
+    struct stat st;
+    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return 0;
+    return stat(path, &st) == 0;
+}
+
+int64_t
+kpf_size(kp_gptr pathstr)
+{
+    char path[1024];
+    struct stat st;
+    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return -1;
+    if (stat(path, &st) != 0)
+        return -1;
+    return (int64_t)st.st_size;
+}
+
+int
+kpf_isdir(kp_gptr pathstr)
+{
+    char path[1024];
+    struct stat st;
+    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return 0;
+    if (stat(path, &st) != 0)
+        return 0;
+    return S_ISDIR(st.st_mode) ? 1 : 0;
+}
+
+int
+kpf_delete(kp_gptr pathstr)
+{
+    char path[1024];
+    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return 0;
+    return unlink(path) == 0;
+}
+
+int
+kpf_rename(kp_gptr oldstr, kp_gptr newstr)
+{
+    char oldp[1024], newp[1024];
+    if (kpf_pathcopy(oldstr, oldp, sizeof oldp) < 0)
+        return 0;
+    if (kpf_pathcopy(newstr, newp, sizeof newp) < 0)
+        return 0;
+    return rename(oldp, newp) == 0;
+}
+
+int
+kpf_mkdir(kp_gptr pathstr)
+{
+    char path[1024];
+    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return 0;
+    return mkdir(path, 0755) == 0;
+}
+
+int
+kpf_rmdir(kp_gptr pathstr)
+{
+    char path[1024];
+    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
+        return 0;
+    return rmdir(path) == 0;
 }
 
 /* Directory reads for the `dirs` unit.  A small fixed table of open
@@ -755,7 +678,7 @@ static struct {
 } kpd_tab[KPD_MAX];
 
 int
-kpd_open(uint32_t pathstr)
+kpd_open(kp_gptr pathstr)
 {
     char path[1024];
     int plen = kp_str_len(pathstr);
@@ -780,7 +703,7 @@ kpd_open(uint32_t pathstr)
     return i;
 }
 
-uint32_t
+kp_gptr
 kpd_next(int h)
 {
     char *e;

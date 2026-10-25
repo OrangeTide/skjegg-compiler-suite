@@ -45,6 +45,22 @@ static const int freg[] = { 0, 1, 8, 9, 10, 11, 12, 13, 14, 15 };
 static const unsigned char *g_f32;
 static int src_is_f32(int t) { return g_f32 && t >= 0 && g_f32[t]; }
 
+/* Integer spill homes.  The x86-64 backend keeps every integer temp in a full
+   64-bit home: a reload and a store-back are always 64-bit, and a call result is
+   captured from the full return register, while only the arithmetic that follows
+   narrows to 32 bits.  That is what lets a guest pointer carried in a temp the
+   front end classed as i32 round-trip, since the Kobold front end does not
+   width-tag every pointer-valued ARG/CALL (it relies on the backend preserving
+   64 bits, exactly as the x86-64 selector does).
+   Under LP64 (the 64-bit guest-pointer Kobold build) the arm64 backend adopts
+   the same uniform 64-bit home.  Under ILP32 an integer home is 32 bits
+   (ldrw/strw), the long-standing model, so an i32 arm64 build is unchanged. */
+#if defined(KP_LP64)
+#define INT_HOME_X 1
+#else
+#define INT_HOME_X 0
+#endif
+
 /****************************************************************
  * Frame geometry (ported verbatim from arm64_emit.c; pure computation)
  ****************************************************************/
@@ -197,14 +213,19 @@ fsave_bytes(struct ir_func *fn)
  * Temp -> register materialization (returns hardware register numbers)
  ****************************************************************/
 
-/* Integer source in its w-view value (or reloaded low 32 bits into scratch). */
+/* Integer source in its w-view value (or reloaded into scratch).  The reload is
+   full 64-bit under a 64-bit integer home (INT_HOME_X), 32-bit zero-extended
+   otherwise; either way the w-view the caller reads is the same low 32 bits. */
 static int
 rs(struct mc64 *m, struct ir_func *fn, int t, int scr)
 {
     int r = fn->temp_reg[t];
     if (r >= 0)
         return xreg[r];
-    mc64_ldrw(m, scr, MC64_FP, spill_off(fn, t));
+    if (INT_HOME_X)
+        mc64_ldrx(m, scr, MC64_FP, spill_off(fn, t));
+    else
+        mc64_ldrw(m, scr, MC64_FP, spill_off(fn, t));
     return scr;
 }
 
@@ -219,15 +240,20 @@ rsx(struct mc64 *m, struct ir_func *fn, int t, int scr)
     return scr;
 }
 
-/* An address-holding temp as a load/store base: a 32-bit value whose high bits
-   are zero, reloaded zero-extended (ldrw) for a spill. */
+/* An address-holding temp as a load/store base.  Under a 64-bit integer home
+   (INT_HOME_X) the address is a full 64-bit value, reloaded at full width (ldrx)
+   or the top half is lost.  Under ILP32 the address is a 32-bit value whose high
+   bits are zero, reloaded zero-extended (ldrw). */
 static int
 ra(struct mc64 *m, struct ir_func *fn, int t, int scr)
 {
     int r = fn->temp_reg[t];
     if (r >= 0)
         return xreg[r];
-    mc64_ldrw(m, scr, MC64_FP, spill_off(fn, t));
+    if (INT_HOME_X)
+        mc64_ldrx(m, scr, MC64_FP, spill_off(fn, t));
+    else
+        mc64_ldrw(m, scr, MC64_FP, spill_off(fn, t));
     return scr;
 }
 
@@ -239,11 +265,18 @@ rd(struct ir_func *fn, int t, int scr)
     return r >= 0 ? xreg[r] : scr;
 }
 
+/* An i32 result's store-back.  Under a 64-bit integer home it writes the full
+   64-bit register (the producing op left the high half zero), so a later ldrx
+   reads the value back whole; under ILP32 it writes the low 32 bits. */
 static void
 wd32(struct mc64 *m, struct ir_func *fn, int t, int reg)
 {
-    if (fn->temp_reg[t] < 0)
-        mc64_strw(m, reg, MC64_FP, spill_off(fn, t));
+    if (fn->temp_reg[t] < 0) {
+        if (INT_HOME_X)
+            mc64_strx(m, reg, MC64_FP, spill_off(fn, t));
+        else
+            mc64_strw(m, reg, MC64_FP, spill_off(fn, t));
+    }
 }
 
 static void
@@ -457,6 +490,10 @@ emit_call(struct mc64 *m, struct ir_func *fn, struct ir_insn *in,
             }
         } else if (ai64[k]) {
             mc64_strx(m, rsx(m, fn, at[k], SC0), MC64_SP, off);
+        } else if (INT_HOME_X) {
+            /* a 64-bit integer home: store the whole register so an untagged
+               pointer argument on the stack keeps its top half */
+            mc64_strx(m, rs(m, fn, at[k], SC0), MC64_SP, off);
         } else {
             mc64_strw(m, rs(m, fn, at[k], SC0), MC64_SP, off);
         }
@@ -490,8 +527,14 @@ emit_call(struct mc64 *m, struct ir_func *fn, struct ir_insn *in,
             else
                 mc64_ldrx(m, treg[k], MC64_FP, spill_off(fn, t));
         } else {
+            /* A plain (i32-classed) argument.  Under a 64-bit integer home the
+               full register is moved, so a guest pointer the front end did not
+               width-tag (a handle passed as ARG, not ARG64) is not truncated;
+               under ILP32 it moves 32 bits. */
             if (r >= 0)
-                mc64_mov(m, 0, treg[k], xreg[r]);
+                mc64_mov(m, INT_HOME_X ? 1 : 0, treg[k], xreg[r]);
+            else if (INT_HOME_X)
+                mc64_ldrx(m, treg[k], MC64_FP, spill_off(fn, t));
             else
                 mc64_ldrw(m, treg[k], MC64_FP, spill_off(fn, t));
         }
@@ -539,9 +582,14 @@ emit_call(struct mc64 *m, struct ir_func *fn, struct ir_insn *in,
                 mc64_mov(m, 1, sd, 0);
             wd64(m, fn, in->dst, sd);
         } else {
+            /* An i32-classed result.  Under a 64-bit integer home capture the
+               whole return register (mov x), so a guest pointer returned by a
+               helper the front end called with a plain CALL keeps its top half;
+               the value narrows to 32 bits only where it is used as an i32.
+               Under ILP32 capture the low 32 bits (mov w). */
             int sd = rd(fn, in->dst, SC0);
             if (sd != 0)
-                mc64_mov(m, 0, sd, 0);
+                mc64_mov(m, INT_HOME_X ? 1 : 0, sd, 0);
             wd32(m, fn, in->dst, sd);
         }
     }

@@ -93,6 +93,14 @@ lex_include(struct lexer *l, const char *name)
     }
 
     f = fopen(path, "rb");
+    /* Fall back to the name as given, i.e. relative to the current working
+       directory (the way GNU as searches), when the include is not beside the
+       including file.  This lets one spelling name a fragment shared across
+       directories, since every build runs from the repository root. */
+    if (f == NULL && name[0] != '/' && strcmp(path, name) != 0) {
+        if ((size_t)snprintf(path, sizeof path, "%s", name) < sizeof path)
+            f = fopen(path, "rb");
+    }
     if (f == NULL)
         return -1;
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }

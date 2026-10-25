@@ -6,6 +6,37 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.20.0
+
+#### Added
+- Kobold standard-library units: `core.convert` (failable string-to-number
+  `ValInt`/`ValReal` over the `Val` builtin), `io.files` (file metadata and path
+  operations), and `io.buffered` (userland buffering).
+- The RISC-V in-process JIT compiles GNU `&&label` label values and the computed
+  `goto *p`, so threaded-dispatch programs run on the RV JIT as they already did
+  on the x86-64 and AArch64 JITs.
+
+#### Changed
+- Kobold uses a native 64-bit pointer and handle model (LP64) on x86-64 and
+  AArch64; RISC-V RV32 and ColdFire stay 32-bit (ILP32). This retires the
+  32-bit-on-64-bit guest model on the 64-bit targets, so the JIT and AOT
+  runtimes use the full address space there. `kpcom` bakes the pointer width in
+  at build time and emits a module for that width class.
+- A KPM module records its pointer-width class on the `.target` line
+  (`ilp32`/`lp64`), and the backend rejects a module whose width does not match,
+  instead of silently truncating pointers.
+- Kobold console I/O is single-sourced over a POSIX file descriptor, and the C
+  and Kobold freestanding runtimes share one break-based heap bump, shrinking the
+  duplicated runtime surface.
+
+#### Fixed
+- A negative 32-bit `or else` fallback into a 64-bit result (`Int64` or real) is
+  sign-extended rather than zero-extended; on a 64-bit backend `or else -1` had
+  read back as a large positive value.
+- A `label` (a threaded-dispatch code address) is sized at pointer width, so a
+  stored `@label` keeps its full address when the JIT maps guest code high.
+- The C compiler loads a narrow scalar local at its own width.
+
 ### 0.19.0
 
 #### Added

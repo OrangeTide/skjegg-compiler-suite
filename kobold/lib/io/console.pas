@@ -46,6 +46,7 @@ implementation
   is standard output; the reads act on standard input. }
 function io_eof: Boolean; external cdecl;
 function io_read_str: string; external cdecl;
+procedure io_read_ln; external cdecl;
 function io_read_char: integer; external cdecl;
 procedure io_write_str(fd: integer; const s: string); external cdecl;
 procedure io_write_char(fd: integer; ch: integer); external cdecl;
@@ -61,7 +62,10 @@ end;
 
 function ReadLine: string;
 begin
+  { io_read_str reads the line's content and leaves the terminating newline on
+    the stream (so a bare read can see it); ReadLine consumes it, like readln. }
   ReadLine := io_read_str;
+  io_read_ln;
 end;
 
 function ReadChar: char;

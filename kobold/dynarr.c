@@ -16,13 +16,13 @@ struct kp_dynarr {
     uint32_t kind;      /* KP_OBJ_ARRAY */
     int32_t  len;       /* element count */
     int32_t  elemsize;  /* element width in bytes */
-    uint32_t layout;    /* guest address of the handle-field map, 0 when none */
-    uint32_t base;      /* guest address of the element storage, 0 when len == 0 */
+    kp_gptr  layout;    /* guest address of the handle-field map, 0 when none */
+    kp_gptr  base;      /* guest address of the element storage, 0 when len == 0 */
 };
 
 /* The array object at a guest address, or NULL for nil. */
 static struct kp_dynarr *
-arr_ptr(KP_VM_P uint32_t a)
+arr_ptr(KP_VM_P kp_gptr a)
 {
     return a ? (struct kp_dynarr *)RT_PTR(a) : (struct kp_dynarr *)0;
 }
@@ -30,7 +30,7 @@ arr_ptr(KP_VM_P uint32_t a)
 /* Read the int32 at word index idx of a guest-address blob (the layout map). The blob is
    an i8 global, so it may be unaligned; copy the bytes out. */
 static int32_t
-blob_i32(KP_VM_P uint32_t addr, int32_t idx)
+blob_i32(KP_VM_P kp_gptr addr, int32_t idx)
 {
     int32_t v;
 
@@ -58,7 +58,7 @@ release_elems(KP_VM_P struct kp_dynarr *d, int32_t lo, int32_t hi)
     for (i = lo; i < hi; i++) {
         char *e = elem_ptr(KP_VM_A d, i);
         for (j = 0; j < nfld; j++)
-            RT_RELEASE(*(uint32_t *)(e + blob_i32(KP_VM_A d->layout, 1 + j)));
+            RT_RELEASE(*(kp_gptr *)(e + blob_i32(KP_VM_A d->layout, 1 + j)));
     }
 }
 
@@ -76,14 +76,14 @@ retain_elems(KP_VM_P struct kp_dynarr *d, int32_t lo, int32_t hi)
     for (i = lo; i < hi; i++) {
         char *e = elem_ptr(KP_VM_A d, i);
         for (j = 0; j < nfld; j++)
-            RT_RETAIN(*(uint32_t *)(e + blob_i32(KP_VM_A d->layout, 1 + j)));
+            RT_RETAIN(*(kp_gptr *)(e + blob_i32(KP_VM_A d->layout, 1 + j)));
     }
 }
 
 /* The KP_OBJ_ARRAY reclaimer, run by kp_release at refcount zero. Release the element
    references first, then return the storage block and the object to the guest heap. */
 static void
-arr_finalize(KP_VM_P uint32_t a)
+arr_finalize(KP_VM_P kp_gptr a)
 {
     struct kp_dynarr *d = arr_ptr(KP_VM_A a);
 
@@ -96,10 +96,10 @@ arr_finalize(KP_VM_P uint32_t a)
 /* Create an array object at refcount 1 and grow it to len (zero-filled) elements. The
    element storage is a separate guest-heap block, so a later resize can move it while the
    object address the caller holds stays put. */
-static uint32_t
-arr_new(KP_VM_P int32_t len, int32_t elemsize, uint32_t layout)
+static kp_gptr
+arr_new(KP_VM_P int32_t len, int32_t elemsize, kp_gptr layout)
 {
-    uint32_t a;
+    kp_gptr a;
     struct kp_dynarr *d;
 
     RT_REGISTER(KP_OBJ_ARRAY, arr_finalize);   /* idempotent */
@@ -120,7 +120,7 @@ arr_new(KP_VM_P int32_t len, int32_t elemsize, uint32_t layout)
 }
 
 int32_t
-kp_arr_len(KP_VM_P uint32_t a)
+kp_arr_len(KP_VM_P kp_gptr a)
 {
     struct kp_dynarr *d = arr_ptr(KP_VM_A a);
 
@@ -132,11 +132,11 @@ kp_arr_len(KP_VM_P uint32_t a)
    This is the eager copy a value-array assignment performs for a borrowed source, so a
    later element write to either array cannot be seen through the other. Returns a fresh
    owned id (0 for a nil source). */
-uint32_t
-kp_arr_clone(KP_VM_P uint32_t a)
+kp_gptr
+kp_arr_clone(KP_VM_P kp_gptr a)
 {
     struct kp_dynarr *d, *nd;
-    uint32_t id;
+    kp_gptr id;
 
     if (a == 0)
         return 0;
@@ -151,8 +151,8 @@ kp_arr_clone(KP_VM_P uint32_t a)
     return id;
 }
 
-uint32_t
-kp_arr_base(KP_VM_P uint32_t a)
+kp_gptr
+kp_arr_base(KP_VM_P kp_gptr a)
 {
     struct kp_dynarr *d = arr_ptr(KP_VM_A a);
 
@@ -165,7 +165,8 @@ kp_arr_base(KP_VM_P uint32_t a)
 static void
 arr_resize_inplace(KP_VM_P struct kp_dynarr *d, int32_t len)
 {
-    uint32_t es, nbase;
+    uint32_t es;
+    kp_gptr nbase;
 
     if (len == d->len)
         return;
@@ -180,8 +181,8 @@ arr_resize_inplace(KP_VM_P struct kp_dynarr *d, int32_t len)
     d->len = len;
 }
 
-uint32_t
-kp_arr_setlen(KP_VM_P uint32_t a, int32_t len, int32_t elemsize, uint32_t layout)
+kp_gptr
+kp_arr_setlen(KP_VM_P kp_gptr a, int32_t len, int32_t elemsize, kp_gptr layout)
 {
     struct kp_dynarr *d;
 
@@ -195,7 +196,7 @@ kp_arr_setlen(KP_VM_P uint32_t a, int32_t len, int32_t elemsize, uint32_t layout
         /* shared: clone at the new length so other owners are unaffected, matching an
            FPC dynamic array where SetLength makes a held array unique before it resizes */
         struct kp_dynarr *nd;
-        uint32_t id = arr_new(KP_VM_A len, elemsize, layout);
+        kp_gptr id =arr_new(KP_VM_A len, elemsize, layout);
         int32_t keep = len < d->len ? len : d->len;
 
         nd = arr_ptr(KP_VM_A id);
@@ -258,8 +259,8 @@ arr_insert_inplace(KP_VM_P struct kp_dynarr *d, int32_t index, int32_t count)
    count past the end deletes only to the end. Returns an owned reference (a fresh array when
    shared, else the same id retained), the handle-assignment discipline kp_arr_setlen uses: the
    caller stores it back and releases the previous value. */
-uint32_t
-kp_arr_delete(KP_VM_P uint32_t a, int32_t index, int32_t count)
+kp_gptr
+kp_arr_delete(KP_VM_P kp_gptr a, int32_t index, int32_t count)
 {
     struct kp_dynarr *d;
     int32_t len;
@@ -281,7 +282,7 @@ kp_arr_delete(KP_VM_P uint32_t a, int32_t index, int32_t count)
         return a;
     }
     if (d->refcount > 1) {
-        uint32_t id = kp_arr_clone(KP_VM_A a);
+        kp_gptr id =kp_arr_clone(KP_VM_A a);
         arr_delete_inplace(KP_VM_A arr_ptr(KP_VM_A id), index, count);
         return id;              /* the clone is already a fresh owned reference */
     }
@@ -295,8 +296,8 @@ kp_arr_delete(KP_VM_P uint32_t a, int32_t index, int32_t count)
    Inserting into nil builds a fresh zero-filled array of count elements, so elemsize and layout
    describe the element type for that case (and match the array object when a is not nil).
    Returns an owned reference, like kp_arr_delete. */
-uint32_t
-kp_arr_insert(KP_VM_P uint32_t a, int32_t index, int32_t count, int32_t elemsize, uint32_t layout)
+kp_gptr
+kp_arr_insert(KP_VM_P kp_gptr a, int32_t index, int32_t count, int32_t elemsize, kp_gptr layout)
 {
     struct kp_dynarr *d;
     int32_t len;
@@ -316,7 +317,7 @@ kp_arr_insert(KP_VM_P uint32_t a, int32_t index, int32_t count, int32_t elemsize
         return a;
     }
     if (d->refcount > 1) {
-        uint32_t id = kp_arr_clone(KP_VM_A a);
+        kp_gptr id =kp_arr_clone(KP_VM_A a);
         arr_insert_inplace(KP_VM_A arr_ptr(KP_VM_A id), index, count);
         return id;
     }
@@ -337,7 +338,7 @@ kp_arr_insert(KP_VM_P uint32_t a, int32_t index, int32_t count, int32_t elemsize
    `base`: tearing the backing down is the host's job. A buffer element is reference-free data
    (the front end enforces this), so there is nothing to release. */
 static void
-buf_finalize(KP_VM_P uint32_t a)
+buf_finalize(KP_VM_P kp_gptr a)
 {
     struct kp_dynarr *d = arr_ptr(KP_VM_A a);
 
@@ -351,10 +352,10 @@ buf_finalize(KP_VM_P uint32_t a)
    the element width in bytes. The buffer is a reference array (share on assign, alias on write,
    indexed exactly like an array through kp_arr_base/kp_arr_len), but ARC never frees `base`.
    Returns a fresh owned id. The host creates buffers; guest code cannot. */
-uint32_t
-kp_buf_new(KP_VM_P uint32_t base, int32_t len, int32_t elemsize)
+kp_gptr
+kp_buf_new(KP_VM_P kp_gptr base, int32_t len, int32_t elemsize)
 {
-    uint32_t a;
+    kp_gptr a;
     struct kp_dynarr *d;
 
     if (len < 0)
@@ -378,11 +379,11 @@ kp_buf_new(KP_VM_P uint32_t base, int32_t len, int32_t elemsize)
    value the front end holds for element k of axis j is base + sum(index_j * strides[j]); the
    host owns the backing, so ARC frees the descriptor and the blob but never `base`. ndim < 1
    falls back to a 1D buffer. Returns a fresh owned id; the host creates buffers, not the guest. */
-uint32_t
-kp_buf_new_nd(KP_VM_P uint32_t base, int32_t ndim, const int32_t *dims,
+kp_gptr
+kp_buf_new_nd(KP_VM_P kp_gptr base, int32_t ndim, const int32_t *dims,
               const int32_t *strides, int32_t elemsize)
 {
-    uint32_t a, blob;
+    kp_gptr a, blob;
     struct kp_dynarr *d;
     int32_t i;
 
@@ -412,8 +413,8 @@ kp_buf_new_nd(KP_VM_P uint32_t base, int32_t ndim, const int32_t *dims,
 /* A 2D buffer of `rows` by `cols` elements with a byte row pitch `pitch` (>= cols * elemsize
    when the host pads rows for alignment). The column stride is the element size. This is the
    texture-surface case; kp_buf_new_nd covers the general shape. */
-uint32_t
-kp_buf_new_2d(KP_VM_P uint32_t base, int32_t rows, int32_t cols, int32_t pitch,
+kp_gptr
+kp_buf_new_2d(KP_VM_P kp_gptr base, int32_t rows, int32_t cols, int32_t pitch,
               int32_t elemsize)
 {
     int32_t dims[2], strides[2];
@@ -425,7 +426,7 @@ kp_buf_new_2d(KP_VM_P uint32_t base, int32_t rows, int32_t cols, int32_t pitch,
 
 /* The buffer's dimension count: the shape blob's ndim, or 1 for a 1D buffer (no blob). */
 int32_t
-kp_buf_ndim(KP_VM_P uint32_t buf)
+kp_buf_ndim(KP_VM_P kp_gptr buf)
 {
     struct kp_dynarr *d = arr_ptr(KP_VM_A buf);
 
@@ -436,7 +437,7 @@ kp_buf_ndim(KP_VM_P uint32_t buf)
 
 /* The extent of axis k. For a 1D buffer axis 0 is the length; higher axes are 1. */
 int32_t
-kp_buf_dim(KP_VM_P uint32_t buf, int32_t k)
+kp_buf_dim(KP_VM_P kp_gptr buf, int32_t k)
 {
     struct kp_dynarr *d = arr_ptr(KP_VM_A buf);
 
@@ -449,7 +450,7 @@ kp_buf_dim(KP_VM_P uint32_t buf, int32_t k)
 
 /* The byte stride of axis k. For a 1D buffer axis 0 is the element size; higher axes are 0. */
 int32_t
-kp_buf_stride(KP_VM_P uint32_t buf, int32_t k)
+kp_buf_stride(KP_VM_P kp_gptr buf, int32_t k)
 {
     struct kp_dynarr *d = arr_ptr(KP_VM_A buf);
     int32_t ndim;
@@ -472,7 +473,7 @@ kp_buf_stride(KP_VM_P uint32_t buf, int32_t k)
 /* The array/buffer descriptor at a valid guest id, or NULL when the id is nil or names a
    different kind of object. Guards the accessors against a misused id. */
 static struct kp_dynarr *
-arr_or_buf(KP_VM_P uint32_t a)
+arr_or_buf(KP_VM_P kp_gptr a)
 {
     struct kp_dynarr *d;
 
@@ -502,14 +503,14 @@ range_ok(struct kp_dynarr *d, int32_t off, int32_t n)
 static int
 span_in_guest(KP_VM_P struct kp_dynarr *d, int32_t off, int32_t n)
 {
-    uint32_t start = d->base + (uint32_t)((int64_t)off * (int64_t)d->elemsize);
+    kp_gptr start = d->base + (kp_gptr)((int64_t)off * (int64_t)d->elemsize);
     unsigned long bytes = (unsigned long)((int64_t)n * (int64_t)d->elemsize);
 
     return RT_CONTAINS(start, bytes);
 }
 
 int32_t
-kp_buf_len(KP_VM_P uint32_t buf)
+kp_buf_len(KP_VM_P kp_gptr buf)
 {
     struct kp_dynarr *d = arr_or_buf(KP_VM_A buf);
 
@@ -517,7 +518,7 @@ kp_buf_len(KP_VM_P uint32_t buf)
 }
 
 int
-kp_buf_read(KP_VM_P uint32_t buf, int32_t off, int32_t n, void *dst)
+kp_buf_read(KP_VM_P kp_gptr buf, int32_t off, int32_t n, void *dst)
 {
     struct kp_dynarr *d = arr_or_buf(KP_VM_A buf);
 
@@ -530,7 +531,7 @@ kp_buf_read(KP_VM_P uint32_t buf, int32_t off, int32_t n, void *dst)
 }
 
 int
-kp_buf_write(KP_VM_P uint32_t buf, int32_t off, int32_t n, const void *src)
+kp_buf_write(KP_VM_P kp_gptr buf, int32_t off, int32_t n, const void *src)
 {
     struct kp_dynarr *d = arr_or_buf(KP_VM_A buf);
 
@@ -543,7 +544,7 @@ kp_buf_write(KP_VM_P uint32_t buf, int32_t off, int32_t n, const void *src)
 }
 
 void *
-kp_buf_map(KP_VM_P uint32_t buf, int32_t off, int32_t n)
+kp_buf_map(KP_VM_P kp_gptr buf, int32_t off, int32_t n)
 {
     struct kp_dynarr *d = arr_or_buf(KP_VM_A buf);
 

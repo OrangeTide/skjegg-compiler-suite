@@ -158,6 +158,42 @@ register) would keep everything in registers and is worth doing if float-argumen
 throughput ever matters; the staging approach was chosen first for being
 obviously correct.
 
+## Console I/O
+
+**The console seam is a POSIX file descriptor, not a stdio `FILE*`.** `write`,
+`writeln`, `read`, and `readln` lower to a small set of `io_*` host functions that
+carry the stream as an `int` file descriptor (1 standard output, 2 standard error,
+0 standard input). A descriptor was chosen over a stdio `FILE*` because the sandbox
+and VM boundary is itself descriptor- and handle-based (boris and smolmoo expose
+`read`/`write` hypercalls, not a C stdio), so an fd is the natural runtime boundary
+and stdio buffering is a layer that belongs above it, in an application or a
+library, not in the language primitives. An fd is also a small integer, so it is
+width-neutral and needs no guest pointer; a `FILE*` would have had to be a guest
+value, which is the pointer-width coupling the descriptor model avoids.
+
+**One byte of input pushback lives in the runtime.** The read side needs exactly
+one byte of lookahead: a `read` of a number or a line scans a token and must stop
+at the delimiter without consuming it (`read(a); read(ch)` on `"3x"` gives `a=3`,
+`ch='x'`), and a `read` of a string detects the line end the same way. That one
+byte is irreducible because `read`/`readln` are builtins and cannot require an
+application `uses`. Everything larger (line buffering, a general `ungetc`, write
+batching) is optional and belongs to an application or a library, so it is not in
+the runtime. The pushback is a single static byte in the one shared console
+implementation, not synthesized into guest code, so the VM and syscall layer still
+implement only `read` and `write`.
+
+**One implementation for both tiers.** The hosted runtime (JIT and native AOT) and
+the freestanding runtime (the no-libc VM tier) share one `io_*` implementation over
+`read`/`write`. Only real-number output is per tier, because the `%g` formatter
+differs (the host C library's versus the freestanding `numfmt.c`'s, with
+byte-identical output); its bytes still reach the fd with a plain write like every
+other console write. This collapsed the earlier double buffering (a stdio `BUFSIZ`
+on one tier, a separate pushback byte on the other) to the single byte, and removed
+two divergences the two copies had: a `read` of one character returns -1 at end of
+input (guard it with the end-of-input query), and a `read` of a string leaves the
+terminating newline on the stream (standard Pascal `read`), which `readln` then
+consumes.
+
 ## Module format (KPM1)
 
 **Version 1 is a text, line-oriented format.** Text was chosen for early

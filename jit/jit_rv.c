@@ -31,7 +31,8 @@
 
 struct rvfix {
     size_t site;
-    int isj;                /* 1 = J-type jal (j), 0 = B-type branch */
+    int kind;               /* 0 = B-type branch, 1 = J-type jal (j),
+                               2 = auipc+addi PC-relative address pair */
 };
 
 struct rvlab {
@@ -107,7 +108,11 @@ static int
 patch(struct code *c, struct rvfix *f, size_t target)
 {
     int32_t disp = (int32_t)((long)target - (long)f->site);
-    return f->isj ? rv_patch_j(c, f->site, disp) : rv_patch_b(c, f->site, disp);
+    switch (f->kind) {
+    case 1:  return rv_patch_j(c, f->site, disp);
+    case 2:  return rv_patch_call(c, f->site, disp);   /* auipc+addi, same PC-relative split */
+    default: return rv_patch_b(c, f->site, disp);
+    }
 }
 
 void
@@ -124,11 +129,11 @@ rv_mc_label(struct rv_mc *m, int id)
 }
 
 static void
-rv_ref(struct rv_mc *m, int id, size_t site, int isj)
+rv_ref(struct rv_mc *m, int id, size_t site, int kind)
 {
     struct rvlab *l = &m->lab[id];
     if (l->off >= 0) {
-        struct rvfix f = { site, isj };
+        struct rvfix f = { site, kind };
         if (patch(m->c, &f, (size_t)l->off) != 0)
             m->errsym = "branch target out of range";
         return;
@@ -138,7 +143,7 @@ rv_ref(struct rv_mc *m, int id, size_t site, int isj)
         l->fix = realloc(l->fix, (size_t)l->cfix * sizeof(*l->fix));
     }
     l->fix[l->nfix].site = site;
-    l->fix[l->nfix].isj = isj;
+    l->fix[l->nfix].kind = kind;
     l->nfix++;
 }
 
@@ -160,11 +165,21 @@ void rv_mc_ret(struct rv_mc *m) { rv_jalr(m->c, 0, 1, 0); }          /* jalr x0,
 void rv_mc_jr(struct rv_mc *m, int rs) { rv_jalr(m->c, 0, rs, 0); }
 void rv_mc_jalr(struct rv_mc *m, int rs) { rv_jalr(m->c, 1, rs, 0); } /* jalr ra, rs, 0 */
 
-/* Continuation re-entry address: needs a code-relative fixup the byte sink does
-   not build (the delimited-continuation opcodes are scheme-only and never reach
-   the C or Excelsior JIT).  Report it unsupported. */
-void rv_mc_lea_label(struct rv_mc *m, int rd, int id)
-{ (void)rd; (void)id; m->errsym = "continuation label address unsupported in JIT"; }
+/* The runtime address of a code label: a GNU `&&label` / computed goto target,
+   or a continuation re-entry point.  An auipc+addi pair computes pc + disp, where
+   disp is the signed distance from the auipc to the label, so the result is the
+   label's absolute address wherever the code maps (no code base needed).  The
+   label is intra-function, so this rides the ordinary label fixup (kind 2), which
+   patches the pair through rv_patch_call's PC-relative split once the label
+   resolves. */
+void
+rv_mc_lea_label(struct rv_mc *m, int rd, int id)
+{
+    size_t site = m->c->len;
+    rv_auipc(m->c, rd, 0);
+    rv_addi(m->c, rd, rd, 0);
+    rv_ref(m, id, site, 2);
+}
 
 /****************************************************************
  * Moves / immediates / addresses

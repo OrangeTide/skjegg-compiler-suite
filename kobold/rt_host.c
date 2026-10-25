@@ -52,7 +52,12 @@ static void rt_oom(const char *what)
    keep this runtime independent of the JIT library. */
 static void *rt_map_low(size_t len)
 {
-#if defined(MAP_32BIT)
+#if defined(KP_LP64)
+    /* LP64: guest addresses are full 64-bit host pointers, so the heap can live
+       anywhere; no low-memory constraint. */
+    return mmap(NULL, len, PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#elif defined(MAP_32BIT)
     return mmap(NULL, len, PROT_READ | PROT_WRITE,
                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
 #elif UINTPTR_MAX <= 0xffffffffULL
@@ -107,27 +112,27 @@ gh_sbrk(long incr)
 
 /* The guest-address wrappers rt_glue.h declares: convert a native payload
    pointer to and from a 32-bit guest address, and turn exhaustion into exit 70. */
-uint32_t gheap_alloc(uint32_t nbytes)
+kp_gptr gheap_alloc(uint32_t nbytes)
 {
     void *p = gh_alloc(nbytes);
 
     if (p == NULL && nbytes != 0)
         rt_oom("guest heap exhausted");
-    return (uint32_t)(uintptr_t)p;
+    return (kp_gptr)(uintptr_t)p;
 }
 
-void gheap_free(uint32_t addr)
+void gheap_free(kp_gptr addr)
 {
     gh_free((void *)(uintptr_t)addr);
 }
 
-uint32_t gheap_realloc(uint32_t addr, uint32_t nbytes)
+kp_gptr gheap_realloc(kp_gptr addr, uint32_t nbytes)
 {
     void *p = gh_realloc((void *)(uintptr_t)addr, nbytes);
 
     if (p == NULL && nbytes != 0)
         rt_oom("guest heap exhausted");
-    return (uint32_t)(uintptr_t)p;
+    return (kp_gptr)(uintptr_t)p;
 }
 
 /* Live guest-heap bytes (allocated, not freed).  A guest leak check snapshots
@@ -141,9 +146,9 @@ uint32_t kp_gheap_live(void)
  * Reference counting and finalizers
  ****************************************************************/
 
-static void (*g_final[KP_OBJ_NKINDS])(uint32_t addr);
+static void (*g_final[KP_OBJ_NKINDS])(kp_gptr addr);
 
-void rt_register_final(uint32_t kind, void (*fn)(uint32_t addr))
+void rt_register_final(uint32_t kind, void (*fn)(kp_gptr addr))
 {
     if (kind < KP_OBJ_NKINDS)
         g_final[kind] = fn;
@@ -153,8 +158,8 @@ void rt_register_final(uint32_t kind, void (*fn)(uint32_t addr))
    (low bit 1).  A gheap object is reference-counted through its header here; a
    table id (currently a coroutine, KP_H_CONT) routes to the handle table in
    co_shim.c.  Host opaque handles will route the same way once ported. */
-void co_table_retain(uint32_t id);
-void co_table_release(uint32_t id);
+void co_table_retain(kp_gptr id);
+void co_table_release(kp_gptr id);
 
 /* GH_POISON (off by default) is the guest-heap write-after-free instrument;
    gheap_core.h documents the poison/verify half (the GH_WAF report).  This half
@@ -165,12 +170,12 @@ void co_table_release(uint32_t id);
    codegen from the embedded compiler's. */
 #ifdef GH_POISON
 #include <execinfo.h>
-static void gh_uaf(const char *op, uint32_t v)
+static void gh_uaf(const char *op, kp_gptr v)
 {
     void *bt[32];
     int n = backtrace(bt, 32);
-    fprintf(stderr, "GH_UAF %s on freed object v=%08x (refcount=%u)\n",
-            op, v, ((struct kp_obj_hdr *)(uintptr_t)v)->refcount);
+    fprintf(stderr, "GH_UAF %s on freed object v=%08llx (refcount=%u)\n",
+            op, (unsigned long long)v, ((struct kp_obj_hdr *)(uintptr_t)v)->refcount);
     backtrace_symbols_fd(bt, n, 2);
     fflush(stderr);
 }
@@ -188,7 +193,7 @@ static void gh_uaf(const char *op, uint32_t v)
 #define GH_UAF_CHECK(op, v) ((void)0)
 #endif
 
-void kp_retain(uint32_t v)
+void kp_retain(kp_gptr v)
 {
     struct kp_obj_hdr *h;
 
@@ -204,10 +209,10 @@ void kp_retain(uint32_t v)
         h->refcount++;
 }
 
-void kp_release(uint32_t v)
+void kp_release(kp_gptr v)
 {
     struct kp_obj_hdr *h;
-    void (*fin)(uint32_t);
+    void (*fin)(kp_gptr);
 
     if (v == 0)
         return;

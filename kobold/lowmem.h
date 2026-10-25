@@ -10,6 +10,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "obj.h"       /* kp_gptr: a guest address is pointer-width (64-bit under LP64) */
 
 /* Map `len` bytes readable/writable (or as `prot` asks) in the low 4 GB.
    Returns the mapping, or NULL on failure. Release with munmap. Used for the
@@ -34,14 +35,14 @@ uintptr_t kp_arena_base(struct kp_arena *a);
    a 32-bit guest pointer to base + addr, and kp_arena_addr maps a real pointer
    back to its 32-bit guest offset. Under the identity model (base 0) both are the
    plain cast. The caller checks for nil (0); these do not special-case it. */
-void    *kp_arena_ptr(struct kp_arena *a, uint32_t addr);
-uint32_t kp_arena_addr(struct kp_arena *a, const void *p);
+void    *kp_arena_ptr(struct kp_arena *a, kp_gptr addr);
+kp_gptr  kp_arena_addr(struct kp_arena *a, const void *p);
 
 /* True when the guest byte range [addr, addr + len) lies within the arena's
    allocated span, so a host access through it cannot escape guest memory. A
    whole-arena guard the buffer FFI accessors add on top of a per-object length
    check, to catch a descriptor whose base or length was corrupted. */
-int kp_arena_contains(struct kp_arena *a, uint32_t addr, size_t len);
+int kp_arena_contains(struct kp_arena *a, kp_gptr addr, size_t len);
 
 /* A one-shot region (globals, the main execution stack). With low_guard, a
    PROT_NONE guard page is placed below it, for a downward-growing stack. Writes

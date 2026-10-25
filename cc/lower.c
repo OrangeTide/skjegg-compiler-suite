@@ -2391,6 +2391,20 @@ lower_expr(struct cc_node *n)
                 ins->slot = lc->slot;
                 return ins->dst;
             }
+            if (t) {
+                /* A narrow scalar local (char/short) holds its value in one or
+                   two bytes of a word-sized slot.  A full-word IR_LDL would also
+                   return the slot's other bytes, which are stack garbage when the
+                   value was written through the local's address by code that
+                   writes only the object's own width (e.g. read(2) into &c).
+                   Load it at its declared width through the same address &c uses
+                   (the big-endian sub-word offset included), matching the global
+                   and dereferenced-pointer load paths and the compound-assign and
+                   increment reads, which already load through lower_addr. */
+                int sz = cc_type_size(t);
+                if (sz == 1 || sz == 2)
+                    return emit_load(lower_addr(n), t);
+            }
             ins = emit(IR_LDL);
             ins->dst = new_temp();
             ins->slot = lc->slot;

@@ -1,0 +1,8 @@
+int "42" = 42
+int "-7" = -7
+int "12x" bad at 3
+int "" bad at 1
+real "3.5" = 3.5
+real "1.5e2" = 150
+real "nope" bad
+fallback -1

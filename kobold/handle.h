@@ -5,6 +5,7 @@
 
 #include <setjmp.h>
 #include <stdint.h>
+#include "obj.h"       /* kp_gptr: a guest value is pointer-width (8 bytes under LP64) */
 
 #ifndef KP_VM_FWD
 #define KP_VM_FWD
@@ -40,32 +41,32 @@ void kp_register_func(kp_vm *vm, const char *name, kp_hostfn fn);
 /* Register a host type: its name, its method table in interface order, and the
    finalizer an id of the type is reclaimed with (NULL falls back to the default).
    Returns a nonzero type id for kp_handle_new_typed and method dispatch. */
-uint32_t kp_register_type(kp_vm *vm, const char *name,
+kp_gptr kp_register_type(kp_vm *vm, const char *name,
                           const kp_hostfn *methods, int nmethods,
                           kp_finalize finalize);
 
 /* Create a host handle (refcount 1). The plain form binds the VM default finalizer;
    the typed form binds the finalizer registered for `type`. */
-uint32_t kp_handle_new(kp_vm *vm, void *obj);
-uint32_t kp_handle_new_typed(kp_vm *vm, void *obj, uint32_t type);
+kp_gptr kp_handle_new(kp_vm *vm, void *obj);
+kp_gptr kp_handle_new_typed(kp_vm *vm, void *obj, kp_gptr type);
 
 /* Intern an object of any kind with an explicit finalizer. The string and coroutine
    runtimes use this to add their KP_H_STRING and KP_H_CONT ids. Returns the id. */
-uint32_t kp_handle_intern(kp_vm *vm, enum kp_handle_kind kind, void *obj,
+kp_gptr kp_handle_intern(kp_vm *vm, enum kp_handle_kind kind, void *obj,
                           kp_finalize finalize);
 
 /* Retain and release any managed value; nil (0) is a no-op. A value with low bit 1 is
    a host-handle table id (release at zero frees the slot and runs its reclaimer); a
    value with low bit 0 is a guest-owned gheap object, and release at zero runs the
    reclaimer registered for the kind in its header (kp_set_obj_finalizer). */
-void kp_retain(kp_vm *vm, uint32_t id);
-void kp_release(kp_vm *vm, uint32_t id);
+void kp_retain(kp_vm *vm, kp_gptr id);
+void kp_release(kp_vm *vm, kp_gptr id);
 
 /* Register the reclaimer for a guest-owned gheap-object kind (kp_obj_kind). The
    string, dynamic-array, and coroutine runtimes register their own; the reclaimer
    frees the object and any storage it owns. */
 void kp_set_obj_finalizer(kp_vm *vm, uint32_t kind,
-                          void (*fn)(kp_vm *vm, uint32_t addr));
+                          void (*fn)(kp_vm *vm, kp_gptr addr));
 
 /* The number of handle-table slots still live (refcount >= 1): coroutines, strings,
    dynamic arrays, and host objects. A guest leak check snapshots this around a scope
@@ -75,8 +76,8 @@ uint32_t kp_live_handle_count(kp_vm *vm);
 /* The host-facing accessor: the object a host id names, or NULL for nil, a freed id,
    or a non-host id. The VM's own runtimes use kp_handle_ptr with the expected kind,
    which also rejects a mismatched kind. */
-void *kp_obj(kp_vm *vm, uint32_t id);
-void *kp_handle_ptr(kp_vm *vm, uint32_t id, enum kp_handle_kind kind);
+void *kp_obj(kp_vm *vm, kp_gptr id);
+void *kp_handle_ptr(kp_vm *vm, kp_gptr id, enum kp_handle_kind kind);
 
 /* The value-stack FFI. A host entry reads its arguments by index (0..kp_argc-1) and
    pushes its results. Cells carry no tags; the type of each is fixed by the routine's
@@ -85,12 +86,12 @@ int      kp_argc(kp_vm *vm);
 int32_t  kp_to_i32(kp_vm *vm, int i);
 int64_t  kp_to_i64(kp_vm *vm, int i);
 double   kp_to_f64(kp_vm *vm, int i);
-uint32_t kp_to_handle(kp_vm *vm, int i);   /* a handle or string id */
+kp_gptr kp_to_handle(kp_vm *vm, int i);   /* a handle or string id */
 void    *kp_to_obj(kp_vm *vm, int i);      /* id -> registered host object, or NULL */
 void kp_push_i32(kp_vm *vm, int32_t v);
 void kp_push_i64(kp_vm *vm, int64_t v);
 void kp_push_f64(kp_vm *vm, double v);
-void kp_push_handle(kp_vm *vm, uint32_t id);
+void kp_push_handle(kp_vm *vm, kp_gptr id);
 
 /* Runtime-internal: pop and return the top result cell, used by the guest-to-host
    thunk to take the host's single result after kp_call_host. */
@@ -118,14 +119,14 @@ int       kp_call_host(kp_vm *vm, kp_hostfn fn, int nargs);
 
 /* Runtime-internal: the id of a registered type by name, or 0 if none (kp_link uses
    this to check a module's type imports resolve). */
-uint32_t  kp_find_type(kp_vm *vm, const char *name);
+kp_gptr   kp_find_type(kp_vm *vm, const char *name);
 
 /* Runtime-internal: dispatch to a method resolved at link time (patched slots). kp_link
    binds a call site whose static receiver type is known directly to that type's method for
    the slot, so this validates only the receiver and calls fn; a nil or invalid receiver
    still traps NIL_DISPATCH. kp_type_method resolves a type's slot to its method. */
 int       kp_dispatch_to(kp_vm *vm, kp_hostfn fn, int nargs);
-kp_hostfn kp_type_method(kp_vm *vm, uint32_t type, int slot);
+kp_hostfn kp_type_method(kp_vm *vm, kp_gptr type, int slot);
 
 /* Traps: a recoverable fatal error the VM raises, distinct from an ordinary result.
    For now a bad coroutine resume and a yield outside any coroutine, joined by the

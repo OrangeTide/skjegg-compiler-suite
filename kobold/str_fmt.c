@@ -143,7 +143,7 @@ scan_real(const char *b, int32_t len, double *rv, int32_t *code)
     *code = (errno == ERANGE) ? len + 1 : 0;
 }
 
-uint32_t
+kp_gptr
 kp_str_from_int(int32_t x)
 {
     char buf[16];
@@ -152,7 +152,7 @@ kp_str_from_int(int32_t x)
     return kp_str_new(buf, n);
 }
 
-uint32_t
+kp_gptr
 kp_str_from_int64(int64_t x)
 {
     char buf[24];
@@ -162,7 +162,7 @@ kp_str_from_int64(int64_t x)
 }
 
 int32_t
-kp_str_val_int(uint32_t s)
+kp_str_val_int(kp_gptr s)
 {
     int64_t iv;
     int32_t code;
@@ -172,7 +172,7 @@ kp_str_val_int(uint32_t s)
 }
 
 int64_t
-kp_str_val_int64(uint32_t s)
+kp_str_val_int64(kp_gptr s)
 {
     int64_t iv;
     int32_t code;
@@ -182,7 +182,7 @@ kp_str_val_int64(uint32_t s)
 }
 
 KP_REAL
-kp_str_val_real(uint32_t s)
+kp_str_val_real(kp_gptr s)
 {
     double rv;
     int32_t code;
@@ -192,7 +192,7 @@ kp_str_val_real(uint32_t s)
 }
 
 int32_t
-kp_str_valcode(uint32_t s, int32_t kind)
+kp_str_valcode(kp_gptr s, int32_t kind)
 {
     int64_t iv;
     double rv;

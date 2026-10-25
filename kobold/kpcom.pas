@@ -232,6 +232,26 @@ type
     Ty: LongInt;
   end;
 
+  { The target ABI the front end compiles for. It is established once at every
+    compilation entry (the native driver from its target selection, the `compile`
+    export from its caller's target) and never defaulted at the point of use, so a
+    type's size is a static property of the target the way cc's is. Pointer and
+    handle types size and lower from PtrBytes, which is what makes record layout
+    and pointer-versus-integer IR follow the target. Room to grow: endianness and
+    the long-integer width would join it. }
+  TTarget = record
+    PtrBytes: LongInt;   { guest pointer/handle width: 4 (ILP32: rv32/cf/mips)
+                           or 8 (LP64: x86-64/arm64) }
+  end;
+
+const
+  { The guest pointer/handle width this compiler binary was built for, baked at
+    build time the way cc's CC_PTR_SIZE is. skj-pc (or fpc) compiles kpcom with
+    -d KP_LP64 for an LP64 backend (x86-64/arm64, 8 bytes) and without it for an
+    ILP32 backend (rv32/cf/mips, 4 bytes). The width is a static property of the
+    binary, Plan 9 style: one front end per backend, native width, no cross flag. }
+  KpNativePtrBytes = {$IFDEF KP_LP64}8{$ELSE}4{$ENDIF};
+
 { ---- Lookup tables ---- }
 
 const
@@ -373,6 +393,10 @@ var
   CondActiveStk, CondTakenStk: array of Boolean;
   CondTop: LongInt;
 
+  { Symbols defined on the command line (-D). InitScanner resets Defines per file,
+    so these are re-applied there after the built-in 'kobold' symbol. }
+  CmdDefines: array of string;
+
   { Parser state }
   Nodes: array of TNode;  { the AST node pool }
   NodeCount: LongInt;
@@ -429,6 +453,7 @@ var
     directories; UnitSrcDir is the directory of the source being compiled, searched first.
     CompilingUnitName is the unit under compilation, so a self-use reads as a cycle. }
   UnitPath: array of string;
+  MainFiles: array of string;   { driver input files, compiled after the argument scan }
   UnitSrcDir: string;
   CompilingUnitName: string;
   { The loaded dependency interfaces, keyed by name (case-insensitive). UUScope is the
@@ -479,6 +504,8 @@ var
   OptEmitKpm: Boolean;    { --emit-kpm: lower and write the KPM1 module }
   OptDebug: Boolean;      { -g: emit .file and per-statement LOC debug markers }
   OptOut: string;         { -o target; recorded but unused until codegen exists }
+  CurTarget: TTarget;     { the active target ABI; see TTarget. Set at every
+                            compilation entry, read by all type sizing }
 
   { Compiler directive state, toggled by the R and Q switches (R+/R-, Q+/Q-) as the
     lexer scans them. The trusted-now default is off. The value in effect at a
@@ -1368,6 +1395,8 @@ begin
 end;
 
 procedure InitScanner(const name, text: string);
+var
+  cdi: LongInt;
 begin
   SrcName := name;
   Src := text;
@@ -1380,6 +1409,9 @@ begin
   CondTop := 0;
   SetLength(Defines, 0);
   AddDefineSym('kobold');
+  { re-apply command-line -D symbols (e.g. KP_LP64 when emitting an LP64 seed) }
+  for cdi := 0 to Length(CmdDefines) - 1 do
+    AddDefineSym(CmdDefines[cdi]);
 end;
 
 { ---- Token dump (the -d output, and the lexer test oracle) ---- }
@@ -6452,9 +6484,15 @@ begin
 end;
 
 function HasKpmExt(const s: string): Boolean;
-{ True when s ends with the case-insensitive suffix '.kpm'. }
+{ True when s ends with the case-insensitive suffix '.kpm'.  The length guard is a
+  separate statement, not an `and` operand: `and` evaluates both sides, so a folded
+  guard would still run Copy with a negative index on a short directory entry (a bare
+  '.' or '..'), building a malformed string that faults. }
 begin
-  HasKpmExt := (Length(s) >= 4) and (LowerStr(Copy(s, Length(s) - 3, 4)) = '.kpm');
+  if Length(s) < 4 then
+    HasKpmExt := False
+  else
+    HasKpmExt := LowerStr(Copy(s, Length(s) - 3, 4)) = '.kpm';
 end;
 
 procedure BindUnitNamed(item: LongInt; const uname, qual: string; bare: Boolean);
@@ -6879,6 +6917,30 @@ begin
     IsDynArray(ty) or IsMap(ty);
 end;
 
+function IsPtrSized(ty: LongInt): Boolean;
+{ A value lowered as one guest pointer/handle word, CurTarget.PtrBytes wide: any
+  reference-counted handle, a procedure/function value, or a `label` code address
+  (threaded dispatch). These are 4 bytes under ILP32 (rv32/cf/mips) and 8 under
+  LP64 (x86-64/arm64), unlike a genuine 32-bit scalar (int/bool/char/enum), which
+  stays 4 on every target. A label holds a native code address, so under LP64,
+  where the JIT maps guest code anywhere in the 64-bit space, it must be a full
+  8-byte word or a stored @name truncates. }
+begin
+  IsPtrSized := IsHandle(ty) or
+    ((ty >= 0) and (ty < SemCount) and
+     ((SemTypes[ty].Kind = skProc) or (SemTypes[ty].Kind = skLabel)));
+end;
+
+function WideStore(ty: LongInt): Boolean;
+{ A value that occupies a full 64-bit word in storage and on the call path, so it
+  uses the *64 opcodes (LD64/ST64, LDL64/STL64, ARG64/RETV64, CALL64, an 8-byte
+  slot): a Wide64 value (a small set or an Int64, 64-bit on every target) or, under
+  LP64, a pointer/handle word (IsPtrSized at PtrBytes = 8). Under ILP32 a handle is
+  4 bytes, so this reduces to Wide64 and every site keyed on it is byte-identical. }
+begin
+  WideStore := Wide64(ty) or (IsPtrSized(ty) and (CurTarget.PtrBytes = 8));
+end;
+
 { ---- Real-literal to binary64, in integer arithmetic ----
   A real constant's f64 bit pattern is computed from its decimal text with the
   TBig helpers below, never through a host Double. On the single-float sandbox
@@ -7146,7 +7208,7 @@ begin
   if (sig < 0) or (sig >= SemCount) or (SemTypes[sig].Kind <> skProc) or
      not SemTypes[sig].Failable then Exit;
   if SemTypes[sig].RetType < 0 then Exit;
-  FailWideResult := IsRealType(SemTypes[sig].RetType) or Wide64(SemTypes[sig].RetType) or
+  FailWideResult := IsRealType(SemTypes[sig].RetType) or WideStore(SemTypes[sig].RetType) or
     IsAggregate(SemTypes[sig].RetType);
 end;
 
@@ -7179,8 +7241,7 @@ begin
   if IsRealType(ty) then begin TypeAlign := 8; Exit; end;
   if IsInt64(ty) then begin TypeAlign := 8; Exit; end;
   if (ty < 0) or (ty >= SemCount) then begin TypeAlign := 4; Exit; end;
-  if IsDynArray(ty) then begin TypeAlign := 4; Exit; end;   { a handle id }
-  if IsMap(ty) then begin TypeAlign := 4; Exit; end;        { a handle id }
+  if IsPtrSized(ty) then begin TypeAlign := CurTarget.PtrBytes; Exit; end;   { handle / code pointer }
   case SemTypes[ty].Kind of
     skSet: TypeAlign := 8;   { a small set is an i64 word }
     skArray: TypeAlign := TypeAlign(SemTypes[ty].Base);
@@ -7207,8 +7268,7 @@ begin
   if IsRealType(ty) then begin TypeSize := 8; Exit; end;
   if IsInt64(ty) then begin TypeSize := 8; Exit; end;
   if (ty < 0) or (ty >= SemCount) then begin TypeSize := 4; Exit; end;
-  if IsDynArray(ty) then begin TypeSize := 4; Exit; end;   { a handle id }
-  if IsMap(ty) then begin TypeSize := 4; Exit; end;        { a handle id }
+  if IsPtrSized(ty) then begin TypeSize := CurTarget.PtrBytes; Exit; end;   { handle / code pointer }
   case SemTypes[ty].Kind of
     skSet: TypeSize := SetWords(ty) * 8;   { a small set is one i64 word, a large set 2-4 }
     skArray: begin
@@ -7306,11 +7366,17 @@ begin
 end;
 
 function EmitLEA(const sym: string): LongInt;
+{ A symbol's address. An address is pointer-width, so this is LEA64 under LP64
+  (the full 64-bit address) and the narrow LEA under ILP32. Every caller wants an
+  address, so the choice lives here rather than at each site. }
 var
   d: LongInt;
 begin
   d := NewTemp;
-  PushInsn('LEA', 'dst=' + IntToStr(d) + ' sym=' + sym);
+  if CurTarget.PtrBytes = 8 then
+    PushInsn('LEA64', 'dst=' + IntToStr(d) + ' sym=' + sym)
+  else
+    PushInsn('LEA', 'dst=' + IntToStr(d) + ' sym=' + sym);
   EmitLEA := d;
 end;
 
@@ -7324,11 +7390,16 @@ begin
 end;
 
 function EmitADL(slot: LongInt): LongInt;
+{ The address of a stack slot. An address is pointer-width, so this is ADL64 under
+  LP64 and the narrow ADL under ILP32; every caller wants a slot address. }
 var
   d: LongInt;
 begin
   d := NewTemp;
-  PushInsn('ADL', 'dst=' + IntToStr(d) + ' slot=' + IntToStr(slot));
+  if CurTarget.PtrBytes = 8 then
+    PushInsn('ADL64', 'dst=' + IntToStr(d) + ' slot=' + IntToStr(slot))
+  else
+    PushInsn('ADL', 'dst=' + IntToStr(d) + ' slot=' + IntToStr(slot));
   EmitADL := d;
 end;
 
@@ -7377,6 +7448,22 @@ begin
   d := NewTemp;
   PushInsn(op, 'dst=' + IntToStr(d) + ' a=' + IntToStr(a) + ' b=' + IntToStr(b));
   EmitBin := d;
+end;
+
+function PtrAddOp: string;
+{ The address-addition opcode for this target: ADD64 under LP64, so adding a byte
+  offset to a 64-bit address keeps all 64 bits, and the narrow 32-bit ADD under
+  ILP32. Byte-offset arithmetic on an address goes through this, never a bare ADD. }
+begin
+  if CurTarget.PtrBytes = 8 then PtrAddOp := 'ADD64' else PtrAddOp := 'ADD';
+end;
+
+function AddrAdd(addr, delta: LongInt): LongInt;
+{ Add a register byte offset to an address, in address width (ADD64 under LP64).
+  The offset comes from 32-bit index arithmetic whose result is zero-extended in
+  its register, so a non-negative delta is correct under ADD64. }
+begin
+  AddrAdd := EmitBin(PtrAddOp, addr, delta);
 end;
 
 procedure EmitLabel(l: LongInt);
@@ -7556,12 +7643,44 @@ begin
   PushInsn('ST64', 'a=' + IntToStr(addr) + ' b=' + IntToStr(val));
 end;
 
+function EmitLDLAddr(slot: LongInt): LongInt;
+{ Load a pointer-width word (an address or a handle) held in a stack slot: LDL64
+  under LP64 (an 8-byte pointer slot), the narrow LDL under ILP32. Used where a slot
+  holds a pointer rather than a scalar (a by-reference parameter, a captured
+  variable's hidden pointer, an sret buffer pointer, a handle local). }
+begin
+  if CurTarget.PtrBytes = 8 then EmitLDLAddr := EmitLDL64(slot)
+  else EmitLDLAddr := EmitLDL(slot);
+end;
+
+procedure EmitSTLAddr(val, slot: LongInt);
+{ Store a pointer-width word (an address or a handle) into a stack slot: STL64 under
+  LP64, the narrow STL under ILP32. The mirror of EmitLDLAddr. }
+begin
+  if CurTarget.PtrBytes = 8 then EmitSTL64(val, slot)
+  else EmitSTL(val, slot);
+end;
+
+function EmitLoadPtr(addr: LongInt): LongInt;
+{ Load a pointer-width word from a guest address: LD64 under LP64, LW under ILP32. }
+begin
+  if CurTarget.PtrBytes = 8 then EmitLoadPtr := EmitLD64(addr)
+  else EmitLoadPtr := EmitLW(addr);
+end;
+
+procedure EmitStorePtr(addr, val: LongInt);
+{ Store a pointer-width word to a guest address: ST64 under LP64, SW under ILP32. }
+begin
+  if CurTarget.PtrBytes = 8 then EmitST64(addr, val)
+  else EmitSW(addr, val);
+end;
+
 function EmitLoadScalar(addr, ty: LongInt): LongInt;
 { Load a scalar of type ty from a guest address, choosing the load opcode by scalar
   class: a 64-bit value (Int64 or a set word) through LD64, a single through FLS, a
   real through FLD, else a 32-bit LW. }
 begin
-  if Wide64(ty) then EmitLoadScalar := EmitLD64(addr)
+  if WideStore(ty) then EmitLoadScalar := EmitLD64(addr)
   else if IsSingle(ty) then EmitLoadScalar := EmitFLS(addr)
   else if IsRealType(ty) then EmitLoadScalar := EmitFLD(addr)
   else EmitLoadScalar := EmitLW(addr);
@@ -7571,7 +7690,7 @@ procedure EmitStoreScalar(addr, val, ty: LongInt);
 { Store scalar val of type ty to a guest address, the mirror of EmitLoadScalar:
   ST64 for a 64-bit value, FSS for a single, FSD for a real, else a 32-bit SW. }
 begin
-  if Wide64(ty) then EmitST64(addr, val)
+  if WideStore(ty) then EmitST64(addr, val)
   else if IsSingle(ty) then EmitFSS(addr, val)
   else if IsRealType(ty) then EmitFSD(addr, val)
   else EmitSW(addr, val);
@@ -7580,6 +7699,14 @@ end;
 procedure EmitArg64(a: LongInt);
 begin
   PushInsn('ARG64', 'a=' + IntToStr(a));
+end;
+
+procedure EmitArgPtr(a: LongInt);
+{ Pass a pointer-width argument (a handle, a receiver, or a hidden sret/args
+  pointer): ARG64 under LP64, the 32-bit ARG under ILP32. }
+begin
+  if CurTarget.PtrBytes = 8 then PushInsn('ARG64', 'a=' + IntToStr(a))
+  else PushInsn('ARG', 'a=' + IntToStr(a));
 end;
 
 procedure EmitRetv64(a: LongInt);
@@ -8050,7 +8177,7 @@ begin
   EmitBNZ(cmp, lBad);
   EmitIndexTrap(lBad, lOk);
   base := EmitStrCall1('kp_str_base', handle);
-  StrCharAddr := EmitBin('ADD', base, EmitBin('SUB', idx, EmitLIC(1)));
+  StrCharAddr := AddrAdd(base, EmitBin('SUB', idx, EmitLIC(1)));
 end;
 
 function EmitStringValue(const bytes: string): LongInt;
@@ -8135,18 +8262,18 @@ begin
   if Syms[s].Kind = syFunc then
     { the current function's aggregate result: its storage is the caller's buffer, reached
       through the hidden sret pointer that CurResultSlot holds }
-    VarAddr := EmitLDL(CurResultSlot)
+    VarAddr := EmitLDLAddr(CurResultSlot)
   else if Syms[s].WithBase >= 0 then begin
     baseNode := Syms[s].WithBase;
     recTy := Nodes[baseNode].Ty;
     m := FindMember(recTy, Syms[s].Name);
     if m >= 0 then off := FieldOffset(recTy, m) else off := 0;
     if off = 0 then VarAddr := AddrOf(baseNode)
-    else VarAddr := EmitBin('ADD', AddrOf(baseNode), EmitLIC(off));
+    else VarAddr := AddOff(AddrOf(baseNode), off);
   end
-  else if CapSlot[s] >= 0 then VarAddr := EmitLDL(CapSlot[s])
+  else if CapSlot[s] >= 0 then VarAddr := EmitLDLAddr(CapSlot[s])
   else if IsGlobalVar(s) then VarAddr := EmitLEA(LinkNameOf(s))
-  else if ParamByRef(s) then VarAddr := EmitLDL(Syms[s].Slot)
+  else if ParamByRef(s) then VarAddr := EmitLDLAddr(Syms[s].Slot)
   else VarAddr := EmitADL(Syms[s].Slot);
 end;
 
@@ -8197,7 +8324,7 @@ begin
   if Syms[s].Kind = syFunc then begin
     { the current function's result variable lives in its own slot, as StoreSym writes it }
     ty := SemTypes[Syms[s].TypeId].RetType;
-    if Wide64(ty) then LoadSym := EmitLDL64(CurResultSlot)
+    if WideStore(ty) then LoadSym := EmitLDL64(CurResultSlot)
     else if IsRealType(ty) then LoadSym := EmitFLDL(CurResultSlot)
     else LoadSym := EmitLDL(CurResultSlot);
     Exit;
@@ -8207,7 +8334,7 @@ begin
     addr := VarAddr(s);
     LoadSym := EmitLoadScalar(addr, ty);
   end
-  else if Wide64(ty) then LoadSym := EmitLDL64(Syms[s].Slot)
+  else if WideStore(ty) then LoadSym := EmitLDL64(Syms[s].Slot)
   else if IsSingle(ty) then LoadSym := EmitFLS(EmitADL(Syms[s].Slot))
   else if IsRealType(ty) then LoadSym := EmitFLDL(Syms[s].Slot)
   else LoadSym := EmitLDL(Syms[s].Slot);
@@ -8220,7 +8347,7 @@ var
 begin
   if Syms[s].Kind = syFunc then begin
     if IsRealType(SemTypes[Syms[s].TypeId].RetType) then EmitFSTL(val, CurResultSlot)
-    else if Wide64(SemTypes[Syms[s].TypeId].RetType) then EmitSTL64(val, CurResultSlot)
+    else if WideStore(SemTypes[Syms[s].TypeId].RetType) then EmitSTL64(val, CurResultSlot)
     else EmitSTL(val, CurResultSlot);
     Exit;
   end;
@@ -8229,7 +8356,7 @@ begin
     addr := VarAddr(s);
     EmitStoreScalar(addr, val, ty);
   end
-  else if Wide64(ty) then EmitSTL64(val, Syms[s].Slot)
+  else if WideStore(ty) then EmitSTL64(val, Syms[s].Slot)
   else if IsSingle(ty) then EmitFSS(EmitADL(Syms[s].Slot), val)
   else if IsRealType(ty) then EmitFSTL(val, Syms[s].Slot)
   else EmitSTL(val, Syms[s].Slot);
@@ -8266,7 +8393,7 @@ procedure EmitTypedCall(d, ret: LongInt; const base, args: string);
 begin
   if IsSingle(ret) then PushInsn('F' + base, 'dst=' + IntToStr(d) + ' imm=4 ' + args)
   else if IsRealType(ret) then PushInsn('F' + base, 'dst=' + IntToStr(d) + ' ' + args)
-  else if Wide64(ret) then PushInsn(base + '64', 'dst=' + IntToStr(d) + ' ' + args)
+  else if WideStore(ret) then PushInsn(base + '64', 'dst=' + IntToStr(d) + ' ' + args)
   else PushInsn(base, 'dst=' + IntToStr(d) + ' ' + args);
 end;
 
@@ -8289,7 +8416,7 @@ begin
   if paramTy >= 0 then effTy := paramTy else effTy := Nodes[argNode].Ty;
   if ((pmode = 1) or (pmode = 3)) and not IsAggregate(effTy) then begin
     at := AddrOf(argNode);   { a scalar var/out arg passes its address }
-    ak := 0;
+    if CurTarget.PtrBytes = 8 then ak := 2 else ak := 0;   { a 64-bit address rides ARG64 }
   end
   else if IsSingle(effTy) then begin
     at := AsFloat(argNode);   { widen an integer argument }
@@ -8313,7 +8440,10 @@ begin
   end
   else begin
     at := LowerExpr(argNode);
-    ak := 0;
+    { a handle, proc, or aggregate lowers to a pointer-width value, 64-bit under LP64
+      (ARG64); a genuine 32-bit scalar stays ARG }
+    if (IsPtrSized(effTy) or IsAggregate(effTy)) and (CurTarget.PtrBytes = 8) then ak := 2
+    else ak := 0;
     { A value-mode dynamic-array argument is a value type, so the callee gets an
       independent copy it may mutate without the caller seeing it. A borrowed source is
       cloned; an owned temporary is moved in as its copy. const, var, and out borrow or
@@ -8420,7 +8550,7 @@ begin
   SetLength(argk, na);
   for i := 0 to na - 1 do
     ClassifyArg(sig, i, argNodes[i], argt[i], argk[i], owned);
-  EmitArg(r0);   { the receiver is argument 0 }
+  EmitArgPtr(r0);   { the receiver is argument 0 (a handle id or a record address) }
   EmitStagedArgs(argt, argk);
   ret := SemTypes[sig].RetType;
   { a record result returns through caller storage (sret); a failable real, int64, or record
@@ -8438,12 +8568,12 @@ begin
     if Length(roffs) > 0 then begin
       z := EmitLIC(0);
       for i := 0 to High(roffs) do
-        EmitSW(AddOff(EmitADL(retbuf), roffs[i]), z);
+        EmitStorePtr(AddOff(EmitADL(retbuf), roffs[i]), z);
     end;
   end
   else if wideFail then
     retbuf := NewSlot(TypeSize(ret));   { a real or 64-bit value buffer (no handle fields) }
-  if aggRet or wideFail then EmitArg(EmitADL(retbuf));
+  if aggRet or wideFail then EmitArgPtr(EmitADL(retbuf));
   if aggRet or wideFail then
     args := 'sym=' + symName + ' nargs=' + IntToStr(na + 2)
   else
@@ -8618,8 +8748,8 @@ begin
   end
   else begin
     addr := AddrOf(target);
-    old := EmitLW(addr);
-    EmitSW(addr, newid);
+    old := EmitLoadPtr(addr);
+    EmitStorePtr(addr, newid);
     EmitRelease(old);
   end;
 end;
@@ -8675,8 +8805,8 @@ begin
   end
   else begin
     addr := AddrOf(target);
-    old := EmitLW(addr);
-    EmitSW(addr, newid);
+    old := EmitLoadPtr(addr);
+    EmitStorePtr(addr, newid);
     EmitRelease(old);
   end;
 end;
@@ -8703,8 +8833,8 @@ begin
   end
   else begin
     maddr := AddrOf(mapDesig);
-    old := EmitLW(maddr);
-    EmitSW(maddr, newmap);
+    old := EmitLoadPtr(maddr);
+    EmitStorePtr(maddr, newmap);
     EmitRelease(old);
   end;
   ReleaseIfOwned(keyNode, key);
@@ -8726,8 +8856,8 @@ begin
   end
   else begin
     addr := AddrOf(desig);
-    old := EmitLW(addr);
-    EmitSW(addr, newid);
+    old := EmitLoadPtr(addr);
+    EmitStorePtr(addr, newid);
     EmitRelease(old);
   end;
 end;
@@ -9092,8 +9222,8 @@ begin
           cur := LowerExpr(arg);
           if not IsOwnedExpr(arg) then EmitRetain(cur);
         end;
-        old := EmitLDL(CurResultSlot);
-        EmitSTL(cur, CurResultSlot);
+        old := EmitLDLAddr(CurResultSlot);
+        EmitSTLAddr(cur, CurResultSlot);
         EmitRelease(old);
       end
       else if IsRealType(rTy) then EmitFSTL(AsFloat(arg), CurResultSlot)
@@ -9317,7 +9447,7 @@ begin
     if Length(roffs) > 0 then begin
       z := EmitLIC(0);
       for i := 0 to High(roffs) do
-        EmitSW(AddOff(EmitADL(retbuf), roffs[i]), z);
+        EmitStorePtr(AddOff(EmitADL(retbuf), roffs[i]), z);
     end;
   end
   else if wideFail then
@@ -9326,7 +9456,7 @@ begin
   { a nested routine's captured variables follow as hidden by-pointer arguments }
   for i := 0 to High(RoutineCaptures[s]) do EmitArg(VarAddr(RoutineCaptures[s][i]));
   extra := Length(RoutineCaptures[s]);
-  if aggRet or wideFail then begin EmitArg(EmitADL(retbuf)); Inc(extra); end;
+  if aggRet or wideFail then begin EmitArgPtr(EmitADL(retbuf)); Inc(extra); end;
   args := 'sym=' + EmittedRoutineName(s) + ' nargs=' + IntToStr(na + extra);
   if wideFail then begin
     { ordinary call: the integer return register holds the error, the value is in retbuf }
@@ -9498,6 +9628,7 @@ function LowerFailForm(node: LongInt; wantVal: Boolean): LongInt;
   (value on success, a control transfer on failure). }
 var
   v, err, fb, rslot, lEnd, oty: LongInt;
+  managed: Boolean;
 begin
   LowerFailForm := -1;
   case Nodes[node].Kind of
@@ -9535,7 +9666,14 @@ begin
           EmitStoreScalar(EmitADL(rslot), v, oty);
           lEnd := NewLabel;
           EmitBZ(err, lEnd);
-          EmitStoreScalar(EmitADL(rslot), LowerExpr(Nodes[node].B), oty);
+          { the fallback must reach the result's width before the store: an Int64 result
+            sign-extends a 32-bit fallback (SEXT64, else `or else -1` stores 0x00000000FFFFFFFF),
+            a real result widens an integer one (ITOF); a set is already 64-bit and passes
+            through. The success value v is already the result's width. }
+          if IsInt64(oty) then fb := AsInt64(Nodes[node].B)
+          else if IsRealType(oty) then fb := AsFloat(Nodes[node].B)
+          else fb := LowerExpr(Nodes[node].B);
+          EmitStoreScalar(EmitADL(rslot), fb, oty);
           EmitLabel(lEnd);
           LowerFailForm := EmitLoadScalar(EmitADL(rslot), oty);
         end
@@ -9546,9 +9684,12 @@ begin
             success value is the callee's owned result, and a borrowed fallback is made owned the
             same way an assignment does (clone a value array/map, retain a reference handle). On
             failure the callee returns a nil value, so overwriting the slot leaks nothing. }
-          rslot := NewSlot(4);
+          { a managed handle result is pointer-width (8 bytes under LP64); a plain
+            32-bit scalar result keeps a 4-byte slot. Both round-trip through rslot. }
+          managed := IsPtrSized(oty);
+          if managed then rslot := NewSlot(CurTarget.PtrBytes) else rslot := NewSlot(4);
           v := LowerFailableCall(Nodes[node].A, True, err);
-          EmitSTL(v, rslot);
+          if managed then EmitSTLAddr(v, rslot) else EmitSTL(v, rslot);
           lEnd := NewLabel;
           EmitBZ(err, lEnd);
           fb := LowerExpr(Nodes[node].B);
@@ -9560,9 +9701,9 @@ begin
             else if IsHandle(oty) or (oty = tyStr) then
               EmitRetain(fb);
           end;
-          EmitSTL(fb, rslot);
+          if managed then EmitSTLAddr(fb, rslot) else EmitSTL(fb, rslot);
           EmitLabel(lEnd);
-          LowerFailForm := EmitLDL(rslot);
+          if managed then LowerFailForm := EmitLDLAddr(rslot) else LowerFailForm := EmitLDL(rslot);
         end;
       end;
     nkOrDivert: begin
@@ -9640,8 +9781,8 @@ begin
   kv := LowerExpr(callee);
   if Length(argNodes) >= 1 then v := LowerExpr(argNodes[0]) else v := EmitLIC(0);
   EnsureHelper('kp_co_resume', 2, 'int');
-  EmitArg(kv);
-  EmitArg(v);
+  EmitArgPtr(kv);   { the process handle }
+  EmitArg(v);       { TODO(lp64): the resume value word follows the kp_word coroutine protocol }
   d := NewTemp;
   PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_co_resume nargs=2');
   LowerResume := d;
@@ -9653,8 +9794,8 @@ var
   d: LongInt;
 begin
   EnsureHelper('kp_co_new', 3, 'int');
-  EmitArg(entry);
-  EmitArg(argsPtr);
+  EmitArgPtr(entry);     { a code address }
+  EmitArgPtr(argsPtr);   { a buffer address }
   EmitArg(EmitLIC(na));
   d := NewTemp;
   PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_co_new nargs=3');
@@ -9709,7 +9850,7 @@ begin
     buf := NewSlot(na * 8);
     for i := 0 to na - 1 do begin
       if i = 0 then addr := EmitADL(buf)
-      else addr := EmitBin('ADD', EmitADL(buf), EmitLIC(i * 8));
+      else addr := AddOff(EmitADL(buf), i * 8);
       arg := Nodes[callExpr].Kids[i];
       if IsRealType(Nodes[arg].Ty) then EmitFSD(addr, AsFloat(arg))
       else EmitST64(addr, LowerExpr(arg));
@@ -10123,8 +10264,11 @@ begin
 end;
 
 function AddOff(addr, off: LongInt): LongInt;
+{ Add a constant byte offset to an address, in address width: ADD64 of a 64-bit
+  immediate under LP64, the narrow ADD under ILP32. }
 begin
   if off = 0 then AddOff := addr
+  else if CurTarget.PtrBytes = 8 then AddOff := EmitBin('ADD64', addr, EmitLIC64(off))
   else AddOff := EmitBin('ADD', addr, EmitLIC(off));
 end;
 
@@ -10196,7 +10340,7 @@ begin
   base := EmitStrCall1('kp_arr_base', handle);
   elemSize := TypeSize(SemTypes[arrTy].Base);
   if elemSize <> 1 then idx := EmitBin('MUL', idx, EmitLIC(elemSize));
-  DynElemAddr := EmitBin('ADD', base, idx);
+  DynElemAddr := AddrAdd(base, idx);
 end;
 
 function BufElemAddr(node: LongInt; var baseHandle: LongInt): LongInt;
@@ -10223,7 +10367,7 @@ begin
     cmp := EmitBin('CMPGTS', idx, EmitBin('SUB', extent, EmitLIC(1)));
     EmitBNZ(cmp, lBad);
     stride := EmitStrCall2('kp_buf_stride', handle, EmitLIC(k));
-    addr := EmitBin('ADD', addr, EmitBin('MUL', idx, stride));
+    addr := AddrAdd(addr, EmitBin('MUL', idx, stride));
   end;
   EmitIndexTrap(lBad, lOk);
   BufElemAddr := addr;
@@ -10261,8 +10405,8 @@ begin
     end
     else begin
       maddr := AddrOf(mapDesig);
-      old := EmitLW(maddr);
-      EmitSW(maddr, newmap);
+      old := EmitLoadPtr(maddr);   { a map is a pointer-width handle }
+      EmitStorePtr(maddr, newmap);
       EmitRelease(old);
     end;
     cur := newmap;
@@ -10366,7 +10510,7 @@ begin
         if SemTypes[sub].Lo <> 0 then
           idx := EmitBin('SUB', idx, EmitLIC(SemTypes[sub].Lo));
         if stride <> 1 then idx := EmitBin('MUL', idx, EmitLIC(stride));
-        base := EmitBin('ADD', base, idx);
+        base := AddrAdd(base, idx);
       end;
       if checked then begin
         lOk := NewLabel;
@@ -10484,17 +10628,17 @@ begin
   SetLength(clones, Length(aoffs));
   for i := 0 to High(aoffs) do
     if akinds[i] = 1 then
-      clones[i] := EmitStrCall1('kp_arr_clone', EmitLW(AddOff(srcAddr, aoffs[i])))
+      clones[i] := EmitStrCall1('kp_arr_clone', EmitLoadPtr(AddOff(srcAddr, aoffs[i])))
     else if akinds[i] = 2 then
-      clones[i] := EmitStrCall1('kp_map_clone', EmitLW(AddOff(srcAddr, aoffs[i])))
+      clones[i] := EmitStrCall1('kp_map_clone', EmitLoadPtr(AddOff(srcAddr, aoffs[i])))
     else begin
       clones[i] := -1;
-      EmitRetain(EmitLW(AddOff(srcAddr, aoffs[i])));
+      EmitRetain(EmitLoadPtr(AddOff(srcAddr, aoffs[i])));
     end;
-  for i := 0 to High(aoffs) do EmitRelease(EmitLW(AddOff(dstAddr, aoffs[i])));
+  for i := 0 to High(aoffs) do EmitRelease(EmitLoadPtr(AddOff(dstAddr, aoffs[i])));
   CopyAggregate(dstAddr, srcAddr, TypeSize(ty));
   for i := 0 to High(aoffs) do
-    if akinds[i] <> 0 then EmitSW(AddOff(dstAddr, aoffs[i]), clones[i]);
+    if akinds[i] <> 0 then EmitStorePtr(AddOff(dstAddr, aoffs[i]), clones[i]);
 end;
 
 { ---- sets (a small set is an i64 bitmask; bit n = element with ordinal n) ---- }
@@ -10558,7 +10702,7 @@ begin
     end
     else begin
       ordv := LowerExpr(Nodes[e].A);
-      addr := EmitBin('ADD', dst, EmitBin('MUL', EmitBin('SHRU', ordv, EmitLIC(6)),
+      addr := AddrAdd(dst, EmitBin('MUL', EmitBin('SHRU', ordv, EmitLIC(6)),
         EmitLIC(8)));
       mask := EmitBin('SHL64', EmitLIC64(1), EmitBin('AND', ordv, EmitLIC(63)));
       cur := EmitLD64(addr);
@@ -10700,7 +10844,7 @@ begin
     if IsLargeSet(Nodes[Nodes[node].B].Ty) then begin
       { x in S: read S's word ord>>6, test bit ord&63 }
       bAddr := LowerSetAddr(Nodes[node].B);
-      waddr := EmitBin('ADD', bAddr, EmitBin('MUL', EmitBin('SHRU', ordv, EmitLIC(6)),
+      waddr := AddrAdd(bAddr, EmitBin('MUL', EmitBin('SHRU', ordv, EmitLIC(6)),
         EmitLIC(8)));
       word := EmitLD64(waddr);
       mask := EmitBin('SHL64', EmitLIC64(1), EmitBin('AND', ordv, EmitLIC(63)));
@@ -10996,19 +11140,19 @@ begin
       SetLength(clones, Length(aoffs));
       for i := 0 to High(aoffs) do
         if akinds[i] = 1 then
-          clones[i] := EmitStrCall1('kp_arr_clone', EmitLW(AddOff(v, aoffs[i])))
+          clones[i] := EmitStrCall1('kp_arr_clone', EmitLoadPtr(AddOff(v, aoffs[i])))
         else if akinds[i] = 2 then
-          clones[i] := EmitStrCall1('kp_map_clone', EmitLW(AddOff(v, aoffs[i])))
+          clones[i] := EmitStrCall1('kp_map_clone', EmitLoadPtr(AddOff(v, aoffs[i])))
         else begin
           clones[i] := -1;
-          EmitRetain(EmitLW(AddOff(v, aoffs[i])));
+          EmitRetain(EmitLoadPtr(AddOff(v, aoffs[i])));
         end;
-      for i := 0 to High(aoffs) do EmitRelease(EmitLW(AddOff(addr, aoffs[i])));
+      for i := 0 to High(aoffs) do EmitRelease(EmitLoadPtr(AddOff(addr, aoffs[i])));
       CopyAggregate(addr, v, TypeSize(tt));
       { a value field (dynamic array or map) is independent: replace the copied (shared) id
         with its clone }
       for i := 0 to High(aoffs) do
-        if akinds[i] <> 0 then EmitSW(AddOff(addr, aoffs[i]), clones[i]);
+        if akinds[i] <> 0 then EmitStorePtr(AddOff(addr, aoffs[i]), clones[i]);
     end;
     Exit;
   end;
@@ -11032,7 +11176,7 @@ begin
       s := Nodes[target].Sym;
       if s >= 0 then begin
         { the function result lives in its own slot, not a variable slot }
-        if Syms[s].Kind = syFunc then old := EmitLDL(CurResultSlot)
+        if Syms[s].Kind = syFunc then old := EmitLDLAddr(CurResultSlot)
         else old := LoadSym(s);
         StoreSym(s, v);
         EmitRelease(old);
@@ -11040,8 +11184,8 @@ begin
     end
     else begin
       addr := AddrOf(target);
-      old := EmitLW(addr);
-      EmitSW(addr, v);
+      old := EmitLoadPtr(addr);
+      EmitStorePtr(addr, v);
       EmitRelease(old);
     end;
     Exit;
@@ -11193,8 +11337,9 @@ begin
     literal) owns its reference and must be released once; a borrowed variable, field, or
     constant is left alone (same rule as a string comparison operand). }
   ownedSel := strSel and IsOwnedExpr(Nodes[node].A);
-  selSlot := NewSlot(4);
-  EmitSTL(sel, selSlot);
+  { a string selector is a handle (pointer-width); an ordinal selector is one word }
+  if strSel then selSlot := NewSlot(CurTarget.PtrBytes) else selSlot := NewSlot(4);
+  if strSel then EmitSTLAddr(sel, selSlot) else EmitSTL(sel, selSlot);
   ne := Length(Nodes[node].Kids);
   SetLength(bodyL, ne);
   for i := 0 to ne - 1 do bodyL[i] := NewLabel;
@@ -11212,7 +11357,7 @@ begin
       for j := 0 to High(Nodes[ll].Kids) do begin
         lab := Nodes[ll].Kids[j];
         lo := EvalConst(Nodes[lab].A);
-        cv := EmitLDL(selSlot);
+        if strSel then cv := EmitLDLAddr(selSlot) else cv := EmitLDL(selSlot);
         if strSel then begin
           { a string label matches by value through kp_str_cmp (sign, 0 on equal). The label
             is a static string, so it is not owned and needs no release. }
@@ -11241,7 +11386,7 @@ begin
   { no label matched: an owned string selector with no else block is released here, on the one
     path that skips every body (each body releases it in its own prologue below, so there is
     exactly one release per path) }
-  if ownedSel and (lDefault = lEnd) then EmitRelease(EmitLDL(selSlot));
+  if ownedSel and (lDefault = lEnd) then EmitRelease(EmitLDLAddr(selSlot));
   EmitJmp(lDefault);
   { bodies }
   for i := 0 to ne - 1 do begin
@@ -11249,7 +11394,7 @@ begin
     EmitLabel(bodyL[i]);
     { release the owned string selector once, before the body runs, so an early break,
       continue, return, or fail out of the body cannot leak it }
-    if ownedSel then EmitRelease(EmitLDL(selSlot));
+    if ownedSel then EmitRelease(EmitLDLAddr(selSlot));
     if Nodes[k].Kind = nkCaseElement then LowerStmt(Nodes[k].B)
     else LowerStmt(k);   { the else compound }
     EmitJmp(lEnd);
@@ -11466,7 +11611,7 @@ begin
   if isFunc then CurFuncSym := s else CurFuncSym := -1;
   retTy := SemTypes[Syms[s].TypeId].RetType;
   realRet := IsRealType(retTy);
-  wideRet := Wide64(retTy);   { a small set or an Int64: a 64-bit result }
+  wideRet := WideStore(retTy);   { a 64-bit result: a small set, an Int64, or an LP64 handle }
   { a failable function returns a real, 64-bit, or aggregate result through a hidden caller
     buffer (sret); a non-aggregate wide result additionally keeps a local value slot that is
     stored through the hidden pointer at the single return site (FailWideResult) }
@@ -11492,7 +11637,7 @@ begin
   { a method receiver is parameter 0, passed by reference: its slot holds a
     pointer to the receiver }
   if rsym >= 0 then begin
-    Syms[rsym].Slot := NewSlot(4);
+    Syms[rsym].Slot := NewSlot(CurTarget.PtrBytes);   { holds the receiver's address }
     SetLength(IrFuncs[CurFn].ParamClass, prm + 1);
     IrFuncs[CurFn].ParamClass[prm] := 0;
     SetLength(IrFuncs[CurFn].ParamFW, prm + 1);
@@ -11508,7 +11653,7 @@ begin
           a pointer: its slot holds the address, and the pointer travels in a
           general register even when the pointee is real or single }
         byref := (sym >= 0) and ParamByRef(sym);
-        if byref then sl := NewSlot(4) else sl := NewSlot(SlotBytes(pty));
+        if byref then sl := NewSlot(CurTarget.PtrBytes) else sl := NewSlot(SlotBytes(pty));
         if sym >= 0 then Syms[sym].Slot := sl;
         SetLength(IrFuncs[CurFn].ParamClass, prm + 1);
         if (not byref) and IsRealType(pty) then IrFuncs[CurFn].ParamClass[prm] := 1
@@ -11519,9 +11664,9 @@ begin
         Inc(prm);
       end;
   { captured enclosing variables are hidden by-pointer parameters after the
-    declared ones; each holds an address (4 bytes, int class) }
+    declared ones; each holds an address (pointer-width, int class) }
   for i := 0 to High(RoutineCaptures[s]) do begin
-    sl := NewSlot(4);
+    sl := NewSlot(CurTarget.PtrBytes);   { holds the captured variable's address }
     CapSlot[RoutineCaptures[s][i]] := sl;
     SetLength(IrFuncs[CurFn].ParamClass, prm + 1);
     IrFuncs[CurFn].ParamClass[prm] := 0;
@@ -11534,7 +11679,7 @@ begin
     failable real or 64-bit result takes the same hidden pointer (failPtrSlot), with its value
     held in a local slot and stored through the pointer at the return. }
   if isFunc and IsAggregate(retTy) then begin
-    CurResultSlot := NewSlot(4);
+    CurResultSlot := NewSlot(CurTarget.PtrBytes);   { the sret buffer address }
     SetLength(IrFuncs[CurFn].ParamClass, prm + 1);
     IrFuncs[CurFn].ParamClass[prm] := 0;
     SetLength(IrFuncs[CurFn].ParamFW, prm + 1);
@@ -11542,7 +11687,7 @@ begin
     Inc(prm);
   end
   else if failWide then begin
-    failPtrSlot := NewSlot(4);
+    failPtrSlot := NewSlot(CurTarget.PtrBytes);   { the hidden sret-style result pointer }
     SetLength(IrFuncs[CurFn].ParamClass, prm + 1);
     IrFuncs[CurFn].ParamClass[prm] := 0;
     SetLength(IrFuncs[CurFn].ParamFW, prm + 1);
@@ -11570,9 +11715,9 @@ begin
   if (Length(hslots) > 0) or (isFunc and IsHandle(retTy)) then begin
     z := EmitLIC(0);
     for i := 0 to High(hslots) do
-      if hoffs[i] = 0 then EmitSTL(z, hslots[i])
-      else EmitSW(AddOff(EmitADL(hslots[i]), hoffs[i]), z);
-    if isFunc and IsHandle(retTy) then EmitSTL(z, CurResultSlot);
+      if hoffs[i] = 0 then EmitSTLAddr(z, hslots[i])
+      else EmitStorePtr(AddOff(EmitADL(hslots[i]), hoffs[i]), z);
+    if isFunc and IsHandle(retTy) then EmitSTLAddr(z, CurResultSlot);
   end;
   { an exported routine may be the host's entry instead of main, so it runs the shared
     global-init first (main and an export never both run in one process, so one call is
@@ -11593,16 +11738,16 @@ begin
   if CurCancelLabel >= 0 then EmitLabel(CurCancelLabel);
   if CurExitLabel >= 0 then EmitLabel(CurExitLabel);
   for i := 0 to High(hslots) do
-    if hoffs[i] = 0 then EmitRelease(EmitLDL(hslots[i]))
-    else EmitRelease(EmitLW(AddOff(EmitADL(hslots[i]), hoffs[i])));
+    if hoffs[i] = 0 then EmitRelease(EmitLDLAddr(hslots[i]))
+    else EmitRelease(EmitLoadPtr(AddOff(EmitADL(hslots[i]), hoffs[i])));
   if failRet then begin
     if failWide then begin
       { a real or 64-bit value is stored through the caller's hidden buffer pointer here; an
         aggregate was already written through CurResultSlot (the hidden pointer). The error
         then returns alone in the integer register. }
       if not IsAggregate(retTy) then begin
-        if realRet then EmitStoreScalar(EmitLDL(failPtrSlot), EmitFLDL(CurResultSlot), retTy)
-        else EmitStoreScalar(EmitLDL(failPtrSlot), EmitLDL64(CurResultSlot), retTy);
+        if realRet then EmitStoreScalar(EmitLDLAddr(failPtrSlot), EmitFLDL(CurResultSlot), retTy)
+        else EmitStoreScalar(EmitLDLAddr(failPtrSlot), EmitLDL64(CurResultSlot), retTy);
       end;
       EmitRetv(EmitLDL(CurErrorSlot));
     end
@@ -12009,26 +12154,26 @@ begin
     CurResultSlot := -1;
     LoopSP := 0;
     CurCancelLabel := -1;
-    { three int-class entry parameters: vm, argsp, nargs (slots 0, 1, 2) }
-    NewSlot(4);
-    argspSlot := NewSlot(4);
+    { three entry parameters: vm (pointer), argsp (pointer), nargs (int); slots 0, 1, 2 }
+    NewSlot(CurTarget.PtrBytes);
+    argspSlot := NewSlot(CurTarget.PtrBytes);
     NewSlot(4);
     SetLength(IrFuncs[CurFn].ParamClass, 3);
     for i := 0 to 2 do IrFuncs[CurFn].ParamClass[i] := 0;
     IrFuncs[CurFn].Nparams := 3;
-    pbase := EmitLDL(argspSlot);
+    pbase := EmitLDLAddr(argspSlot);
     for i := 0 to np - 1 do begin
       if i = 0 then addr := pbase
-      else addr := EmitBin('ADD', pbase, EmitLIC(i * 8));
+      else addr := AddOff(pbase, i * 8);
       pty := SemTypes[sig].ParamTypes[i];
       if IsRealType(pty) then EmitFArg(EmitFLD(addr))
-      else if Wide64(pty) then EmitArg64(EmitLD64(addr))
+      else if WideStore(pty) then EmitArg64(EmitLD64(addr))
       else EmitArg(EmitLD64(addr));
     end;
     ret := SemTypes[sig].RetType;
     if (Syms[s].Kind = syFunc) and (ret >= 0) and not IsRealType(ret) then begin
       d := NewTemp;
-      if Wide64(ret) then begin
+      if WideStore(ret) then begin
         PushInsn('CALL64', 'dst=' + IntToStr(d) + ' sym=' + wname +
           ' nargs=' + IntToStr(np));
         EmitRetv64(d);
@@ -12064,13 +12209,15 @@ begin
     agg := Nodes[Syms[s].Node].B;
     extent := Length(Nodes[agg].Kids);
     nm := '_carr' + IntToStr(IrGlobalCount);
-    AddIrGlobalArr(nm, 'i32', extent);
+    { each element is a string handle, pointer-width: an i64 array under LP64 }
+    if CurTarget.PtrBytes = 8 then AddIrGlobalArr(nm, 'i64', extent)
+    else AddIrGlobalArr(nm, 'i32', extent);
     Syms[s].ConstAggName := nm;
     base := EmitLEA(nm);
     for j := 0 to extent - 1 do begin
       ev := EvalConst(Nodes[agg].Kids[j]);
       v := EmitStringValue(ev.S);   { value staged before the address, for determinism }
-      EmitSW(AddOff(base, j * 4), v);
+      EmitStorePtr(AddOff(base, j * CurTarget.PtrBytes), v);
     end;
   end;
 end;
@@ -12129,7 +12276,7 @@ begin
   if SemTypes[ty].Kind = skString then begin
     ev := EvalConst(valNode);
     v := EmitStringValue(ev.S);
-    EmitSW(AddOff(base, off), v);
+    EmitStorePtr(AddOff(base, off), v);   { a string handle is pointer-width }
   end
   else if SemTypes[ty].Kind = skRecord then
     for f := 0 to High(Nodes[valNode].Kids) do begin
@@ -12174,7 +12321,12 @@ begin
   for i := 0 to RecConstArrayCount - 1 do begin
     s := RecConstArrays[i];
     nm := '_rarr' + IntToStr(IrGlobalCount);
-    AddIrGlobalArr(nm, 'i32', (TypeSize(Syms[s].TypeId) + 3) div 4);
+    { under LP64 the blob holds pointer-width handle fields at 8-aligned offsets, so
+      declare it as i64 words (8-aligned, and large enough) }
+    if CurTarget.PtrBytes = 8 then
+      AddIrGlobalArr(nm, 'i64', (TypeSize(Syms[s].TypeId) + 7) div 8)
+    else
+      AddIrGlobalArr(nm, 'i32', (TypeSize(Syms[s].TypeId) + 3) div 4);
     Syms[s].ConstAggName := nm;
     base := EmitLEA(nm);
     EmitConstValueAt(Syms[s].TypeId, Nodes[Syms[s].Node].B, base, 0);
@@ -12188,6 +12340,7 @@ begin
   else if IsInt64(ty) then GlobalBaseType := 'i64'
   else if IsSingle(ty) then GlobalBaseType := 'f32'
   else if IsRealType(ty) then GlobalBaseType := 'f64'
+  else if IsPtrSized(ty) and (CurTarget.PtrBytes = 8) then GlobalBaseType := 'i64'
   else GlobalBaseType := 'i32';
 end;
 
@@ -12667,7 +12820,13 @@ var
 begin
   ModLineCount := 0;
   EmitLine('.kpm 1');
-  EmitLine('.target agnostic');
+  { The pointer-width class, authoritative (not a hint): a module's opcodes bake
+    in the guest pointer width, so the reader rejects a module of the other class.
+    4 bytes is ilp32 (rv32/cf/mips), 8 is lp64 (x86-64/arm64). }
+  if CurTarget.PtrBytes = 8 then
+    EmitLine('.target lp64')
+  else
+    EmitLine('.target ilp32');
   { A compiled program is a linked executable image whose entry is `main`; a unit is an
     object module a consumer links against, with no entry. }
   if ModIsUnit then
@@ -12876,14 +13035,26 @@ begin
   CompileSource := True;
 end;
 
+procedure InitTarget;
+{ Establish the active target ABI. Called at every compilation entry so CurTarget
+  is authoritative before any type is sized: the native driver's main and the
+  `compile` export (which never runs the program body). The width is this binary's
+  compile-time native width (KpNativePtrBytes); there is no runtime choice. }
+begin
+  CurTarget.PtrBytes := KpNativePtrBytes;
+end;
+
 function compile(const srcName, srcText: string): string; export;
-{ The module entry an embedding host calls across the FFI: compile srcText and return the
-  KPM1 module text, or the empty string on a compile error (the diagnostics went to
-  standard error). This is the two-stage boot's hand-off, so the host neither writes a
-  temporary file nor forks the front end. }
+{ The module entry an embedding host calls across the FFI: compile srcText and
+  return the KPM1 module text, or the empty string on a compile error (the
+  diagnostics went to standard error). The target is this binary's native width,
+  so the export sets it itself (unlike the native driver, it never runs the
+  program body). This is the two-stage boot's hand-off, so the host neither writes
+  a temporary file nor forks the front end. }
 var
   moduleText: string;
 begin
+  InitTarget;
   if CompileSource(srcName, srcText, False, moduleText) then compile := moduleText
   else compile := '';
 end;
@@ -12954,8 +13125,11 @@ begin
   OptEmitKpm := False;
   OptDebug := False;
   OptOut := '';
+  InitTarget;   { the active target ABI is this binary's compile-time native width }
   ErrCount := 0;
   fileCount := 0;
+  SetLength(MainFiles, 0);
+  SetLength(CmdDefines, 0);
   UnitSrcDir := '';
   CompilingUnitName := '';
   SetLength(UnitPath, 0);
@@ -12985,6 +13159,22 @@ begin
       end;
       OptOut := ParamStr(i);
     end
+    else if (Length(arg) >= 2) and (arg[1] = '-') and (arg[2] = 'D') then begin
+      { -D<sym> or -D <sym>: define a conditional-compilation symbol, as skj-pc's
+        -d does, so a seed build can select the LP64 target width (-D KP_LP64) }
+      if Length(arg) > 2 then dir := Copy(arg, 3, Length(arg) - 2)
+      else begin
+        Inc(i);
+        if i > ParamCount then begin
+          WriteLn(ErrOutput, 'kpcom: -D needs a symbol');
+          Halt(2);
+        end;
+        dir := ParamStr(i);
+      end;
+      n := Length(CmdDefines);
+      SetLength(CmdDefines, n + 1);
+      CmdDefines[n] := dir;
+    end
     else if (Length(arg) >= 2) and (arg[1] = '-') and (arg[2] = 'U') then begin
       { -U<dir> or -U <dir>: a directory to search for a dependency's .kpm }
       if Length(arg) > 2 then dir := Copy(arg, 3, Length(arg) - 2)
@@ -13007,8 +13197,11 @@ begin
       Halt(2);
     end
     else begin
+      { collect the file; files are compiled after the whole argument scan }
+      n := Length(MainFiles);
+      SetLength(MainFiles, n + 1);
+      MainFiles[n] := arg;
       Inc(fileCount);
-      ProcessFile(arg);
     end;
     Inc(i);
   end;
@@ -13018,6 +13211,9 @@ begin
     Usage;
     Halt(2);
   end;
+
+  for i := 0 to fileCount - 1 do
+    ProcessFile(MainFiles[i]);
 
   if ErrCount > 0 then
     Halt(1);

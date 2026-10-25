@@ -16,6 +16,11 @@
     .globl close
     .globl lseek
     .globl getdents64
+    .globl statx
+    .globl mkdirat
+    .globl unlinkat
+    .globl fchmodat
+    .globl renameat2
     .globl clock_gettime
     .globl getrandom
     .globl nanosleep
@@ -88,6 +93,68 @@ getdents64:
     movem.l (%sp)+, %d2-%d3
     rts
 
+| The file-metadata and path syscalls the libc wraps (libc/stat.c over statx,
+| libc/fileops.c over the *at forms with AT_FDCWD).  m68k has no stat/fstat the
+| libc can use the modern way, so the stat family goes through statx; mkdir /
+| unlink / rename go through the *at forms.  Shared with the Kobold freestanding
+| runtime (the files unit's Exists/FileSize/IsDir and Delete/Rename/MakeDir/
+| RemoveDir), hence here rather than in start.S.  Stack arguments; d2-d5 are
+| callee-saved, so save them around the trap.
+statx:                             | statx(dirfd, path, flags, mask, buf)
+    movem.l %d2-%d5, -(%sp)
+    move.l  20(%sp), %d1           | dirfd
+    move.l  24(%sp), %d2           | path
+    move.l  28(%sp), %d3           | flags
+    move.l  32(%sp), %d4           | mask
+    move.l  36(%sp), %d5           | buf
+    move.l  #379, %d0              | __NR_statx
+    trap    #0
+    movem.l (%sp)+, %d2-%d5
+    rts
+
+mkdirat:                           | mkdirat(dirfd, path, mode)
+    movem.l %d2-%d5, -(%sp)
+    move.l  20(%sp), %d1           | dirfd
+    move.l  24(%sp), %d2           | path
+    move.l  28(%sp), %d3           | mode
+    move.l  #289, %d0              | __NR_mkdirat
+    trap    #0
+    movem.l (%sp)+, %d2-%d5
+    rts
+
+unlinkat:                          | unlinkat(dirfd, path, flags)
+    movem.l %d2-%d5, -(%sp)
+    move.l  20(%sp), %d1           | dirfd
+    move.l  24(%sp), %d2           | path
+    move.l  28(%sp), %d3           | flags
+    move.l  #294, %d0              | __NR_unlinkat
+    trap    #0
+    movem.l (%sp)+, %d2-%d5
+    rts
+
+fchmodat:                          | fchmodat(dirfd, path, mode, flags)
+    movem.l %d2-%d5, -(%sp)
+    move.l  20(%sp), %d1           | dirfd
+    move.l  24(%sp), %d2           | path
+    move.l  28(%sp), %d3           | mode
+    move.l  32(%sp), %d4           | flags
+    move.l  #299, %d0              | __NR_fchmodat
+    trap    #0
+    movem.l (%sp)+, %d2-%d5
+    rts
+
+renameat2:                         | renameat2(olddirfd, oldpath, newdirfd, newpath, flags)
+    movem.l %d2-%d5, -(%sp)
+    move.l  20(%sp), %d1           | olddirfd
+    move.l  24(%sp), %d2           | oldpath
+    move.l  28(%sp), %d3           | newdirfd
+    move.l  32(%sp), %d4           | newpath
+    move.l  36(%sp), %d5           | flags
+    move.l  #351, %d0              | __NR_renameat2
+    trap    #0
+    movem.l (%sp)+, %d2-%d5
+    rts
+
 | int clock_gettime(int clk_id, void *ts); writes a 32-bit {tv_sec, tv_nsec}
 | through ts (the 32-bit timespec seam convention this seam and boris share).
 | Args d1..d2.
@@ -134,9 +201,9 @@ sched_yield:
     rts
 
 | void *__sys_brk(void *addr); the raw Linux brk (#45), returning the new
-| program break in d0.  Both heaps grow through it: libc/sbrk.c on the hosted
-| ILP32 targets and the Kobold freestanding gheap (rt_free.c), so it lives in
-| the shared seam.
+| program break in d0.  Both heaps grow through one brk-bump, libc/sbrk.c's
+| __libc_sbrk: libc's malloc on the hosted ILP32 targets and the Kobold
+| freestanding gheap (rt_free.c) call it alike, so it lives in the shared seam.
 __sys_brk:
     move.l  4(%sp), %d1         | addr
     move.l  #45, %d0            | __NR_brk

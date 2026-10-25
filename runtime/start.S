@@ -20,78 +20,10 @@
     | with the Kobold freestanding runtime
     .include "syscall_cf.S"
 
-| int statx(int dirfd, const char *path, int flags, unsigned mask,
-|           struct statx *buf);  m68k has no stat/fstat the libc stat family can
-| use the modern way, so fstat/stat (libc/stat.c) go through statx (#379).  A
-| C-libc wrapper, not part of the shared seam (the Kobold runtime needs no stat).
-| Five stack arguments; d2-d5 are callee-saved, so save them around the trap.
-    .globl statx
-statx:
-    movem.l %d2-%d5, -(%sp)         | save callee-saved regs (16 bytes)
-    move.l  20(%sp), %d1            | dirfd
-    move.l  24(%sp), %d2            | path
-    move.l  28(%sp), %d3            | flags
-    move.l  32(%sp), %d4            | mask
-    move.l  36(%sp), %d5            | buf
-    move.l  #379, %d0              | __NR_statx
-    trap    #0
-    movem.l (%sp)+, %d2-%d5
-    rts
-
-| __sys_brk (the raw Linux brk) now lives in the shared seam syscall_cf.S,
-| included above, since both libc/sbrk.c and the Kobold freestanding gheap grow
-| their heap through it.
-
-| The directory/path file operations the libc wraps with AT_FDCWD
-| (libc/fileops.c): mkdirat, unlinkat (unlink and rmdir), renameat2.  Each is a
-| C-libc wrapper, not part of the shared seam.  Stack arguments, d2-d5 saved
-| around the trap as the C ABI requires.
-    .globl mkdirat
-mkdirat:                           | mkdirat(dirfd, path, mode)
-    movem.l %d2-%d5, -(%sp)
-    move.l  20(%sp), %d1           | dirfd
-    move.l  24(%sp), %d2           | path
-    move.l  28(%sp), %d3           | mode
-    move.l  #289, %d0              | __NR_mkdirat
-    trap    #0
-    movem.l (%sp)+, %d2-%d5
-    rts
-
-    .globl unlinkat
-unlinkat:                          | unlinkat(dirfd, path, flags)
-    movem.l %d2-%d5, -(%sp)
-    move.l  20(%sp), %d1           | dirfd
-    move.l  24(%sp), %d2           | path
-    move.l  28(%sp), %d3           | flags
-    move.l  #294, %d0              | __NR_unlinkat
-    trap    #0
-    movem.l (%sp)+, %d2-%d5
-    rts
-
-    .globl fchmodat
-fchmodat:                          | fchmodat(dirfd, path, mode, flags)
-    movem.l %d2-%d5, -(%sp)
-    move.l  20(%sp), %d1           | dirfd
-    move.l  24(%sp), %d2           | path
-    move.l  28(%sp), %d3           | mode
-    move.l  32(%sp), %d4           | flags
-    move.l  #299, %d0              | __NR_fchmodat
-    trap    #0
-    movem.l (%sp)+, %d2-%d5
-    rts
-
-    .globl renameat2
-renameat2:                         | renameat2(olddirfd, oldpath, newdirfd, newpath, flags)
-    movem.l %d2-%d5, -(%sp)
-    move.l  20(%sp), %d1           | olddirfd
-    move.l  24(%sp), %d2           | oldpath
-    move.l  28(%sp), %d3           | newdirfd
-    move.l  32(%sp), %d4           | newpath
-    move.l  36(%sp), %d5           | flags
-    move.l  #351, %d0              | __NR_renameat2
-    trap    #0
-    movem.l (%sp)+, %d2-%d5
-    rts
+| __sys_brk (the raw Linux brk) lives in the shared seam syscall_cf.S, included
+| above, as do statx and the mkdirat/unlinkat/fchmodat/renameat2 *at forms the
+| libc stat.c/fileops.c wrap, now that the Kobold freestanding runtime uses them
+| too (the files unit's metadata and path operations).
 
     | _start and the argv/entry contract are shared with the Kobold freestanding
     | crt (kobold/kp_crt_cf.S); both include this fragment.  This file provides

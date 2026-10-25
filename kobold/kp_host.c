@@ -8,6 +8,7 @@
    src/str_fmt.c so behavior matches the Kobold VM byte for byte. */
 
 #include "kp_host.h"
+#include "kp_io.h"
 #include "str.h"
 #include "dynarr.h"
 #include "map.h"
@@ -16,142 +17,41 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <unistd.h>
 #include <ctype.h>
 #include <math.h>
 
 /* Coroutine operators, provided vm-lessly by kobold/co_shim.c over co.c. */
-uint32_t kp_co_new_g(void *entry, const void *args, int nargs);
-int64_t kp_co_resume_g(uint32_t co, int64_t value);
+kp_gptr kp_co_new_g(void *entry, const void *args, int nargs);
+int64_t kp_co_resume_g(kp_gptr co, int64_t value);
 int64_t kp_co_yield_g(int64_t value);
-uint32_t kp_co_self_g(void);
+kp_gptr kp_co_self_g(void);
 int kp_co_cancelling_g(void);
 
 /****************************************************************
- * Console I/O (mirrors src/rt.c)
+ * Console I/O
+ *
+ * The console seam (io_write_str/int/char, io_flush, io_halt, and the whole
+ * read side) is the shared POSIX-fd implementation in kobold/kp_io.c, used by
+ * this hosted runtime and the freestanding io_free.c alike.  Only io_write_real
+ * is defined per tier: the host libc renders "%g" here, numfmt.c does on the
+ * freestanding tier (byte-identical output).  Its bytes go straight to the fd
+ * with write(), like every other console write in kp_io.c, so the hosted
+ * program's output never interleaves a buffered stdio stream with those raw
+ * writes.  `real` is f64 printed with a plain "%g" (the dialect has no
+ * field-width formatting).
  ****************************************************************/
 
-static FILE *fd_stream(int fd) { return fd == 2 ? stderr : stdout; }
-
-/* A guest string address is a real low-memory pointer, so the ported runtime
-   reads it directly through kp_str_bytes/kp_str_len. */
-void io_write_str(int fd, uint32_t sp)
+void io_write_real(int fd, double x)
 {
-    fwrite(kp_str_bytes(sp), 1, (size_t)kp_str_len(sp), fd_stream(fd));
-}
-void io_write_int(int fd, int v) { fprintf(fd_stream(fd), "%d", v); }
-void io_write_char(int fd, int ch) { fputc(ch, fd_stream(fd)); }
-void io_flush(int fd) { fflush(fd_stream(fd)); }
-void io_halt(int code) { exit(code); }
+    char buf[40];
+    int n = snprintf(buf, sizeof buf, "%g", x);
 
-/* `real` is f64, written with a plain "%g" (the Kobold dialect has no field-width
-   formatting), matching src/rt.c io_write_real. */
-void io_write_real(int fd, double x) { fprintf(fd_stream(fd), "%g", x); }
-
-static int io_skip_space(void)
-{
-    int ch;
-    do {
-        ch = getchar();
-    } while (ch != EOF && isspace((unsigned char)ch));
-    return ch;
-}
-
-/* Returns a 64-bit value: the front end reads an int64 with the same import,
-   calling it as CALL64 to take the full register, while a plain int read uses the
-   low half.  A narrower return would truncate an int64 like 5000000000. */
-int64_t io_read_int(void)
-{
-    int ch = io_skip_space();
-    int neg = 0;
-    long long v = 0;
-
-    if (ch == '+' || ch == '-') {
-        neg = (ch == '-');
-        ch = getchar();
+    if (n > 0) {
+        if (n > (int)sizeof buf)
+            n = (int)sizeof buf;
+        { ssize_t r = write(fd, buf, (size_t)n); (void)r; }
     }
-    while (ch >= '0' && ch <= '9') {
-        v = v * 10 + (ch - '0');
-        ch = getchar();
-    }
-    if (ch != EOF)
-        ungetc(ch, stdin);
-    return (int64_t)(neg ? -v : v);
-}
-
-double io_read_real(void)
-{
-    char buf[64];
-    int n = 0;
-    int ch = io_skip_space();
-
-    while (ch != EOF && !isspace((unsigned char)ch) && n < (int)sizeof(buf) - 1) {
-        buf[n++] = (char)ch;
-        ch = getchar();
-    }
-    if (ch != EOF)
-        ungetc(ch, stdin);
-    buf[n] = '\0';
-    return n ? strtod(buf, NULL) : 0.0;
-}
-
-int io_read_char(void)
-{
-    int ch = getchar();
-    return ch == EOF ? 0 : (unsigned char)ch;
-}
-
-/* The sticky end-of-input latch (io.console's Eof), matching io_free.c's
-   io_eof: a one-byte lookahead that is true once no byte remains on stdin.  A
-   peeked byte is pushed back so the next read returns it; once EOF is seen it
-   stays latched, so a read-to-end loop stops once. */
-static int io_eof_latched;
-int io_eof(void)
-{
-    int ch;
-    if (io_eof_latched)
-        return 1;
-    ch = getchar();
-    if (ch == EOF) {
-        io_eof_latched = 1;
-        return 1;
-    }
-    ungetc(ch, stdin);
-    return 0;
-}
-
-void io_read_ln(void)
-{
-    int ch;
-    while ((ch = getchar()) != EOF && ch != '\n')
-        ;
-}
-
-/* Read a line (not consuming the newline) into a fresh guest string (owned,
-   refcount 1), or 0 for the empty line.  Mirrors src/rt.c io_read_str. */
-uint32_t io_read_str(void)
-{
-    char *buf = NULL;
-    size_t cap = 0, n = 0;
-    int ch;
-    uint32_t s;
-
-    while ((ch = getchar()) != EOF && ch != '\n') {
-        if (n + 1 > cap) {
-            size_t ncap = cap ? cap * 2 : 64;
-            char *grown = realloc(buf, ncap);
-            if (!grown)
-                break;
-            buf = grown;
-            cap = ncap;
-        }
-        buf[n++] = (char)ch;
-    }
-    if (ch == '\n')
-        ungetc(ch, stdin);
-
-    s = kp_str_new(buf ? buf : "", (int)n);
-    free(buf);
-    return s;
 }
 
 /****************************************************************
@@ -177,7 +77,7 @@ static uint64_t d2b(double d) { uint64_t b; memcpy(&b, &d, sizeof b); return b; 
    reaches them by address through its binding table either way. */
 void     brv_write_real(int fd, uint64_t x) { io_write_real(fd, b2d(x)); }
 uint64_t brv_read_real(void)                { return d2b(io_read_real()); }
-uint64_t brv_val_real(uint32_t s)           { return d2b(kp_str_val_real(s)); }
+uint64_t brv_val_real(kp_gptr s)            { return d2b(kp_str_val_real(s)); }
 
 uint64_t brv_sin(uint64_t x)    { return d2b(sin(b2d(x))); }
 uint64_t brv_cos(uint64_t x)    { return d2b(cos(b2d(x))); }
@@ -262,7 +162,7 @@ int rt_param_count(void)
 
 /* The i-th command-line argument as a new guest string, empty when out of range.
    Argument 0 is the program (module) name.  Global for the AOT link path. */
-uint32_t rt_param_str(int32_t i)
+kp_gptr rt_param_str(int32_t i)
 {
     const char *s = (i >= 0 && i < g_nargs) ? g_args[i] : "";
     return kp_str_new(s, (int)strlen(s));

@@ -35,13 +35,13 @@ void *memmove(void *dst, const void *src, size_t n);
 void *memset(void *dst, int c, size_t n);
 int   rt_memcmp(const void *a, const void *b, size_t n);
 
-uint32_t gheap_alloc(uint32_t nbytes);
-void     gheap_free(uint32_t addr);
-uint32_t gheap_realloc(uint32_t addr, uint32_t nbytes);
+kp_gptr  gheap_alloc(uint32_t nbytes);
+void     gheap_free(kp_gptr addr);
+kp_gptr  gheap_realloc(kp_gptr addr, uint32_t nbytes);
 uint32_t kp_gheap_live(void);          /* live heap bytes, for a guest leak check */
-void     kp_retain(uint32_t v);
-void     kp_release(uint32_t v);
-void     rt_register_final(uint32_t kind, void (*fn)(uint32_t addr));
+void     kp_retain(kp_gptr v);
+void     kp_release(kp_gptr v);
+void     rt_register_final(uint32_t kind, void (*fn)(kp_gptr addr));
 void     rt_trap(uint32_t kind);
 
 #define KP_TRAP_INDEX      4u        /* the sandbox trap-kind space (see rt_sandbox.c) */
@@ -55,7 +55,7 @@ void     rt_trap(uint32_t kind);
 #define KP_VM_P                      /* no vm parameter */
 #define KP_VM_A
 #define KP_VM_UNUSED()               /* no vm to mark used */
-#define RT_PTR(a)          ((void *)(unsigned long)(a))
+#define RT_PTR(a)          ((void *)(uintptr_t)(a))
 #define RT_ALLOC(n)        gheap_alloc(n)
 #define RT_FREE(a)         gheap_free(a)
 #define RT_REALLOC(a, n)   gheap_realloc((a), (n))

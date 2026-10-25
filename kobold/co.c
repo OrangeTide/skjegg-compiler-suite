@@ -44,7 +44,7 @@ struct coro {
     int started;               /* resumed at least once, so it has live frames */
     int cancelling;            /* being torn down: yields do not suspend (unwind) */
     int dead;                  /* last reference went while running: reclaim on unwind */
-    uint32_t id;
+    kp_gptr id;
 };
 
 /* A coroutine lives in the VM handle table as a KP_H_CONT entry; its id is a handle
@@ -177,7 +177,7 @@ co_trampoline(void)
     co_switch(&co->ctx, co->resumer);
 }
 
-uint32_t
+kp_gptr
 kp_co_new(kp_vm *vm, void *entry, const void *args, int nargs)
 {
     struct coro *co;
@@ -230,7 +230,7 @@ kp_co_new(kp_vm *vm, void *entry, const void *args, int nargs)
 
         top -= resv;
         real_argbuf = (int64_t *)top;
-        memcpy(real_argbuf, kp_arena_ptr(arena, (uint32_t)(uintptr_t)args),
+        memcpy(real_argbuf, kp_arena_ptr(arena, (kp_gptr)(uintptr_t)args),
                (size_t)nargs * sizeof(int64_t));
         co->argbuf = (int64_t *)(uintptr_t)kp_arena_addr(arena, real_argbuf);
     }
@@ -372,7 +372,7 @@ co_run(kp_vm *vm, struct coro *co, struct co_ctx *resumer, int reraise)
 }
 
 int64_t
-kp_co_resume(kp_vm *vm, uint32_t id, int64_t value)
+kp_co_resume(kp_vm *vm, kp_gptr id, int64_t value)
 {
     struct coro *co = kp_handle_ptr(vm, id, KP_H_CONT);
     struct co_ctx resumer;
@@ -426,7 +426,7 @@ kp_co_yield(kp_vm *vm, int64_t value)
     return co->xfer;
 }
 
-uint32_t
+kp_gptr
 kp_co_self(kp_vm *vm)
 {
     (void)vm;

@@ -564,7 +564,12 @@ same name ahead of it with `-U` or `KOBOLD_UNITS`.
 The units, by tier:
 
 - `io.files` — whole-file (`ReadFile`/`WriteFile`) and handle (`Open`/`Create`/`ReadLine`/
-  `WriteLine`/`Close`) text I/O.
+  `WriteLine`/`Close`) text I/O, plus the file-metadata and path operations: `Exists`,
+  `FileSize` (an `Int64`), `IsDir`, `DeleteFile`, `RenameFile`, `MakeDir`, `RemoveDir`. Each
+  metadata/path call is a thin wrapper over an external cdecl into the runtime, which reaches
+  the host through the libc `stat`/`fileops` helpers (statx and the `*at` syscall forms on the
+  freestanding tier). `FileSize` and the predicates return a sentinel on a missing path
+  (`-1` size, `false` predicate) rather than failing.
 - `io.dirs` — directory enumeration.
 - `io.console` — the standard input and output as typed functions: `Eof` (the sticky
   end-of-input latch), `ReadLine`/`ReadChar`, `WriteStr`/`WriteLine`/`WriteChar`, and the real
@@ -576,6 +581,14 @@ The units, by tier:
   signed decimal token, returning an `Int64` (the same 64-bit cdecl return as `std.time`'s `Now`,
   so endian-safe on both tiers); `WriteInt` prints a 32-bit `Integer`. A non-numeric input reads
   as zero (this tier's lenient scan); a status-returning `Val` surface is a later design pass.
+- `io.buffered` — buffered streams over any descriptor, written entirely in Kobold on the raw
+  fd seam (`io_write_str`/`kpf_read`). A `BufWriter` (`OpenWriter`/`PutStr`/`PutChar`/`Flush`)
+  batches a run of small writes into one `write` per bufferful or per `Flush`; a `BufReader`
+  (`OpenReader`/`GetChar`/`UngetStr`/`ReadLine`/`Eof`) pulls host chunks and serves bytes and
+  lines, with an arbitrary-length `UngetStr` pushback. The runtime keeps only the one byte of
+  input pushback its own numeric and line reads need; this unit is where larger buffering, output
+  batching, and a general ungetc live, as the design intends (a stream owns its descriptor, so a
+  program does not mix it with the console builtins or a second stream on the same fd).
 - `std.time` — `Now` (monotonic milliseconds) and `Sleep(ms)`, over the host clock and the
   park seam. A give-up-the-turn yield is `Sleep(0)` for now; a dedicated procedure waits on
   coroutine scheduling landing as its own namespaced unit (`yield` is the coroutine keyword).
@@ -590,6 +603,14 @@ The units, by tier:
   (ASCII), `Trim`/`TrimLeft`/`TrimRight`, `StringReplace`, and a non-mutating string
   `Delete`/`Insert`. Reached qualified as `strings.Delete` so it does not shadow the
   dynamic-array built-ins of the same name.
+- `core.convert` — the failable face of the classic `Val(s, v, code)` builtin: `ValInt(s):
+  Int64 fails` and `ValReal(s): real fails`. A console read is lenient (a non-numeric token
+  reads as zero), so a program that needs to know whether the text was a number reads it as a
+  string and converts here, catching a bad token with `or else` or `fails`: `n := ValInt(line)
+  or else 0`, or `if ValReal(line) fails then ...`. On failure the error code is the 1-based
+  position `Val` reports. `Val` is strict (no whitespace skipping), so `Trim` padded input
+  first. Built over the `Val` and `fail` builtins, so it carries no runtime primitive and works
+  on every tier.
 
 These units wrap runtime glue (`kp_random_*`, `kp_now_ms`, `kp_sleep_ms`, the console
 `io_eof`/`io_read_str`/`io_read_char`/`io_write_str`/`io_write_char`,

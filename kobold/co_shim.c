@@ -51,16 +51,16 @@ static int ht_cap;
 #define HV_UNTAG(v)  ((v) >> 1)
 
 static struct ht_entry *
-ht_lookup(uint32_t id)
+ht_lookup(kp_gptr id)
 {
-    uint32_t u = HV_UNTAG(id);
+    uint32_t u = (uint32_t)HV_UNTAG(id);   /* a small 1-based slot index */
 
     if (u == 0 || (int)u > ht_cap)
         return NULL;
     return &ht[u - 1];
 }
 
-uint32_t
+kp_gptr
 kp_handle_intern(kp_vm *vm, enum kp_handle_kind kind, void *obj, kp_finalize fin)
 {
     int i;
@@ -87,7 +87,7 @@ kp_handle_intern(kp_vm *vm, enum kp_handle_kind kind, void *obj, kp_finalize fin
 }
 
 void *
-kp_handle_ptr(kp_vm *vm, uint32_t id, enum kp_handle_kind kind)
+kp_handle_ptr(kp_vm *vm, kp_gptr id, enum kp_handle_kind kind)
 {
     struct ht_entry *e = ht_lookup(id);
 
@@ -125,7 +125,7 @@ kp_handle_sweep(void)
 
 /* Called by rt_host.c's ARC for a value whose low bit is 1 (a table id). */
 void
-co_table_retain(uint32_t id)
+co_table_retain(kp_gptr id)
 {
     struct ht_entry *e = ht_lookup(id);
 
@@ -134,7 +134,7 @@ co_table_retain(uint32_t id)
 }
 
 void
-co_table_release(uint32_t id)
+co_table_release(kp_gptr id)
 {
     struct ht_entry *e = ht_lookup(id);
     kp_finalize fin;
@@ -168,15 +168,20 @@ kp_vm_arena(kp_vm *vm)
 }
 
 uintptr_t kp_arena_base(struct kp_arena *a) { (void)a; return 0; }
-void *kp_arena_ptr(struct kp_arena *a, uint32_t addr) { (void)a; return (void *)(uintptr_t)addr; }
-uint32_t kp_arena_addr(struct kp_arena *a, const void *p) { (void)a; return (uint32_t)(uintptr_t)p; }
+void *kp_arena_ptr(struct kp_arena *a, kp_gptr addr) { (void)a; return (void *)(uintptr_t)addr; }
+kp_gptr kp_arena_addr(struct kp_arena *a, const void *p) { (void)a; return (kp_gptr)(uintptr_t)p; }
 
 /* Map `len` bytes of read/write memory below 4 GB (see rt_host.c:rt_map_low): a
    coroutine stack address must fit the 32-bit guest model, so x86-64 uses
    MAP_32BIT, a 32-bit host is low by construction, and arm64 probes low hints. */
 static void *co_map_low(size_t len)
 {
-#if defined(MAP_32BIT)
+#if defined(KP_LP64)
+    /* LP64: a coroutine stack address is a full 64-bit guest pointer, so the stack
+       can live anywhere; no low-memory constraint (mirrors rt_host.c:rt_map_low). */
+    return mmap(NULL, len, PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#elif defined(MAP_32BIT)
     return mmap(NULL, len, PROT_READ | PROT_WRITE,
                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
 #elif UINTPTR_MAX <= 0xffffffffULL
@@ -271,11 +276,11 @@ kp_raise(kp_vm *vm, enum kp_trap_code code, const char *msg)
  * Guest-facing operators: the front end calls these without a vm.
  ****************************************************************/
 
-uint32_t kp_co_new_g(void *entry, const void *args, int nargs)
+kp_gptr kp_co_new_g(void *entry, const void *args, int nargs)
 {
     return kp_co_new(NULL, entry, args, nargs);
 }
-int64_t kp_co_resume_g(uint32_t co, int64_t value) { return kp_co_resume(NULL, co, value); }
+int64_t kp_co_resume_g(kp_gptr co, int64_t value) { return kp_co_resume(NULL, co, value); }
 int64_t kp_co_yield_g(int64_t value) { return kp_co_yield(NULL, value); }
-uint32_t kp_co_self_g(void) { return kp_co_self(NULL); }
+kp_gptr kp_co_self_g(void) { return kp_co_self(NULL); }
 int kp_co_cancelling_g(void) { return kp_co_cancelling(NULL); }

@@ -18,6 +18,22 @@
 
 #include <stdint.h>
 
+/* A guest value: the address of a gheap object, a host-handle table id, or nil.
+   It is pointer-width, which follows the target: 4 bytes under ILP32 (rv32, cf,
+   mips) and 8 under LP64 (x86-64, arm64, KP_LP64). The LP64 JIT and AOT hosts map
+   the guest heap in full memory, so a guest address can exceed 32 bits; it must
+   never be narrowed to uint32_t. kp_word is the same width, for a value that
+   shares a guest pointer's lane (a key-slot stride, an untyped payload word). The
+   object header below (refcount, kind) and the string header stay width-neutral:
+   they are counts and tags, not addresses. */
+#ifdef KP_LP64
+typedef uint64_t kp_gptr;
+typedef uint64_t kp_word;
+#else
+typedef uint32_t kp_gptr;
+typedef uint32_t kp_word;
+#endif
+
 enum kp_obj_kind {
     KP_OBJ_STRING = 1,
     KP_OBJ_ARRAY  = 2,

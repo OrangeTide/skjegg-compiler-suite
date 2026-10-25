@@ -22,11 +22,13 @@ a negative Linux errno on failure, passed through unchanged (B1, A7). The C crt
 written once.
 
 The calls on the seam: `read`, `write`, `open`, `close`, `lseek`,
-`getdents64`, `clock_gettime`, `getrandom`, `nanosleep`, `sched_yield`,
-`__sys_brk`, and `_exit` (with a weak `exit`). The `*at` file-metadata calls
-(`statx`, `mkdirat`, `unlinkat`, `renameat2`, `fchmodat`) are on the crt for
-the hosted libc targets; the freestanding tiers reach file metadata the same
-way. The RV32 numbers already match boris exactly; the ColdFire numbers are the
+`getdents64`, the `*at` file-metadata and path calls (`statx`, `mkdirat`,
+`unlinkat`, `renameat2`, `fchmodat`), `clock_gettime`, `getrandom`,
+`nanosleep`, `sched_yield`, `__sys_brk`, and `_exit` (with a weak `exit`). The
+`*at` calls back both the hosted libc (`libc/stat.c`, `libc/fileops.c`) and the
+Kobold freestanding `io.files` metadata/path operations, so they live on the
+shared seam rather than in the crt. The RV32 numbers already match boris
+exactly; the ColdFire numbers are the
 Linux/m68k ones. `RV_SYS_FATAL` is `0x000f0000`, boris's `VM_SYS_TRAP`, so a
 runtime fault looks the same on skj-run and in the VM.
 
@@ -50,8 +52,10 @@ region and `kp_rt_init` is a no-op.
 
 `libc/stdio_core.c` is the one buffered-stream core (the three standard streams
 and the character and block I/O over them), built on the `write`/`read` seam
-with no malloc and no format engine. The Kobold freestanding console
-(`kobold/io_free.c`) uses its `__libc_stdin/out/err`.
+with no malloc and no format engine. It serves C programs on the freestanding
+tier. The Kobold console does not use it: it writes and reads the `write`/`read`
+seam directly from `kobold/kp_io.c`, keeping one byte of input pushback rather
+than a stream buffer.
 
 ## The number formatter
 
