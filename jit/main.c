@@ -109,11 +109,36 @@ h_va_arg(void *ap, int kind)
     f[2] = p + (kind == 0 ? 4u : 8u);
     return (void *)(unsigned long)p;
 }
+#elif SKJ_LP64
+/* SysV x86-64, LP64 guest: the va_list is the SysV __va_list_tag with 8-byte
+   overflow_arg_area and reg_save_area at offsets 8 and 16 (gp_offset@0,
+   fp_offset@4).  Mirrors runtime/va_x86_64.c.  The guest only 4-aligns its
+   va_list slot, so copy it into an aligned local rather than dereferencing the
+   guest pointer as the 8-byte-aligned struct directly. */
+static void *
+h_va_arg(void *ap, int kind)
+{
+    struct __va_list_tag {
+        unsigned gp_offset, fp_offset;
+        char *overflow_arg_area, *reg_save_area;
+    } v;
+    void *p;
+    int is_fp = (kind == 1);     /* 0 int/ptr, 1 double, 2 i64: GP for 0 and 2 */
+    memcpy(&v, ap, sizeof v);
+    if (is_fp) {
+        if (v.fp_offset < 176) { p = v.reg_save_area + v.fp_offset; v.fp_offset += 16; }
+        else                   { p = v.overflow_arg_area; v.overflow_arg_area += 8; }
+    } else {
+        if (v.gp_offset < 48)  { p = v.reg_save_area + v.gp_offset; v.gp_offset += 8; }
+        else                   { p = v.overflow_arg_area; v.overflow_arg_area += 8; }
+    }
+    memcpy(ap, &v, sizeof v);
+    return p;
+}
 #else
-/* SysV: the guest is ILP32, so its va_list has 4-byte pointers and the four
-   fields sit at byte offsets 0/4/8/12: gp_offset, fp_offset, overflow_arg_area,
-   reg_save_area, the last two 32-bit low-memory addresses.  Read as raw words,
-   mirroring runtime/va_x86_64.c. */
+/* SysV x86 ILP32 guest: a va_list with 4-byte pointers, the four fields at byte
+   offsets 0/4/8/12: gp_offset, fp_offset, overflow_arg_area, reg_save_area, the
+   last two 32-bit low-memory addresses.  Read as raw words. */
 static void *
 h_va_arg(void *ap, int kind)
 {

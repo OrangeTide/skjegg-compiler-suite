@@ -16,6 +16,7 @@
    its code and data also sit below 4GB. */
 
 #include "str.h"
+#include "target.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -294,7 +295,7 @@ void kpd_close(int h)
    fight the guest heap's probe region. */
 static void *aot_map_low(size_t len)
 {
-#if defined(KP_LP64)
+#if SKJ_LP64
     /* LP64: guest addresses are full 64-bit host pointers, so the execution stack
        can live anywhere; no low-memory constraint. */
     return mmap(NULL, len, PROT_READ | PROT_WRITE,

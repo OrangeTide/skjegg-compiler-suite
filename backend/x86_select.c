@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "ir.h"
+#include "target.h"
 #include "mc.h"
 #include "x86_select.h"
 
@@ -1574,7 +1575,7 @@ x86_select_func(struct mc *m, struct ir_func *fn, int tp,
                reg_save@16, the standard __va_list_tag), ILP32 a 4-byte one
                (overflow@8, reg_save@12), valid because the JIT stack is low
                memory and the address fits in 32 bits. */
-#ifdef CC_LP64
+#if SKJ_LP64
             mc_lea(m, SC0, MC_RBP, 16 + 8 * ns);
             mc_store64(m, SC1, 8, SC0);
             mc_lea(m, SC0, MC_RBP, fr.va_disp);

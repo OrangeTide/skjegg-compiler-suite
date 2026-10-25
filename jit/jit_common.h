@@ -136,7 +136,9 @@ extern const struct jit_target kp_target;
    Because the stub reads the target from the slot, redirection is a plain pointer
    store: the stub code is written once and never patched, so it needs no W^X dance,
    and a later step can point a slot at a lazy compiler instead of a finished entry. */
-#define KP_STUB_STRIDE 16   /* bytes reserved per stub; fits every target's sequence */
+#define KP_STUB_STRIDE 32   /* bytes reserved per stub; fits every target's sequence
+                               (arm64 LP64 materialises a full 64-bit slot address:
+                               movz + 3 movk + ldr + br = 24 bytes) */
 
 struct kp_stubs {
     void **slots;           /* writable target slots (low memory), one per stub */

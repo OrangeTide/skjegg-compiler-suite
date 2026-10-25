@@ -34,10 +34,6 @@ SKJ_INC_DEF := -DSKJ_INCLUDE_DIR='"$(CURDIR)/include"'
 # guest allocator and the scheduler.  -fno-sanitize-recover makes the first
 # fault the exit status rather than a printed warning the run walks past.
 SAN_CFLAGS := -fsanitize=address,undefined -fno-sanitize-recover=all -g
-## UBSan only, for tools that map JITed code into low memory (the JIT driver),
-## where ASan's shadow reservation collides with that mapping.  UBSan needs no
-## shadow and still catches the shift/overflow/out-of-bounds-index UB.
-UBSAN_CFLAGS := -fsanitize=undefined -fno-sanitize-recover=all -g
 
 # Version: version.mk is authoritative, git only refines it.  In a release
 # tree the tag v$(SKJ_VERSION) exists and describe adds the commit count and
@@ -166,10 +162,10 @@ build/skj-tinc-mips: $(SRC_MIPS) ir/ir.h tinc/tinc.h | build
 	$(CC) $(CFLAGS) -Iir -Itinc -o $@ $(SRC_MIPS)
 
 build/skj-tinc-arm64: $(SRC_A64) ir/ir.h tinc/tinc.h | build
-	$(CC) $(CFLAGS) -Iir -Itinc -o $@ $(SRC_A64)
+	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Iir -Itinc -o $@ $(SRC_A64)
 
 build/skj-tinc-x86-64: $(SRC_X64) ir/ir.h tinc/tinc.h | build
-	$(CC) $(CFLAGS) -DX86_BITS=64 -Iir -Itinc -o $@ $(SRC_X64)
+	$(CC) $(CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -Iir -Itinc -o $@ $(SRC_X64)
 
 ## C preprocessor
 CPP_SRC := cpp/tok.c cpp/macro.c cpp/cond.c cpp/dir.c ir/util.c ir/arena.c
@@ -190,10 +186,10 @@ build/skj-cc: $(CC_SRC) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | build
 	$(CC) $(CFLAGS) -DCC_M68K $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC)
 
 build/skj-cc-x86-64: $(CC_SRC_X64) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h backend/mc.h backend/mc_text.h backend/x86_select.h | build
-	$(CC) $(CFLAGS) -DX86_BITS=64 -DCC_LP64 -DCC_PSABI -DCC_STRUCT_ABI $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ibackend -o $@ $(CC_SRC_X64)
+	$(CC) $(CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -DCC_PSABI -DCC_STRUCT_ABI $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ibackend -o $@ $(CC_SRC_X64)
 
 build/skj-cc-arm64: $(CC_SRC_A64) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h backend/arm64_mc.h backend/arm64_select.h backend/arm64_mc_text.h | build
-	$(CC) $(CFLAGS) -DCC_LP64 -DCC_PSABI -DCC_ARM64 $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_A64)
+	$(CC) $(CFLAGS) -DSKJ_LP64=1 -DCC_PSABI -DCC_ARM64 $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_A64)
 
 build/skj-cc-rv: $(CC_SRC_RV) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | build
 	$(CC) $(CFLAGS) -DCC_RISCV $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_RV)
@@ -219,7 +215,7 @@ JIT_SRC := jit/main.c jit/jit_common.c jit/jit_arena.c jit/jit_x86.c jit/emit_x8
            jit/call_guest_x86.S \
            backend/x86_select.c backend/regalloc_x86.c $(JIT_FE) $(CC_CPP) $(IR_SRC)
 build/skj-jit: $(JIT_SRC) cc/cc.h jit/jit_common.h jit/jit_arena.h jit/jit_x86.h jit/emit_x86.h jit/code.h backend/mc.h backend/x86_select.h ir/ir.h Makefile build/version.h | build
-	$(CC) $(CFLAGS) -DX86_BITS=64 -DCC_PSABI -DCC_STRUCT_ABI $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ijit -Ibackend -o $@ $(JIT_SRC)
+	$(CC) $(CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -DCC_PSABI -DCC_STRUCT_ABI $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ijit -Ibackend -o $@ $(JIT_SRC)
 
 ## Run the C suite in-process through skj-jit and compare exit codes, the
 ## counterpart of check-cc without an assembler, linker, or qemu.  The runner
@@ -246,7 +242,7 @@ KP_RT  := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kobold
           backend/x86_select.c backend/regalloc_x86.c $(IR_SRC)
 KP_HDRS := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue.h kobold/obj.h kobold/gheap_core.h kobold/co.h \
            kobold/handle.h kobold/lowmem.h kobold/kp_host.h jit/jit_common.h jit/jit_arena.h \
-           jit/jit_x86.h jit/emit_x86.h jit/code.h backend/mc.h backend/x86_select.h ir/ir.h
+           jit/jit_x86.h jit/emit_x86.h jit/code.h backend/mc.h backend/x86_select.h ir/ir.h ir/target.h
 KP_CFLAGS := $(CFLAGS) -DX86_BITS=64 -DKP_FREESTANDING -DKP_REAL=double -Iir -Ijit -Ibackend -Ikobold
 
 ## co.c is vendored unchanged from the Kobold tree, which builds with -Wall -Wextra
@@ -358,7 +354,7 @@ KP_RT_RV := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kobo
             backend/rv_select.c backend/regalloc_rv.c $(IR_SRC)
 KP_HDRS_RV := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue.h kobold/obj.h kobold/gheap_core.h kobold/co.h \
               kobold/handle.h kobold/lowmem.h kobold/kp_host.h jit/jit_common.h jit/jit_arena.h \
-              jit/emit_rv.h jit/code.h backend/rv_mc.h backend/rv_select.h ir/ir.h
+              jit/emit_rv.h jit/code.h backend/rv_mc.h backend/rv_select.h ir/ir.h ir/target.h
 KP_CFLAGS_RV := $(CFLAGS) -DKP_FREESTANDING -DKP_REAL=double -Iir -Ijit -Ibackend -Ikobold
 
 ## co.c built for rv with the same vendored-warning set as the x86 kp_co.o.
@@ -424,7 +420,7 @@ build/skj-kp-jit-arm64: kobold/jit_main.c kobold/frontend.c build/lp64/kpcom_kpm
 ## in libkpaot.a (built -DKP_LP64 below).
 build/skj-kp: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL) kobold/kpm.h ir/ir.h \
               backend/mc_text.h backend/x86_select.h Makefile | build
-	$(CC) $(CFLAGS) -DX86_BITS=64 -Iir -Ibackend -Ikobold -o $@ \
+	$(CC) $(CFLAGS) -DX86_BITS=64 -DKP_LP64 -Iir -Ibackend -Ikobold -o $@ \
 	    kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL)
 
 ## Exercise the KPM1 module reader's input validation (kobold/kpm.c) through skj-kp.
@@ -668,7 +664,7 @@ check-kp-frontend: build/skj-kp-jit
 ## Compile and run each fixture in one process with the x86-64 JIT; stdout must
 ## match the .expected file.
 check-kp-jit: build/skj-kp-jit
-	@MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-src-tests.sh
+	@QEMU= MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-src-tests.sh
 
 ## Native front end emits a module, the x86-64 backend AOT-compiles and links it,
 ## the program runs; stdout must match the .expected file.
@@ -711,7 +707,7 @@ check-kp-aot-arm64: build/skj-kpc build/skj-kp-arm64 build/libkpaot-arm64.a
 ## include-file cases stay external; the failable two-return (CALL2) cases
 ## failforms/failmethod are included (their dst=-1 discard needed the reader fix).
 check-kp-corpus: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a
-	@KP_SRCDIR=tests/kp-corpus MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-src-tests.sh
+	@QEMU= KP_SRCDIR=tests/kp-corpus MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-src-tests.sh
 	@KP_SRCDIR=tests/kp-corpus MODE=aot FRONTEND=build/skj-kpc \
 	    KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
 	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) -f elf64" \
@@ -775,7 +771,7 @@ check-kp-corpus-cf: build/skj-kpc-32 build/skj-kp-cf build/libkpaot-cf.a
 ## check-emu-all), so one .expected pins every backend and the in-memory and
 ## system links agree.
 check-kp-multi: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a
-	@KP_SRCDIR=tests/kp-multi MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-multi-tests.sh
+	@QEMU= KP_SRCDIR=tests/kp-multi MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-multi-tests.sh
 	@KP_SRCDIR=tests/kp-multi MODE=aot FRONTEND=build/skj-kpc \
 	    KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
 	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) -f elf64" \
@@ -1088,7 +1084,7 @@ check-kp-stdlib-free-cf: build/skj-kpc-32 build/skj-kp-cf build/skj-as build/skj
 ## rv32 and arm64 AOT paths and the freestanding tier run in check-emu-all, so the
 ## entry argument vector and the read seam are checked on the no-libc tier too.
 check-kp-io: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a
-	@KP_SRCDIR=tests/kp-io MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-src-tests.sh
+	@QEMU= KP_SRCDIR=tests/kp-io MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-src-tests.sh
 	@KP_SRCDIR=tests/kp-io MODE=aot FRONTEND=build/skj-kpc \
 	    KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
 	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) -f elf64" \
@@ -1125,7 +1121,7 @@ check-kp-io-free: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj-ld-
 ## resolved by the host front end in every case, so the included text is in the
 ## module before codegen).
 check-kp-inc: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a
-	@KP_SRCDIR=tests/kp-inc MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-src-tests.sh
+	@QEMU= KP_SRCDIR=tests/kp-inc MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-src-tests.sh
 	@KP_SRCDIR=tests/kp-inc MODE=aot FRONTEND=build/skj-kpc \
 	    KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
 	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) -f elf64" \
@@ -1171,7 +1167,7 @@ check-kp-inc-free: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj-ld
 # skj toolchain alone), matching the ColdFire tier.  skj-cc-rv ignores the
 # gcc-style flags, so only the defines and the include path carry over; it emits
 # the RISC-V ILP32 psABI, which the hand-written .S pieces below also use.
-KPFREE_RV_SKJFLAGS := -DKP_FREESTANDING -DKP_REAL=double -Ikobold
+KPFREE_RV_SKJFLAGS := -DKP_FREESTANDING -DKP_REAL=double -Ikobold -Iir
 
 build/kpfree-rv:
 	mkdir -p build/kpfree-rv
@@ -1293,13 +1289,13 @@ build/libkpaot-rv-free.a: $(KPFREE_RV_ARCHIVE) | build/kpfree-rv
 ## core runs it, and assembled by skj-as to keep the path binutils-free.
 # Deferred (=, not :=): CF_RT_CFLAGS is defined further down the Makefile.
 KP_HDRS_CF := kobold/str.h kobold/dynarr.h kobold/map.h kobold/obj.h kobold/gheap_core.h kobold/co.h \
-              kobold/handle.h kobold/lowmem.h kobold/rt_glue.h kobold/kp_abi.h
+              kobold/handle.h kobold/lowmem.h kobold/rt_glue.h kobold/kp_abi.h ir/target.h
 # The C runtime is compiled by skj-cc (the in-tree C compiler) to GAS asm and
 # assembled by skj-as, so the ColdFire kp runtime is built with no external
 # toolchain (the host-seam syscalls and the fp0 math shim are already skj-as .S).
 # skj-cc ignores the gcc-style flags, so only the defines and the include path
 # carry over; strict-ColdFire is implicit (the backend targets ColdFire/m68k).
-KPFREE_CF_SKJFLAGS := -DKP_FREESTANDING -DKP_REAL=double -Ikobold
+KPFREE_CF_SKJFLAGS := -DKP_FREESTANDING -DKP_REAL=double -Ikobold -Iir
 
 build/kpfree-cf:
 	mkdir -p build/kpfree-cf
@@ -1437,7 +1433,7 @@ JIT_SRC_A64 := jit/main.c jit/jit_common.c jit/jit_arena.c jit/jit_arm64.c jit/e
                backend/arm64_select.c backend/regalloc_arm64.c \
                $(JIT_FE) $(CC_CPP) $(IR_SRC)
 build/skj-jit-arm64: $(JIT_SRC_A64) cc/cc.h jit/jit_common.h jit/jit_arena.h jit/jit_x86.h jit/emit_arm64.h jit/code.h backend/arm64_mc.h backend/arm64_select.h ir/ir.h Makefile build/version.h | build
-	$(A64_CC) $(CFLAGS) -DCC_LP64 -DCC_PSABI -DCC_ARM64 $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ijit -Ibackend -o $@ $(JIT_SRC_A64)
+	$(A64_CC) $(CFLAGS) -DSKJ_LP64=1 -DCC_PSABI -DCC_ARM64 $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ijit -Ibackend -o $@ $(JIT_SRC_A64)
 
 ## Run the C suite in-process through skj-jit-arm64 under qemu-aarch64.  The
 ## arm64 JIT supports _Float16 natively (fcvt), so it excludes only inline asm.
@@ -1915,8 +1911,8 @@ check-rv-oracle: build/test_rv_oracle
 
 ## The guest runtime arena (host-only): lazy low-memory mapping, word-aligned
 ## bump allocation, and clean exhaustion.  Runs on the host, no qemu.
-build/test_jit_arena: tests/jit_arena.c jit/jit_arena.c jit/jit_arena.h | build
-	$(CC) $(CFLAGS) -Ijit -o $@ tests/jit_arena.c jit/jit_arena.c
+build/test_jit_arena: tests/jit_arena.c jit/jit_arena.c jit/jit_arena.h ir/target.h | build
+	$(CC) $(CFLAGS) -Ijit -Iir -o $@ tests/jit_arena.c jit/jit_arena.c
 
 test-jit-arena: build/test_jit_arena
 	@./build/test_jit_arena
@@ -2346,8 +2342,8 @@ check-emu-san: build/san/test_rv_run build/san/test_guest_mmap \
 ## the tools themselves.  The guest binaries still run under qemu unsanitized;
 ## only the host tools carry instrumentation.
 ##
-## The parse/emit tools take full ASan+UBSan.  skj-jit takes UBSan only (see
-## UBSAN_CFLAGS).  ASAN_OPTIONS=detect_leaks=0 because the tools arena-allocate
+## The parse/emit tools and the JIT drivers take full ASan+UBSan.
+## ASAN_OPTIONS=detect_leaks=0 because the tools arena-allocate
 ## and exit without freeing (not a bug here), so LeakSanitizer is off while the
 ## memory-error and UB checks stay on; -fno-sanitize-recover aborts loudly on a
 ## real finding, which the suite then reports as a tool failure.
@@ -2407,7 +2403,7 @@ AS_MIPS_FUZZ_LIB := $(filter-out as/mips_main.c,$(AS_MIPS_SRC))
 
 build/san/as-fuzz: as/as_fuzz.c $(AS_FUZZ_LIB) as/as.h as/asm_lex.h as/asm_obj.h \
                    tests/fuzz_mutate.h build/version.h | build build/san
-	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DASFUZZ_CF -Ias -Iir -Itests -o $@ \
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DASFUZZ_CF -Ias -Iir -Idwarf -Itests -o $@ \
 	    as/as_fuzz.c $(AS_FUZZ_LIB)
 
 build/san/as-rv-fuzz: as/as_fuzz.c $(AS_RV_FUZZ_LIB) as/rv.h as/asm_lex.h as/asm_obj.h \
@@ -2417,7 +2413,7 @@ build/san/as-rv-fuzz: as/as_fuzz.c $(AS_RV_FUZZ_LIB) as/rv.h as/asm_lex.h as/asm
 
 build/san/as-mips-fuzz: as/as_fuzz.c $(AS_MIPS_FUZZ_LIB) as/mips.h as/asm_lex.h as/asm_obj.h \
                         tests/fuzz_mutate.h build/version.h | build build/san
-	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DASFUZZ_MIPS -Ias -Iir -Itests -o $@ \
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DASFUZZ_MIPS -Ias -Iir -Idwarf -Itests -o $@ \
 	    as/as_fuzz.c $(AS_MIPS_FUZZ_LIB)
 
 # The IR front-end parser fuzz harnesses (one arch-parameterized source over
@@ -2467,11 +2463,11 @@ build/san/fe-exc-fuzz: tests/fe_fuzz.c excelsior/lex.c excelsior/parse.c \
 	    excelsior/typecheck.c excelsior/lower.c $(IR_SRC) $(BE_CF)
 
 build/san/skj-jit: $(JIT_SRC) cc/cc.h jit/jit_common.h jit/jit_arena.h jit/jit_x86.h jit/emit_x86.h jit/code.h backend/mc.h backend/x86_select.h ir/ir.h build/version.h | build build/san
-	$(CC) $(CFLAGS) $(UBSAN_CFLAGS) -DX86_BITS=64 -DCC_PSABI -DCC_STRUCT_ABI $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ijit -Ibackend -o $@ $(JIT_SRC)
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -DCC_PSABI -DCC_STRUCT_ABI $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ijit -Ibackend -o $@ $(JIT_SRC)
 
 # The remaining front ends (tinc, scheme, moo, Pascal) and the archive tool
-# take full ASan+UBSan: pure compile-and-emit, no low mmap to collide with the
-# ASan shadow.  Each is probed compile-only by run-compile-san.sh.  SC_SRC,
+# also take full ASan+UBSan; each is probed compile-only by run-compile-san.sh.
+# SC_SRC,
 # MOO_SRC, and PC_SRC are defined later in the Makefile than these rules, so a
 # prerequisite of them would expand empty at read time and never trigger a
 # rebuild (the same deferred-definition hazard the skj-exc rule above notes);
@@ -2497,12 +2493,12 @@ build/san/skj-pc: pascal/lex.c pascal/parse.c pascal/lower.c pascal/main.c \
 build/san/skj-ar: $(AR_SRC) ld/mapfile.h ir/util.h ir/arena.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Ild -Iir -o $@ $(AR_SRC)
 
-# skj-kp-jit maps executable memory low for the JIT, which collides with the
-# ASan shadow on x86-64 (the same reason skj-jit is UBSan-only), so the Kobold
-# behavioral corpora run under UBSan only.  kp_co.o stays unsanitized (raw
-# stack-switch coroutine assembly); UBSan is per-TU, so linking it in is fine.
-build/san/skj-kp-jit: kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c $(KP_RT) build/kp_co.o kobold/frontend.h $(KP_HDRS) build/version.h Makefile | build build/san
-	$(CC) $(KP_CFLAGS) $(UBSAN_CFLAGS) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c $(KP_RT) build/kp_co.o -lm
+# The Kobold behavioral corpora run under full ASan+UBSan, LP64 to match the
+# shipped host so cross-module .kpm loads width-check clean.  kp_co_lp64.o stays
+# unsanitized (raw stack-switch coroutine assembly); the sanitizers are
+# per-TU, so linking it into a sanitized binary is fine.
+build/san/skj-kp-jit: kobold/jit_main.c kobold/frontend.c build/lp64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o kobold/frontend.h $(KP_HDRS) build/version.h Makefile | build build/san
+	$(CC) $(KP_CFLAGS) -DKP_LP64 -Ibuild/lp64 $(SAN_CFLAGS) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/lp64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o -lm
 
 ## Each sanitized suite is its own target over the build/san tools, so a failing
 ## slice fails on its own (a single recipe line returns the script's status, no
@@ -2540,7 +2536,7 @@ check-san-kp: build/san/skj-kp
 	@$(SAN_RUNENV) KP="$(CURDIR)/build/san/skj-kp" sh tests/run-kp-tests.sh
 
 check-san-jit: build/san/skj-jit
-	@echo "== check-san: C via the JIT (skj-jit, UBSan) =="
+	@echo "== check-san: C via the JIT (skj-jit, ASan+UBSan) =="
 	@$(SAN_RUNENV) JIT="$(CURDIR)/build/san/skj-jit" sh tests/run-jit-tests.sh
 
 check-san-tinc: build/san/skj-tinc
@@ -2565,26 +2561,26 @@ check-san-ar: build/san/skj-ar build/start.o build/half.o
 	   build/start.o build/half.o
 
 ## The Kobold behavioral corpora (the hosted corpus and the multi-unit set)
-## through the UBSan-only skj-kp-jit, run in JIT mode so the sanitized driver
+## through the ASan+UBSan skj-kp-jit, run in JIT mode so the sanitized driver
 ## both compiles and executes each program.
 check-san-kp-corpus: build/san/skj-kp-jit
-	@echo "== check-san: Kobold hosted corpus (skj-kp-jit, UBSan) =="
-	@$(SAN_RUNENV) KP_SRCDIR=tests/kp-corpus MODE=jit JIT="$(CURDIR)/build/san/skj-kp-jit" \
+	@echo "== check-san: Kobold hosted corpus (skj-kp-jit, ASan+UBSan) =="
+	@$(SAN_RUNENV) QEMU= KP_SRCDIR=tests/kp-corpus MODE=jit JIT="$(CURDIR)/build/san/skj-kp-jit" \
 	   sh tests/run-kp-src-tests.sh
 
 check-san-kp-multi: build/san/skj-kp-jit
-	@echo "== check-san: Kobold multi-unit corpus (skj-kp-jit, UBSan) =="
-	@$(SAN_RUNENV) KP_SRCDIR=tests/kp-multi MODE=jit JIT="$(CURDIR)/build/san/skj-kp-jit" \
+	@echo "== check-san: Kobold multi-unit corpus (skj-kp-jit, ASan+UBSan) =="
+	@$(SAN_RUNENV) QEMU= KP_SRCDIR=tests/kp-multi MODE=jit JIT="$(CURDIR)/build/san/skj-kp-jit" \
 	   sh tests/run-kp-multi-tests.sh
 
 check-san-kp-io: build/san/skj-kp-jit
-	@echo "== check-san: Kobold io corpus (skj-kp-jit, UBSan) =="
-	@$(SAN_RUNENV) KP_SRCDIR=tests/kp-io MODE=jit JIT="$(CURDIR)/build/san/skj-kp-jit" \
+	@echo "== check-san: Kobold io corpus (skj-kp-jit, ASan+UBSan) =="
+	@$(SAN_RUNENV) QEMU= KP_SRCDIR=tests/kp-io MODE=jit JIT="$(CURDIR)/build/san/skj-kp-jit" \
 	   sh tests/run-kp-src-tests.sh
 
 check-san-kp-inc: build/san/skj-kp-jit
-	@echo "== check-san: Kobold include corpus (skj-kp-jit, UBSan) =="
-	@$(SAN_RUNENV) KP_SRCDIR=tests/kp-inc MODE=jit JIT="$(CURDIR)/build/san/skj-kp-jit" \
+	@echo "== check-san: Kobold include corpus (skj-kp-jit, ASan+UBSan) =="
+	@$(SAN_RUNENV) QEMU= KP_SRCDIR=tests/kp-inc MODE=jit JIT="$(CURDIR)/build/san/skj-kp-jit" \
 	   sh tests/run-kp-src-tests.sh
 
 ## The KPM1 reader-pipeline fuzz: mutate valid seed modules and run each result
@@ -2711,10 +2707,10 @@ check-san-tools: check-san-cpp check-san-cc check-san-exc \
                  check-san-ar
 	@echo "check-san-tools: preprocessor, compilers, front ends, assembler, linker, and ar clean under the sanitizers."
 
-## The Kobold behavioral corpora through the UBSan-only driver.
+## The Kobold behavioral corpora through the ASan+UBSan driver.
 check-san-kobold: check-san-kp check-san-kp-corpus check-san-kp-multi \
                   check-san-kp-io check-san-kp-inc
-	@echo "check-san-kobold: KPM1 reader and the Kobold corpora clean under UBSan."
+	@echo "check-san-kobold: KPM1 reader and the Kobold corpora clean under ASan+UBSan."
 
 ## Every sanitized slice.
 check-san: check-san-tools check-san-rvas check-san-jit check-san-kobold \
@@ -2818,13 +2814,13 @@ build/skj-sc-mips: $(SC_SRC_MIPS) scheme/scheme.h scheme/gc.h ir/ir.h | build
 	$(CC) $(CFLAGS) -Ischeme -Iir -o $@ $(SC_SRC_MIPS)
 
 build/skj-sc-arm64: $(SC_SRC_A64) scheme/scheme.h scheme/gc.h ir/ir.h | build
-	$(CC) $(CFLAGS) -Ischeme -Iir -o $@ $(SC_SRC_A64)
+	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Ischeme -Iir -o $@ $(SC_SRC_A64)
 
 SC_SRC_X64 := scheme/lex.c scheme/parse.c scheme/print.c scheme/main.c scheme/gc.c \
               scheme/lower.c $(IR_SRC) $(BE_X64)
 
 build/skj-sc-x86-64: $(SC_SRC_X64) scheme/scheme.h scheme/gc.h ir/ir.h | build
-	$(CC) $(CFLAGS) -DX86_BITS=64 -Ischeme -Iir -o $@ $(SC_SRC_X64)
+	$(CC) $(CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -Ischeme -Iir -o $@ $(SC_SRC_X64)
 
 ## TinScheme codegen tests (.scm -> .s via skj-sc)
 build/scm_%.s: tests/scm_%.scm build/skj-sc | build
@@ -3320,10 +3316,10 @@ build/skj-exc-mips: $(EXC_SRC_MIPS) excelsior/excelsior.h ir/ir.h | build
 ## build that holds every shared struct at guest width.  See excelsior/status.md
 ## (Roadmap 2).
 build/skj-exc-x86-64: $(EXC_SRC_X64) excelsior/excelsior.h ir/ir.h backend/mc.h backend/mc_text.h backend/x86_select.h | build
-	$(CC) $(CFLAGS) -DX86_BITS=64 -DCC_LP64 -DCC_PSABI -DCC_STRUCT_ABI -Iexcelsior -Iir -Ibackend -o $@ $(EXC_SRC_X64)
+	$(CC) $(CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -DCC_PSABI -DCC_STRUCT_ABI -Iexcelsior -Iir -Ibackend -o $@ $(EXC_SRC_X64)
 
 build/skj-exc-arm64: $(EXC_SRC_A64) excelsior/excelsior.h ir/ir.h backend/arm64_mc.h backend/arm64_select.h backend/arm64_mc_text.h | build
-	$(CC) $(CFLAGS) -DCC_LP64 -DCC_PSABI -DCC_ARM64 -Iexcelsior -Iir -o $@ $(EXC_SRC_A64)
+	$(CC) $(CFLAGS) -DSKJ_LP64=1 -DCC_PSABI -DCC_ARM64 -Iexcelsior -Iir -o $@ $(EXC_SRC_A64)
 
 ## skj-exc-jit-arm64: the in-process Excelsior JIT.  The exc front end lowers to
 ## IR, the jit/ library JITs it to AArch64, and the entry verb runs in-process
@@ -3339,7 +3335,7 @@ EXC_JIT_A64 := jit/exc_main.c jit/jit_common.c jit/jit_arena.c jit/jit_arm64.c \
                backend/arm64_select.c backend/regalloc_arm64.c \
                $(EXC_FE_NOMAIN) $(IR_SRC) runtime/libexc.c runtime/utf8.c
 build/skj-exc-jit-arm64: $(EXC_JIT_A64) excelsior/excelsior.h ir/ir.h jit/jit_common.h jit/jit_arena.h jit/emit_arm64.h jit/code.h backend/arm64_mc.h backend/arm64_select.h runtime/libexc.h runtime/utf8.h Makefile build/version.h | build
-	$(A64_CC) $(CFLAGS) -DCC_LP64 -DCC_PSABI -DCC_ARM64 -DEXC_GUEST32 -no-pie -rdynamic \
+	$(A64_CC) $(CFLAGS) -DSKJ_LP64=1 -DCC_PSABI -DCC_ARM64 -DEXC_GUEST32 -no-pie -rdynamic \
 	    -Iexcelsior -Iir -Ijit -Ibackend -Iruntime -o $@ $(EXC_JIT_A64) -ldl
 
 ## Run the Excelsior end-to-end suite in-process through skj-exc-jit-arm64 under
@@ -3395,10 +3391,10 @@ PC_SRC_X64 := $(PC_FE) $(IR_SRC) $(BE_X64_SEL)
 PC_SRC_A64 := $(PC_FE) $(IR_SRC) $(BE_A64_SEL)
 
 build/skj-pc-x86-64: $(PC_SRC_X64) pascal/pascal.h ir/ir.h backend/mc_text.h backend/x86_select.h | build
-	$(CC) $(CFLAGS) -DX86_BITS=64 -DPC_LP64 -Ipascal -Iir -Ibackend -o $@ $(PC_SRC_X64)
+	$(CC) $(CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -Ipascal -Iir -Ibackend -o $@ $(PC_SRC_X64)
 
 build/skj-pc-arm64: $(PC_SRC_A64) pascal/pascal.h ir/ir.h backend/arm64_mc.h backend/arm64_select.h backend/arm64_mc_text.h | build
-	$(CC) $(CFLAGS) -DPC_LP64 -Ipascal -Iir -Ibackend -o $@ $(PC_SRC_A64)
+	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Ipascal -Iir -Ibackend -o $@ $(PC_SRC_A64)
 
 ## Host Pascal runtime (native libc): x86-64 built by the host cc, aarch64 by
 ## the cross cc for running under qemu.
@@ -4765,7 +4761,7 @@ test-mips-selfhost: build/skjcc build/skj-cc-mips build/skj-as-mips build/skj-ld
 I64_TEST_A64_SRC := tests/test_i64.c $(IR_SRC) $(BE_A64)
 
 build/test_i64_arm64: $(I64_TEST_A64_SRC) ir/ir.h | build
-	$(CC) $(CFLAGS) -Iir -o $@ $(I64_TEST_A64_SRC)
+	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Iir -o $@ $(I64_TEST_A64_SRC)
 
 build/arm64/i64_test.s: build/test_i64_arm64 | build/arm64
 	./build/test_i64_arm64 -o $@
@@ -4850,7 +4846,7 @@ test-threaded-rv: build/rv/threaded_test
 ## Threaded-dispatch test on arm64 (IR builder → arm64 asm → qemu-aarch64)
 THREADED_TEST_A64_SRC := tests/test_threaded.c $(IR_SRC) $(BE_A64)
 build/test_threaded_arm64: $(THREADED_TEST_A64_SRC) ir/ir.h | build
-	$(CC) $(CFLAGS) -Iir -o $@ $(THREADED_TEST_A64_SRC)
+	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Iir -o $@ $(THREADED_TEST_A64_SRC)
 build/arm64/threaded_test.s: build/test_threaded_arm64 | build/arm64
 	./build/test_threaded_arm64 -o $@
 build/arm64/threaded_test.o: build/arm64/threaded_test.s
@@ -4917,7 +4913,7 @@ test-ops-rv: build/rv/ops_test
 OPS_TEST_A64_SRC := tests/test_ops.c $(IR_SRC) $(BE_A64)
 
 build/test_ops_arm64: $(OPS_TEST_A64_SRC) ir/ir.h | build
-	$(CC) $(CFLAGS) -Iir -o $@ $(OPS_TEST_A64_SRC)
+	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Iir -o $@ $(OPS_TEST_A64_SRC)
 
 build/arm64/ops_test.s: build/test_ops_arm64 | build/arm64
 	./build/test_ops_arm64 -o $@
@@ -4957,7 +4953,7 @@ test-ops-x86-64: build/x86_64/ops_test
 FPU_TEST_A64_SRC := tests/test_fpu.c $(IR_SRC) $(BE_A64)
 
 build/test_fpu_arm64: $(FPU_TEST_A64_SRC) ir/ir.h | build
-	$(CC) $(CFLAGS) -Iir -o $@ $(FPU_TEST_A64_SRC)
+	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Iir -o $@ $(FPU_TEST_A64_SRC)
 
 build/arm64/fpu_test.s: build/test_fpu_arm64 | build/arm64
 	./build/test_fpu_arm64 -o $@
@@ -5040,7 +5036,7 @@ test-f32-x86-64: build/x86_64/f32_test
 
 F32_TEST_A64_SRC := tests/test_f32.c $(IR_SRC) $(BE_A64)
 build/test_f32_arm64: $(F32_TEST_A64_SRC) ir/ir.h | build
-	$(CC) $(CFLAGS) -Iir -o $@ $(F32_TEST_A64_SRC)
+	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Iir -o $@ $(F32_TEST_A64_SRC)
 build/arm64/f32_test.s: build/test_f32_arm64 | build/arm64
 	./build/test_f32_arm64 -o $@
 build/arm64/f32_test.o: build/arm64/f32_test.s

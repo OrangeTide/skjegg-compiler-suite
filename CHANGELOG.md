@@ -6,6 +6,18 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.21.0
+
+#### Changed
+- The TinC and TinScheme compilers and the in-process C JIT now use a native
+  64-bit pointer model (LP64) on x86-64 and AArch64, retiring the
+  32-bit-on-64-bit guest model on those targets. Every front end is now LP64 on
+  the 64-bit targets, in line with the C and Kobold compilers; RISC-V RV32,
+  ColdFire, and MIPS stay 32-bit (ILP32). The in-process C JIT maps its guest
+  across the full address space. Pointer width is unified on a single axis that
+  derives from the target instruction set, so a tool can no longer be built with
+  a 64-bit code generator yet a 32-bit pointer model.
+
 ### 0.20.0
 
 #### Added

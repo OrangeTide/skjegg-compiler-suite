@@ -143,12 +143,21 @@ mc64_lea_sym(struct mc64 *m, int sf, int Rd, const char *name)
     if (ga) {
         a_movimm(m->c, sf, Rd, (uint64_t)(uintptr_t)ga);
     } else if (kp_is_module_func(m->e->prog, name)) {
-        /* the code base is not known yet: emit a fixed movz/movk pair (a
-           low-memory <4GB address needs only the low two 16-bit lanes) and
-           record a fixup patched once the code is mapped. */
+        /* the code base is not known yet: emit a fixed movz/movk sequence over
+           all four 16-bit lanes (a full 64-bit code address, since the JIT maps
+           code anywhere under LP64) and record a fixup patched once the code is
+           mapped.  sf is 1 here (a code pointer is 64-bit). */
         size_t site = m->c->len;
         a_movz(m->c, sf, Rd, 0, 0);
         a_movk(m->c, sf, Rd, 0, 16);
+        if (sf) {
+            /* a 64-bit code pointer may need the upper two lanes (the JIT maps
+               LP64 code anywhere); a 32-bit pointer (sf == 0, an EXC_GUEST32
+               build) must not, since movk with hw 2 or 3 is illegal for a
+               32-bit register. */
+            a_movk(m->c, sf, Rd, 0, 32);
+            a_movk(m->c, sf, Rd, 0, 48);
+        }
         kp_add_absreloc(m->e, site, name);
     } else {
         /* an external data symbol the host provides (the Excelsior runtime's
@@ -325,36 +334,44 @@ arm64_apply_call_reloc(struct code *c, size_t site, size_t target)
     return a_patch_imm26(c, site, target);
 }
 
-/* An absolute function-code reference is the movz/movk pair mc64_lea_sym emitted:
-   patch the low two 16-bit lanes (a low-memory <4GB address). */
+/* An absolute function-code reference is the movz/movk sequence mc64_lea_sym
+   emitted, one instruction per 16-bit lane.  A 64-bit sequence (sf bit set in
+   the leading movz) has four lanes and carries a full map-anywhere address; a
+   32-bit sequence (an EXC_GUEST32 build) has two lanes and a sub-4GB address.
+   Patch the lanes that are actually there. */
 static void
 arm64_apply_abs_reloc(uint8_t *code, size_t site, uint64_t addr)
 {
-    uint32_t w0, w1;
-    memcpy(&w0, code + site, 4);
-    memcpy(&w1, code + site + 4, 4);
-    w0 = (w0 & ~(0xffffu << 5)) | (((uint32_t)(addr & 0xffff)) << 5);
-    w1 = (w1 & ~(0xffffu << 5)) | (((uint32_t)((addr >> 16) & 0xffff)) << 5);
-    memcpy(code + site, &w0, 4);
-    memcpy(code + site + 4, &w1, 4);
+    uint32_t first;
+    int lanes, i;
+    memcpy(&first, code + site, 4);
+    lanes = (first & 0x80000000u) ? 4 : 2;   /* the movz sf bit */
+    for (i = 0; i < lanes; i++) {
+        uint32_t w;
+        memcpy(&w, code + site + (size_t)i * 4, 4);
+        w = (w & ~(0xffffu << 5)) | (((uint32_t)((addr >> (16 * i)) & 0xffff)) << 5);
+        memcpy(code + site + (size_t)i * 4, &w, 4);
+    }
 }
 
 /* An export stub: materialize the slot address in x16 (the IP0 scratch a callee may
-   clobber), load the target through it, and branch.  The slot is low (<4GB), so a
-   movz/movk pair suffices; x16 is the only register touched, so the guest's argument
-   registers and link register pass through to the real entry untouched. */
+   clobber), load the target through it, and branch.  The slot can live anywhere
+   under LP64, so materialize the full 64-bit address with movz + three movk; x16 is
+   the only register touched, so the guest's argument registers and link register
+   pass through to the real entry untouched. */
 static size_t
 arm64_emit_stub(uint8_t *dst, uintptr_t dst_addr, uintptr_t slot_addr)
 {
-    uint32_t lo = (uint32_t)(slot_addr & 0xffff);
-    uint32_t hi = (uint32_t)((slot_addr >> 16) & 0xffff);
-    uint32_t w[4];
+    uint64_t a = (uint64_t)slot_addr;
+    uint32_t w[6];
 
     (void)dst_addr;
-    w[0] = 0xD2800010u | (lo << 5);   /* movz x16, #lo            */
-    w[1] = 0xF2A00010u | (hi << 5);   /* movk x16, #hi, lsl 16    */
-    w[2] = 0xF9400210u;               /* ldr  x16, [x16]          */
-    w[3] = 0xD61F0200u;               /* br   x16                 */
+    w[0] = 0xD2800010u | (((uint32_t)(a & 0xffff)) << 5);         /* movz x16, #l0          */
+    w[1] = 0xF2A00010u | (((uint32_t)((a >> 16) & 0xffff)) << 5); /* movk x16, #l1, lsl 16  */
+    w[2] = 0xF2C00010u | (((uint32_t)((a >> 32) & 0xffff)) << 5); /* movk x16, #l2, lsl 32  */
+    w[3] = 0xF2E00010u | (((uint32_t)((a >> 48) & 0xffff)) << 5); /* movk x16, #l3, lsl 48  */
+    w[4] = 0xF9400210u;                                           /* ldr  x16, [x16]        */
+    w[5] = 0xD61F0200u;                                           /* br   x16               */
     memcpy(dst, w, sizeof w);
     return sizeof w;
 }

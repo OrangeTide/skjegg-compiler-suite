@@ -140,11 +140,11 @@ Every Kobold value has a fixed machine width. There are no runtime type tags.
 records, large sets) are passed and returned by reference. By-value structured FFI
 is deferred until the language needs it.
 
-A handle and a pointer are 32-bit on every target. On the 64-bit targets (x86-64 and
-AArch64) the toolkit is ILP32-style: a 32-bit handle or address occupies the low half
-of a 64-bit register (a 32-bit write zeroes the upper half), and the runtime keeps all
-guest memory below 4 GB so every address fits. On RV32 and ColdFire the registers are
-natively 32-bit.
+A handle and a pointer follow the target's data model: 32-bit on RV32 and ColdFire
+(ILP32), 64-bit on x86-64 and AArch64 (LP64). On the 64-bit targets a handle or address
+is a full 64-bit value and the JIT and AOT runtimes use the whole address space. A
+module records its width class on the `.target` line (`ilp32`/`lp64`), and the backend
+rejects a module whose width does not match.
 
 ## The value-stack FFI
 

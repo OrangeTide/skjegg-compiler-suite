@@ -20,6 +20,7 @@
 #include "handle.h"
 #include "lowmem.h"
 #include "co.h"
+#include "target.h"
 
 #include <setjmp.h>
 #include <stdint.h>
@@ -176,7 +177,7 @@ kp_gptr kp_arena_addr(struct kp_arena *a, const void *p) { (void)a; return (kp_g
    MAP_32BIT, a 32-bit host is low by construction, and arm64 probes low hints. */
 static void *co_map_low(size_t len)
 {
-#if defined(KP_LP64)
+#if SKJ_LP64
     /* LP64: a coroutine stack address is a full 64-bit guest pointer, so the stack
        can live anywhere; no low-memory constraint (mirrors rt_host.c:rt_map_low). */
     return mmap(NULL, len, PROT_READ | PROT_WRITE,

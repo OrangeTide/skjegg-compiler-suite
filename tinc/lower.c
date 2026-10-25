@@ -2,9 +2,36 @@
  */
 
 #include "tinc.h"
+#include "target.h"
 
 #include <stdlib.h>
 #include <string.h>
+
+/****************************************************************
+ * Address width
+ *
+ * A TinC int or byte value stays 32-bit (or 8-bit) on every target.  Only
+ * ADDRESSES follow the pointer width: an array base, an array view held in a
+ * local, an element address (base + index), and a multi-return buffer pointer
+ * are 4 bytes under ILP32 and 8 under LP64.  These macros pick the pointer-wide
+ * opcode; under ILP32 they expand to the plain ops, so that build is
+ * byte-identical.  A view/pointer local slot is sized by alloc_slot and the
+ * frame rounds every slot up to one 8-byte machine word, so an 8-byte pointer
+ * always fits with no slot-size change.
+ ****************************************************************/
+#if SKJ_LP64
+#define IR_PLDL   IR_LDL64      /* load a pointer (array view) from a slot */
+#define IR_PSTL   IR_STL64      /* store a pointer (array view) to a slot */
+#define IR_PLEA   IR_LEA64      /* address of a global */
+#define IR_PADL   IR_ADL64      /* address of a local slot */
+#define IR_PADD   IR_ADD64      /* address arithmetic (base + offset) */
+#else
+#define IR_PLDL   IR_LDL
+#define IR_PSTL   IR_STL
+#define IR_PLEA   IR_LEA
+#define IR_PADL   IR_ADL
+#define IR_PADD   IR_ADD
+#endif
 
 /****************************************************************
  * Convenience wrappers (thread cur_fn to the IR builder API)
@@ -202,9 +229,9 @@ lower_addr(struct node *n)
         ls = find_lsym(n->name);
         if (ls) {
             if (ls->is_view) {
-                ins = emit(IR_LDL);
+                ins = emit(IR_PLDL);
             } else {
-                ins = emit(IR_ADL);
+                ins = emit(IR_PADL);
             }
             ins->dst = new_temp();
             ins->slot = ls->slot;
@@ -215,7 +242,7 @@ lower_addr(struct node *n)
         gs = find_gsym(n->name);
         if (!gs)
             die("lower:%d: undefined '%s'", n->line, n->name);
-        ins = emit(IR_LEA);
+        ins = emit(IR_PLEA);
         ins->dst = new_temp();
         ins->sym = arena_strdup(lower_arena,n->name);
         a.temp = ins->dst;
@@ -239,7 +266,7 @@ lower_addr(struct node *n)
             ins->b = scl;
             iv.temp = ins->dst;
         }
-        ins = emit(IR_ADD);
+        ins = emit(IR_PADD);
         ins->dst = new_temp();
         ins->a = av.temp;
         ins->b = iv.temp;
@@ -448,7 +475,7 @@ lower_call(struct node *n)
 
         if (need_retbuf) {
             int retbuf_t, i;
-            ins = emit(IR_ADL);
+            ins = emit(IR_PADL);
             ins->dst = new_temp();
             ins->slot = retbuf_local;
             retbuf_t = ins->dst;
@@ -535,7 +562,7 @@ lower_expr(struct node *n)
             s.ret_count = 0;
             add_gsym(s);
         }
-        ins = emit(IR_LEA);
+        ins = emit(IR_PLEA);
         ins->dst = new_temp();
         ins->sym = arena_strdup(lower_arena,namebuf);
         v = mkval(ins->dst, ELEM_BYTE, 1);
@@ -547,9 +574,9 @@ lower_expr(struct node *n)
         if (ls) {
             if (ls->is_array) {
                 if (ls->is_view) {
-                    ins = emit(IR_LDL);
+                    ins = emit(IR_PLDL);
                 } else {
-                    ins = emit(IR_ADL);
+                    ins = emit(IR_PADL);
                 }
                 ins->dst = new_temp();
                 ins->slot = ls->slot;
@@ -571,7 +598,7 @@ lower_expr(struct node *n)
             return mkval(ins->dst, ELEM_INT, 0);
         }
         if (gs->is_array) {
-            ins = emit(IR_LEA);
+            ins = emit(IR_PLEA);
             ins->dst = new_temp();
             ins->sym = arena_strdup(lower_arena,n->name);
             v = mkval(ins->dst, gs->elem, 1);
@@ -579,7 +606,7 @@ lower_expr(struct node *n)
         }
         {
             int addr;
-            ins = emit(IR_LEA);
+            ins = emit(IR_PLEA);
             ins->dst = new_temp();
             ins->sym = arena_strdup(lower_arena,n->name);
             addr = ins->dst;
@@ -824,12 +851,12 @@ lower_local_decl(struct node *n)
         }
         ls.is_view = 1;
         lsyms[nlsyms - 1].is_view = 1;
-        ins = emit(IR_LEA);
+        ins = emit(IR_PLEA);
         ins->dst = new_temp();
         ins->sym = arena_strdup(lower_arena,namebuf);
         {
             int addr_t = ins->dst;
-            ins = emit(IR_STL);
+            ins = emit(IR_PSTL);
             ins->a = addr_t;
             ins->slot = ls.slot;
         }
@@ -840,7 +867,7 @@ lower_local_decl(struct node *n)
         struct node *e;
         int base_t, i;
 
-        ins = emit(IR_ADL);
+        ins = emit(IR_PADL);
         ins->dst = new_temp();
         ins->slot = ls.slot;
         base_t = ins->dst;
@@ -850,7 +877,7 @@ lower_local_decl(struct node *n)
             int off = i * n->elem;
             if (off > 0) {
                 int off_t = lower_const(off);
-                ins = emit(IR_ADD);
+                ins = emit(IR_PADD);
                 ins->dst = new_temp();
                 ins->a = base_t;
                 ins->b = off_t;
@@ -892,7 +919,7 @@ lower_foreach(struct node *n)
     if (arr_ls && arr_ls->is_array) {
         arr_len = arr_ls->arr_size;
         arr_elem = arr_ls->elem;
-        arr_base_op = arr_ls->is_view ? IR_LDL : IR_ADL;
+        arr_base_op = arr_ls->is_view ? IR_PLDL : IR_PADL;
         arr_slot_or_sym = arr_ls->slot;
     } else {
         arr_gs = find_gsym(n->a->name);
@@ -965,13 +992,13 @@ lower_foreach(struct node *n)
         ins->dst = new_temp();
         ins->slot = arr_slot_or_sym;
     } else {
-        ins = emit(IR_LEA);
+        ins = emit(IR_PLEA);
         ins->dst = new_temp();
         ins->sym = arena_strdup(lower_arena,arr_sym);
     }
     {
         int base_t = ins->dst;
-        ins = emit(IR_ADD);
+        ins = emit(IR_PADD);
         ins->dst = new_temp();
         ins->a = base_t;
         ins->b = idx_t;
@@ -1116,7 +1143,7 @@ lower_stmt(struct node *n)
             struct node *rv;
             int buf_t, off;
 
-            ins = emit(IR_LDL);
+            ins = emit(IR_PLDL);
             ins->dst = new_temp();
             ins->slot = ret_buf_slot;
             buf_t = ins->dst;
@@ -1127,7 +1154,7 @@ lower_stmt(struct node *n)
                 v = lower_expr(rv);
                 if (off > 0) {
                     int off_t = lower_const(off);
-                    ins = emit(IR_ADD);
+                    ins = emit(IR_PADD);
                     ins->dst = new_temp();
                     ins->a = buf_t;
                     ins->b = off_t;
@@ -1176,12 +1203,12 @@ lower_stmt(struct node *n)
         ins->b = four_t;
         off_t = ins->dst;
 
-        ins = emit(IR_LDL);
+        ins = emit(IR_PLDL);
         ins->dst = new_temp();
         ins->slot = ret_buf_slot;
         buf_t = ins->dst;
 
-        ins = emit(IR_ADD);
+        ins = emit(IR_PADD);
         ins->dst = new_temp();
         ins->a = buf_t;
         ins->b = off_t;
@@ -1214,7 +1241,7 @@ lower_stmt(struct node *n)
 
         (void)lower_call(n->b);
 
-        ins = emit(IR_ADL);
+        ins = emit(IR_PADL);
         ins->dst = new_temp();
         ins->slot = last_retbuf_slot;
         buf_t = ins->dst;
@@ -1231,7 +1258,7 @@ lower_stmt(struct node *n)
 
                 if (off > 0) {
                     int off_t = lower_const(off);
-                    ins = emit(IR_ADD);
+                    ins = emit(IR_PADD);
                     ins->dst = new_temp();
                     ins->a = buf_t;
                     ins->b = off_t;

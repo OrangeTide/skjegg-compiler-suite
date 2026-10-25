@@ -18,10 +18,44 @@
  */
 
 #include "scheme.h"
+#include "target.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/****************************************************************
+ * Value-word width
+ *
+ * A TinScheme value is a tagged machine word: 4 bytes under ILP32, 8 under
+ * LP64.  Heap objects (pairs, closures) are real machine pointers, so under
+ * LP64 every value load/store, every value address, the heap object layout,
+ * and the global value cells widen to 64 bits.  The small-integer (fixnum)
+ * and boolean tag arithmetic stays 32-bit: the runtime keeps every live
+ * address below 4GB, so a value word's upper half is always zero and a 32-bit
+ * op (which zero-extends its result into the full register on both x86-64 and
+ * arm64) preserves it.  With VWORD 4 the macros below expand to the exact
+ * ILP32 opcodes, so that build is byte-identical.
+ ****************************************************************/
+#if SKJ_LP64
+#define VWORD     8
+#define IR_VLD    IR_LD64       /* load a value word from [addr] */
+#define IR_VST    IR_ST64       /* store a value word to [addr] */
+#define IR_VLDL   IR_LDL64      /* load a value word from a local slot */
+#define IR_VSTL   IR_STL64      /* store a value word to a local slot */
+#define IR_VLEA   IR_LEA64      /* address of a global value */
+#define IR_VADD   IR_ADD64      /* add an offset to a pointer value */
+#define IR_VBASE  IR_I64        /* global base type for a value word */
+#else
+#define VWORD     4
+#define IR_VLD    IR_LW
+#define IR_VST    IR_SW
+#define IR_VLDL   IR_LDL
+#define IR_VSTL   IR_STL
+#define IR_VLEA   IR_LEA
+#define IR_VADD   IR_ADD
+#define IR_VBASE  IR_I32
+#endif
 
 /****************************************************************
  * IR builder shortcuts
@@ -198,7 +232,7 @@ add_lsym(const char *name)
             die("oom");
     }
     lsyms[nlsyms].name = arena_strdup(lower_arena, name);
-    lsyms[nlsyms].slot = alloc_slot(4);
+    lsyms[nlsyms].slot = alloc_slot(VWORD);
     nlsyms++;
 }
 
@@ -537,7 +571,7 @@ lower_call(val_t form, int tail)
         if (ls) {
             int tf, t_fn, total;
 
-            ins = emit(IR_LDL);
+            ins = emit(IR_VLDL);
             ins->dst = new_temp();
             ins->slot = ls->slot;
             tf = ins->dst;
@@ -623,11 +657,11 @@ lower_call(val_t form, int tail)
         if (gs && gs->kind == GSYM_VAR) {
             int taddr, tf, t_fn, total;
 
-            ins = emit(IR_LEA);
+            ins = emit(IR_VLEA);
             ins->dst = new_temp();
             ins->sym = arena_strdup(lower_arena, name);
             taddr = ins->dst;
-            ins = emit(IR_LW);
+            ins = emit(IR_VLD);
             ins->dst = new_temp();
             ins->a = taddr;
             tf = ins->dst;
@@ -704,7 +738,7 @@ lower_reset(val_t args)
     body_expr = gc_car(args);
     handler_expr = gc_car(gc_cdr(args));
 
-    slot = alloc_slot(16);
+    slot = alloc_slot(4 * VWORD);   /* mark: fp, sp, re-entry PC, arena */
     lelse = new_label();
     lend = new_label();
     tresult = new_temp();
@@ -837,11 +871,12 @@ find_free(val_t expr, val_t params, char **fv, int *nfv, int max_fv)
 /****************************************************************
  * Closure helpers
  *
- * Closure layout (bump-allocated from __heap):
- *   offset 0: type byte (OBJ_CLOSURE = 3)
- *   offset 4: function pointer
- *   offset 8: free[0]
- *   offset 12: free[1]
+ * Closure layout (bump-allocated from __heap), fields one value word (VWORD)
+ * wide:
+ *   offset 0:         type byte (OBJ_CLOSURE = 3)
+ *   offset VWORD:     function pointer
+ *   offset 2*VWORD:   free[0]
+ *   offset 3*VWORD:   free[1]
  *   ...
  ****************************************************************/
 
@@ -850,15 +885,15 @@ emit_closure(int fn_temp, int *free_vals, int nfree)
 {
     struct ir_insn *ins;
     int t_ptr_addr, t_ptr, t_off, t_addr, t_new;
-    int size = 8 + 4 * nfree;
+    int size = 2 * VWORD + VWORD * nfree;
     int i;
 
-    ins = emit(IR_LEA);
+    ins = emit(IR_VLEA);
     ins->dst = new_temp();
     ins->sym = arena_strdup(lower_arena, "__heap_ptr");
     t_ptr_addr = ins->dst;
 
-    ins = emit(IR_LW);
+    ins = emit(IR_VLD);
     ins->dst = new_temp();
     ins->a = t_ptr_addr;
     t_ptr = ins->dst;
@@ -870,35 +905,35 @@ emit_closure(int fn_temp, int *free_vals, int nfree)
         ins->b = tag;
     }
 
-    t_off = lower_const(4);
-    ins = emit(IR_ADD);
+    t_off = lower_const(VWORD);
+    ins = emit(IR_VADD);
     ins->dst = new_temp();
     ins->a = t_ptr;
     ins->b = t_off;
     t_addr = ins->dst;
-    ins = emit(IR_SW);
+    ins = emit(IR_VST);
     ins->a = t_addr;
     ins->b = fn_temp;
 
     for (i = 0; i < nfree; i++) {
-        t_off = lower_const(8 + 4 * i);
-        ins = emit(IR_ADD);
+        t_off = lower_const(2 * VWORD + VWORD * i);
+        ins = emit(IR_VADD);
         ins->dst = new_temp();
         ins->a = t_ptr;
         ins->b = t_off;
         t_addr = ins->dst;
-        ins = emit(IR_SW);
+        ins = emit(IR_VST);
         ins->a = t_addr;
         ins->b = free_vals[i];
     }
 
     t_off = lower_const(size);
-    ins = emit(IR_ADD);
+    ins = emit(IR_VADD);
     ins->dst = new_temp();
     ins->a = t_ptr;
     ins->b = t_off;
     t_new = ins->dst;
-    ins = emit(IR_SW);
+    ins = emit(IR_VST);
     ins->a = t_ptr_addr;
     ins->b = t_new;
 
@@ -911,13 +946,13 @@ closure_fn(int t_closure)
     struct ir_insn *ins;
     int t_off, t_addr;
 
-    t_off = lower_const(4);
-    ins = emit(IR_ADD);
+    t_off = lower_const(VWORD);
+    ins = emit(IR_VADD);
     ins->dst = new_temp();
     ins->a = t_closure;
     ins->b = t_off;
     t_addr = ins->dst;
-    ins = emit(IR_LW);
+    ins = emit(IR_VLD);
     ins->dst = new_temp();
     ins->a = t_addr;
     return ins->dst;
@@ -959,13 +994,13 @@ lower_lambda(val_t args)
 
         if (!ls)
             die("lower: free var '%s' not found", fv[i]);
-        ins = emit(IR_LDL);
+        ins = emit(IR_VLDL);
         ins->dst = new_temp();
         ins->slot = ls->slot;
         fv_temps[i] = ins->dst;
     }
 
-    ins = emit(IR_LEA);
+    ins = emit(IR_VLEA);
     ins->dst = new_temp();
     ins->sym = arena_strdup(lower_arena, l->name);
     t_fn = ins->dst;
@@ -976,12 +1011,12 @@ lower_lambda(val_t args)
 /****************************************************************
  * Pair and list operations
  *
- * Pairs are bump-allocated from __heap (BSS).  Layout matches
- * gc_pair on a 32-bit target:
- *   offset 0: type byte (0 = pair, zero-init from BSS)
- *   offset 8: car
- *   offset 12: cdr
- *   16 bytes per pair
+ * Pairs are bump-allocated from __heap (BSS).  The car/cdr are value words
+ * (VWORD) past a fixed 8-byte header:
+ *   offset 0:       type byte (0 = pair, zero-init from BSS)
+ *   offset 8:       car
+ *   offset 8+VWORD: cdr
+ *   8 + 2*VWORD bytes per pair
  ****************************************************************/
 
 static int
@@ -990,43 +1025,43 @@ emit_cons(int ta, int tb)
     struct ir_insn *ins;
     int t_ptr_addr, t_ptr, t_off, t_addr, t_new;
 
-    ins = emit(IR_LEA);
+    ins = emit(IR_VLEA);
     ins->dst = new_temp();
     ins->sym = arena_strdup(lower_arena, "__heap_ptr");
     t_ptr_addr = ins->dst;
 
-    ins = emit(IR_LW);
+    ins = emit(IR_VLD);
     ins->dst = new_temp();
     ins->a = t_ptr_addr;
     t_ptr = ins->dst;
 
     t_off = lower_const(8);
-    ins = emit(IR_ADD);
+    ins = emit(IR_VADD);
     ins->dst = new_temp();
     ins->a = t_ptr;
     ins->b = t_off;
     t_addr = ins->dst;
-    ins = emit(IR_SW);
+    ins = emit(IR_VST);
     ins->a = t_addr;
     ins->b = ta;
 
-    t_off = lower_const(12);
-    ins = emit(IR_ADD);
+    t_off = lower_const(8 + VWORD);
+    ins = emit(IR_VADD);
     ins->dst = new_temp();
     ins->a = t_ptr;
     ins->b = t_off;
     t_addr = ins->dst;
-    ins = emit(IR_SW);
+    ins = emit(IR_VST);
     ins->a = t_addr;
     ins->b = tb;
 
-    t_off = lower_const(16);
-    ins = emit(IR_ADD);
+    t_off = lower_const(8 + 2 * VWORD);
+    ins = emit(IR_VADD);
     ins->dst = new_temp();
     ins->a = t_ptr;
     ins->b = t_off;
     t_new = ins->dst;
-    ins = emit(IR_SW);
+    ins = emit(IR_VST);
     ins->a = t_ptr_addr;
     ins->b = t_new;
 
@@ -1051,12 +1086,12 @@ lower_car(val_t args)
 
     ta = lower_expr(gc_car(args), 0);
     t_off = lower_const(8);
-    ins = emit(IR_ADD);
+    ins = emit(IR_VADD);
     ins->dst = new_temp();
     ins->a = ta;
     ins->b = t_off;
     t_addr = ins->dst;
-    ins = emit(IR_LW);
+    ins = emit(IR_VLD);
     ins->dst = new_temp();
     ins->a = t_addr;
     return ins->dst;
@@ -1069,13 +1104,13 @@ lower_cdr(val_t args)
     int ta, t_off, t_addr;
 
     ta = lower_expr(gc_car(args), 0);
-    t_off = lower_const(12);
-    ins = emit(IR_ADD);
+    t_off = lower_const(8 + VWORD);
+    ins = emit(IR_VADD);
     ins->dst = new_temp();
     ins->a = ta;
     ins->b = t_off;
     t_addr = ins->dst;
-    ins = emit(IR_LW);
+    ins = emit(IR_VLD);
     ins->dst = new_temp();
     ins->a = t_addr;
     return ins->dst;
@@ -1152,12 +1187,12 @@ lower_set_car(val_t args)
     ta = lower_expr(gc_car(args), 0);
     tb = lower_expr(gc_car(gc_cdr(args)), 0);
     t_off = lower_const(8);
-    ins = emit(IR_ADD);
+    ins = emit(IR_VADD);
     ins->dst = new_temp();
     ins->a = ta;
     ins->b = t_off;
     t_addr = ins->dst;
-    ins = emit(IR_SW);
+    ins = emit(IR_VST);
     ins->a = t_addr;
     ins->b = tb;
     return lower_const(0);
@@ -1171,13 +1206,13 @@ lower_set_cdr(val_t args)
 
     ta = lower_expr(gc_car(args), 0);
     tb = lower_expr(gc_car(gc_cdr(args)), 0);
-    t_off = lower_const(12);
-    ins = emit(IR_ADD);
+    t_off = lower_const(8 + VWORD);
+    ins = emit(IR_VADD);
     ins->dst = new_temp();
     ins->a = ta;
     ins->b = t_off;
     t_addr = ins->dst;
-    ins = emit(IR_SW);
+    ins = emit(IR_VST);
     ins->a = t_addr;
     ins->b = tb;
     return lower_const(0);
@@ -1231,7 +1266,7 @@ lower_expr(val_t expr, int tail)
         struct gsym *gs;
 
         if (ls) {
-            ins = emit(IR_LDL);
+            ins = emit(IR_VLDL);
             ins->dst = new_temp();
             ins->slot = ls->slot;
             return ins->dst;
@@ -1249,20 +1284,20 @@ lower_expr(val_t expr, int tail)
              * a loop, leaks the closure heap turn by turn). */
             gs->needs_closure = 1;
             snprintf(cname, sizeof(cname), "__closure_%s", name);
-            ins = emit(IR_LEA);
+            ins = emit(IR_VLEA);
             ins->dst = new_temp();
             ins->sym = arena_strdup(lower_arena, cname);
             return ins->dst;
         }
-        /* Global variable: LEA + LW */
+        /* Global variable: LEA + LD */
         {
             int taddr;
 
-            ins = emit(IR_LEA);
+            ins = emit(IR_VLEA);
             ins->dst = new_temp();
             ins->sym = arena_strdup(lower_arena, name);
             taddr = ins->dst;
-            ins = emit(IR_LW);
+            ins = emit(IR_VLD);
             ins->dst = new_temp();
             ins->a = taddr;
             return ins->dst;
@@ -1391,7 +1426,7 @@ lower_function(const char *name, val_t params, val_t body,
     if (nfree > 0) {
         int t_env;
 
-        ins = emit(IR_LDL);
+        ins = emit(IR_VLDL);
         ins->dst = new_temp();
         ins->slot = 0;
         t_env = ins->dst;
@@ -1399,17 +1434,17 @@ lower_function(const char *name, val_t params, val_t body,
             struct lsym *ls = find_lsym(free_vars[i]);
             int t_off, t_addr, t_val;
 
-            t_off = lower_const(8 + 4 * i);
-            ins = emit(IR_ADD);
+            t_off = lower_const(2 * VWORD + VWORD * i);
+            ins = emit(IR_VADD);
             ins->dst = new_temp();
             ins->a = t_env;
             ins->b = t_off;
             t_addr = ins->dst;
-            ins = emit(IR_LW);
+            ins = emit(IR_VLD);
             ins->dst = new_temp();
             ins->a = t_addr;
             t_val = ins->dst;
-            ins = emit(IR_STL);
+            ins = emit(IR_VSTL);
             ins->a = t_val;
             ins->slot = ls->slot;
         }
@@ -1520,7 +1555,7 @@ scm_lower(struct arena *a, struct gc_heap *h, val_t program)
 
             g = arena_zalloc(lower_arena, sizeof(*g));
             g->name = arena_strdup(lower_arena, sym_name(name));
-            g->base_type = IR_I32;
+            g->base_type = IR_VBASE;
             g->next = prog->globals;
             prog->globals = g;
         }
@@ -1539,7 +1574,7 @@ scm_lower(struct arena *a, struct gc_heap *h, val_t program)
 
         g = arena_zalloc(lower_arena, sizeof(*g));
         g->name = arena_strdup(lower_arena, "__heap_ptr");
-        g->base_type = IR_I32;
+        g->base_type = IR_VBASE;
         g->next = prog->globals;
         prog->globals = g;
     }
@@ -1584,15 +1619,15 @@ scm_lower(struct arena *a, struct gc_heap *h, val_t program)
         {
             int t_heap, t_addr;
 
-            ins = emit(IR_LEA);
+            ins = emit(IR_VLEA);
             ins->dst = new_temp();
             ins->sym = arena_strdup(lower_arena, "__heap");
             t_heap = ins->dst;
-            ins = emit(IR_LEA);
+            ins = emit(IR_VLEA);
             ins->dst = new_temp();
             ins->sym = arena_strdup(lower_arena, "__heap_ptr");
             t_addr = ins->dst;
-            ins = emit(IR_SW);
+            ins = emit(IR_VST);
             ins->a = t_addr;
             ins->b = t_heap;
         }
@@ -1611,11 +1646,11 @@ scm_lower(struct arena *a, struct gc_heap *h, val_t program)
                 int tval, taddr;
 
                 tval = lower_expr(init, 0);
-                ins = emit(IR_LEA);
+                ins = emit(IR_VLEA);
                 ins->dst = new_temp();
                 ins->sym = arena_strdup(lower_arena, sym_name(name));
                 taddr = ins->dst;
-                ins = emit(IR_SW);
+                ins = emit(IR_VST);
                 ins->a = taddr;
                 ins->b = tval;
             } else {
@@ -1660,8 +1695,8 @@ scm_lower(struct arena *a, struct gc_heap *h, val_t program)
         }
 
     /* One static closure per global function referenced as a value:
-     * an 8-byte { type byte 3, pad, code pointer } image (matching
-     * emit_closure's layout), so a bare function reference is a constant
+     * a { type byte 3, pad, code pointer } image (matching emit_closure's
+     * layout, 2*VWORD bytes), so a bare function reference is a constant
      * address rather than a fresh __heap allocation. */
     {
         int gi;
@@ -1680,8 +1715,8 @@ scm_lower(struct arena *a, struct gc_heap *h, val_t program)
             tag->ival = 3;                  /* OBJ_CLOSURE */
 
             fnp = arena_zalloc(lower_arena, sizeof(*fnp));
-            fnp->offset = 4;
-            fnp->size = 4;
+            fnp->offset = VWORD;
+            fnp->size = VWORD;
             fnp->sym = arena_strdup(lower_arena, gsyms[gi].name);
             tag->next = fnp;
 
@@ -1689,8 +1724,8 @@ scm_lower(struct arena *a, struct gc_heap *h, val_t program)
             g = arena_zalloc(lower_arena, sizeof(*g));
             g->name = arena_strdup(lower_arena, cname);
             g->base_type = IR_I8;
-            g->arr_size = 8;
-            g->align = 4;
+            g->arr_size = 2 * VWORD;
+            g->align = VWORD;
             g->is_local = 1;
             g->inits = tag;
             g->next = prog->globals;

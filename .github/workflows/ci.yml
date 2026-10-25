@@ -90,12 +90,14 @@ jobs:
       - name: Emulator sanitizer pass
         run: make check-emu-san
 
-      # The core ColdFire toolchain (skj-cpp/cc/as/ld) rebuilt with ASan+UBSan
-      # and re-run over the cpp, cc, and Excelsior corpora, so the code
-      # generators and assembler/linker get the same sanitizer coverage the
-      # emulator already has.
-      - name: Toolchain sanitizer slice
-        run: make check-san-tools QEMU="qemu-m68k"
+      # The whole sanitizer suite rebuilt with ASan+UBSan: the ColdFire
+      # toolchain (skj-cpp/cc/as/ld) over the cpp, cc, and Excelsior corpora,
+      # the RV assembler/linker, the x86-64 C and Kobold JIT drivers over their
+      # corpora, and the reader, assembler, and front-end fuzzers, so the code
+      # generators, assembler/linker, and JIT get the same sanitizer coverage
+      # the emulator already has.
+      - name: Sanitizer suite (ASan+UBSan)
+        run: make check-san
 
   # The deep-recovery fpc path: re-mint the Kobold stage0 seed from source with
   # Free Pascal alone, no skjegg tool and no committed seed, and assert it

@@ -1,6 +1,7 @@
 /* kpm.c : reader for the KPM1 text module format */
 
 #include "kpm.h"
+#include "target.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -13,15 +14,9 @@
    `.target` header (ilp32 for rv32/cf/mips, lp64 for x86-64/arm64); the reader
    rejects a module of the other class rather than silently truncating a 64-bit
    handle to 32 bits (or sign-confusing a 32-bit one).  This tool's own class is
-   fixed at compile time by the backend-width defines: KP_LP64 (the JIT and the
-   arm64 AOT) or X86_BITS == 64 (the x86-64 AOT, whose selector is unconditionally
-   64-bit, so it carries no KP_LP64).  The 32-bit backends (rv32 via KP_AOT_RV,
-   ColdFire, MIPS) define neither. */
-#if defined(KP_LP64) || (defined(X86_BITS) && X86_BITS == 64)
-#define KPM_NATIVE_TARGET "lp64"
-#else
-#define KPM_NATIVE_TARGET "ilp32"
-#endif
+   the shared width axis (target.h): SKJ_LP64 is set for the JIT and the x86-64 /
+   arm64 AOT, unset for the 32-bit backends (rv32, ColdFire, MIPS). */
+#define KPM_NATIVE_TARGET SKJ_KPM_TARGET
 
 /****************************************************************
  * Opcode names

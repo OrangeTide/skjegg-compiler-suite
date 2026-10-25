@@ -23,6 +23,7 @@
  */
 
 #include "ir.h"
+#include "target.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -726,14 +727,23 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
 
     case IR_ALLOCA: {
         const char *sa = rs(out, fn, i->a, 0);
+#if SKJ_LP64
+        const char *sd = rdq(fn, i->dst, 0);
+#else
         const char *sd = rd(fn, i->dst, 0);
+#endif
         if (strcmp(sa, "eax") != 0)
             fprintf(out, "\tmov eax, %s\n", sa);
         fprintf(out, "\tadd eax, 15\n");     /* keep rsp 16-aligned */
         fprintf(out, "\tand eax, -16\n");
         fprintf(out, "\tsub rsp, rax\n");
+#if SKJ_LP64
+        fprintf(out, "\tmov %s, rsp\n", sd);  /* a full 64-bit stack address */
+        wdq(out, fn, i->dst, sd);
+#else
         fprintf(out, "\tmov %s, esp\n", sd);  /* esp is the low-32 stack view */
         wd(out, fn, i->dst, sd);
+#endif
         break;
     }
 
@@ -1003,9 +1013,60 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     }
 
     /* ---- Delimited continuations ----
-     * The mark metadata (fp, sp, re-entry PC) is stored as 32-bit words: on
-     * x86-64 (ILP32) these are low-memory addresses, and ebp/esp are the
-     * 32-bit views of the frame/stack pointers in both modes. */
+     * The mark metadata is fp, sp, re-entry PC, and the arena high-water mark.
+     * Under ILP32 these are four 32-bit low-memory words; under LP64 they are
+     * four 64-bit words (the re-entry PC stays a low code address, so its store
+     * immediate is still 32-bit-representable).  The captured/resumed value
+     * follows the front-end value width (continuations are a scheme feature, so
+     * that width is 64-bit under LP64). */
+#if SKJ_LP64
+    case IR_MARK: {
+        const char *sd = rdq(fn, i->dst, 0);
+        int off = slot_offset(fn, i->slot);
+
+        fprintf(out, "\tmov [" BP "%+d], rbp\n", off);
+        fprintf(out, "\tmov [" BP "%+d], rsp\n", off + 8);
+        fprintf(out, "\tmov qword [" BP "%+d], .Lmark%d_%d\n",
+            off + 16, label_prefix, i->label);
+        fprintf(out, "\tlea rax, [" BP "%+d]\n", off);
+        fprintf(out, "\tmov [__cont_mark_sp], rax\n");
+        /* stash the continuation-arena high-water mark (first entry only,
+         * before the re-entry label) for IR_CONT_UNWIND to restore */
+        fprintf(out, "\tmov rax, [__cont_arena_ptr]\n");
+        fprintf(out, "\tmov [" BP "%+d], rax\n", off + 24);
+        fprintf(out, "\txor eax, eax\n");
+        fprintf(out, ".Lmark%d_%d:\n", label_prefix, i->label);
+        if (strcmp(sd, "rax") != 0)
+            fprintf(out, "\tmov %s, rax\n", sd);
+        wdq(out, fn, i->dst, sd);
+        break;
+    }
+
+    case IR_CAPTURE: {
+        const char *sd = rdq(fn, i->dst, 0);
+        int k;
+
+        /* push the callee-saved allocatables into the captured segment */
+        for (k = 0; k < NSAVED; k++)
+            fprintf(out, "\tpush %s\n", saved_regs[k]);
+        fprintf(out, "\tcall __cont_capture\n");
+        for (k = NSAVED - 1; k >= 0; k--)
+            fprintf(out, "\tpop %s\n", saved_regs[k]);
+        if (strcmp(sd, "rax") != 0)
+            fprintf(out, "\tmov %s, rax\n", sd);
+        wdq(out, fn, i->dst, sd);
+        break;
+    }
+
+    case IR_CONT_UNWIND: {
+        /* restore the continuation arena to the mark-time high-water mark,
+         * reclaiming every buffer captured within the closing reset extent */
+        int off = slot_offset(fn, i->slot);
+        fprintf(out, "\tmov rax, [" BP "%+d]\n", off + 24);
+        fprintf(out, "\tmov [__cont_arena_ptr], rax\n");
+        break;
+    }
+#else
     case IR_MARK: {
         const char *sd = rd(fn, i->dst, 0);
         int off = slot_offset(fn, i->slot);
@@ -1052,6 +1113,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         fprintf(out, "\tmov [__cont_arena_ptr], eax\n");
         break;
     }
+#endif
 
     case IR_RESUME: {
         const char *sa = rsq(out, fn, i->a, 0);

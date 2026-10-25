@@ -2,6 +2,7 @@
 
 #include "pascal.h"
 #include "arena.h"
+#include "target.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -43,22 +44,17 @@ new_label(void)
 /****************************************************************
  * Target pointer width
  *
- * PC_LP64 is defined by the x86-64 and aarch64 builds, where a pointer is a
- * full 64-bit value and differs in width from an int.  There the front end
- * emits the IR's 64-bit address opcodes (IR_LEA64, IR_ADL64, IR_LDL64,
- * IR_ADD64, IR_ARG64), keeps pointer-carrying slots 8 bytes, and loads a
- * pointee scalar with the ordinary 32-bit IR_LW / IR_SW.  The ILP32 targets
- * (ColdFire) leave PC_LP64 undefined and keep the 32-bit address opcodes, so a
- * single IR_ADD / IR_LEA serves both a value and an address.
+ * The shared SKJ_LP64 width axis (target.h) is set for the x86-64 and aarch64
+ * builds, where a pointer is a full 64-bit value and differs in width from an
+ * int.  There the front end emits the IR's 64-bit address opcodes (IR_LEA64,
+ * IR_ADL64, IR_LDL64, IR_ADD64, IR_ARG64), keeps pointer-carrying slots 8 bytes,
+ * and loads a pointee scalar with the ordinary 32-bit IR_LW / IR_SW.  The ILP32
+ * targets (ColdFire) leave SKJ_LP64 unset and keep the 32-bit address opcodes,
+ * so a single IR_ADD / IR_LEA serves both a value and an address.
  ****************************************************************/
 
-#ifdef PC_LP64
-#define PC_LP64_ON   1
-#define PC_PTR_BYTES 8
-#else
-#define PC_LP64_ON   0
-#define PC_PTR_BYTES 4
-#endif
+#define PC_LP64_ON   SKJ_LP64
+#define PC_PTR_BYTES SKJ_PTR_BYTES
 
 /* A heap string value is a pointer to a {refcount, kind, len, cap} descriptor
    (four 32-bit words, 16 bytes) with the bytes following it; NULL is the empty

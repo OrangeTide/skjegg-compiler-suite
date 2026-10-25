@@ -74,7 +74,7 @@ main(int argc, char **argv)
 #elif defined(X86_BITS) && X86_BITS == 64
     cpp_define(pp, "__skj_x86_64__", "1");
 #endif
-#if defined(CC_LP64)
+#if SKJ_LP64
     cpp_define(pp, "__skj_lp64__", "1");
 #else
     cpp_define(pp, "__skj_ilp32__", "1");

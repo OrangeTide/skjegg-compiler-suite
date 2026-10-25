@@ -4,23 +4,19 @@
 #define CC_H
 
 #include "ir.h"
+#include "target.h"
 #include <stdio.h>
 
 /****************************************************************
  * Target data model
  *
- * LP64 (8-byte long and pointers) is selected at compile time for the 64-bit
- * targets by defining CC_LP64; the 32-bit targets stay ILP32 (4-byte long and
- * pointers).  See doc/internals/lp64.md.
+ * LP64 (8-byte long and pointers) is selected for the 64-bit targets by the
+ * shared SKJ_LP64 width axis (target.h); the 32-bit targets stay ILP32 (4-byte
+ * long and pointers).  See doc/internals/lp64.md.
  ****************************************************************/
 
-#ifdef CC_LP64
-#define CC_PTR_SIZE  8
-#define CC_LONG_SIZE 8
-#else
-#define CC_PTR_SIZE  4
-#define CC_LONG_SIZE 4
-#endif
+#define CC_PTR_SIZE  SKJ_PTR_BYTES
+#define CC_LONG_SIZE SKJ_LONG_BYTES
 
 /****************************************************************
  * Tokens

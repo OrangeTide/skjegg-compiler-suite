@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "jit_arena.h"
+#include "target.h"
 
 #include <stdint.h>
 #include <sys/mman.h>
@@ -29,9 +30,13 @@
 void *
 kp_map_low(size_t len)
 {
-#if defined(KP_LP64)
-    /* LP64: guest addresses are full 64-bit host pointers, so the region can live
-       anywhere; no low-memory constraint. */
+#if defined(KP_LP64) || (SKJ_LP64 && defined(__x86_64__))
+    /* LP64 with a backend proven for high addresses (the kobold JIT on any arch,
+       and the x86-64 C JIT): guest addresses are full 64-bit host pointers, so
+       the region can live anywhere, with no low-memory constraint.  The arm64 C
+       JIT is LP64 too but its varargs register-save-area addressing is not yet
+       audited for high addresses, so it keeps the low arena below (not the 32-on
+       -64 model being retired, just a bounded address range), pending that fix. */
     return mmap(NULL, len, PROT_READ | PROT_WRITE,
                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 #elif UINTPTR_MAX <= 0xffffffffULL

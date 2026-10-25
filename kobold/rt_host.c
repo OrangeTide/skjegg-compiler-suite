@@ -52,7 +52,7 @@ static void rt_oom(const char *what)
    keep this runtime independent of the JIT library. */
 static void *rt_map_low(size_t len)
 {
-#if defined(KP_LP64)
+#if SKJ_LP64
     /* LP64: guest addresses are full 64-bit host pointers, so the heap can live
        anywhere; no low-memory constraint. */
     return mmap(NULL, len, PROT_READ | PROT_WRITE,

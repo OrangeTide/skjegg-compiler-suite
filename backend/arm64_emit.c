@@ -31,6 +31,14 @@
  */
 
 #include "ir.h"
+#include "target.h"
+
+/* The AArch64 stack-ABI backend is LP64 only (tinc/scheme/pascal carry no ISA
+   macro target.h can key on, so the width check lives here). A build that omits
+   -DSKJ_LP64 would otherwise emit 32-bit addresses on a 64-bit ISA. */
+#if !SKJ_LP64
+#error "backend/arm64_emit.c is the AArch64 (LP64) backend; build it with -DSKJ_LP64=1"
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -1086,10 +1094,77 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     }
 
     /* ---- Delimited continuations (copy-the-stack-segment model) ----
-     * Metadata (mark slot, buffer header) is stored as 32-bit words: fp, sp
-     * and the re-entry PC are all low-memory (< 4GB) addresses under the
-     * ILP32 model, reloaded zero-extended in the runtime. See start_arm64.S. */
+     * Metadata (mark slot, buffer header) is fp, sp, the re-entry PC and the
+     * arena high-water mark.  Under ILP32 these are four 32-bit low-memory
+     * words; under LP64 they are four 64-bit words (the stack is still low, so
+     * the values fit in 32 bits, but each slot is a full pointer).  The
+     * captured/resumed value follows the front-end value width (continuations
+     * are a scheme feature, so that width is 64-bit under LP64).  See
+     * start_arm64.S. */
 
+#if SKJ_LP64
+    case IR_MARK: {
+        const char *sd = rdx(fn, i->dst, 0);
+        int off = slot_offset(fn, i->slot);
+        memop(out, 1, "x29", "x29", off);            /* mark[0] = fp */
+        fprintf(out, "\tmov x9, sp\n");
+        memop(out, 1, "x9", "x29", off + 8);         /* mark[1] = sp */
+        fprintf(out, "\tldr x9, =.Lmark%d_%d\n", label_prefix, i->label);
+        memop(out, 1, "x9", "x29", off + 16);        /* mark[2] = re-entry PC */
+        addimm(out, "x9", "x29", off);               /* x9 = &mark */
+        fprintf(out, "\tldr x10, =__cont_mark_sp\n");
+        fprintf(out, "\tstr x9, [x10]\n");           /* __cont_mark_sp = &mark */
+        /* stash the continuation-arena high-water mark (first entry only,
+         * before the re-entry label) for IR_CONT_UNWIND to restore */
+        fprintf(out, "\tldr x9, =__cont_arena_ptr\n");
+        fprintf(out, "\tldr x9, [x9]\n");
+        memop(out, 1, "x9", "x29", off + 24);        /* mark[3] = arena ptr */
+        fprintf(out, "\tmov x0, #0\n");              /* first time: result = 0 */
+        fprintf(out, ".Lmark%d_%d:\n", label_prefix, i->label);
+        if (strcmp(sd, "x0") != 0)
+            fprintf(out, "\tmov %s, x0\n", sd);      /* dst = 0, or buf on re-entry */
+        wd64(out, fn, i->dst, sd);
+        break;
+    }
+
+    case IR_CAPTURE: {
+        const char *sd = rdx(fn, i->dst, 0);
+        int k;
+        /* push x19-x28 so they are part of the captured stack segment */
+        fprintf(out, "\tsub sp, sp, #%d\n", NSAVED * 8);
+        for (k = 0; k < NSAVED; k++)
+            fprintf(out, "\tstr %s, [sp, #%d]\n", xr[k + 2], k * 8);
+        fprintf(out, "\tbl __cont_capture\n");
+        /* reached only on resume: pop x19-x28 back from the restored segment */
+        for (k = 0; k < NSAVED; k++)
+            fprintf(out, "\tldr %s, [sp, #%d]\n", xr[k + 2], k * 8);
+        fprintf(out, "\tadd sp, sp, #%d\n", NSAVED * 8);
+        if (strcmp(sd, "x0") != 0)
+            fprintf(out, "\tmov %s, x0\n", sd);      /* dst = buf, or value on resume */
+        wd64(out, fn, i->dst, sd);
+        break;
+    }
+
+    case IR_CONT_UNWIND: {
+        /* restore the continuation arena to the mark-time high-water mark,
+         * reclaiming every buffer captured within the closing reset extent */
+        int off = slot_offset(fn, i->slot);
+        memop(out, 0, "x9", "x29", off + 24);        /* load saved arena ptr */
+        fprintf(out, "\tldr x10, =__cont_arena_ptr\n");
+        fprintf(out, "\tstr x9, [x10]\n");
+        break;
+    }
+
+    case IR_RESUME: {
+        const char *sa = rsx(out, fn, i->a, 0);      /* buf */
+        const char *sb = rsx(out, fn, i->b, 1);      /* value */
+        fprintf(out, "\tsub sp, sp, #16\n");
+        memop(out, 1, sa, "sp", 0);
+        memop(out, 1, sb, "sp", 8);
+        fprintf(out, "\tbl __cont_resume\n");        /* does not return here */
+        break;
+    }
+#else
     case IR_MARK: {
         const char *sd = rd(fn, i->dst, 0);
         int off = slot_offset(fn, i->slot);
@@ -1151,6 +1226,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         fprintf(out, "\tbl __cont_resume\n");        /* does not return here */
         break;
     }
+#endif
 
     /* ---- Floating point (IEEE 754 double, hardware) ---- */
 

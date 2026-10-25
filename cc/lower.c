@@ -447,6 +447,13 @@ widen_to_i64(int val, struct cc_type *src_type)
 {
     if (src_type && is_i64_type(src_type))
         return val;
+    /* An array or function value decays to its address in a value context, so
+       under LP64 it is already i64-wide (the address came from an IR_LEA64);
+       re-extending it through SEXT64 keeps only the low 32 bits and corrupts a
+       high address.  Only a genuinely narrow integer is widened. */
+    if (src_type && (src_type->kind == TY_ARRAY || src_type->kind == TY_FUNC) &&
+        CC_PTR_SIZE == 8)
+        return val;
     int op = (src_type && src_type->is_unsigned) ? IR_ZEXT64 : IR_SEXT64;
     struct ir_insn *ins = emit(op);
     ins->dst = new_temp();
@@ -455,16 +462,11 @@ widen_to_i64(int val, struct cc_type *src_type)
 }
 
 /* Widen a value that is one branch of a wider expression (e.g. a ternary whose
-   result type is i64/pointer).  An array or function branch decays to a pointer
-   in value context, so under LP64 it is already i64-wide and re-extending it
-   would corrupt the address; only a genuinely narrow integer branch is widened.
-   ADDR64 is defined below, so this consults it through is_i64_type/the kind. */
+   result type is i64/pointer).  The array/function decay guard now lives in
+   widen_to_i64, so this is a thin alias kept for call-site clarity. */
 static int
 widen_branch_to_i64(int val, struct cc_type *bt)
 {
-    if (bt && (bt->kind == TY_ARRAY || bt->kind == TY_FUNC) &&
-        CC_PTR_SIZE == 8)
-        return val;
     return widen_to_i64(val, bt);
 }
 
