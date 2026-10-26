@@ -84,7 +84,7 @@ static const char *fregs[] = {
  * The o32 platform ABI.  This is the only convention the MIPS backend
  * emits: the toolkit's old stack convention was retired in favour of the
  * platform psABI for every external call, so a gcc-built guest runtime
- * (libexc and its host binding, o32 hard-float) can be linked and called
+ * (o32 hard-float) can be linked and called
  * in both directions.  The rules used here:
  *
  *   - Arguments fill a conceptual "argument structure" one word at a time,
@@ -585,7 +585,7 @@ static int i64cmp_serial;
  * exception, not our handler), so the overflow is tested directly, as on RISC-V:
  * add/sub by the operand sign bits, multiply by comparing the signed high half
  * against the low half's sign extension.  i->label >= 0 is an explicit per-site
- * trap (Excelsior's cold __exc_trap trampoline); otherwise (Kobold) the runtime
+ * trap (a front end's cold trap trampoline); otherwise (Kobold) the runtime
  * kp_trap_overflow is called.  $t2/$t3 are scratch outside the allocator pool. */
 static void
 emit_overflow(FILE *out, struct ir_func *fn, struct ir_insn *i)

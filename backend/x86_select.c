@@ -1154,7 +1154,7 @@ x86_select_func(struct mc *m, struct ir_func *fn, int tp,
             case IR_MULO: mc_imul32_rr(m, SC0, SC1); break;
             }
             if (in->label >= 0) {
-                /* explicit per-site trap target (Excelsior's cold __exc_trap
+                /* explicit per-site trap target (a front end's cold trap
                    trampoline): branch there on overflow. */
                 mc_jcc(m, MC_O, il(m, lbl, in->label));
             } else if (tp == TRAP_GUARDED) {

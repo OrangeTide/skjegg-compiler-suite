@@ -14,7 +14,6 @@ trading a small effort for a big payoff.
 | `skj-mooc`   | MooScript compiler                           | Working     |
 | `skj-pc`     | Compact Pascal compiler                      | Working     |
 | `skj-cc`     | C compiler (C89 + C99 subset)                | Working     |
-| `skj-exc`    | Excelsior compiler (in-world scripting)      | In progress |
 | `skj-cpp`    | C preprocessor (library, also used by `cc`)  | Working     |
 | `skj-as`     | ColdFire/m68k assembler (GAS subset -> ELF32)| Working     |
 | `skj-ld`     | ColdFire/m68k static linker                  | Working     |
@@ -26,7 +25,7 @@ trading a small effort for a big payoff.
 | `skj-run`    | Guest runner (ColdFire and RV32 cores)        | Working     |
 
 Most compilers exist in per-backend variants (for example `skj-cc-rv`,
-`skj-cc-x86-64`, `skj-exc-mips`).  The `skj-as`/`skj-ld` family is a
+`skj-cc-x86-64`, `skj-cc-arm64`).  The `skj-as`/`skj-ld` family is a
 binutils-free assembler and linker for the ColdFire, RISC-V, and MIPS
 targets, verified against GNU as and the qemu suites.
 
@@ -39,9 +38,9 @@ tinc/    ──┐                               ┌── backend/cf_emit.c    
 scheme/  ──┤                               │
 moo/     ──┼──▶  ir/ir.h  ──▶  regalloc  ──┼── backend/rv_emit.c     (RISC-V RV32IMFD+Zfh)
 pascal/  ──┤       │                       │
-cc/      ──┤       │                       ├── backend/x86_emit.c    (x86-32 and x86-64)
-excelsior/─┘       │                       │
-  ▲                └── ir/ir.c, ir/util.c  ├── backend/arm64_emit.c  (AArch64)
+cc/      ──┘       │                       ├── backend/x86_emit.c    (x86-32 and x86-64)
+  ▲                │                       │
+  │                └── ir/ir.c, ir/util.c  ├── backend/arm64_emit.c  (AArch64)
   │                                        │
 cpp/  (preprocessor library)               └── backend/mips_emit.c   (MIPS I / R2000/R3000)
 ```
@@ -56,10 +55,8 @@ backend means writing a regalloc + emitter pair and a
 Not every front end targets every backend.  TinC and TinScheme run on
 every backend.  The C compiler runs on ColdFire, RISC-V, x86-64,
 AArch64, and MIPS (not x86-32).  MooScript and Compact Pascal are
-ColdFire only.  Excelsior runs end to end on ColdFire, RISC-V, and
-MIPS, and compiles (codegen only) on x86-64 and AArch64.  The x86-32
-and x86-64 targets share one backend, selected at compile time by
-`X86_BITS`.
+ColdFire only.  The x86-32 and x86-64 targets share one backend,
+selected at compile time by `X86_BITS`.
 
 ## Layout
 
@@ -71,13 +68,12 @@ ld/          ColdFire linker, plus the RV32 and MIPS front ends over a shared la
 ar/          target-neutral ar(1) archive tool
 cpp/         C preprocessor (library and standalone tool)
 emu/         ColdFire and RV32 emulator cores, and skj-run (doc/tools/emulator.md)
-runtime/     target runtimes (start_*.S per target, pascal_rt.c, str.c, list.c, libexc.c, 64-bit helpers)
+runtime/     target runtimes (start_*.S per target, pascal_rt.c, str.c, list.c, 64-bit helpers)
 tinc/        TinC front end (C-like)
 scheme/      TinScheme front end (Scheme subset with GC; doc/internals/closures.md)
 moo/         MooScript front end
 pascal/      Compact Pascal front end (doc/languages/pascal.md)
 cc/          C front end (uses the cpp library)
-excelsior/   Excelsior front end and its design notes (excelsior/core.md, status.md)
 tests/       test programs and harnesses
 doc/         design and reference docs (tools/, languages/, internals/)
 ```
@@ -112,7 +108,7 @@ directly in a browser.
 Per-target toolchains, needed only to build and test that target:
 
 - RISC-V: `binutils-riscv64-linux-gnu` (and `gcc-riscv64-linux-gnu` for
-  the Excelsior runtime).  `skj-as-rv`/`skj-ld-rv` can replace binutils.
+  a gcc-built guest runtime).  `skj-as-rv`/`skj-ld-rv` can replace binutils.
 - AArch64: `gcc-aarch64-linux-gnu`, `binutils-aarch64-linux-gnu`.
 - MIPS: `binutils-mipsel-linux-gnu` (or a bare-metal `mipsel-none-elf`
   cross).  `skj-as-mips`/`skj-ld-mips` can replace binutils.
@@ -129,7 +125,6 @@ make check-x86-64 # x86-64 suite under qemu-x86_64
 make check-arm64  # AArch64 suite under qemu-aarch64
 make check-cc     # C compiler tests (skj-cc -> skj-as -> skj-ld -> qemu-m68k)
 make check-cpp    # C preprocessor tests
-make check-exc    # Excelsior end to end under qemu-m68k
 make check-rvas   # RV32 assembler/linker golden-master vs GNU as
 make check-all    # the whole qemu matrix across every backend
 make check-smoke  # full in-tree toolchain smoke test (no cross toolchain needed)
@@ -214,8 +209,8 @@ at a fork or local path.
 | `emu-cf`, `emu-rv`   | the ColdFire and RV32 emulator cores           |
 
 A front-end selection needs at least one backend.  The `cc` component
-pulls in the `cpp` library automatically.  The AArch64 backend and the
-Excelsior front end are not yet vendorable; they build only in-tree.
+pulls in the `cpp` library automatically.  The AArch64 backend is not
+yet vendorable; it builds only in-tree.
 
 ## Name
 

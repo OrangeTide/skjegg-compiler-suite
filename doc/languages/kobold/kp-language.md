@@ -55,8 +55,8 @@ the same name, and `Begin` is the keyword `begin`.
 Reserved words:
 
 ```
-and array as begin bind break buffer case const continue div do downto else end
-external for forward function goto if implement implementation in interface label
+and array as begin bind break buffer case const continue defer div do downto else
+end external for forward function goto if implement implementation in interface label
 map mod nil not of or procedure program property record reexport ref repeat set
 shared shl shr slice start string then to type unit until uses var while with yield
 ```
@@ -77,6 +77,15 @@ identifier may still carry one of these names.
   byte by its numeric code (decimal `#10` or hex `#$0A`). Adjacent pieces join, so
   `'line'#10` is a five-byte string. A one-character string literal is also valid where
   a `char` is expected.
+- **Interpolated string.** Double-quoted text builds a string with interpolation holes:
+  `"hello ${name}, you have ${count} messages"`. Each `${expr}` is replaced by `expr`
+  rendered to text the way `write` renders it (a string or `char` as itself, an integer
+  or `int64` as its digits, a `bool` or enum as its ordinal number). Write a literal
+  dollar-brace with `$$` before the brace, a literal double quote with `""`, and any
+  other `$` stands for itself. Single-quoted literals never interpolate, so existing code
+  is unchanged. See [Strings](#strings). (A `real` hole is not supported yet; convert it
+  with `str` first. A hole may not itself contain a double-quoted string; use single
+  quotes inside a hole.)
 - **Boolean.** The predefined constants `true` and `false`.
 - **Nil.** `nil`, the empty handle, usable where any handle, string, or dynamic array is
   expected.
@@ -400,8 +409,24 @@ Argument and operand evaluation order is right to left.
 - **repeat.** `repeat stmts until cond`, testing after the body.
 - **for.** `for i := lo to hi do stmt`, or `downto` to count down. The counter is
   undefined after the loop; do not read it once the loop ends.
+- **for-in.** `for x in seq do stmt` binds each element of a sequence to the
+  pre-declared variable `x` in turn. The source is a fixed array (over its index
+  range), a dynamic array (`0..high`), a string (byte by byte, each a `char`), a
+  set (its members in ordinal order), a map, or a custom cursor. A map binds two
+  variables, `for k, v in m do`, the key (a string) and the value. A custom
+  cursor is a type with a `function Next for (c): E fails` method, failure ending
+  the loop. Use `_` to ignore a binder and run the body once per element.
+  `break` and `continue` work as in any loop. See `kp-foreach.md`.
 - **with.** `with recordExpr do stmt` opens a record's fields as bare names in the body.
 - **break / continue.** Exit the nearest enclosing loop, or skip to its next iteration.
+- **defer.** `defer stmt` registers `stmt` for teardown at the end of its enclosing
+  block. Deferred statements run in reverse order (last deferred, first run) on every
+  orderly exit from that block: falling off the end, `exit`, `break`, `continue`, and
+  the failable diverts (`or exit`/`or fail`/...). An `exit(v)` computes its result
+  before the teardown runs. A trap (panic, bounds, nil, divide-by-zero) does not run
+  defers. Use a `begin`..`end` block to defer several statements. The deferred statement
+  may not itself leave its block, so `exit`, `fail`, `break`, `continue`, `yield`,
+  `goto`, and a nested `defer` are compile errors inside it. See `kp-defer.md`.
 - **computed goto.** For a bytecode interpreter's inner loop, a `name:` label marks a
   statement and `goto EXPR` jumps to a `label` value. A `label` value is made only by
   `@name` (the address of a label in the current routine) and is **second-class**: it
@@ -557,6 +582,14 @@ does not apply. Assignment shares the bytes by reference and is cheap; since no 
 change them, there is never a copy. Build a new value by concatenation (`+`, with a `char`
 operand promoted to a one-character string) or `copy`. Convert with `str` (to a string)
 and `val` (from a string).
+
+A double-quoted literal is an **interpolated** string: each `${expr}` hole is rendered to
+text (as `write` would render it) and concatenated into the result, so
+`"x = ${x}, ok = ${found}"` folds to `'x = ' + str(x) + ', ok = ' + str(found)`. Write a
+literal dollar-brace as `$$` before the brace and a literal quote as `""`. A single-quoted
+literal is never interpolated. Hole types: string, `char`, the integer widths and
+`int64`, and `bool`/enum (rendered as their ordinal number); a `real` is not supported yet
+(convert it with `str`), and a hole may not contain a double-quoted string.
 
 Higher-level string helpers (`UpperCase`, `LowerCase`, `Trim`, `StringReplace`, and string
 `Delete`/`Insert`) live in the standard-library `core.strings` unit, reached with

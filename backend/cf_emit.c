@@ -477,8 +477,8 @@ emit_unop(FILE *out, struct ir_func *fn, struct ir_insn *i,
 /* Overflow-checked signed 32-bit arithmetic (IR_ADDO/SUBO/MULO).  add.l,
  * sub.l, and muls.l each set the V flag on signed overflow (the emulator sets
  * it for muls.l too; see emu/coldfire.c), so a bvs after the operation takes
- * the trap.  i->label >= 0 is an explicit per-site trap target (Excelsior's
- * cold __exc_trap trampoline): branch there on overflow.  Otherwise (Kobold,
+ * the trap.  i->label >= 0 is an explicit per-site trap target (a front end's
+ * cold trap trampoline): branch there on overflow.  Otherwise (Kobold,
  * i->label == -1) call the runtime's kp_trap_overflow.  The branch is emitted
  * before wd(), since a move to a spill slot would clear V. */
 static void
@@ -514,9 +514,8 @@ static int divz_label_ctr;
 /* Under Kobold's guarded trap policy (target_aot_trap_guarded) a zero divisor
  * must raise the clean DIV_ZERO trap (exit 70), not the m68k hardware
  * divide-by-zero exception (which reaches the shell as SIGFPE).  Test the
- * divisor and call kp_trap_div_zero when it is zero.  cc and Excelsior leave
- * the policy clear and keep the bare divide (Excelsior checks a fallible
- * divisor in its own lowering, cc's divide by zero is undefined). */
+ * divisor and call kp_trap_div_zero when it is zero.  cc leaves the policy
+ * clear and keeps the bare divide (cc's divide by zero is undefined). */
 static void
 emit_divzero_guard(FILE *out, const char *divisor)
 {

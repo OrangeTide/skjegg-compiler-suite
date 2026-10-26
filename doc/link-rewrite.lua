@@ -24,7 +24,7 @@ function Link(el)
         -- repo-root-relative into the manual: drop "doc/", anchor to site root
         path = prefix .. path:sub(5)
     elseif path:match("^%.%./") then
-        -- points outside the manual (e.g. excelsior notes): leave as Markdown
+        -- points outside the manual (e.g. internal notes): leave as Markdown
         return nil
     end
     path = path:gsub("%.md$", ".html")

@@ -6,6 +6,33 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.22.0
+
+#### Added
+- Kobold `defer`: `defer <statement>` registers block-scoped teardown that runs
+  in last-in-first-out order on every orderly exit from the enclosing block,
+  including a `return`, a `break` or `continue` that leaves the block, and a
+  failable divert. It does not run when a trap aborts the program.
+- Kobold `${}` string interpolation: a double-quoted string literal `"..."`
+  interpolates `${expr}` holes, converting each expression to text in place; the
+  single-quoted literal `'...'` is unchanged. Write `$${` for a literal `${`.
+- Kobold `for`-`in` loops: `for x in seq do` walks the elements of a sequence
+  directly, binding each to a pre-declared loop variable. The sources are a
+  fixed or dynamic array, a string (over its bytes, each bound as a `char`), a
+  set (members in ordinal order), a map (`for k, v in m do`, binding the key and
+  the value), and any custom cursor type with a `function Next for (c): E fails`
+  method, where a failure ends the iteration. Bind `_` to ignore an element.
+  Array, string, and set loops lower to the counted loop with no iterator object
+  and no per-element call.
+
+#### Removed
+- The Excelsior front end (`skj-exc`) and its runtime are removed. Excelsior was
+  an in-progress scripting language that had converged with Kobold on its core
+  runtime model, and no target host consumed it. Its distinct surface features
+  (`defer`, `${}` interpolation, and `for`-`in`) are now part of Kobold, so the
+  front end carried no capability Kobold lacks. The removal also drops the
+  Excelsior smolmoo host binding and its demo link.
+
 ### 0.21.0
 
 #### Changed

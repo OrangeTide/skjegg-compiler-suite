@@ -1,3 +1,0 @@
-# a dangling jump target, and what a target has to be
-`nowhere` points to no label in this data
-a `to` target must name a labelled node

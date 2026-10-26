@@ -166,8 +166,6 @@ included: it rejects `mov3q` and the remainder instructions.
 | `make check-emu`   | skj-run   | ColdFire (5475)   |
 | `make check-rv`    | qemu-riscv32 | RV32IM         |
 | `make check-rv-emu`| skj-run   | RV32IM (same binaries) |
-| `make check-exc`   | qemu-m68k | generic m68k      |
-| `make check-exc-emu` | skj-run | ColdFire (5475)   |
 
 `make check-emu-all` runs every suite the emulator covers, with no qemu
 involved.
@@ -206,24 +204,24 @@ toolchain. The counts are guest-instruction counts; for tuning the
 interpreter itself, callgrind host-instruction counts are the companion
 metric, with the guest count held fixed as a behavior-preservation check.
 
-## Excelsior on RV32, and the platform ABI
+## The RISC-V platform ABI
 
-`make check-exc-rv` runs the whole Excelsior suite on RISC-V: 174 of
-174 under `qemu-riscv32`, the same count ColdFire passes.
+The RISC-V backend has a platform-ABI path so compiled output and a
+gcc-built C runtime can call each other under RV32 ILP32. The C compiler
+uses it in its psABI mode (`check-cc-rv-psabi` under `qemu-riscv32`),
+where `skj-cc-rv` output links against a gcc-built runtime.
 
-Getting there was a calling-convention problem, not a missing-feature
-one. The RV backend passes every call argument on the stack, which is
-the toolkit's own convention; the RISC-V ILP32 ABI passes the first
-eight in `a0`-`a7`. On m68k the two coincide, which is why gcc-built
-`libexc.c` and `skj-exc` output call each other for free there. On RV32
-they could not, in either direction: compiled code reaches about 40
-`__exc_*` entry points, and `__exc_list_map` and `__exc_send` call back
-into compiled code, so a shim layer would have needed trampolines both
+Getting there was a calling-convention problem. The RV backend passes
+every call argument on the stack, which is the toolkit's own
+convention; the RISC-V ILP32 ABI passes the first eight in `a0`-`a7`.
+On m68k the two coincide, which is why a gcc-built C runtime and
+compiled output call each other for free there. On RV32 they could not,
+in either direction, so a shim layer would have needed trampolines both
 ways.
 
 So the RV backend gained a platform-ABI path under `CC_PSABI`, the flag
-x86-64 and AArch64 already use, and `skj-exc-rv` is built with it. The
-rules it implements, all confirmed against what gcc emits:
+x86-64 and AArch64 already use, which `skj-cc-rv` emits in its psABI
+mode. The rules it implements, all confirmed against what gcc emits:
 
 - one-word arguments take `a0` through `a7` in order;
 - a two-word argument takes the next two registers, low word first, and
@@ -244,14 +242,12 @@ return, since the outgoing block would sit under the frame being torn
 down. Only the Scheme front end depends on the tail property, and it
 does not target this ABI.
 
-`runtime/start_rv_psabi.S` is the matching runtime: entry, syscalls,
-arena, and the source coroutines under that convention.
-`runtime/soft64.c` supplies the 64-bit helpers, since the cross
-toolchain ships no rv32 libgcc. Both retire a trap that was already in
-the tree: `start_rv.S` defines `__muldi3` and the shift helpers with the
-stack convention under the standard names, so gcc-built C calling one
-would read its arguments from the wrong place. It had not fired only
-because gcc inlines the 64-bit multiply libexc needs.
+`runtime/start_rv_psabi_cc.S` is the matching C runtime: entry and
+syscalls under that convention. `runtime/soft64.c` supplies the 64-bit
+helpers, since the cross toolchain ships no rv32 libgcc. Both retire a
+trap that was already in the tree: `start_rv.S` defines `__muldi3` and
+the shift helpers with the stack convention under the standard names, so
+gcc-built C calling one would read its arguments from the wrong place.
 
 ## The RV32 test rig, and what it is worth
 
@@ -527,17 +523,11 @@ Linux RISC-V syscall space, so a real kernel or `qemu-user` answers
 `-ENOSYS` and a guest that wanted a guarded region falls back to
 whatever it does without one.
 
-That fallback is exactly how the Excelsior source coroutines work on
-both runners from one binary. `libexc` calls an optional
-`__exc_src_stack_provider` hook for a coroutine's private stack;
-`start_rv_psabi.S` installs `__exc_map_stack`, which issues the
-`RV_SYS_MAP` ecall with the guard flag. On `skj-run` that returns a
-guarded region, so a coroutine stack overrun faults on the guard page
-instead of silently corrupting the arena. On `qemu-user` the ecall
-returns `-ENOSYS`, the provider returns 0, and `libexc` falls back to an
-arena block. `make check-exc-rv-emu` runs the coroutine tier through the
-guarded path on `skj-run`; the full `qemu-riscv32` suites cover the
-arena fallback.
+A guest that wants a guarded region can install a stack provider that
+issues the `RV_SYS_MAP` ecall with the guard flag. On `skj-run` that
+returns a guarded region, so a stack overrun faults on the guard page
+instead of silently corrupting the arena; on `qemu-user` the ecall
+returns `-ENOSYS` and the guest falls back to an arena block.
 
 Two host-side tests pin these primitives directly, needing no cross
 toolchain and no qemu. `make test-guest-mmap` drives `emu/guest.c` with
@@ -614,9 +604,9 @@ between systems, so host-dependent rounding never shows. Only aldeby
 synchronizes state, and only one program on it (the client/server
 prediction VM) is sensitive to it; that one must clear `dp` (or use the
 deterministic single-precision path) rather than impose a softfloat cost
-on everything else. `fadd.d`/`fsd` now run on `skj-run`, so a double
-Excelsior guest no longer needs qemu; qemu stays the cross-check for
-double, since it is the independent model.
+on everything else. `fadd.d`/`fsd` now run on `skj-run`, so a
+double-precision guest no longer needs qemu; qemu stays the cross-check
+for double, since it is the independent model.
 
 `_Float16` (Zfh) is still absent on this core (`fmt` must be S or D), so
 a `_Float16` guest belongs to qemu.
@@ -626,18 +616,6 @@ A committed regression test pins the D decoding: `tests/rv32/test_fp_d.c`
 register read/write, the double/single/integer conversions, FLD/FSD
 moving eight bytes, and that every D instruction is illegal when `dp` is
 clear.
-
-The coroutine tier keeps its soft-ctx crt for a separate reason.
-`exs_source_yield` and its siblings have no doubles but spill fs0-fs11
-with `fsd` on every source switch, since the backend allocates those
-callee-saved float registers as doubles. `make check-exc-rv-emu` runs
-that tier on `skj-run` with a soft-ctx crt, a mechanical `fsd`->`fsw` /
-`fld`->`flw` rewrite of `start_rv_psabi.S` (the Makefile generates it
-with `sed`). With `dp` on the core could now execute the `fsd` form too,
-so the rewrite is no longer a correctness requirement there; it stays
-because those slots only ever hold 32-bit values, so the narrow saves are
-exact and cheaper. See "Guest mmap and guarded stacks" below for the
-private stack those coroutines run on.
 
 ## Single-precision determinism across backends
 
@@ -686,11 +664,10 @@ table. Making a native backend a valid sync peer would mean
 canonicalizing NaNs in its codegen, which is not done and is not needed
 as long as the peers share the emulator.
 
-This is also what makes an f32 Excelsior practical. Excelsior's `float`
-is a double today, off the deterministic surface (see above). The IR,
-every backend, and this test already carry a proven single-precision
-path, so moving Excelsior's `float` to `IR_F32` would land it inside the
-determinism the games need, with no new emulator work.
+This is also what makes an f32 source language practical. The IR, every
+backend, and this test already carry a proven single-precision path, so
+a language whose `float` is `IR_F32` would land inside the determinism
+the games need, with no new emulator work.
 
 ## Limits
 

@@ -19,14 +19,11 @@ PlayStation target) done: the assembler `skj-as-mips`, the linker `skj-ld-mips`
 the BIOS-TTY runtime are in place, so the MIPS toolchain is binutils-free
 (`as`, `ld`, `ar`) and writes the PlayStation executable format. The PS-EXE runs
 on the PCSX-Redux emulator booting a real BIOS, and the soft-float configuration
-runs float code there on the FPU-less R3051. The backend is complete
-for two tiers. The stack
-convention (the toolkit's own) runs TinC, TinScheme, and the C compiler; the
-o32 platform ABI runs Excelsior against a gcc-built C runtime. It passes the
+runs float code there on the FPU-less R3051. The backend is complete: it
+passes the
 TinC and TinScheme suites (`make check-mips`), the `test-i64`, `test-ops`,
-`test-fpu`, and `test-f32` integration tests, the C compiler suite
-(`make check-cc-mips`, 73 tests), and the Excelsior suite
-(`make check-exc-mips`, 174 tests), all under `qemu-mipsel`. A `.set
+`test-fpu`, and `test-f32` integration tests, and the C compiler suite
+(`make check-cc-mips`, 73 tests), all under `qemu-mipsel`. A `.set
 noreorder` mode (`SKJ_MIPS_NOREORDER=1`) makes the backend fill the delay
 slots itself with a scheduler; every suite has a `-noreorder` variant that
 passes. A basic inline-assembly statement (`asm` / `asm volatile`) passes
@@ -211,8 +208,8 @@ The default convention is the toolkit's own stack-passing one, shared with
 the ColdFire and the non-psABI RISC-V backends. It is not the o32 C ABI. That
 means this backend's functions call each other, and call the runtime in
 `start_mips.S`, but they do not interoperate with a `gcc`-compiled o32 object.
-TinC, TinScheme, and the C compiler use this convention. The `CC_PSABI` build
-(next section) emits the o32 ABI instead, for the Excelsior tier.
+TinC, TinScheme, and the C compiler use this convention. The `CC_PSABI`
+path (next section) emits the o32 ABI instead.
 
 The rules:
 
@@ -236,14 +233,13 @@ The prologue sets `$fp` to the entry stack pointer minus 8, so argument `i`
 sits at `$fp + 8 + 4*i`, which is where the caller wrote it. The whole frame
 is rounded up to a multiple of 16 so `$sp` stays 16-aligned across calls.
 
-## The o32 platform ABI (skj-exc-mips)
+## The o32 platform ABI
 
-`skj-exc-mips` is built `-DCC_PSABI` and emits the o32 C ABI, so a gcc-built
-guest runtime (libexc and its host binding) links against it and is called in
-both directions. This is the counterpart of the RISC-V `CC_PSABI` build. The
-runtime objects are cross-compiled with `mipsel-none-elf-gcc`, and the
-entry point, syscalls, arena, and source coroutines come from
-`start_mips_psabi.S`, the o32 version of `start_mips.S`.
+The MIPS backend has a `CC_PSABI` path that emits the o32 C ABI, so
+compiled output and a gcc-built o32 object can call each other in both
+directions. This is the counterpart of the RISC-V `CC_PSABI` build. A
+gcc-built runtime is cross-compiled with `mipsel-none-elf-gcc`, with the
+entry point, syscalls, and arena in an o32 version of `start_mips.S`.
 
 The o32 argument rules used here:
 
@@ -265,7 +261,7 @@ The o32 argument rules used here:
 - A leading run of floating-point arguments (at most two, before any integer
   argument) is also passed in `$f12` and `$f14`, and a double result comes
   back in `$f0`. This is the hard-float o32 rule, and it is what a gcc-built
-  `__exc_str_from_float(double)` reads.
+  double-taking function reads.
 - Other results come back in `$v0`, or `$v0:$v1` for two words.
 
 The parameter side reuses `slot_offset`: it lays parameters out at `$fp+8`
@@ -288,13 +284,13 @@ ships a single hard-float libgcc multilib:
 - The runtime is compiled hard-float (the default). A soft-float runtime
   would pass doubles in integer registers, which the backend could match, but
   its double math would call the soft-float libgcc helpers (`__adddf3`, ...),
-  and the toolchain has no soft-float libgcc. Hard-float keeps libexc's double
-  math on the hardware FPU and its few libgcc calls (`__fixdfsi`, since MIPS I
-  has no `trunc.w`) in the matching hard-float ABI.
+  and the toolchain has no soft-float libgcc. Hard-float keeps a runtime's
+  double math on the hardware FPU and its few libgcc calls (`__fixdfsi`, since
+  MIPS I has no `trunc.w`) in the matching hard-float ABI.
 - A leading floating-point argument is passed in `$f12`/`$f14` *and* in the
   integer home slot. A gcc callee reads `$f12`; a skj callee reads the home
-  slot (it has no per-parameter float classification of its own in the
-  Excelsior front end). Writing both is one spare move and keeps the two
+  slot (the backend has no per-parameter float classification of its own).
+  Writing both is one spare move and keeps the two
   callee kinds correct without the caller having to know which it is calling.
 - gcc is invoked with `-G 0` so it addresses globals absolutely rather than
   through `$gp`, which the hand-written `_start` does not set up.
@@ -503,15 +499,14 @@ hard-float on its own; the `$f`-register assertion is the check that does.
 backend/regalloc_mips.c    linear scan, o32 register counts, soft-float classes
 backend/mips_emit.c        instruction selection, GAS output, noreorder scheduler,
                            soft-float lowering
-runtime/start_mips.S       stack convention: _start, syscalls, arena, i64,
+runtime/start_mips.S       o32 psABI: _start, syscalls, arena, i64,
                            continuations
-runtime/start_mips_psabi.S o32 psABI: syscalls, arena, source coroutines
 runtime/softfloat.c        integer-only IEEE-754 binary64 (soft-float builds)
 tests/test_softfloat.c     host-only unit test of softfloat.c against native double
 ```
 
 The Makefile builds `skj-tinc-mips`, `skj-sc-mips`, `skj-cc-mips`,
-`skj-exc-mips`, and `skj-cc-mips-sf` (the soft-float C compiler) from these
+and `skj-cc-mips-sf` (the soft-float C compiler) from these
 plus the shared IR, and the `check-*-mips` targets drive the suites through
 `mipsel-none-elf-{as,ld}` and `qemu-mipsel`. The FPU and C tests also link
 `build/mips/half.o`, the `mipsel-none-elf-gcc` build of `runtime/half.c`,
@@ -776,7 +771,7 @@ configuration runs float code there without an FPU.
   toolchain and PlayStation target").
 - Pascal and MooScript. Neither front end was ported to a non-ColdFire
   backend (RISC-V did not bring them up either), so they are not part of the
-  MIPS tier. The C compiler and Excelsior are.
+  MIPS tier. The C compiler is.
 
 ## Roadmap
 
@@ -788,9 +783,9 @@ configuration runs float code there without an FPU.
    integers (register pairs plus the ported `__muldi3` and shift helpers).
    Passes the `test-i64`, `test-ops`, `test-fpu`, and `test-f32` integration
    tests. (Done.)
-3. The C compiler (`check-cc-mips`, stack convention) and the o32 psABI
-   configuration for Excelsior (`check-exc-mips`), so a gcc-built C runtime
-   links. The counterpart of `check-cc-rv` and `check-exc-rv`. (Done.)
+3. The C compiler (`check-cc-mips`, stack convention), plus the backend's
+   o32 psABI path so a gcc-built C runtime can link. The counterpart of
+   `check-cc-rv`. (Done.)
 4. The `.set noreorder` scheduler, so the backend fills the delay slots itself
    for systems code (`SKJ_MIPS_NOREORDER=1`, verified by the `-noreorder` test
    variants), and a basic inline-assembly channel in `skj-cc` (`asm` / `asm

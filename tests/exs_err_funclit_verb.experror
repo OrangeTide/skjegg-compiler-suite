@@ -1,1 +1,0 @@
-a func value cannot call the sibling verb `hurt`: a self-send needs `self`

@@ -192,6 +192,86 @@ end.
 3
 ```
 
+## Scoped cleanup with `defer`
+
+`tests/kp-corpus/defer.pas`. `defer stmt` runs `stmt` when its block exits, in
+reverse order (last deferred, first run), on every orderly exit: fall-through,
+`exit`, `break`, and `continue`. It keeps a release next to its acquisition.
+
+```pascal
+program deferdemo;
+
+procedure run;
+begin
+  defer WriteLn('closed');   { runs when run returns, after the body }
+  WriteLn('opened');
+  WriteLn('working');
+end;
+
+begin
+  run;
+end.
+```
+
+```
+opened
+working
+closed
+```
+
+## String interpolation
+
+`tests/kp-corpus/interp.pas`. A double-quoted string interpolates `${expr}` holes,
+each rendered to text the way `write` renders it; single-quoted strings stay plain.
+
+```pascal
+program greet;
+
+var
+  name: string;
+  count: integer;
+begin
+  name := 'Ada';
+  count := 3;
+  WriteLn("hello ${name}, you have ${count} messages");
+end.
+```
+
+```
+hello Ada, you have 3 messages
+```
+
+## Iterating with `for`-`in`
+
+`tests/kp-corpus/forin.pas`. `for x in seq do` binds each element of a sequence
+to `x` in turn: a fixed array over its index range, a dynamic array over
+`0..high`, a string byte by byte. `_` ignores the element.
+
+```pascal
+program forindemo;
+type Triple = array[1..3] of integer;
+var
+  t: Triple;
+  s: string;
+  x: integer;
+  c: char;
+begin
+  t[1] := 10; t[2] := 20; t[3] := 30;
+  for x in t do WriteLn(x);
+  s := 'abc';
+  for c in s do WriteLn(Ord(c));
+end.
+```
+
+```
+10
+20
+30
+97
+98
+99
+```
+
 ## More programs
 
 The skjegg test corpora hold many more Kobold programs, each paired with its

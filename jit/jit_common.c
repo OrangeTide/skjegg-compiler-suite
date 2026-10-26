@@ -395,9 +395,9 @@ kp_jit(struct kp_jit *j, struct ir_program *prog,
 }
 
 /* The runtime arena a guest reaches through __moo_arena_alloc.  A driver that
-   runs an Excelsior program binds the name "__moo_arena_alloc" to the function
-   below; it serves the active JIT (kp_active).  A C-only guest never calls it,
-   so the arena stays unmapped. */
+   runs a guest with an arena-backed runtime binds the name "__moo_arena_alloc"
+   to the function below; it serves the active JIT (kp_active).  A C-only guest
+   never calls it, so the arena stays unmapped. */
 void *
 __moo_arena_alloc(int size)
 {

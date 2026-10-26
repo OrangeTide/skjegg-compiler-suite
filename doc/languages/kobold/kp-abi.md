@@ -12,9 +12,9 @@ identical on every target; only the register-level calling convention differs. T
 document describes x86-64 in most detail as the reference, and collects the
 per-backend differences under "The guest-internal convention across backends" below.
 
-Much of this borrows Skjegg's Excelsior runtime (`runtime/libexc.h` in the Skjegg
-suite): handles as object-table indices, a length+bytes string, stackful coroutines
-on private stacks (Excelsior's `source of T`), and trap descriptors.
+Much of this follows a runtime model proven earlier in the Skjegg suite:
+handles as object-table indices, a length+bytes string, stackful coroutines
+on private stacks, and trap descriptors.
 
 ## Two calling worlds
 
@@ -364,8 +364,8 @@ uint32_t kp_str_concat(kp_vm *vm, uint32_t a, uint32_t b);
 int32_t  kp_str_len(kp_vm *vm, uint32_t s);
 ```
 
-A string is stored as a length+bytes descriptor (UTF-8, byte length, as Excelsior's
-`exc_str`). These are runtime helpers, called natively. A host that wants host-owned
+A string is stored as a length+bytes descriptor (UTF-8, byte length). These
+are runtime helpers, called natively. A host that wants host-owned
 strings can expose them as an ordinary handle type instead. Module string literals
 are created at load and held for the module's life; `writeln(someString)` is an
 overloaded call to the host's registered output routine.
@@ -568,7 +568,7 @@ A guard records the guest return address, which `kp_raise` maps through that tab
 trap raised from the runtime with no guest address, or a module built without `-g`,
 passes line 0 with file and name NULL.
 
-Trap kinds, reusing Excelsior's set (`libexc.h`) plus one:
+Trap kinds:
 
 | Kind           | Cause                                          |
 |----------------|------------------------------------------------|

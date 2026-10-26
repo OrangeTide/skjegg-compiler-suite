@@ -90,7 +90,7 @@ encoding would be. It is the bulk of the effort and the part missing today:
 - **Front ends.** Every lexer already tracks a line (used only for
   diagnostics). Each front end must attach the current source position to the
   IR it lowers, not drop it. kobold already does this under `-g`; the others
-  (cc, pascal, moo, tinc, excelsior) do not.
+  (cc, pascal, moo, tinc) do not.
 - **The IR carries position.** Extend `IR_LOC` to carry a file id and column
   beside the line, or add position fields to the instruction node. A `-g`
   flag gates emission so a normal build is unchanged.

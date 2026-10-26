@@ -1,3 +1,0 @@
-# the point is the rename, so both halves are pinned
-it is only the boolean branch
-the operator is now `otherwise`: write `A otherwise B`

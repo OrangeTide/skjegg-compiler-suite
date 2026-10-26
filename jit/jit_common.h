@@ -57,7 +57,7 @@ struct kp_jit {
     uint8_t *stack;         /* low-memory execution stack (see kp_jit_call) */
     size_t stack_len;
     struct kp_arena arena;  /* the guest runtime arena (__moo_arena_alloc),
-                               mapped lazily; only Excelsior guests use it */
+                               mapped lazily; only an arena-backed guest uses it */
     struct kp_gslot *globals;
     int nglobals;
     struct kp_fslot *funcs;
@@ -182,8 +182,8 @@ uint64_t kp_call_guest(void *entry, void *stack_top,
 /* Release the data and code regions, the runtime arena, and the name tables. */
 void kp_jit_free(struct kp_jit *j);
 
-/* The guest runtime arena binding: a driver running an Excelsior program binds
-   the name "__moo_arena_alloc" to this, so libexc allocates from the active
+/* The guest runtime arena binding: a driver binds the name
+   "__moo_arena_alloc" to this, so a guest runtime allocates from the active
    JIT's low-memory arena.  Returns a low (< 4GB) pointer, or NULL. */
 void *__moo_arena_alloc(int size);
 

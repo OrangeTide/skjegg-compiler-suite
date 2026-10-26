@@ -440,6 +440,7 @@ Statement        = [ LabelPrefix ]
                    | IfStmt
                    | WhileStmt
                    | ForStmt
+                   | ForInStmt
                    | RepeatStmt
                    | CaseStmt
                    | WithStmt
@@ -448,6 +449,7 @@ Statement        = [ LabelPrefix ]
                    | YieldExpr
                    | BreakStmt
                    | ContinueStmt
+                   | DeferStmt
                    | GotoStmt ] .
                  (* StartExpr, BindExpr, and YieldExpr are also expressions; as
                     statements their value is discarded. See Coroutine
@@ -458,6 +460,15 @@ LabelPrefix      = Identifier ':' .
                     the enclosing routine. The only use of a label name is in '@'
                     (take its address, below); a bare 'goto name' is rejected, so
                     there is no unstructured goto. *)
+DeferStmt        = 'defer' Statement .
+                 (* registers the Statement for teardown at the end of its
+                    enclosing block, run LIFO on every orderly exit from that
+                    block: fall-through, 'exit', 'break', 'continue', and the
+                    failable diverts. A trap skips it. Use a 'begin'..'end' block
+                    to defer several statements. The deferred Statement may not
+                    transfer control out of itself ('exit'/'fail'/'break'/
+                    'continue'/'yield'/'goto'/a nested 'defer' are rejected). See
+                    kp-defer.md. *)
 GotoStmt         = 'goto' Expression .
                  (* a computed jump: the Expression must have type 'label'. The
                     label value can only be made by '@' on a current-routine
@@ -476,6 +487,15 @@ IfStmt           = 'if' Expression 'then' Statement [ 'else' Statement ] .
 WhileStmt        = 'while' Expression 'do' Statement .
 ForStmt          = 'for' Identifier ':=' Expression ( 'to' | 'downto' )
                    Expression 'do' Statement .
+ForInStmt        = 'for' ForBinder [ ',' ForBinder ] 'in' Designator 'do'
+                   Statement .
+ForBinder        = Identifier | '_' .
+                 (* iterates the elements of the Designator, binding each to the
+                    pre-declared ForBinder variable(s); '_' ignores a binder. A
+                    second binder is only for a map, where the pair is key, value.
+                    The source is a fixed array (its index range), a dynamic
+                    array (0..high), a string (its bytes), a set, or a custom
+                    cursor. See kp-foreach.md. *)
 RepeatStmt       = 'repeat' StmtSequence 'until' Expression .
 CaseStmt         = 'case' Expression 'of' CaseElement { ';' CaseElement }
                    [ ';' ] [ 'else' StmtSequence ] 'end' .
@@ -594,6 +614,7 @@ MulOp            = '*' | '/' | 'div' | 'mod' | 'and' | 'shl' | 'shr' .
 Factor           = INTEGER_LITERAL
                  | REAL_LITERAL
                  | STRING_LITERAL
+                 | INTERP_STRING
                  | 'nil'
                  | '__line__'
                  | Designator
@@ -670,6 +691,18 @@ StringElement    = "'" { CHARACTER | "''" } "'"
                  | '#' INTEGER_LITERAL .
                  (* "''" is an escaped single quote inside a string;
                     '#' followed by 0..255 produces one byte *)
+
+INTERP_STRING    = '"' { CHUNK | HOLE } '"' .
+HOLE             = '${' Expression '}' .
+                 (* A double-quoted literal with interpolation holes. Each HOLE's
+                    Expression is rendered to text as 'write' renders it and
+                    concatenated into the result. A CHUNK is literal text in which
+                    "" is a literal double quote, "$$" before a brace is a literal
+                    "${", and any other '$' stands for itself. The Expression is a
+                    full expression and runs to its closing '}' (a '}' inside a
+                    single-quoted literal within it does not close the hole). A
+                    single-quoted STRING_LITERAL never interpolates. A 'real' hole
+                    is not yet supported, and a HOLE may not contain a '"'. *)
 
 LETTER           = 'a'..'z' | 'A'..'Z' .
 DIGIT            = '0'..'9' .

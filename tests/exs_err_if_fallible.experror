@@ -1,2 +1,0 @@
-a fallible value cannot be an `if` condition
-bind it with `if var x = ...` or supply a fallback with `otherwise`

@@ -534,6 +534,8 @@ are specified by the companion documents in this directory:
 - `kp-hardening.md`: the plan for running untrusted scripts safely.
 - `kp-property.md`: the uniform-access (`property`) feature: accessor-backed
   declarations and computed record fields.
+- `kp-defer.md`: `defer`, block-scoped teardown run LIFO on every orderly exit.
+- `kp-foreach.md`: `for`-`in`, iterating the elements of a sequence directly.
 
 ## See also
 

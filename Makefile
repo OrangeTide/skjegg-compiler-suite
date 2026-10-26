@@ -93,7 +93,7 @@ BE_A64  := backend/regalloc_arm64.c backend/arm64_emit.c
 BE_X64  := backend/regalloc_x86.c backend/x86_emit.c
 
 # AArch64 selector + GAS text sink, driven by the shared AArch64 selector.
-# skj-cc-arm64 / skj-exc-arm64 use this; the stack-ABI arm64 tools (tinc/scheme)
+# skj-cc-arm64 uses this; the stack-ABI arm64 tools (tinc/scheme)
 # and the i64/ops/fpu integration tests keep BE_A64 (arm64_emit.c), the same
 # split x86 has between BE_X64_SEL and BE_X64.
 BE_A64_SEL := backend/regalloc_arm64.c backend/arm64_select.c backend/arm64_mc_text.c
@@ -1629,7 +1629,7 @@ build/version.h: FORCE | build
 
 # Every tool's main.c includes "version.h".  This covers the tools outside
 # $(TOOLS) too, since they are built by their own targets, not by `make all`.
-VERSIONED := $(TOOLS) build/skj-tinc-x86-64 build/skj-sc-x86-64 build/skj-exc build/skj-exc-rv
+VERSIONED := $(TOOLS) build/skj-tinc-x86-64 build/skj-sc-x86-64
 $(VERSIONED): build/version.h
 
 ## Verify version.mk and the git tag agree before cutting a release.
@@ -1735,13 +1735,10 @@ build/mips/start_rt.o: runtime/start_mips.S | build/mips
 
 ## gcc-built runtime objects (o32).  Like the RISC-V build/rv/%.o rule, this
 ## coexists with build/mips/%.o: build/mips/%.s: make picks the .c rule only
-## when no matching .s can be produced (libexc, exc_native, utf8, soft64,
+## when no matching .s can be produced (utf8, soft64,
 ## half have no test source).
 build/mips/%.o: runtime/%.c | build/mips
 	$(MIPS_CC) $(MIPS_RT_CFLAGS) -c -o $@ $<
-
-build/mips/start_psabi.o: runtime/start_mips_psabi.S | build/mips
-	$(MIPS_AS) -march=mips1 -EL -o $@ $<
 
 ## Divide-only soft64 for the libc, as on RISC-V: start_mips.S already has the
 ## mul and shift family, so a full soft64.o would collide on them.
@@ -2082,12 +2079,9 @@ check-rv-emu: build/skj-run build/skj-tinc-rv build/skj-sc-rv \
 ## bench-cf or bench-rv to gate one core when only one toolchain is present.
 ##
 ## The corpus reuses the guests check-emu and check-rv-emu already build, so
-## these share their prerequisite sets.  exc_walker_test is the exception: it
-## is built by test-exc-walker rather than the suite binary lists, so name it
-## directly or bench and bench-accept would skip it (and --accept would drop
-## it from the baseline).
+## these share their prerequisite sets.
 BENCH_CF_DEPS := $(CF_TC_BINS) $(CF_SCM_BINS) $(CF_MOO_BINS) $(CF_TOY_BINS) \
-                 $(CF_PAS_BINS) build/cf/exc_walker_test
+                 $(CF_PAS_BINS)
 BENCH_RV_DEPS := build/skj-tinc-rv build/skj-sc-rv \
                  $(RV_TESTS:tests/%.tc=build/rv/%) \
                  $(RV_SCM_TESTS:tests/%.scm=build/rv/%)
@@ -2105,14 +2099,11 @@ bench-accept: build/skj-run $(BENCH_CF_DEPS) $(BENCH_RV_DEPS)
 	@sh tests/bench.sh ./build/skj-run build tests/bench.list tests/bench.expected --accept
 
 ## ---------------------------------------------------------------
-## Excelsior on RISC-V (the platform-ABI tier)
+## RISC-V platform-ABI runtime objects
 ##
-## skj-exc-rv emits the RISC-V ILP32 convention, so the gcc-built guest
-## runtime links against it the way it does on ColdFire.  The runtime
-## objects are the same portable C, cross-compiled for rv32: soft64.c
+## The runtime objects are portable C cross-compiled for rv32: soft64.c
 ## supplies the 64-bit helpers, since the toolchain ships no rv32 libgcc
-## to take them from, and start_rv_psabi.S the entry, syscalls, arena
-## and source coroutines under that same convention.
+## to take them from.
 ## ---------------------------------------------------------------
 RV_CC       ?= riscv64-linux-gnu-gcc
 RV_AR       ?= riscv64-linux-gnu-ar
@@ -2123,42 +2114,12 @@ RV_RT_CFLAGS := -std=c99 -O2 -Wall -ffreestanding $(RV_ARCH)
 build/rv/%.o: runtime/%.c | build/rv
 	$(RV_CC) $(RV_RT_CFLAGS) -c -o $@ $<
 
-build/rv/start_psabi.o: runtime/start_rv_psabi.S | build/rv
-	$(RV_AS) $(RV_AS_ARCH) -o $@ $<
-
 ## Divide-only soft64 for the libc: start_rv.S already defines the mul and
 ## shift family, so only the __udivdi3 div family must be added (a full
 ## soft64.o would collide on the shifts).  A separate object from the shared
 ## build/rv/soft64.o, which the Excelsior runtime links whole.
 build/rv/soft64_div.o: runtime/soft64.c | build/rv
 	$(RV_CC) $(RV_RT_CFLAGS) -DSOFT64_NO_MULSHIFT -c -o $@ $<
-
-EXC_RV_RT := build/rv/start_psabi.o build/rv/libexc.o build/rv/exc_native.o \
-             build/rv/utf8.o build/rv/soft64.o
-
-## Excelsior end to end on RISC-V, under qemu-riscv32.  Not skj-run: the
-## RV32 core in emu/ implements F but not D, and Excelsior's float is a
-## double, so the emulator cannot run this tier yet.
-check-exc-rv: build/skj-exc-rv build/skj-run $(EXC_RV_RT)
-	@BDIR="$(CURDIR)/build/rv/exc" \
-	 EXC="$(CURDIR)/build/skj-exc-rv" \
-	 AS="$(RV_AS) $(RV_AS_ARCH) -o" \
-	 LD="$(RV_LD) -m elf32lriscv -o" \
-	 START="$(CURDIR)/build/rv/start_psabi.o" \
-	 LIBEXC="$(CURDIR)/build/rv/libexc.o" \
-	 BINDING="$(CURDIR)/build/rv/exc_native.o" \
-	 UTF8="$(CURDIR)/build/rv/utf8.o build/rv/soft64.o" \
-	 sh tests/run-exc-tests.sh "$(QEMU_RV)"
-
-## Excelsior end to end on the emulator: libexc and its native binding
-## rebuilt for ColdFire, into their own output directory.
-check-exc-emu: build/skj-run build/skj-exc build/skj-as build/skj-ld build/start.o \
-               build/cf/libexc.o build/cf/exc_native.o build/cf/utf8.o
-	@BDIR="$(CURDIR)/build/cf/exc" \
-	 LIBEXC="$(CURDIR)/build/cf/libexc.o" \
-	 BINDING="$(CURDIR)/build/cf/exc_native.o" \
-	 UTF8="$(CURDIR)/build/cf/utf8.o" \
-	 sh tests/run-exc-tests.sh ./build/skj-run
 
 ## The IR-builder integration tests on the emulator.  i64 and ops link no
 ## cross-compiled C, so they run the very binaries the qemu tier runs; the
@@ -2178,89 +2139,9 @@ test-ops-emu: build/skj-run build/ops_test_cf
 	@./build/skj-run ./build/ops_test_cf && echo "PASS: ops_test (skj-run)" \
 		|| (echo "FAIL: ops_test (skj-run)"; exit 1)
 
-## Freeze/thaw walker on the emulator: its harness is cross-compiled C, so
-## it needs the ColdFire build like the rest of the runtime.
-build/cf/exc_walker_test.o: tests/exc_walker_test.c runtime/libexc.h | build/cf
-	$(M68K_CC) $(CF_RT_CFLAGS) -c -o $@ $<
-
-build/cf/exc_walker_test: build/start.o build/cf/exc_walker_test.o \
-		build/cf/libexc.o build/cf/utf8.o build/exs_walker_fixture.o build/skj-ld
-	./build/skj-ld -o $@ build/start.o build/cf/exc_walker_test.o \
-		build/cf/libexc.o build/cf/utf8.o build/exs_walker_fixture.o
-
-test-exc-walker-emu: build/skj-run build/cf/exc_walker_test
-	@./build/skj-run ./build/cf/exc_walker_test && echo "PASS: exc_walker_test (skj-run)" \
-		|| (echo "FAIL: exc_walker_test (skj-run)"; exit 1)
-
-## Excelsior through the RISC-V backend, codegen only: every test in the
-## corpus must compile and assemble.  It cannot be linked or run yet (the
-## RV backend passes call arguments on the stack, the RISC-V ILP32 ABI
-## passes them in registers, so gcc-built libexc is unreachable), so this
-## guards the lowering while that gap stands.  The three samples excluded
-## below fail identically on ColdFire: they use features neither backend
-## lowers yet.
-EXC_RV_SKIP := exs_barrow_chest exs_decimal_lit exs_shape_dialog
-
-check-exc-rv-asm: build/skj-exc-rv | build/rv
-	@ok=0; bad=0; \
-	for f in tests/exs_*.exs; do \
-	    n=$$(basename $$f .exs); \
-	    case " $(EXC_RV_SKIP) " in *" $$n "*) continue ;; esac; \
-	    case $$n in exs_err_*) continue ;; esac; \
-	    if ./build/skj-exc-rv -o build/rv/$$n.s $$f 2>build/rv/$$n.err && \
-	       $(RV_AS) -march=rv32imfd_zfh -mabi=ilp32 -o build/rv/$$n.o \
-	           build/rv/$$n.s 2>>build/rv/$$n.err; then \
-	        ok=$$((ok + 1)); \
-	    else \
-	        bad=$$((bad + 1)); echo "FAIL $$n"; sed 's/^/    /' build/rv/$$n.err; \
-	    fi; \
-	done; \
-	echo "exc rv codegen: $$ok assembled, $$bad failed"; \
-	[ $$bad -eq 0 ]
-
-## Excelsior codegen on the 64-bit backends (compile + assemble every program,
-## no run).  This verifies the x86-64 / arm64 claim of full Excelsior parity at
-## the level where the risk lives, the front-end-to-backend path, since the
-## runtime C is shared and portable.  A run tier waits on a register-ABI crt
-## with the arena/continuation/coroutine helpers (see skj-exc-x86-64 above).
-## The skip set is EXC_RV_SKIP: those three are front-end limitations, not
-## backend ones, so every backend skips them alike.
-check-exc-x86-64-asm: build/skj-exc-x86-64 | build/x86_64
-	@ok=0; bad=0; \
-	for f in tests/exs_*.exs; do \
-	    n=$$(basename $$f .exs); \
-	    case " $(EXC_RV_SKIP) " in *" $$n "*) continue ;; esac; \
-	    case $$n in exs_err_*) continue ;; esac; \
-	    if ./build/skj-exc-x86-64 -o build/x86_64/$$n.s $$f 2>build/x86_64/$$n.err && \
-	       $(X64_ASM) -f elf64 -o build/x86_64/$$n.o build/x86_64/$$n.s 2>>build/x86_64/$$n.err; then \
-	        ok=$$((ok + 1)); \
-	    else \
-	        bad=$$((bad + 1)); echo "FAIL $$n"; sed 's/^/    /' build/x86_64/$$n.err; \
-	    fi; \
-	done; \
-	echo "exc x86-64 codegen: $$ok assembled, $$bad failed"; \
-	[ $$bad -eq 0 ]
-
-check-exc-arm64-asm: build/skj-exc-arm64 | build/arm64
-	@ok=0; bad=0; \
-	for f in tests/exs_*.exs; do \
-	    n=$$(basename $$f .exs); \
-	    case " $(EXC_RV_SKIP) " in *" $$n "*) continue ;; esac; \
-	    case $$n in exs_err_*) continue ;; esac; \
-	    if ./build/skj-exc-arm64 -o build/arm64/$$n.s $$f 2>build/arm64/$$n.err && \
-	       $(A64_AS) -o build/arm64/$$n.o build/arm64/$$n.s 2>>build/arm64/$$n.err; then \
-	        ok=$$((ok + 1)); \
-	    else \
-	        bad=$$((bad + 1)); echo "FAIL $$n"; sed 's/^/    /' build/arm64/$$n.err; \
-	    fi; \
-	done; \
-	echo "exc arm64 codegen: $$ok assembled, $$bad failed"; \
-	[ $$bad -eq 0 ]
-
 ## Every suite the in-tree emulator can run, no qemu involved.
-check-emu-all: check-emu check-rv-emu check-exc-emu check-exc-rv-emu \
-               test-exc-coro-overflow \
-               test-exc-walker-emu test-rv-irq test-rv-run test-guest-mmap \
+check-emu-all: check-emu check-rv-emu \
+               test-rv-irq test-rv-run test-guest-mmap \
                test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache \
                test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp \
                check-rv32 \
@@ -2315,8 +2196,7 @@ check-emu-san: build/san/test_rv_run build/san/test_guest_mmap \
                build/san/test_rv_decode_cache build/san/test_rv_irq \
                build/san/test_rv_expand build/san/test_rv_bus \
                build/san/test_rv_csr build/san/test_rv_decode build/san/test_rv_fp \
-               build/san/skj-run build/sandbox/parent.elf \
-               build/skj-exc-rv build/skj-as-rv build/skj-ld-rv $(EXC_RV_EMU_RT)
+               build/san/skj-run build/sandbox/parent.elf
 	@./build/san/test_rv_run
 	@./build/san/test_guest_mmap
 	@./build/san/test_rv_decode_cache
@@ -2327,8 +2207,6 @@ check-emu-san: build/san/test_rv_run build/san/test_guest_mmap \
 	@./build/san/test_rv_decode
 	@./build/san/test_rv_fp
 	@sh tests/run-sandbox-test.sh "$(CURDIR)/build/san/skj-run" "$(CURDIR)/build/sandbox/parent.elf"
-	@$(MAKE) --no-print-directory check-exc-rv-emu-san
-	@$(MAKE) --no-print-directory test-exc-coro-overflow SKJRUN="$(CURDIR)/build/san/skj-run"
 	@echo "All host-only emulator tests passed under ASan+UBSan."
 
 ## ---------------------------------------------------------------------------
@@ -2359,15 +2237,6 @@ build/san/skj-as: $(AS_SRC) as/as.h as/asm_lex.h as/asm_obj.h dwarf/dwarf.h buil
 
 build/san/skj-ld: $(LD_SRC) ld/ld.h ld/mapfile.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Ild -Iir -o $@ $(LD_SRC)
-
-# EXC_SRC is defined later in the Makefile than this rule, so a prerequisite of
-# $(EXC_SRC) would expand empty at read time and never trigger a rebuild; list
-# the sources explicitly here (the recipe's $(EXC_SRC) is fine, deferred).
-build/san/skj-exc: excelsior/lex.c excelsior/parse.c excelsior/resolve.c \
-                   excelsior/typecheck.c excelsior/lower.c excelsior/main.c \
-                   $(IR_SRC) $(BE_CF) excelsior/excelsior.h ir/ir.h build/version.h \
-                   | build build/san
-	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Iexcelsior -Iir -o $@ $(EXC_SRC)
 
 build/san/skj-as-rv: $(AS_RV_SRC) as/rv.h as/asm_lex.h as/asm_obj.h dwarf/dwarf.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Ias -Iir -Idwarf -o $@ $(AS_RV_SRC)
@@ -2451,17 +2320,6 @@ build/san/fe-cc-fuzz: tests/fe_fuzz.c cc/lex.c cc/parse.c cc/type.c cc/lower.c \
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DCC_M68K -DFEFUZZ_CC -Icc -Iir -Itests -o $@ \
 	    tests/fe_fuzz.c cc/lex.c cc/parse.c cc/type.c cc/lower.c $(IR_SRC) $(BE_CF)
 
-# The Excelsior harness runs the full front end: lex -> parse -> resolve ->
-# typecheck -> lower.  EXC front-end sources are defined later than this rule,
-# so they are listed explicitly (the deferred-definition hazard).
-build/san/fe-exc-fuzz: tests/fe_fuzz.c excelsior/lex.c excelsior/parse.c \
-                       excelsior/resolve.c excelsior/typecheck.c excelsior/lower.c \
-                       $(IR_SRC) $(BE_CF) excelsior/excelsior.h ir/ir.h \
-                       tests/fuzz_mutate.h build/version.h | build build/san
-	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DFEFUZZ_EXC -Iexcelsior -Iir -Itests -o $@ \
-	    tests/fe_fuzz.c excelsior/lex.c excelsior/parse.c excelsior/resolve.c \
-	    excelsior/typecheck.c excelsior/lower.c $(IR_SRC) $(BE_CF)
-
 build/san/skj-jit: $(JIT_SRC) cc/cc.h jit/jit_common.h jit/jit_arena.h jit/jit_x86.h jit/emit_x86.h jit/code.h backend/mc.h backend/x86_select.h ir/ir.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -DCC_PSABI -DCC_STRUCT_ABI $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ijit -Ibackend -o $@ $(JIT_SRC)
 
@@ -2470,7 +2328,7 @@ build/san/skj-jit: $(JIT_SRC) cc/cc.h jit/jit_common.h jit/jit_arena.h jit/jit_x
 # SC_SRC,
 # MOO_SRC, and PC_SRC are defined later in the Makefile than these rules, so a
 # prerequisite of them would expand empty at read time and never trigger a
-# rebuild (the same deferred-definition hazard the skj-exc rule above notes);
+# rebuild (a deferred-definition hazard);
 # the source files are listed explicitly in the prerequisites here, while the
 # recipe's deferred $(VAR) expansion is fine.  SRC and AR_SRC are defined
 # before this point, so those rules use the variable directly.
@@ -2517,13 +2375,6 @@ check-san-cc: build/san/skj-cc build/san/skj-as build/start.o build/half.o build
 	   OUTDIR="$(CURDIR)/build/san/cc-out" EXCLUDE="$(CF_EXCLUDE)" \
 	   HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o" \
 	   sh tests/run-cc-tests.sh
-
-check-san-exc: build/san/skj-exc build/san/skj-as build/san/skj-ld \
-               build/start.o build/libexc.o build/exc_native.o build/utf8.o
-	@echo "== check-san: Excelsior (skj-exc + skj-as + skj-ld) =="
-	@$(SAN_RUNENV) EXC="$(CURDIR)/build/san/skj-exc" AS="$(CURDIR)/build/san/skj-as -o" \
-	   LD="$(CURDIR)/build/san/skj-ld -o" BDIR="$(CURDIR)/build/san/exc-out" \
-	   sh tests/run-exc-tests.sh "$(QEMU)"
 
 check-san-rvas: build/san/skj-as-rv build/san/skj-ld-rv build/skj-run
 	@echo "== check-san: RV32 assembler/linker (skj-as-rv + skj-ld-rv) =="
@@ -2690,19 +2541,12 @@ test-fe-cc-fuzz: build/san/fe-cc-fuzz
 	   || { echo "fe-cc-fuzz: FAILED"; tail -40 build/fe-cc-fuzz.log; exit 1; }
 	@tail -1 build/fe-cc-fuzz.log
 
-test-fe-exc-fuzz: build/san/fe-exc-fuzz
-	@echo "== Excelsior parser fuzz ($(FE_FUZZ_ITERS) iterations, rng $(FE_FUZZ_RNG)) =="
-	@$(SAN_RUNENV) ./build/san/fe-exc-fuzz --mutate $(FE_FUZZ_ITERS) --rng $(FE_FUZZ_RNG) \
-	   $(wildcard tests/exs_*.exs) >/dev/null 2>build/fe-exc-fuzz.log \
-	   || { echo "fe-exc-fuzz: FAILED"; tail -40 build/fe-exc-fuzz.log; exit 1; }
-	@tail -1 build/fe-exc-fuzz.log
-
 ## The pure compile-and-emit tools under the sanitizers: the preprocessor, the
 ## C compiler, every IR front end (tinc, scheme, moo, Pascal, Excelsior), the
 ## assembler and linker, and the archive tool.  skj-ld is exercised by the
 ## Excelsior slice (the cc slice links with the system ld).  This is the CI
 ## slice: self-contained, no RISC-V reference assembler and no cross checkouts.
-check-san-tools: check-san-cpp check-san-cc check-san-exc \
+check-san-tools: check-san-cpp check-san-cc \
                  check-san-tinc check-san-scheme check-san-moo check-san-pc \
                  check-san-ar
 	@echo "check-san-tools: preprocessor, compilers, front ends, assembler, linker, and ar clean under the sanitizers."
@@ -2717,17 +2561,17 @@ check-san: check-san-tools check-san-rvas check-san-jit check-san-kobold \
            test-kpm-fuzz test-cpp-fuzz \
            test-as-fuzz test-as-rv-fuzz test-as-mips-fuzz \
            test-fe-tinc-fuzz test-fe-pascal-fuzz test-fe-moo-fuzz \
-           test-fe-cc-fuzz test-fe-exc-fuzz
+           test-fe-cc-fuzz
 	@echo "All check-san suites passed under the sanitizers."
 
 .PHONY: check-san check-san-tools check-san-kobold \
-        check-san-cpp check-san-cc check-san-exc check-san-rvas check-san-kp \
+        check-san-cpp check-san-cc check-san-rvas check-san-kp \
         check-san-jit check-san-tinc check-san-scheme check-san-moo \
         check-san-pc check-san-ar check-san-kp-corpus check-san-kp-multi \
         check-san-kp-io check-san-kp-inc test-kpm-fuzz test-cpp-fuzz \
         test-as-fuzz test-as-rv-fuzz test-as-mips-fuzz \
         test-fe-tinc-fuzz test-fe-pascal-fuzz test-fe-moo-fuzz \
-        test-fe-cc-fuzz test-fe-exc-fuzz
+        test-fe-cc-fuzz
 
 ## arm64 per-test rules: tests/<name>.tc -> build/arm64/<name>.s -> .o -> binary
 A64_TESTS := $(TESTS)
@@ -2889,19 +2733,6 @@ test-threads: build/test_threads
 	@./build/test_threads; ec=$$?; \
 	 if [ $$ec -eq 42 ]; then echo "PASS: libc threads (host, exit 42)"; \
 	 else echo "FAIL: libc threads (exit $$ec, expected 42)"; exit 1; fi
-
-## The guest-32 libexc build (host-only).  Compiles the portable Excelsior
-## runtime as LP64 host code over the 32-bit guest object model (the
-## EXC_GUEST32 mode the arm64 JIT's Excelsior tier uses) and round-trips the
-## value helpers, spawn/image seeding, dispatch lookup, and freeze/thaw
-## against a low (MAP_32BIT) arena.  No cross toolchain, no qemu.
-build/test_libexc_guest32: tests/libexc_guest32.c runtime/libexc.c runtime/utf8.c \
-                           runtime/libexc.h runtime/utf8.h | build
-	$(CC) $(CFLAGS) -D_GNU_SOURCE -DEXC_GUEST32 -Iruntime -o $@ \
-	    tests/libexc_guest32.c runtime/libexc.c runtime/utf8.c
-
-test-libexc-guest32: build/test_libexc_guest32
-	./build/test_libexc_guest32
 
 ## RV32 interrupt delivery (host-only: it drives the core directly, so
 ## it needs neither a cross toolchain nor qemu)
@@ -3276,75 +3107,6 @@ build/skj-mooc: $(MOO_SRC) moo/moo.h ir/ir.h | build
 
 ## Excelsior compiler (reader + resolver + type checker + IR lowering,
 ## ColdFire backend). Lowering covers the integer / bool core so far.
-EXC_SRC := excelsior/lex.c excelsior/parse.c excelsior/resolve.c \
-           excelsior/typecheck.c excelsior/lower.c excelsior/main.c \
-           $(IR_SRC) $(BE_CF)
-
-EXC_FE     := excelsior/lex.c excelsior/parse.c excelsior/resolve.c \
-              excelsior/typecheck.c excelsior/lower.c excelsior/main.c
-EXC_SRC_RV := $(EXC_FE) $(IR_SRC) $(BE_RV)
-EXC_SRC_MIPS := $(EXC_FE) $(IR_SRC) $(BE_MIPS)
-EXC_SRC_X64 := $(EXC_FE) $(IR_SRC) $(BE_X64_SEL)
-EXC_SRC_A64 := $(EXC_FE) $(IR_SRC) $(BE_A64_SEL)
-
-build/skj-exc: $(EXC_SRC) excelsior/excelsior.h ir/ir.h | build
-	$(CC) $(CFLAGS) -Iexcelsior -Iir -o $@ $(EXC_SRC)
-
-## Excelsior through the RISC-V backend.  The front end is
-## backend-agnostic, so this is the same sources with BE_RV swapped in.
-## Built -DCC_PSABI: on RISC-V the toolkit's stack convention cannot
-## reach a gcc-built runtime (m68k's C ABI is stack-based, RISC-V's is
-## not), so this tool emits the platform ILP32 convention instead.
-build/skj-exc-rv: $(EXC_SRC_RV) excelsior/excelsior.h ir/ir.h | build
-	$(CC) $(CFLAGS) -DCC_PSABI -Iexcelsior -Iir -o $@ $(EXC_SRC_RV)
-
-## Excelsior through the MIPS backend, o32 psABI (the counterpart of
-## skj-exc-rv): emits the o32 convention so a gcc-built guest runtime links.
-build/skj-exc-mips: $(EXC_SRC_MIPS) excelsior/excelsior.h ir/ir.h | build
-	$(CC) $(CFLAGS) -DCC_PSABI -Iexcelsior -Iir -o $@ $(EXC_SRC_MIPS)
-
-## Excelsior through the x86-64 and AArch64 backends, emitting the platform
-## register ABI (SysV / AAPCS64) so the compiler matches a gcc-built runtime,
-## the same flags skj-cc-x86-64 / skj-cc-arm64 use.  These drive the
-## codegen-only tiers (check-exc-x86-64-asm / -arm64-asm).  The static AOT link
-## has no end-to-end tier on these two: the backends emit an ILP32 address model
-## (4-byte pointers and struct fields) and a statically linked LP64 runtime
-## disagrees on the width of every shared struct field, and the ILP32 host ABIs
-## that would bridge it (x86 x32, arm64 ilp32) are rejected by qemu-user.  The
-## in-process JIT bridges it a different way (skj-exc-jit-arm64 below): it maps
-## the guest arena below 4GB and links libexc built EXC_GUEST32, an LP64 host
-## build that holds every shared struct at guest width.  See excelsior/status.md
-## (Roadmap 2).
-build/skj-exc-x86-64: $(EXC_SRC_X64) excelsior/excelsior.h ir/ir.h backend/mc.h backend/mc_text.h backend/x86_select.h | build
-	$(CC) $(CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -DCC_PSABI -DCC_STRUCT_ABI -Iexcelsior -Iir -Ibackend -o $@ $(EXC_SRC_X64)
-
-build/skj-exc-arm64: $(EXC_SRC_A64) excelsior/excelsior.h ir/ir.h backend/arm64_mc.h backend/arm64_select.h backend/arm64_mc_text.h | build
-	$(CC) $(CFLAGS) -DSKJ_LP64=1 -DCC_PSABI -DCC_ARM64 -Iexcelsior -Iir -o $@ $(EXC_SRC_A64)
-
-## skj-exc-jit-arm64: the in-process Excelsior JIT.  The exc front end lowers to
-## IR, the jit/ library JITs it to AArch64, and the entry verb runs in-process
-## over libexc built EXC_GUEST32 (the guest-32 host runtime).  The driver is
-## non-PIE (so host libexc's __exc_self and code sit below 4GB, the guest's
-## 32-bit reach) and -rdynamic (so the guest's runtime imports resolve by name
-## through dlsym).  Cross-built with the arm64 toolchain, run under qemu-aarch64.
-EXC_FE_NOMAIN := excelsior/lex.c excelsior/parse.c excelsior/resolve.c \
-                 excelsior/typecheck.c excelsior/lower.c
-EXC_JIT_A64 := jit/exc_main.c jit/jit_common.c jit/jit_arena.c jit/jit_arm64.c \
-               jit/emit_arm64.c jit/code.c jit/call_guest_arm64.S \
-               jit/exc_coro_arm64.S \
-               backend/arm64_select.c backend/regalloc_arm64.c \
-               $(EXC_FE_NOMAIN) $(IR_SRC) runtime/libexc.c runtime/utf8.c
-build/skj-exc-jit-arm64: $(EXC_JIT_A64) excelsior/excelsior.h ir/ir.h jit/jit_common.h jit/jit_arena.h jit/emit_arm64.h jit/code.h backend/arm64_mc.h backend/arm64_select.h runtime/libexc.h runtime/utf8.h Makefile build/version.h | build
-	$(A64_CC) $(CFLAGS) -DSKJ_LP64=1 -DCC_PSABI -DCC_ARM64 -DEXC_GUEST32 -no-pie -rdynamic \
-	    -Iexcelsior -Iir -Ijit -Ibackend -Iruntime -o $@ $(EXC_JIT_A64) -ldl
-
-## Run the Excelsior end-to-end suite in-process through skj-exc-jit-arm64 under
-## qemu-aarch64, comparing exit codes and stdout.  Source coroutines run through
-## jit/exc_coro_arm64.S, so the whole suite is in.
-check-exc-jit-arm64: build/skj-exc-jit-arm64
-	@JIT="$(CURDIR)/build/skj-exc-jit-arm64" RUNNER="$(QEMU_A64)" \
-	 sh tests/run-exc-jit-tests.sh
-
 ## MooScript runtime objects (cross-compiled C)
 build/str.o: runtime/str.c | build
 	$(M68K_CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<
@@ -3442,79 +3204,6 @@ check-pc-kpcom: build/skj-pc-x86-64 build/pascal_rt_host.o build/skj-kp-jit
 ## Pascal runtime (cross-compiled C)
 build/pascal_rt.o: runtime/pascal_rt.c | build
 	$(M68K_CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<
-
-## Excelsior guest runtime and its native host binding (host-abi.md:
-## libexc is layer 1, portable; exc_native is the layer-2 binding the
-## test host uses; a VM-host binding replaces only the latter)
-build/libexc.o: runtime/libexc.c runtime/libexc.h runtime/utf8.h | build
-	$(M68K_CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<
-
-build/exc_native.o: runtime/exc_native.c runtime/libexc.h | build
-	$(M68K_CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<
-
-## Excelsior on smolmoo (host-abi.md D8): the first VM-host binding.
-## smolmoo is a RISC-V RV32 machine (rv32.c, vm_rv.ld), so the verb ELF
-## is built through the RV32 psABI toolchain.  The C runtime (libexc, the
-## binding, utf8, soft64) is gcc-built -fno-pic -mno-relax, exactly like
-## check-exc-rv-skj, so skj-ld-rv can resolve it without a GOT or linker
-## relaxation.  The binding is crt-less: exc_smolmoo.c supplies _start and
-## the ecall hypercall stubs, the coroutine shim (smolmoo_rt_rv.S) and the
-## verb are assembled by skj-as-rv, and the whole program is linked by
-## skj-ld-rv over runtime/smolmoo_rv.ld (code at 0x400).  runtime/soft64.c
-## supplies the 64-bit helpers the toolchain's absent rv32 libgcc cannot.
-## Link-only smoke in this tree: the ELF runs under the smolmoo server,
-## whose ecall hypercalls have no Linux meaning, not qemu.  make
-## smolmoo-demo proves the pipeline; M0 in doc/languages/smolmoo-v1.md runs it on a
-## real server.
-build/smolmoo:
-	mkdir -p build/smolmoo
-
-build/smolmoo/%.o: runtime/%.c runtime/libexc.h | build/smolmoo
-	$(RV_CC) -std=c99 $(RV_SKJ_RT_CFLAGS) -c -o $@ $<
-
-build/smolmoo/smolmoo_rt_rv.o: runtime/smolmoo_rt_rv.S build/skj-as-rv | build/smolmoo
-	./build/skj-as-rv -o $@ $<
-
-build/smolmoo/demo.s: build/skj-exc-rv tests/exs_source_yield.exs | build/smolmoo
-	./build/skj-exc-rv -o $@ tests/exs_source_yield.exs
-
-build/smolmoo/demo.o: build/smolmoo/demo.s build/skj-as-rv
-	./build/skj-as-rv -o $@ $<
-
-build/smolmoo/demo.elf: build/smolmoo/demo.o build/smolmoo/libexc.o \
-		build/smolmoo/exc_smolmoo.o build/smolmoo/smolmoo_rt_rv.o \
-		build/smolmoo/soft64.o build/smolmoo/utf8.o \
-		runtime/smolmoo_rv.ld build/skj-ld-rv
-	./build/skj-ld-rv -T runtime/smolmoo_rv.ld -o $@ \
-		build/smolmoo/demo.o build/smolmoo/libexc.o \
-		build/smolmoo/exc_smolmoo.o build/smolmoo/smolmoo_rt_rv.o \
-		build/smolmoo/soft64.o build/smolmoo/utf8.o
-
-smolmoo-demo: build/smolmoo/demo.elf
-
-.PHONY: smolmoo-demo
-
-## Freeze/thaw walker test (host-abi.md D7): the compiled fixture
-## class's descriptor field table driven by a C harness that is its own
-## binding (an in-memory property store), self-checking under qemu.
-build/exs_walker_fixture.o: tests/exs_walker_fixture.exs build/skj-exc build/skj-as
-	./build/skj-exc -o build/exs_walker_fixture.s tests/exs_walker_fixture.exs
-	./build/skj-as -o $@ build/exs_walker_fixture.s
-
-build/exc_walker_test.o: tests/exc_walker_test.c runtime/libexc.h | build
-	$(M68K_CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<
-
-build/exc_walker_test: build/start.o build/exc_walker_test.o build/libexc.o \
-		build/utf8.o build/exs_walker_fixture.o build/skj-ld
-	./build/skj-ld -o $@ build/start.o build/exc_walker_test.o \
-		build/libexc.o build/utf8.o build/exs_walker_fixture.o
-
-test-exc-walker: build/exc_walker_test
-	@echo "Running freeze/thaw walker test under qemu-m68k..."
-	@$(QEMU) ./build/exc_walker_test && echo "PASS: exc_walker_test" \
-		|| (echo "FAIL: exc_walker_test"; exit 1)
-
-.PHONY: test-exc-walker
 
 ## Vendored UTF-8 decoder (freestanding), for R7 code-point string ops
 build/utf8.o: runtime/utf8.c runtime/utf8.h | build
@@ -3752,25 +3441,6 @@ test-tinc-loc: build/skj-tinc build/skj-as
 	 fi
 	@./build/skj-as -o build/debug/tcloc_g.o build/debug/tcloc_g.s \
 	     && echo "PASS: tinc -g assembly assembles"
-
-## Debug-info line markers (-g) on the Excelsior path: skj-exc emits an IR_LOC
-## per statement and records the source file on each function (verbs, funcs,
-## source bodies and lambdas); the ColdFire backend records each marker as a
-## DWARF ".loc" directive.  Assert the markers appear under -g, are absent without
-## it, and the -g assembly still assembles with skj-as.
-test-exc-loc: build/skj-exc build/skj-as
-	@mkdir -p build/debug
-	@./build/skj-exc -g -o build/debug/excloc_g.s tests/debug/loc.exs
-	@./build/skj-exc    -o build/debug/excloc_n.s tests/debug/loc.exs
-	@g=`grep -c '\.loc' build/debug/excloc_g.s`; \
-	 n=`grep -c '\.loc' build/debug/excloc_n.s`; \
-	 if [ "$$g" -ge 5 ] && [ "$$n" -eq 0 ]; then \
-	     echo "PASS: exc -g line markers ($$g with -g, $$n without)"; \
-	 else \
-	     echo "FAIL: exc -g line markers ($$g with -g, $$n without)"; exit 1; \
-	 fi
-	@./build/skj-as -o build/debug/excloc_g.o build/debug/excloc_g.s \
-	     && echo "PASS: exc -g assembly assembles"
 
 ## DWARF 4 line-number serializer (item 2 of doc/tools/debugger.md): the
 ## dwarf/ serializer turns a (code address, line) row table into a .debug_line
@@ -5129,123 +4799,14 @@ build/rv-skj:
 build/rv-skj/start.o: runtime/start_rv.S build/skj-as-rv | build/rv-skj
 	./build/skj-as-rv -o $@ $<
 
-## The Excelsior psABI runtime for the skj-toolchain variant: the C parts are
-## still gcc-built (skj-cc-rv uses the backend's stack convention, not the
-## register psABI skj-exc-rv and the runtime share), but -fno-pic -mno-relax
-## keeps them to the relocations skj-ld-rv implements (no GOT, no linker
-## relaxation; the SET*/SUB* pairs stay in the discarded .eh_frame).  The crt
-## is assembled by skj-as-rv.
+## The psABI runtime for the skj-toolchain variant: the C parts are
+## gcc-built, but -fno-pic -mno-relax keeps them to the relocations skj-ld-rv
+## implements (no GOT, no linker relaxation; the SET*/SUB* pairs stay in the
+## discarded .eh_frame).  The crt is assembled by skj-as-rv.
 RV_SKJ_RT_CFLAGS := $(RV_RT_CFLAGS) -fno-pic -mno-relax
 
 build/rv-skj/%.o: runtime/%.c build/skj-as-rv | build/rv-skj
 	$(RV_CC) $(RV_SKJ_RT_CFLAGS) -c -o $@ $<
-
-build/rv-skj/start_psabi.o: runtime/start_rv_psabi.S build/skj-as-rv | build/rv-skj
-	./build/skj-as-rv -o $@ $<
-
-EXC_RV_SKJ_RT := build/rv-skj/start_psabi.o build/rv-skj/libexc.o \
-                 build/rv-skj/exc_native.o build/rv-skj/utf8.o \
-                 build/rv-skj/soft64.o
-
-## Excelsior end to end through the in-tree RV32 toolchain: skj-exc-rv output
-## and the psABI crt assembled by skj-as-rv, the whole program (crt + libexc +
-## binding + softfloat + verb) linked by skj-ld-rv, run under qemu-riscv32.
-check-exc-rv-skj: build/skj-exc-rv build/skj-as-rv build/skj-ld-rv $(EXC_RV_SKJ_RT)
-	@BDIR="$(CURDIR)/build/rv-skj/exc" \
-	 EXC="$(CURDIR)/build/skj-exc-rv" \
-	 AS="$(CURDIR)/build/skj-as-rv -o" \
-	 LD="$(CURDIR)/build/skj-ld-rv -o" \
-	 START="$(CURDIR)/build/rv-skj/start_psabi.o" \
-	 LIBEXC="$(CURDIR)/build/rv-skj/libexc.o" \
-	 BINDING="$(CURDIR)/build/rv-skj/exc_native.o" \
-	 UTF8="$(CURDIR)/build/rv-skj/utf8.o $(CURDIR)/build/rv-skj/soft64.o" \
-	 sh tests/run-exc-tests.sh "$(QEMU_RV)"
-
-## The soft-ctx psABI crt for the emulator.  skj-run's RV32 core has F but
-## not D, so the source-coroutine context switch (save_ctx/restore_ctx in
-## start_rv_psabi.S) cannot use fsd/fld.  This variant is the mechanical
-## fsd->fsw / fld->flw rewrite of that crt; those two macros hold the file's
-## only such instructions.  It is correct on the F-only core because skj-run
-## never runs double-float code (that tier is qemu's), so a coroutine's saved
-## float registers only ever carry 32-bit values here.  A coroutine's private
-## stack comes from the guarded gm_mmap region (start_rv_psabi.S installs the
-## provider), so a stack overrun faults on the guard instead of the arena.
-build/rv-skj/start_psabi_soft.S: runtime/start_rv_psabi.S | build/rv-skj
-	sed -E 's/\bfsd\b/fsw/g; s/\bfld\b/flw/g' $< > $@
-
-build/rv-skj/start_psabi_soft.o: build/rv-skj/start_psabi_soft.S build/skj-as-rv
-	./build/skj-as-rv -o $@ $<
-
-EXC_RV_EMU_RT := build/rv-skj/start_psabi_soft.o build/rv-skj/libexc.o \
-                 build/rv-skj/exc_native.o build/rv-skj/utf8.o \
-                 build/rv-skj/soft64.o
-
-## Excelsior source coroutines on the emulator (skj-run), the tier the guarded
-## coroutine stack protects.  Built with the soft-ctx crt so the F-only core
-## can run the context switch, linked by skj-ld-rv, run on skj-run.  Only the
-## double-free coroutine tests: the RV32 core has no D, so the wider suite is
-## qemu's (check-exc-rv).
-## The coroutine tier: the two source samples plus the V.F stress tests (deep
-## wrapper nesting and many simultaneously live coroutines).  All four are the
-## soft-ctx save_ctx / restore_ctx path on the F-only core, so skj-run runs
-## them; the deep and many tests also ride the portable tiers (they have
-## .expected files, so check-exc / check-exc-rv enumerate them).
-EXC_RV_EMU_TESTS := exs_source_yield exs_source_cursor exs_coro_deep exs_coro_many
-
-check-exc-rv-emu: build/skj-exc-rv build/skj-as-rv build/skj-ld-rv build/skj-run \
-                  $(EXC_RV_EMU_RT)
-	@BDIR="$(CURDIR)/build/rv-skj/exc-emu" \
-	 EXC="$(CURDIR)/build/skj-exc-rv" \
-	 AS="$(CURDIR)/build/skj-as-rv -o" \
-	 LD="$(CURDIR)/build/skj-ld-rv -o" \
-	 START="$(CURDIR)/build/rv-skj/start_psabi_soft.o" \
-	 LIBEXC="$(CURDIR)/build/rv-skj/libexc.o" \
-	 BINDING="$(CURDIR)/build/rv-skj/exc_native.o" \
-	 UTF8="$(CURDIR)/build/rv-skj/utf8.o $(CURDIR)/build/rv-skj/soft64.o" \
-	 ONLY="$(EXC_RV_EMU_TESTS)" \
-	 sh tests/run-exc-tests.sh "$(CURDIR)/build/skj-run"
-
-## V.F: the same coroutine tier under the sanitized skj-run (ASan+UBSan), so
-## the hand-written context switch and the guarded private stacks are driven
-## with the host emulator instrumented, not only by qemu.  Reuses the already
-## built cross objects (a guest ELF is unaffected by host sanitizers).
-check-exc-rv-emu-san: build/skj-exc-rv build/skj-as-rv build/skj-ld-rv \
-                      build/san/skj-run $(EXC_RV_EMU_RT)
-	@BDIR="$(CURDIR)/build/rv-skj/exc-emu-san" \
-	 EXC="$(CURDIR)/build/skj-exc-rv" \
-	 AS="$(CURDIR)/build/skj-as-rv -o" \
-	 LD="$(CURDIR)/build/skj-ld-rv -o" \
-	 START="$(CURDIR)/build/rv-skj/start_psabi_soft.o" \
-	 LIBEXC="$(CURDIR)/build/rv-skj/libexc.o" \
-	 BINDING="$(CURDIR)/build/rv-skj/exc_native.o" \
-	 UTF8="$(CURDIR)/build/rv-skj/utf8.o $(CURDIR)/build/rv-skj/soft64.o" \
-	 ONLY="$(EXC_RV_EMU_TESTS)" \
-	 sh tests/run-exc-tests.sh "$(CURDIR)/build/san/skj-run"
-
-## V.F: a coroutine stack overrun must fault on the guard page, not corrupt the
-## arena.  exs_coro_overflow recurses unboundedly inside a source body; on
-## skj-run that walks the private 4 KB stack into the unmapped guard and faults
-## (exit 139, SIGSEGV, "stack overflow" on stderr, no stdout).  It is skj-run
-## only (qemu falls back to the arena with no guard) and expects a non-zero
-## exit, so it is driven here, not through the enumerated exc runner.  SKJRUN
-## overrides the runner, so check-emu-san runs it under the sanitized build too.
-test-exc-coro-overflow: build/skj-exc-rv build/skj-as-rv build/skj-ld-rv \
-                        build/skj-run $(EXC_RV_EMU_RT)
-	@BDIR="$(CURDIR)/build/rv-skj/exc-emu"; mkdir -p "$$BDIR"; \
-	t=exs_coro_overflow; \
-	./build/skj-exc-rv -o "$$BDIR/$$t.s" tests/$$t.exs 2>"$$BDIR/$$t.err" && \
-	./build/skj-as-rv -o "$$BDIR/$$t.o" "$$BDIR/$$t.s" 2>>"$$BDIR/$$t.err" && \
-	./build/skj-ld-rv -o "$$BDIR/$$t" $(EXC_RV_EMU_RT) "$$BDIR/$$t.o" 2>>"$$BDIR/$$t.err" || \
-	    { echo "FAIL: $$t did not build"; cat "$$BDIR/$$t.err"; exit 1; }; \
-	RUN="$${SKJRUN:-$(CURDIR)/build/skj-run}"; \
-	"$$RUN" "$$BDIR/$$t" >"$$BDIR/$$t.out" 2>"$$BDIR/$$t.stderr"; rc=$$?; \
-	if [ "$$rc" -eq 139 ] && grep -q "stack overflow" "$$BDIR/$$t.stderr" && \
-	   [ ! -s "$$BDIR/$$t.out" ]; then \
-	    echo "PASS: coroutine stack overrun hits the guard page (exit 139)"; \
-	else \
-	    echo "FAIL: expected exit 139 with 'stack overflow' and no stdout, got exit $$rc"; \
-	    cat "$$BDIR/$$t.stderr"; exit 1; \
-	fi
 
 check-cc-rv-skj: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv-skj/start.o build/rv-skj/va_rv.o
 	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
@@ -5959,46 +5520,10 @@ check-cc-mips-sf: build/skj-cc-mips-sf build/mips/start.o build/mips/half.o buil
 ## The whole PlayStation soft-float tier.
 check-mips-sf: test-softfloat test-fpu-mips-sf test-f32-mips-sf check-cc-mips-sf
 
-## Excelsior end to end on MIPS, o32 psABI, under qemu-mipsel.  The runtime
-## is the same portable C the other tiers use, cross-compiled for mips1 o32:
-## libexc, its native binding, utf8, and soft64 (the 64-bit helpers libexc's
-## decimal path needs), plus start_mips_psabi.S for entry, syscalls, arena,
-## and the source coroutines under the o32 convention.
-EXC_MIPS_RT := build/mips/start_psabi.o build/mips/libexc.o \
-               build/mips/exc_native.o build/mips/utf8.o build/mips/soft64.o
-
-## libexc's double->int conversions lower to libgcc helpers (__fixdfsi, ...)
-## since MIPS I has no trunc.w; the toolchain's libgcc supplies them.
-MIPS_LIBGCC := $(shell $(MIPS_CC) -march=mips1 -EL -print-libgcc-file-name)
-
-check-exc-mips: build/skj-exc-mips build/skj-run $(EXC_MIPS_RT)
-	@BDIR="$(CURDIR)/build/mips/exc" \
-	 EXC="$(CURDIR)/build/skj-exc-mips" \
-	 AS="$(MIPS_AS) -march=mips1 -EL -o" \
-	 LD="$(MIPS_LD) -o" \
-	 START="$(CURDIR)/build/mips/start_psabi.o" \
-	 LIBEXC="$(CURDIR)/build/mips/libexc.o" \
-	 BINDING="$(CURDIR)/build/mips/exc_native.o" \
-	 UTF8="$(CURDIR)/build/mips/utf8.o build/mips/soft64.o $(MIPS_LIBGCC)" \
-	 sh tests/run-exc-tests.sh "$(QEMU_MIPS)"
-
-## Excelsior under the noreorder scheduler (object model, sends, float, and
-## the source coroutines through scheduled code).
-check-exc-mips-noreorder: build/skj-exc-mips build/skj-run $(EXC_MIPS_RT)
-	@SKJ_MIPS_NOREORDER=1 BDIR="$(CURDIR)/build/mips/exc-nr" \
-	 EXC="$(CURDIR)/build/skj-exc-mips" \
-	 AS="$(MIPS_AS) -march=mips1 -EL -o" \
-	 LD="$(MIPS_LD) -o" \
-	 START="$(CURDIR)/build/mips/start_psabi.o" \
-	 LIBEXC="$(CURDIR)/build/mips/libexc.o" \
-	 BINDING="$(CURDIR)/build/mips/exc_native.o" \
-	 UTF8="$(CURDIR)/build/mips/utf8.o build/mips/soft64.o $(MIPS_LIBGCC)" \
-	 sh tests/run-exc-tests.sh "$(QEMU_MIPS)"
-
 ## The whole MIPS tier in one target, the counterpart to check-emu-all, so CI
 ## and a MIPS working session have a single entry point.  Everything under
 ## qemu-mipsel with the GNU mipsel binutils: the front-end suites and the three
-## IR-builder integration tests, the C and Excelsior suites (reorder and
+## IR-builder integration tests, the C suite (reorder and
 ## noreorder), the binutils-free toolchain (skj-as-mips / skj-ld-mips / skj-ar,
 ## the encoding golden-master, the archive and PS-EXE paths), and the FPU-less
 ## soft-float configuration.  test-mips-psexe-redux is excluded (it needs a
@@ -6006,17 +5531,12 @@ check-exc-mips-noreorder: build/skj-exc-mips build/skj-run $(EXC_MIPS_RT)
 check-mips-all: check-mips check-mips-noreorder \
                 test-i64-mips test-ops-mips test-fpu-mips test-f32-mips \
                 check-cc-mips check-cc-mips-noreorder \
-                check-exc-mips check-exc-mips-noreorder \
                 check-mipsas check-cc-mips-skj test-mips-archive test-mips-psexe \
                 test-cc-mips-asm check-mips-sf test-threaded-mips
 	@echo "All MIPS test suites passed."
 
 check-cpp: build/skj-cpp
 	@sh tests/run-cpp-tests.sh
-
-## Excelsior end-to-end (skj-exc -> skj-as -> skj-ld -> qemu-m68k)
-check-exc: build/skj-exc build/skj-as build/skj-ld build/start.o build/libexc.o build/exc_native.o build/utf8.o
-	@sh tests/run-exc-tests.sh "$(QEMU)"
 
 ## Smoke test: full in-tree toolchain (front end -> skj-as -> skj-ld -> qemu)
 check-smoke: build/skj-tinc build/skj-sc build/skj-mooc build/skj-cc build/skj-as build/skj-ld
@@ -6042,7 +5562,7 @@ check-rvas: build/skj-as-rv build/skj-ld-rv build/skj-run
 ## representative per distinct entry point (the cross variants share a main.c
 ## with the host tool, and skj-kpc covers the kpcom seed).  This keeps the -h
 ## surface uniform as tools are added.
-HELP_TOOLS := skj-tinc skj-sc skj-mooc skj-pc skj-cc skj-cpp skj-exc skj-jit \
+HELP_TOOLS := skj-tinc skj-sc skj-mooc skj-pc skj-cc skj-cpp skj-jit \
               skj-as skj-as-rv skj-as-mips skj-ld skj-ld-rv skj-ld-mips skj-ar \
               skj-run skj-addr2line skj-dbg skj-kp skj-kp-jit skj-kp-patrol \
               skj-kpc
@@ -6058,23 +5578,22 @@ test-help: $(addprefix build/,$(HELP_TOOLS))
 	     echo "PASS: -h prints usage and exits 0 on all $(words $(HELP_TOOLS)) tools"; \
 	 else exit 1; fi
 
-check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc \
+check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm \
-           check-exc-x86-64-asm check-exc-arm64-asm \
            check-rv check-x86-64 check-arm64 \
            check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 \
            check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm \
            test-jit-trap test-jit-trap-arm64 \
-           check-exc-jit-arm64 test-libexc-guest32 test-jit-arena \
-           test-gc test-coro test-threads test-exc-walker \
+           test-jit-arena \
+           test-gc test-coro test-threads \
            test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 \
            test-f32-diff \
            test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 \
            test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 \
            test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 \
-           check-rvas check-cc-rv-skj check-exc-rv-skj \
+           check-rvas check-cc-rv-skj \
            test-cc-rv-loc test-kp-rv-loc test-kp-rv-dwarf test-kp-rv-trap-backtrace test-pc-loc test-moo-loc test-tinc-loc \
-           test-exc-loc test-dwarf-line test-rv-stt-func test-rv-debug-sections \
+           test-dwarf-line test-rv-stt-func test-rv-debug-sections \
            test-rv-debug-link test-rv-addr2line test-rv-backtrace test-rv-abort-backtrace \
            test-bt-loop test-bt-trim test-rv-wild-backtrace \
            test-cf-addr2line test-mips-addr2line \
@@ -6104,4 +5623,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-exc-rv check-exc-rv-asm check-exc-rv-emu check-exc-rv-emu-san test-exc-coro-overflow check-emu check-rv-emu check-exc-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu test-exc-walker-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-exc check-exc-x86-64-asm check-exc-arm64-asm check-as check-rvas check-cc-rv-skj check-exc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke check-exc-jit-arm64 test-gc test-coro test-threads test-libexc-guest32 test-jit-arena test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE

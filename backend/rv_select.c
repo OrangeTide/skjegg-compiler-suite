@@ -569,7 +569,7 @@ emit_overflow(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl)
     }
 
     if (i->label >= 0) {
-        /* explicit per-site trap target (Excelsior's cold __exc_trap
+        /* explicit per-site trap target (a front end's cold trap
            trampoline): branch there on overflow. */
         rv_mc_bnez(m, flag, il(m, lbl, i->label));
     } else {

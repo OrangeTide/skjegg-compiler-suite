@@ -152,18 +152,17 @@ mc64_lea_sym(struct mc64 *m, int sf, int Rd, const char *name)
         a_movk(m->c, sf, Rd, 0, 16);
         if (sf) {
             /* a 64-bit code pointer may need the upper two lanes (the JIT maps
-               LP64 code anywhere); a 32-bit pointer (sf == 0, an EXC_GUEST32
-               build) must not, since movk with hw 2 or 3 is illegal for a
+               LP64 code anywhere); a 32-bit pointer (sf == 0, a 32-bit-pointer
+               guest) must not, since movk with hw 2 or 3 is illegal for a
                32-bit register. */
             a_movk(m->c, sf, Rd, 0, 32);
             a_movk(m->c, sf, Rd, 0, 48);
         }
         kp_add_absreloc(m->e, site, name);
     } else {
-        /* an external data symbol the host provides (the Excelsior runtime's
-           __exc_self, shared between guest code and host libexc).  The driver
-           is linked so this host address is < 4GB, which the guest loads into
-           a 32-bit register. */
+        /* an external data symbol the host provides, shared between guest code
+           and the host runtime.  The driver is linked so this host address is
+           < 4GB, which the guest loads into a 32-bit register. */
         void *ia = kp_import_addr(m->e, name);
         if (ia)
             a_movimm(m->c, sf, Rd, (uint64_t)(uintptr_t)ia);
@@ -337,7 +336,7 @@ arm64_apply_call_reloc(struct code *c, size_t site, size_t target)
 /* An absolute function-code reference is the movz/movk sequence mc64_lea_sym
    emitted, one instruction per 16-bit lane.  A 64-bit sequence (sf bit set in
    the leading movz) has four lanes and carries a full map-anywhere address; a
-   32-bit sequence (an EXC_GUEST32 build) has two lanes and a sub-4GB address.
+   32-bit sequence (a 32-bit-pointer guest) has two lanes and a sub-4GB address.
    Patch the lanes that are actually there. */
 static void
 arm64_apply_abs_reloc(uint8_t *code, size_t site, uint64_t addr)

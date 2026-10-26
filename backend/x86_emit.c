@@ -1548,7 +1548,7 @@ emit_externs(FILE *out, struct ir_program *prog)
                  i->op == IR_CALL_AGG ||
                  i->op == IR_LEA || i->op == IR_LEA64)) {
                 /* A symbol-address load (IR_LEA/LEA64) can reference an
-                 * external data symbol, e.g. Excelsior's __exc_self, which
+                 * external data symbol, e.g. a runtime's global, which
                  * NASM needs declared extern.  The defined set filters out the
                  * program's own globals and functions. */
                 if (!strset_contains(&defined, i->sym))

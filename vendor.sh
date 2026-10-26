@@ -385,11 +385,7 @@ fi
 if [ "$has_pascal" -eq 1 ]; then
     cp "$S/doc/languages/pascal.md" "$DEST/doc/"
 fi
-# MooScript: the smolmoo language reference and the scripting overview (the
-# latter also covers TinScheme-style scripting, so a scheme vendor gets it too)
-if [ "$has_moo" -eq 1 ]; then
-    cp "$S/doc/languages/smolmoo-v1.md" "$DEST/doc/"
-fi
+# MooScript and TinScheme share the scripting overview
 if [ "$has_moo" -eq 1 ] || [ "$has_scheme" -eq 1 ]; then
     cp "$S/doc/languages/game-scripting.md" "$DEST/doc/"
 fi

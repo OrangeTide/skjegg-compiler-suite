@@ -3,8 +3,7 @@
    One harness, parameterized at compile time for a front end:
    FEFUZZ_TINC / FEFUZZ_PASCAL / FEFUZZ_MOO follow the common pipeline
    (lex_init -> parse_program -> lower_program -> regalloc -> target_emit);
-   FEFUZZ_CC uses the cc_* spellings of the same pipeline; FEFUZZ_EXC inserts
-   resolve_program and typecheck_program between parse and lower. The emitted
+   FEFUZZ_CC uses the cc_* spellings of the same pipeline. The emitted
    assembly is discarded. It is built ASan plus UBSan: the point is that no
    source, valid or hostile, drives undefined behavior through the lexer,
    recursive-descent parser, resolver, type checker, or lowering. A fatal
@@ -93,26 +92,8 @@
         target_emit((out), prog);                                       \
     } while (0)
 
-#elif defined(FEFUZZ_EXC)
-#include "ir.h"
-#include "excelsior.h"
-#define FE_LABEL "exc"
-#define FE_RUN(ap, buf, out) do {                                       \
-        struct node *ast;                                               \
-        struct ir_program *prog;                                        \
-        struct ir_func *fn;                                             \
-        lex_init((ap), (buf), "<fuzz>", 0);                             \
-        ast = parse_program(ap);                                        \
-        resolve_program((ap), ast);                                     \
-        typecheck_program((ap), ast);                                   \
-        prog = lower_program((ap), ast);                                \
-        for (fn = prog->funcs; fn; fn = fn->next)                       \
-            regalloc(fn);                                               \
-        target_emit((out), prog);                                       \
-    } while (0)
-
 #else
-#error "define FEFUZZ_TINC, FEFUZZ_PASCAL, FEFUZZ_MOO, FEFUZZ_CC, or FEFUZZ_EXC"
+#error "define FEFUZZ_TINC, FEFUZZ_PASCAL, FEFUZZ_MOO, or FEFUZZ_CC"
 #endif
 
 #include "fuzz_mutate.h"

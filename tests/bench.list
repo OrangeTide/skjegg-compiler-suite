@@ -12,7 +12,6 @@
 
 # ColdFire (m68k) guests
 cf/moo_func                     Moo: function calls and locals
-cf/exc_walker_test              Excelsior: tree walk
 cf/pascal_t052_set_basic        Pascal: set operations
 cf/pascal_t135_prime_sieve      Pascal: sieve of Eratosthenes
 cf/pascal_t177_deep_recursion   Pascal: deep recursion

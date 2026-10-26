@@ -23,9 +23,9 @@ type
   TTokenKind = (
     tkEOF,
     { literals and identifiers }
-    tkIdent, tkIntLit, tkRealLit, tkStrLit,
+    tkIdent, tkIntLit, tkRealLit, tkStrLit, tkInterpStr,
     { reserved words (doc/languages/kobold/kp-grammar.md) }
-    tkAnd, tkArray, tkBegin, tkBreak, tkCase, tkConst, tkContinue, tkDiv,
+    tkAnd, tkArray, tkBegin, tkBreak, tkCase, tkConst, tkContinue, tkDefer, tkDiv,
     tkDo, tkDownto, tkElse, tkEnd, tkExternal, tkFor, tkForward, tkFunction,
     tkIf, tkIn, tkInterface, tkMod, tkNil, tkNot, tkOf, tkOr, tkProcedure,
     tkProgram, tkRecord, tkRepeat, tkStart, tkSet, tkBind, tkString, tkThen,
@@ -112,7 +112,16 @@ type
       `or else EXPR` / `or else ignore` recover, and the `or exit|break|continue|fail` divert }
     nkFailsTest, nkOrElse, nkOrDivert,
     { accessor-backed value with uniform access (doc/languages/kobold/kp-property.md) }
-    nkPropertyDecl
+    nkPropertyDecl,
+    { `defer STMT`: block-scoped teardown run LIFO on orderly scope exit
+      (doc/languages/kobold/kp-defer.md) }
+    nkDefer,
+    { the to-string wrapper the string-interpolation expansion puts around each
+      hole expression (doc/languages/kobold/kp-language.md) }
+    nkToStr,
+    { `for x in e do` and `for k, v in m do`: iterate an array, string, map, set,
+      or a cursor type (doc/languages/kobold/kp-foreach.md) }
+    nkForIn
   );
 
   TNode = record
@@ -258,8 +267,8 @@ const
   { Printable name per token kind, in enum order. Used by the token dump. }
   TokenName: array[TTokenKind] of string = (
     'tkEOF',
-    'tkIdent', 'tkIntLit', 'tkRealLit', 'tkStrLit',
-    'tkAnd', 'tkArray', 'tkBegin', 'tkBreak', 'tkCase', 'tkConst', 'tkContinue',
+    'tkIdent', 'tkIntLit', 'tkRealLit', 'tkStrLit', 'tkInterpStr',
+    'tkAnd', 'tkArray', 'tkBegin', 'tkBreak', 'tkCase', 'tkConst', 'tkContinue', 'tkDefer',
     'tkDiv', 'tkDo', 'tkDownto', 'tkElse', 'tkEnd', 'tkExternal', 'tkFor',
     'tkForward', 'tkFunction', 'tkIf', 'tkIn', 'tkInterface', 'tkMod', 'tkNil',
     'tkNot', 'tkOf', 'tkOr', 'tkProcedure', 'tkProgram', 'tkRecord', 'tkRepeat',
@@ -277,7 +286,7 @@ const
     'tkShl', 'tkShr'
   );
 
-  KeywordCount = 56;
+  KeywordCount = 57;
   Keywords: array[1..KeywordCount] of TKeyword = (
     (Name: 'and';       Kind: tkAnd),
     (Name: 'array';     Kind: tkArray),
@@ -289,6 +298,7 @@ const
     (Name: 'case';      Kind: tkCase),
     (Name: 'const';     Kind: tkConst),
     (Name: 'continue';  Kind: tkContinue),
+    (Name: 'defer';     Kind: tkDefer),
     (Name: 'div';       Kind: tkDiv),
     (Name: 'do';        Kind: tkDo),
     (Name: 'downto';    Kind: tkDownto),
@@ -357,7 +367,7 @@ const
     'Interface', 'Implementation', 'Reexport', 'ReexportItem',
     'Implement',
     'FailsTest', 'OrElse', 'OrDivert',
-    'PropertyDecl'
+    'PropertyDecl', 'Defer', 'ToStr', 'ForIn'
   );
 
   { Token-kind sets the parser tests against. }
@@ -369,10 +379,10 @@ const
     [tkConst, tkType, tkVar, tkProcedure, tkFunction, tkImplement, tkProperty];
   StmtStart:    set of TTokenKind =
     [tkBegin, tkIf, tkWhile, tkFor, tkRepeat, tkCase, tkWith, tkStart, tkBind,
-     tkYield, tkBreak, tkContinue, tkGoto, tkIdent];
+     tkYield, tkBreak, tkContinue, tkDefer, tkGoto, tkIdent];
   StmtTerm:     set of TTokenKind = [tkEnd, tkUntil, tkEOF];
   ExprStart:    set of TTokenKind =
-    [tkIntLit, tkRealLit, tkStrLit, tkNil, tkLParen, tkNot, tkLBracket,
+    [tkIntLit, tkRealLit, tkStrLit, tkInterpStr, tkNil, tkLParen, tkNot, tkLBracket,
      tkStart, tkBind, tkYield, tkIdent, tkPlus, tkMinus, tkAt];
 
 { ---- Global variables ---- }
@@ -1271,6 +1281,36 @@ begin
   end;
 end;
 
+procedure ScanInterpStr;
+{ A double-quoted interpolated string literal, with dollar-brace holes. The whole
+  inner text, with a doubled quote collapsed to one literal quote, is captured raw
+  into Tok.StrVal; the parser splits it into literal chunks and holes (see
+  BuildInterp). The single-quoted literal stays plain and non-interpolated, so
+  existing code is unchanged. One line only; a hole may not itself contain a quote. }
+begin
+  Tok.Kind := tkInterpStr;
+  Tok.StrVal := '';
+  Tok.Text := '"';
+  Adv;   { past the opening quote }
+  while True do begin
+    if (CurCh = #0) or (CurCh = #10) or (CurCh = #13) then begin
+      LexError(Tok.Line, Tok.Col, 'unterminated interpolated string');
+      Exit;
+    end;
+    if CurCh = '"' then begin
+      if PeekCh(1) = '"' then begin
+        Tok.StrVal := Tok.StrVal + '"'; Tok.Text := Tok.Text + '""'; Adv; Adv;
+      end
+      else begin
+        Tok.Text := Tok.Text + '"'; Adv; Break;
+      end;
+    end
+    else begin
+      Tok.StrVal := Tok.StrVal + CurCh; Tok.Text := Tok.Text + CurCh; Adv;
+    end;
+  end;
+end;
+
 function ScanSymbol: Boolean;
 { Punctuation and operators. Returns False when the char is not recognized (it
   has been reported and consumed), so NextToken can try again. }
@@ -1360,6 +1400,7 @@ begin
     if IsAlpha(c) then begin ScanIdentOrKeyword; Exit; end;
     if IsDigit(c) or (c = '$') then begin ScanNumber; Exit; end;
     if (c = '''') or (c = '#') then begin ScanString; Exit; end;
+    if c = '"' then begin ScanInterpStr; Exit; end;
     if ScanSymbol then Exit;
     { unrecognized char: reported and consumed; loop for the next token }
   end;
@@ -1578,6 +1619,13 @@ begin
   end;
 end;
 
+function ParseForBinder: string;
+{ a for-in binder: an identifier, or '_' to ignore its value }
+begin
+  if Accept(tkUnderscore) then ParseForBinder := '_'
+  else ParseForBinder := EatIdent('a loop variable');
+end;
+
 procedure ParseIdentList(owner: LongInt);
 begin
   AddKid(owner, IdentNode);
@@ -1651,6 +1699,106 @@ begin
   ParseSetConstructor := n;
 end;
 
+function ParseExprString(const s: string): LongInt;
+{ Parse s as a standalone expression (an interpolation hole) by pointing the
+  scanner at s and restoring it afterward. The hole is a complete expression, so
+  the parse ends at end of input. }
+var
+  saveSrc, saveName: string;
+  savePos, saveLen, saveLine, saveCol: LongInt;
+  saveTok: TToken;
+  r: LongInt;
+begin
+  saveSrc := Src; saveName := SrcName; savePos := Pos; saveLen := SrcLen;
+  saveLine := CurLine; saveCol := CurCol; saveTok := Tok;
+  Src := s; SrcLen := Length(s); SrcName := '<interpolation>';
+  Pos := 1; CurLine := 1; CurCol := 1;
+  NextToken;
+  r := ParseExpression;
+  if Tok.Kind <> tkEOF then
+    LexError(CurLine, CurCol, 'unexpected text after the expression in ${...}');
+  Src := saveSrc; SrcLen := saveLen; SrcName := saveName; Pos := savePos;
+  CurLine := saveLine; CurCol := saveCol; Tok := saveTok;
+  ParseExprString := r;
+end;
+
+function BuildInterp(const raw: string): LongInt;
+{ Expand an interpolated literal's raw inner text into a '+'-concat chain of
+  string pieces: a literal chunk becomes an nkStrLit, a hole an nkToStr around the
+  parsed expr. A doubled dollar-brace is a literal dollar-brace, a lone dollar is
+  literal, and a hole runs to its closing brace (one inside a single-quoted literal
+  in the hole does not end it). }
+var
+  i, n, acc, startH, hole: LongInt;
+  chunk, hs: string;
+  inStr: Boolean;
+
+  function Concat2(a, b: LongInt): LongInt;
+  var m: LongInt;
+  begin
+    if a < 0 then Concat2 := b
+    else begin
+      m := NewNode(nkBinary); Nodes[m].Op := tkPlus; Nodes[m].A := a; Nodes[m].B := b;
+      Concat2 := m;
+    end;
+  end;
+
+  procedure FlushChunk;
+  var c: LongInt;
+  begin
+    if chunk <> '' then begin
+      c := NewNode(nkStrLit); Nodes[c].Text := chunk;
+      acc := Concat2(acc, c);
+      chunk := '';
+    end;
+  end;
+
+begin
+  i := 1; n := Length(raw); chunk := ''; acc := -1;
+  while i <= n do begin
+    if (raw[i] = '$') and (i + 2 <= n) and (raw[i+1] = '$') and (raw[i+2] = '{') then begin
+      chunk := chunk + '${'; i := i + 3;
+    end
+    else if (raw[i] = '$') and (i + 1 <= n) and (raw[i+1] = '{') then begin
+      FlushChunk;
+      i := i + 2; startH := i; inStr := False;
+      while i <= n do begin
+        if inStr then begin
+          if raw[i] = '''' then begin
+            if (i < n) and (raw[i+1] = '''') then i := i + 2
+            else begin inStr := False; Inc(i); end;
+          end
+          else Inc(i);
+        end
+        else begin
+          if raw[i] = '''' then begin inStr := True; Inc(i); end
+          else if raw[i] = '}' then Break
+          else Inc(i);
+        end;
+      end;
+      if i > n then begin
+        LexError(Tok.Line, Tok.Col, 'unterminated ${ } in interpolated string');
+        BuildInterp := NewNode(nkStrLit); Exit;
+      end;
+      hs := Copy(raw, startH, i - startH);
+      i := i + 1;   { past the closing brace }
+      if hs = '' then
+        LexError(Tok.Line, Tok.Col, 'empty ${} has no expression to interpolate');
+      hole := NewNode(nkToStr);
+      Nodes[hole].A := ParseExprString(hs);
+      acc := Concat2(acc, hole);
+    end
+    else begin
+      chunk := chunk + raw[i]; Inc(i);
+    end;
+  end;
+  FlushChunk;
+  if acc < 0 then begin
+    acc := NewNode(nkStrLit); Nodes[acc].Text := '';
+  end;
+  BuildInterp := acc;
+end;
+
 function ParseFactor: LongInt;
 var
   n, agg, fi: LongInt;
@@ -1665,6 +1813,9 @@ begin
     end;
     tkStrLit: begin
       n := NewNode(nkStrLit); Nodes[n].Text := Tok.StrVal; NextToken;
+    end;
+    tkInterpStr: begin
+      n := BuildInterp(Tok.StrVal); NextToken;
     end;
     tkNil: begin n := NewNode(nkNil); NextToken; end;
     tkIdent:
@@ -2236,6 +2387,7 @@ end;
 function ParseStatement: LongInt;
 var
   n, d: LongInt;
+  firstBinder: string;
 begin
   { A statement may nest another statement. The recursive calls use () because a
     bare function name inside its own body denotes the result variable, not a
@@ -2266,15 +2418,35 @@ begin
       Nodes[n].B := ParseStatement();
     end;
     tkFor: begin
-      n := NewNode(nkFor); NextToken;
-      Nodes[n].Text := EatIdent('a loop variable');
-      Expect(tkAssign);
-      Nodes[n].A := ParseExpression;
-      if Accept(tkDownto) then Nodes[n].Flag := 1
-      else begin Expect(tkTo); Nodes[n].Flag := 0; end;
-      Nodes[n].B := ParseExpression;
-      Expect(tkDo);
-      Nodes[n].C := ParseStatement();
+      NextToken;   { past 'for' }
+      firstBinder := ParseForBinder;
+      if (Tok.Kind = tkIn) or (Tok.Kind = tkComma) then begin
+        { for-in: `for x in e do` or, over a map, `for k, v in m do`. Use '_' to
+          ignore a binder (doc/languages/kobold/kp-foreach.md). }
+        n := NewNode(nkForIn);
+        Nodes[n].Text := firstBinder;
+        Nodes[n].B := -1;   { second binder (map value), an nkIdent, or -1 }
+        if Accept(tkComma) then begin
+          Nodes[n].B := NewNode(nkIdent);
+          Nodes[Nodes[n].B].Text := ParseForBinder;
+        end;
+        Expect(tkIn);
+        Nodes[n].A := ParseExpression;
+        Expect(tkDo);
+        Nodes[n].C := ParseStatement();
+      end
+      else begin
+        { the counted loop: `for i := lo to|downto hi do` }
+        n := NewNode(nkFor);
+        Nodes[n].Text := firstBinder;
+        Expect(tkAssign);
+        Nodes[n].A := ParseExpression;
+        if Accept(tkDownto) then Nodes[n].Flag := 1
+        else begin Expect(tkTo); Nodes[n].Flag := 0; end;
+        Nodes[n].B := ParseExpression;
+        Expect(tkDo);
+        Nodes[n].C := ParseStatement();
+      end;
     end;
     tkRepeat: begin
       n := NewNode(nkRepeat); NextToken;
@@ -2295,6 +2467,11 @@ begin
     tkYield: n := ParseYield;
     tkBreak: begin n := NewNode(nkBreak); NextToken; end;
     tkContinue: begin n := NewNode(nkContinue); NextToken; end;
+    tkDefer: begin
+      { `defer STMT` registers STMT for LIFO teardown at the end of its block
+        (doc/languages/kobold/kp-defer.md); use a begin..end block for several }
+      n := NewNode(nkDefer); NextToken; Nodes[n].A := ParseStatement();
+    end;
     tkGoto: begin
       { a computed jump: `goto EXPR` where EXPR has type label. A bare
         `goto name` to a label identifier is rejected in sema, so there is no
@@ -4700,6 +4877,263 @@ begin
   else AutoCall := t;
 end;
 
+{ Small synthesized-node builders used to desugar for-in into existing forms. }
+function MkIdent(const nm: string): LongInt;
+begin
+  MkIdent := NewNode(nkIdent); Nodes[MkIdent].Text := nm;
+end;
+
+function MkIntLit(v: Int64): LongInt;
+begin
+  MkIntLit := NewNode(nkIntLit); Nodes[MkIntLit].IntVal := v;
+end;
+
+function MkCall1(const fn: string; arg: LongInt): LongInt;
+begin
+  MkCall1 := NewNode(nkCall); Nodes[MkCall1].A := MkIdent(fn); AddKid(MkCall1, arg);
+end;
+
+function MkIndex(base, idx: LongInt): LongInt;
+begin
+  MkIndex := NewNode(nkIndex); Nodes[MkIndex].A := base; AddKid(MkIndex, idx);
+end;
+
+function MkAssign(lhs, rhs: LongInt): LongInt;
+begin
+  MkAssign := NewNode(nkAssign); Nodes[MkAssign].A := lhs; Nodes[MkAssign].B := rhs;
+end;
+
+function MkCompound2(a, b: LongInt): LongInt;
+begin
+  MkCompound2 := NewNode(nkCompound); AddKid(MkCompound2, a); AddKid(MkCompound2, b);
+end;
+
+function MkCall3(const fn: string; a1, a2, a3: LongInt): LongInt;
+begin
+  MkCall3 := NewNode(nkCall); Nodes[MkCall3].A := MkIdent(fn);
+  AddKid(MkCall3, a1); AddKid(MkCall3, a2); AddKid(MkCall3, a3);
+end;
+
+function MkWhile(cond, body: LongInt): LongInt;
+begin
+  MkWhile := NewNode(nkWhile); Nodes[MkWhile].A := cond; Nodes[MkWhile].B := body;
+end;
+
+function MkBinary(op: TTokenKind; a, b: LongInt): LongInt;
+begin
+  MkBinary := NewNode(nkBinary); Nodes[MkBinary].Op := op;
+  Nodes[MkBinary].A := a; Nodes[MkBinary].B := b;
+end;
+
+function MkIf(cond, thenS: LongInt): LongInt;
+begin
+  MkIf := NewNode(nkIf); Nodes[MkIf].A := cond; Nodes[MkIf].B := thenS;
+  Nodes[MkIf].C := -1;
+end;
+
+function MkField(base: LongInt; const nm: string): LongInt;
+begin
+  MkField := NewNode(nkField); Nodes[MkField].A := base; Nodes[MkField].Text := nm;
+end;
+
+function MkHiddenBinder(const nm: string; ty: LongInt): LongInt;
+{ A fresh slot-resident variable with no source declaration, to receive an
+  ignored for-in binder ('_') or the map iterator. Returns a use of it. }
+var
+  s: LongInt;
+begin
+  s := AddSym(nm, syVar);
+  Syms[s].TypeId := ty;
+  Syms[s].BinderVar := True;
+  MkHiddenBinder := MkIdent(nm);
+end;
+
+procedure AnalyzeForIn(node: LongInt);
+{ `for x in e do` / `for k, v in m do`. Each backing desugars into existing
+  statements (stored in node.D) which carry all the type checks and lowering:
+  an array or string iterates a synthesized counted loop whose body binds the
+  element, so the binder assignment is an ordinary (ARC-correct) assignment.
+  Binders are pre-declared variables, as the counted loop's variable is; '_'
+  ignores a binder. (doc/languages/kobold/kp-foreach.md) }
+var
+  bt, idxSym, syn, elemNode, assignNode, bodyC, sub: LongInt;
+  keySym, valSym, itSym, keyNode, valNode, msig: LongInt;
+  idxName, itName: string;
+  lo, hi: Int64;
+  two, isStr: Boolean;
+begin
+  { synth nodes built below take their source line from Tok (dormant in this
+    phase), so point it at the for-in so any binder/element error reads right. }
+  Tok.Line := Nodes[node].Line;
+  Tok.Col := Nodes[node].Col;
+  Nodes[node].IntVal := -1;   { no hidden index var unless a backing adds one }
+  two := Nodes[node].B >= 0;   { a second binder was given: `for k, v in m` }
+  bt := AnalyzeExpr(Nodes[node].A);
+  if not (Nodes[Nodes[node].A].Kind in [nkIdent, nkField, nkIndex]) then begin
+    SemErr(node, 'the source of a for-in loop must be a variable');
+    Inc(LoopDepth); AnalyzeStmt(Nodes[node].C); Dec(LoopDepth);
+    Exit;
+  end;
+  if (bt < 0) or (bt >= SemCount) then begin
+    Inc(LoopDepth); AnalyzeStmt(Nodes[node].C); Dec(LoopDepth); Exit;
+  end;
+  case SemTypes[bt].Kind of
+    skArray, skString: begin
+      isStr := SemTypes[bt].Kind = skString;
+      if two then begin
+        SemErr(node, 'iterating a ' + TypeName(bt) + ' binds one variable, not two');
+        Inc(LoopDepth); AnalyzeStmt(Nodes[node].C); Dec(LoopDepth); Exit;
+      end;
+      if (not isStr) and (Length(SemTypes[bt].Subs) > 1) then begin
+        SemErr(node, 'for-in cannot iterate a multi-dimensional array');
+        Inc(LoopDepth); AnalyzeStmt(Nodes[node].C); Dec(LoopDepth); Exit;
+      end;
+      { desugar to a counted loop over the index range, binding the element in
+        the body. A string iterates its bytes (1..length), a dynamic array its
+        0..high, a fixed array its declared index subrange. }
+      idxName := '__for_i_' + IntToStr(node);
+      idxSym := AddSym(idxName, syVar);
+      Syms[idxSym].TypeId := tyInt;
+      Syms[idxSym].BinderVar := True;   { lives in a local slot, even at program scope }
+      elemNode := MkIndex(Nodes[node].A, MkIdent(idxName));
+      if Nodes[node].Text <> '_' then
+        assignNode := MkAssign(MkIdent(Nodes[node].Text), elemNode)
+      else assignNode := -1;
+      if assignNode >= 0 then bodyC := MkCompound2(assignNode, Nodes[node].C)
+      else bodyC := Nodes[node].C;
+      syn := NewNode(nkFor);
+      Nodes[syn].Text := idxName;
+      Nodes[syn].Flag := 0;
+      if isStr then begin
+        Nodes[syn].A := MkIntLit(1);
+        Nodes[syn].B := MkCall1('length', Nodes[node].A);
+      end
+      else if IsDynArray(bt) then begin
+        Nodes[syn].A := MkIntLit(0);
+        Nodes[syn].B := MkCall1('high', Nodes[node].A);
+      end
+      else begin
+        sub := SemTypes[bt].Subs[0];
+        Nodes[syn].A := MkIntLit(SemTypes[sub].Lo);
+        Nodes[syn].B := MkIntLit(SemTypes[sub].Hi);
+      end;
+      Nodes[syn].C := bodyC;
+      Nodes[node].D := syn;
+      Nodes[node].IntVal := idxSym;
+      AnalyzeStmt(syn);
+    end;
+    skMap: begin
+      { for k, v in m  ->  it := MapFirst(m); while MapNext(it, k, v) do body.
+        A map binds the key (always a string) and optionally the value; a second
+        binder is the value. An omitted or '_' binder gets a hidden throwaway so
+        MapNext always has both out slots. }
+      keySym := -1; valSym := -1;
+      if Nodes[node].Text = '_' then
+        keyNode := MkHiddenBinder('__for_k_' + IntToStr(node), tyStr)
+      else begin
+        keySym := Lookup(Nodes[node].Text);
+        keyNode := MkIdent(Nodes[node].Text);
+      end;
+      if Nodes[node].B < 0 then
+        valNode := MkHiddenBinder('__for_v_' + IntToStr(node), SemTypes[bt].Base)
+      else if Nodes[Nodes[node].B].Text = '_' then
+        valNode := MkHiddenBinder('__for_v_' + IntToStr(node), SemTypes[bt].Base)
+      else begin
+        valSym := Lookup(Nodes[Nodes[node].B].Text);
+        valNode := MkIdent(Nodes[Nodes[node].B].Text);
+      end;
+      { clearer errors than MapNext's, naming the binder the user wrote }
+      if (keySym >= 0) and (Syms[keySym].TypeId <> tyStr) then
+        SemErr(node, 'a map key binder must be a string: ''' + Nodes[node].Text + '''');
+      if (valSym >= 0) and (Syms[valSym].TypeId <> SemTypes[bt].Base) then
+        SemErr(node, 'the value binder must be the map value type (' +
+          TypeName(SemTypes[bt].Base) + ')');
+      itName := '__for_it_' + IntToStr(node);
+      itSym := AddSym(itName, syVar);
+      Syms[itSym].TypeId := tyMapIter;
+      Syms[itSym].BinderVar := True;
+      syn := MkCompound2(
+        MkAssign(MkIdent(itName), MkCall1('mapfirst', Nodes[node].A)),
+        MkWhile(MkCall3('mapnext', MkIdent(itName), keyNode, valNode), Nodes[node].C));
+      Nodes[node].D := syn;
+      AnalyzeStmt(syn);
+    end;
+    skSet: begin
+      { for x in s  ->  for x := lo to hi do if x in s then body, walking the
+        element type's ordinal range and keeping the members. The loop variable
+        is the binder itself (the element type), so no separate binding is
+        needed. Cost is the universe size, not the member count. }
+      if two then begin
+        SemErr(node, 'iterating a set binds one variable, not two');
+        Inc(LoopDepth); AnalyzeStmt(Nodes[node].C); Dec(LoopDepth); Exit;
+      end;
+      if not OrdinalRange(SemTypes[bt].Base, lo, hi) then begin
+        SemErr(node, 'cannot iterate a ' + TypeName(bt));
+        Inc(LoopDepth); AnalyzeStmt(Nodes[node].C); Dec(LoopDepth); Exit;
+      end;
+      if Nodes[node].Text = '_' then begin
+        idxName := '__for_e_' + IntToStr(node);
+        idxSym := AddSym(idxName, syVar);
+        Syms[idxSym].TypeId := SemTypes[bt].Base;
+        Syms[idxSym].BinderVar := True;
+      end
+      else idxName := Nodes[node].Text;
+      syn := NewNode(nkFor);
+      Nodes[syn].Text := idxName;
+      Nodes[syn].Flag := 0;
+      Nodes[syn].A := MkIntLit(lo);
+      Nodes[syn].B := MkIntLit(hi);
+      Nodes[syn].C := MkIf(MkBinary(tkIn, MkIdent(idxName), Nodes[node].A), Nodes[node].C);
+      Nodes[node].D := syn;
+      AnalyzeStmt(syn);
+    end;
+  else
+    { a custom cursor: a type with a `function Next for (c): E fails` method,
+      failure signalling the end. for x in c -> while true do begin
+      x := c.Next or break; body end. The by-reference receiver advances the
+      cursor in place, so the source variable is consumed. }
+    msig := FindMethod(bt, 'Next');
+    if (msig >= 0) and SemTypes[msig].Failable and
+       (SemTypes[msig].RetType >= 0) and (SemTypes[msig].RetType <> tyVoid) then begin
+      if two then begin
+        SemErr(node, 'iterating a cursor binds one variable, not two');
+        Inc(LoopDepth); AnalyzeStmt(Nodes[node].C); Dec(LoopDepth); Exit;
+      end;
+      if Nodes[node].Text = '_' then
+        elemNode := MkHiddenBinder('__for_e_' + IntToStr(node), SemTypes[msig].RetType)
+      else elemNode := MkIdent(Nodes[node].Text);
+      assignNode := NewNode(nkOrDivert);   { c.Next or break }
+      Nodes[assignNode].A := MkField(Nodes[node].A, 'Next');
+      Nodes[assignNode].Flag := 1;
+      syn := MkWhile(MkIdent('true'),
+        MkCompound2(MkAssign(elemNode, assignNode), Nodes[node].C));
+      Nodes[node].D := syn;
+      AnalyzeStmt(syn);
+    end
+    else begin
+      SemErr(node, 'cannot iterate over a value of type ' + TypeName(bt) +
+        ' (a sequence, set, map, or a type with a ''Next ... fails'' method)');
+      Inc(LoopDepth); AnalyzeStmt(Nodes[node].C); Dec(LoopDepth);
+    end;
+  end;
+end;
+
+function CheckInterpHole(node: LongInt): LongInt;
+{ The interpolation hole (nkToStr): the value is rendered to a string the way
+  write renders it. Allowed: string, char, any integer width (incl int64), and the
+  ordinals (bool, enum) that render as their number. A real needs a string-producing
+  formatter the runtime does not expose yet, so it is rejected for now. }
+var
+  t: LongInt;
+begin
+  t := AnalyzeExpr(Nodes[node].A);
+  if IsRealType(t) then
+    SemErr(node, 'interpolating a real is not supported yet; format it with str or write')
+  else if (t <> tyStr) and (t <> tyChar) and (not IsInt64(t)) and (not IsOrdinalType(t)) then
+    SemErr(node, 'cannot interpolate a value of this type into a string');
+  CheckInterpHole := tyStr;
+end;
+
 function AnalyzeExpr(node: LongInt): LongInt;
 var
   s, at, savedAnswer: LongInt;
@@ -4714,6 +5148,7 @@ begin
       else AnalyzeExpr := tyInt;
     nkRealLit: AnalyzeExpr := tyReal;
     nkStrLit:  AnalyzeExpr := tyStr;
+    nkToStr:   AnalyzeExpr := CheckInterpHole(node);
     nkNil:     AnalyzeExpr := tyNil;
     nkLabelAddr: begin
       { `@name` is a label value; register the mention against the current
@@ -5059,6 +5494,38 @@ begin
   end;
 end;
 
+procedure CheckDeferBody(node, errNode: LongInt);
+{ A deferred statement runs during scope-exit teardown, so it must not itself
+  transfer control out of its block. Reject exit/fail/break/continue/yield, a
+  computed goto, a failable divert, and a nested defer (doc .../kp-defer.md). }
+var
+  i, callee: LongInt;
+begin
+  if node < 0 then Exit;
+  case Nodes[node].Kind of
+    nkBreak:    SemErr(errNode, 'break is not allowed inside a defer');
+    nkContinue: SemErr(errNode, 'continue is not allowed inside a defer');
+    nkYield:    SemErr(errNode, 'yield is not allowed inside a defer');
+    nkGoto:     SemErr(errNode, 'goto is not allowed inside a defer');
+    nkDefer:    SemErr(errNode, 'a defer may not be nested inside a defer');
+    nkOrDivert: SemErr(errNode,
+      'a failable divert (or exit/break/continue/fail) is not allowed inside a defer');
+    nkCall, nkCallStmt: begin
+      if Nodes[node].Kind = nkCallStmt then callee := Nodes[node].A else callee := node;
+      if (callee >= 0) and (Nodes[callee].Kind = nkCall) then callee := Nodes[callee].A;
+      if (callee >= 0) and (Nodes[callee].Kind = nkIdent) and
+         (SameTextCI(Nodes[callee].Text, 'exit') or SameTextCI(Nodes[callee].Text, 'fail')) then
+        SemErr(errNode, 'exit/fail is not allowed inside a defer');
+    end;
+  end;
+  CheckDeferBody(Nodes[node].A, errNode);
+  CheckDeferBody(Nodes[node].B, errNode);
+  CheckDeferBody(Nodes[node].C, errNode);
+  CheckDeferBody(Nodes[node].D, errNode);
+  for i := 0 to High(Nodes[node].Kids) do
+    CheckDeferBody(Nodes[node].Kids[i], errNode);
+end;
+
 procedure AnalyzeStmt(node: LongInt);
 var
   i, s, ct, d: LongInt;
@@ -5134,6 +5601,7 @@ begin
       AnalyzeExpr(Nodes[node].B);
       Inc(LoopDepth); AnalyzeStmt(Nodes[node].C); Dec(LoopDepth);
     end;
+    nkForIn: AnalyzeForIn(node);
     nkRepeat: begin
       Inc(LoopDepth);
       for i := 0 to High(Nodes[node].Kids) do AnalyzeStmt(Nodes[node].Kids[i]);
@@ -5145,6 +5613,10 @@ begin
     nkBreak, nkContinue:
       if LoopDepth = 0 then
         SemErr(node, 'break or continue outside of a loop');
+    nkDefer: begin
+      CheckDeferBody(Nodes[node].A, node);
+      AnalyzeStmt(Nodes[node].A);
+    end;
     nkLabelStmt: begin
       { a `name:` label definition; register it in the current routine's table,
         rejecting a duplicate, then analyze the statement it marks }
@@ -6785,6 +7257,11 @@ var
   LoopBreak: array of LongInt;  { break/continue target label stack }
   LoopCont: array of LongInt;
   LoopSP: LongInt;
+  LoopDeferBase: array of LongInt; { per loop: open defer-scope count at loop entry, the break/continue unwind floor }
+  DeferNodes: array of LongInt;    { flat stack of deferred statement nodes across the open defer scopes }
+  DeferCount: LongInt;             { entries in use in DeferNodes }
+  DeferScopeBase: array of LongInt; { per open defer scope: its start index in DeferNodes }
+  DeferScopeSP: LongInt;           { number of open defer scopes }
   PendingMapInsert: LongInt;    { the nkIndex node of a map assignment target: AddrOf inserts
                                   the key (kp_map_reserve) for exactly that node, else reads it
                                   (kp_map_get); -1 when no map assignment is in progress }
@@ -6831,6 +7308,59 @@ procedure LowerSetInto(node, dst, nwords: LongInt); forward;
 function LowerSetValue(node: LongInt): LongInt; forward;
 function LowerSetAddr(node: LongInt): LongInt; forward;
 procedure LowerStmt(node: LongInt); forward;
+
+{ ---- defer scopes (doc/languages/kobold/kp-defer.md) ----
+  A `defer STMT` registers STMT for teardown at the end of its lexical block,
+  run LIFO on every orderly exit: block fall-through, exit, break, continue, and
+  the failable diverts. A deferred statement is re-lowered at each exit edge
+  (there are no block-scoped locals, so this needs no runtime defer stack). A
+  trap/panic bypasses the exit edges and so skips defers, by design. }
+
+procedure PushDeferScope;
+begin
+  if DeferScopeSP > High(DeferScopeBase) then SetLength(DeferScopeBase, DeferScopeSP + 8);
+  DeferScopeBase[DeferScopeSP] := DeferCount;
+  Inc(DeferScopeSP);
+end;
+
+procedure RegisterDefer(stmt: LongInt);
+begin
+  if DeferCount > High(DeferNodes) then SetLength(DeferNodes, DeferCount + 8);
+  DeferNodes[DeferCount] := stmt;
+  Inc(DeferCount);
+end;
+
+function DeferScopeEnd(i: LongInt): LongInt;
+begin
+  if i + 1 < DeferScopeSP then DeferScopeEnd := DeferScopeBase[i + 1]
+  else DeferScopeEnd := DeferCount;
+end;
+
+procedure EmitScopeDefers(i: LongInt);
+{ re-lower defer scope i's statements in LIFO (reverse registration) order }
+var j: LongInt;
+begin
+  for j := DeferScopeEnd(i) - 1 downto DeferScopeBase[i] do
+    LowerStmt(DeferNodes[j]);
+end;
+
+procedure EmitDeferUnwind(toSP: LongInt);
+{ emit the defers of every open scope from the innermost down to (and including)
+  toSP, for an exit path (break/continue/exit/fail). It does NOT pop: the lexical
+  block ends still own the stack and the fall-through path still needs it. }
+var i: LongInt;
+begin
+  for i := DeferScopeSP - 1 downto toSP do
+    EmitScopeDefers(i);
+end;
+
+procedure PopDeferScope;
+{ emit this scope's defers for the fall-through path, then drop the scope }
+begin
+  EmitScopeDefers(DeferScopeSP - 1);
+  Dec(DeferScopeSP);
+  DeferCount := DeferScopeBase[DeferScopeSP];
+end;
 function EmittedRoutineName(s: LongInt): string; forward;
 function LowerDirectCall(s: LongInt; const argNodes: array of LongInt;
   wantVal: Boolean): LongInt; forward;
@@ -8251,6 +8781,16 @@ begin
     ((Syms[s].Scope = GlobalScope) or Syms[s].Imported);
 end;
 
+procedure EnsureBinderSlot(s: LongInt);
+{ A binder variable (a for-in index or map iterator, a `fails`/self error binder,
+  a for-in ignored throwaway) has no var declaration, so AssignBlockSlots never
+  gave it a slot. Allocate one on first use, sized by its type. A binder is always
+  written before it is read, so the first StoreSym/VarAddr touch allocates it. }
+begin
+  if (s >= 0) and Syms[s].BinderVar and (Syms[s].Slot < 0) then
+    Syms[s].Slot := NewSlot(TypeSize(Syms[s].TypeId));
+end;
+
 function VarAddr(s: LongInt): LongInt;
 { The address of variable s in the routine being lowered. A `with` field alias is
   base.field; a captured variable is reached through its hidden pointer parameter;
@@ -8259,6 +8799,7 @@ function VarAddr(s: LongInt): LongInt;
 var
   baseNode, recTy, m, off: LongInt;
 begin
+  EnsureBinderSlot(s);
   if Syms[s].Kind = syFunc then
     { the current function's aggregate result: its storage is the caller's buffer, reached
       through the hidden sret pointer that CurResultSlot holds }
@@ -8291,6 +8832,7 @@ function LoadSym(s: LongInt): LongInt;
 var
   addr, ty: LongInt;
 begin
+  EnsureBinderSlot(s);
   { a declaration-level property read is a call to its getter (doc/languages/kobold/kp-property.md) }
   if IsPropertySym(s) then begin
     LoadSym := LowerDirectCall(Nodes[Nodes[Syms[s].Node].B].Sym, [], True);
@@ -8345,6 +8887,7 @@ procedure StoreSym(s, val: LongInt);
 var
   addr, ty: LongInt;
 begin
+  EnsureBinderSlot(s);
   if Syms[s].Kind = syFunc then begin
     if IsRealType(SemTypes[Syms[s].TypeId].RetType) then EmitFSTL(val, CurResultSlot)
     else if WideStore(SemTypes[Syms[s].TypeId].RetType) then EmitSTL64(val, CurResultSlot)
@@ -9231,6 +9774,7 @@ begin
       else if IsSmallSet(rTy) then EmitSTL64(LowerExpr(arg), CurResultSlot)
       else EmitSTL(LowerExpr(arg), CurResultSlot);
     end;
+    EmitDeferUnwind(0);   { run all pending defers before the routine epilogue }
     if CurExitLabel < 0 then CurExitLabel := NewLabel;
     EmitJmp(CurExitLabel);
     LowerBuiltin := -1;
@@ -9609,15 +10153,23 @@ procedure EmitFailDivert(flag, err: LongInt);
   register still zero (success reported upward); `or fail` forwards the inner error unchanged. }
 begin
   case flag of
-    1: if LoopSP > 0 then EmitJmp(LoopBreak[LoopSP - 1]);
-    2: if LoopSP > 0 then EmitJmp(LoopCont[LoopSP - 1]);
+    1: if LoopSP > 0 then begin
+      EmitDeferUnwind(LoopDeferBase[LoopSP - 1]);
+      EmitJmp(LoopBreak[LoopSP - 1]);
+    end;
+    2: if LoopSP > 0 then begin
+      EmitDeferUnwind(LoopDeferBase[LoopSP - 1]);
+      EmitJmp(LoopCont[LoopSP - 1]);
+    end;
     3: begin
       EmitSTL(err, CurErrorSlot);   { forward the callee's error from this failable routine }
+      EmitDeferUnwind(0);
       if CurExitLabel < 0 then CurExitLabel := NewLabel;
       EmitJmp(CurExitLabel);
     end;
   else
     { exit }
+    EmitDeferUnwind(0);
     if CurExitLabel < 0 then CurExitLabel := NewLabel;
     EmitJmp(CurExitLabel);
   end;
@@ -10062,6 +10614,30 @@ begin
   LowerComputedFieldRead := LowerMethodCall(sf, [], True);
 end;
 
+function LowerToStr(node: LongInt): LongInt;
+{ Lower an interpolation hole (nkToStr) to a string value, the same rendering
+  write uses: a string is the identity, a char through kp_str_from_char, int64
+  through kp_str_from_int64, and everything else (int widths, bool, enum) through
+  kp_str_from_int. (A real is rejected in the checker.) }
+var
+  t, d: LongInt;
+begin
+  t := Nodes[Nodes[node].A].Ty;
+  if t = tyStr then
+    LowerToStr := LowerExpr(Nodes[node].A)
+  else if t = tyChar then
+    LowerToStr := EmitStrCall1('kp_str_from_char', LowerExpr(Nodes[node].A))
+  else if IsInt64(t) then begin
+    EnsureHelperI64('kp_str_from_int64', 'int');
+    EmitArg64(AsInt64(Nodes[node].A));
+    d := NewTemp;
+    PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_str_from_int64 nargs=1');
+    LowerToStr := d;
+  end
+  else
+    LowerToStr := EmitStrCall1('kp_str_from_int', LowerExpr(Nodes[node].A));
+end;
+
 function LowerExpr(node: LongInt): LongInt;
 var
   s, a, b, one, r: LongInt;
@@ -10083,6 +10659,7 @@ begin
         LowerExpr := EmitLIC(Ord(Nodes[node].Text[1]))
       else
         LowerExpr := LowerStringLit(node);
+    nkToStr: LowerExpr := LowerToStr(node);
     nkIdent: begin
       s := Nodes[node].Sym;
       if (s >= 0) and (Syms[s].Kind in [syProc, syFunc]) and
@@ -10901,8 +11478,10 @@ procedure PushLoop(contL, breakL: LongInt);
 begin
   SetLength(LoopCont, LoopSP + 1);
   SetLength(LoopBreak, LoopSP + 1);
+  SetLength(LoopDeferBase, LoopSP + 1);
   LoopCont[LoopSP] := contL;
   LoopBreak[LoopSP] := breakL;
+  LoopDeferBase[LoopSP] := DeferScopeSP;
   Inc(LoopSP);
 end;
 
@@ -10925,6 +11504,10 @@ begin
       cloned/retained fallback on failure, see LowerFailForm). }
     nkOrDivert, nkOrElse: IsOwnedExpr := True;
     nkBinary: IsOwnedExpr := (Nodes[node].Op = tkPlus) and (Nodes[node].Ty = tyStr);
+    { a converted hole is a fresh string (owned); a string hole is the operand's own
+      ownership, since nkToStr over a string is the identity }
+    nkToStr: if Nodes[Nodes[node].A].Ty = tyStr then IsOwnedExpr := IsOwnedExpr(Nodes[node].A)
+             else IsOwnedExpr := True;
     { a bare paramless function name auto-calls and so transfers a fresh
       reference, EXCEPT inside the function's own body, where the name is the
       result variable: that is a borrow (loaded from the result slot), so it must
@@ -11321,6 +11904,15 @@ begin
   EmitLabel(lEnd);
 end;
 
+procedure LowerForIn(node: LongInt);
+{ Each for-in backing was desugared in AnalyzeForIn into an ordinary statement
+  tree stored in node.D (a counted loop for array/string, a MapFirst/MapNext pump
+  for a map); lower that. The desugar's hidden binder vars (index, iterator,
+  ignored throwaways) get their slots lazily through EnsureBinderSlot. }
+begin
+  LowerStmt(Nodes[node].D);
+end;
+
 procedure LowerCase(node: LongInt);
 var
   sel, selSlot, lEnd, lDefault: LongInt;
@@ -11416,12 +12008,17 @@ begin
         be in progress on return, so branch to the routine's cleanup and skip the rest.
         The check sits at a statement boundary, where no owned temporary is live, so it
         never abandons one (cancel-by-unwind stage 2). }
-      for i := 0 to High(Nodes[node].Kids) do begin
-        StmtSuspended := False;
-        LowerStmt(Nodes[node].Kids[i]);
-        if StmtSuspended and (CurCancelLabel >= 0) then EmitCancelCheck;
+      begin
+        PushDeferScope;
+        for i := 0 to High(Nodes[node].Kids) do begin
+          StmtSuspended := False;
+          LowerStmt(Nodes[node].Kids[i]);
+          if StmtSuspended and (CurCancelLabel >= 0) then EmitCancelCheck;
+        end;
+        PopDeferScope;   { fall-through: run this block's defers, then drop the scope }
       end;
     nkEmpty: ;
+    nkDefer: RegisterDefer(Nodes[node].A);
     nkAssign: LowerAssign(node);
     nkCallStmt: LowerCallStmt(node);
     nkFailsTest, nkOrElse, nkOrDivert: LowerFailForm(node, False);
@@ -11429,11 +12026,18 @@ begin
     nkWhile: LowerWhile(node);
     nkRepeat: LowerRepeat(node);
     nkFor: LowerFor(node);
+    nkForIn: LowerForIn(node);
     nkCase: LowerCase(node);
     nkBreak:
-      if LoopSP > 0 then EmitJmp(LoopBreak[LoopSP - 1]);
+      if LoopSP > 0 then begin
+        EmitDeferUnwind(LoopDeferBase[LoopSP - 1]);
+        EmitJmp(LoopBreak[LoopSP - 1]);
+      end;
     nkContinue:
-      if LoopSP > 0 then EmitJmp(LoopCont[LoopSP - 1]);
+      if LoopSP > 0 then begin
+        EmitDeferUnwind(LoopDeferBase[LoopSP - 1]);
+        EmitJmp(LoopCont[LoopSP - 1]);
+      end;
     nkLabelStmt: begin
       { a `name:` label marks a jump target: emit its IR label here, then the
         statement it labels }
@@ -11627,6 +12231,7 @@ begin
   failPtrSlot := -1;
   FailCaptureSlot := -1;
   LoopSP := 0;
+  DeferScopeSP := 0; DeferCount := 0;
   PendingMapInsert := -1;
   { open this routine's label-id scope (threaded dispatch): @name and a `name:`
     definition share one IR label id, allocated on first mention }
@@ -12122,6 +12727,7 @@ begin
     IrFuncs[CurFn].Nparams := 0;
     CurResultSlot := -1;
     LoopSP := 0;
+    DeferScopeSP := 0; DeferCount := 0;
     { a start block declares no locals (no-capture rule), so it owns no frame handles
       and needs no cancel-unwind cleanup; its yields emit no cancel check }
     CurCancelLabel := -1;
@@ -12153,6 +12759,7 @@ begin
     CurFn := AddIrFunc(CoThunkName[q], True);
     CurResultSlot := -1;
     LoopSP := 0;
+    DeferScopeSP := 0; DeferCount := 0;
     CurCancelLabel := -1;
     { three entry parameters: vm (pointer), argsp (pointer), nargs (int); slots 0, 1, 2 }
     NewSlot(CurTarget.PtrBytes);

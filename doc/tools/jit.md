@@ -3,8 +3,7 @@
 `skj-jit`, `skj-jit-arm64`, and `skj-jit-rv` compile a C source to native
 machine code in the running process and call into it, rather than writing
 assembly for an external assembler. Each is the same driver over a
-different byte sink. The Excelsior variant `skj-exc-jit-arm64` does the
-same for the Excelsior front end.
+different byte sink.
 
 ```sh
 skj-jit prog.c          # x86-64 host: compile prog.c in memory and run main()

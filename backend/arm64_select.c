@@ -1041,7 +1041,7 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
                 mc64_cmp(m, 1, SC0, SCQ);
                 mc64_cset(m, 0, SCQ, MC64_NE);   /* SCQ = 1 on overflow */
                 if (in->label >= 0) {
-                    /* explicit per-site trap (Excelsior's cold __exc_trap
+                    /* explicit per-site trap (a front end's cold trap
                        trampoline): branch there on overflow. */
                     mc64_cbnz(m, 0, SCQ, il(m, lbl, in->label));
                 } else {

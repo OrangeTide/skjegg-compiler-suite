@@ -49,7 +49,6 @@ the soft-float PlayStation configuration where it applies).
 | TinC | `skj-tinc` (and per-target variants) | front end under `tinc/` |
 | TinScheme | `skj-sc` (and per-target variants) | front end under `scheme/` |
 | MooScript | `skj-mooc` | front end under `moo/` |
-| Excelsior | `skj-exc` (and per-target variants) | in progress, under `excelsior/` |
 
 C and Compact Pascal have full language references in `doc/languages/`.
 Kobold-Pascal has its own manual set under `doc/languages/kobold/`, indexed from
@@ -111,7 +110,7 @@ ColdFire is inventoried in `as/INSTRUCTIONS.md`.
   a stock `gdb` or the in-tree client both attach. Symbolization reads DWARF 4
   emitted into the output ELF. See `doc/tools/debugger.md`.
 - The **JIT** drivers (`skj-jit`, `skj-jit-rv`, `skj-jit-arm64`, and the Kobold
-  and Excelsior JITs) execute the IR in process instead of emitting an object.
+  JIT) execute the IR in process instead of emitting an object.
   See `doc/tools/jit.md`.
 
 qemu (`qemu-m68k`, `qemu-riscv32`, `qemu-i386`, `qemu-x86_64`, `qemu-aarch64`)
@@ -158,7 +157,7 @@ make check-all      # every architecture's qemu suite plus the integration tests
 make clean          # remove build/
 ```
 
-Per-language and per-feature suites (`check-cc`, `check-cpp`, `check-exc`, the
+Per-language and per-feature suites (`check-cc`, `check-cpp`, the
 `test-fpu`/`test-i64`/`test-ops` integration tests, the Compact Pascal
 `check-pc-host` and `check-pc-kpcom` suites, and the Kobold suites) number in
 the hundreds. `make help` prints the full catalog, generated from the Makefile

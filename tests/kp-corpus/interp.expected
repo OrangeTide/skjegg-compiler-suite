@@ -1,0 +1,10 @@
+hello world!
+n=42 big=10000000000
+char=Q
+bool=1 enum=1
+sum=50
+literal ${not a hole} and $x
+quote="q"
+plain ${notahole} stays
+
+end

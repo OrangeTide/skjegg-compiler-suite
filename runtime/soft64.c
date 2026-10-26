@@ -20,8 +20,8 @@
  * or divide operators anywhere inside (the build checks the object has
  * no undefined __*di3 symbols).
  *
- * Division by zero returns 0: libexc's callers check the divisor first
- * (runtime-errors.md's DIV_ZERO fault fires above this level).
+ * Division by zero returns 0: callers check the divisor first (the
+ * language's divide-by-zero fault fires above this level).
  *
  */
 

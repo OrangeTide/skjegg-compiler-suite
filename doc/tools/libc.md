@@ -30,28 +30,24 @@ rather than factored:
 
 - The 64-bit integer helpers exist as target assembly in every full crt and
   again in C in `runtime/soft64.c`.
-- The bump arena is reimplemented about six times (the five crts and
-  `runtime/exc_smolmoo.c`).
-- Integer and float to string formatting exists three times: `runtime/str.c`
-  (`__moo_tostr*`), `runtime/libexc.c` (`fmt_int`/`fmt_dec`/`fmt_double`), and
-  `runtime/pascal_rt.c` (`__pascal_write_*`).
-- String and list value operations exist twice over near-identical
-  `{ int len; char *data }` structs: the `__moo_*` world (str.c, list.c,
-  rope.c) and the `__exc_*` world (libexc.c).
+- The bump arena is reimplemented about five times (the crts).
+- Integer and float to string formatting exists in more than one place:
+  `runtime/str.c` (`__moo_tostr*`) and `runtime/pascal_rt.c`
+  (`__pascal_write_*`).
+- String and list value operations exist over near-identical
+  `{ int len; char *data }` structs in the `__moo_*` world (str.c, list.c,
+  rope.c).
 - `memset` and `memmove` live only in `pascal_rt.c`.
 
 The per-host code that is genuinely different is small. The irreducible host
 power a guest needs is write, exit, and read. The trap instruction differs by
 target (`trap #0` on ColdFire, `ecall` on RISC-V, `syscall` on MIPS, a BIOS
-jump on the PlayStation), and Excelsior adds a thin layer-2 `__exh_*` binding
-(`exc_native.c` versus `exc_smolmoo.c`) that in practice is just
-`__exh_emit` to write and `__exh_fault` to exit. Everything else (persistence,
-cross-VM messaging, scheduling, memory mapping) is optional and host-tier.
+jump on the PlayStation). Everything else (persistence, cross-VM messaging,
+scheduling, memory mapping) is optional and host-tier.
 
-So the libc is not a new thing bolted on. It should formalize the layering
-that `excelsior/host-abi.md` already uses, a portable host-independent layer
-over a tiny per-host seam, and make libexc, pascal_rt, and the moo runtime
-consumers of one shared core rather than parallel implementations.
+So the libc is not a new thing bolted on. It should formalize a portable
+host-independent layer over a tiny per-host seam, and make pascal_rt and the
+moo runtime consumers of one shared core rather than parallel implementations.
 
 ## Constraints from skj-cc
 
@@ -126,12 +122,11 @@ libc/        (compiled by skj-cc, per target, host-independent)
   stdio/     FILE over the seam; stdin, stdout, stderr; fopen only where a
              host offers a file power
 
-the seam    (per host, tiny; maps onto the existing crt and __exh_*)
+the seam    (per host, tiny; maps onto the existing crt)
   __libc_write   __libc_read   __libc_exit   __libc_sbrk
 ```
 
-The seam is a small superset of Excelsior's layer 2. `write` and `exit`
-already exist in every crt and as `__exh_emit` and `__exh_fault`. Add `read`
+The seam is small. `write` and `exit` already exist in every crt. Add `read`
 (present in most crts) and one memory primitive, `__libc_sbrk`, which is a
 real `brk` call under skj-run and qemu and a fixed static region under the VM
 hosts. That single primitive is what turns the allocate-only bump arena into
@@ -140,8 +135,8 @@ a real `malloc` with `free`.
 As built, the write/read/exit three are realized directly as the crt's bare
 `write`, `read`, and `exit` symbols (the names `start.S` already exports), not
 under a `__libc_` prefix: `libc/stdio.c`, `assert.c`, and `abort()` call them
-by those names, and so do moo, pascal, and `exc_native`. So the three
-consumers already share one seam at the crt. `__libc_sbrk` is the only
+by those names, and so do moo and pascal. So the consumers already share
+one seam at the crt. `__libc_sbrk` is the only
 libc-private seam member, and it lives in `libc/sbrk.c` over a reserved `.bss`
 region. The names above are the conceptual contract; the prefix was not added,
 since a single set of crt symbols already serves everyone.
@@ -227,20 +222,19 @@ targets.
 - Phase E, convergence. Done, though a survey of the three runtimes showed the
   premise was largely already met, so the work was narrower than the heading
   implies.
-  - utf8 is already shared: `runtime/libexc.c` includes and links the one
-    `runtime/utf8.c`, and moo and pascal are byte-oriented and decode no UTF-8,
-    so there was no duplicate to remove.
-  - The seam is already one. libexc's binding (`exc_native.c`), moo, pascal,
-    and the libc all reach the host through the crt's bare `write`/`read`/
-    `exit` (see the seam note above); only `__libc_sbrk` is libc-private. No
-    collapse was needed.
+  - utf8 is already shared: the one `runtime/utf8.c` is the only decoder, and
+    moo and pascal are byte-oriented and decode no UTF-8, so there was no
+    duplicate to remove.
+  - The seam is already one. moo, pascal, and the libc all reach the host
+    through the crt's bare `write`/`read`/`exit` (see the seam note above);
+    only `__libc_sbrk` is libc-private. No collapse was needed.
   - The formatters do not converge. The shared `__vformat` engine now has the
     floating conversions f/e/g (the one real libc gap, closed this phase in
     `libc/printf.c`, pinned by `tests/libc_phase_e.c`). But the runtime
     formatters stay bespoke by design: each carries domain semantics the
     generic engine does not (Pascal shortstring output, the MOO error-name
-    table and scientific float style, Excelsior's base-10 `decimal` scaled by
-    10^4). Only plain integer-to-decimal overlaps, which is too small to share
+    table and scientific float style). Only plain integer-to-decimal overlaps,
+    which is too small to share
     across the ABI and arena boundaries.
   - The mem functions were left as they are. `runtime/pascal_rt.c` defines
     `memset`/`memmove` because the Pascal codegen emits calls to them; those
@@ -278,9 +272,8 @@ targets.
   handlers; the expected stdout is the flushed, reverse-ordered result).
 - `setjmp`/`longjmp` and the coroutine machinery: investigate the synergy.
   `longjmp` saves and restores the callee-saved registers, the stack pointer,
-  and the return address, which is a subset of what the Excelsior source
-  coroutines already do in `runtime/start.S` and `runtime/start_rv_psabi.S`
-  (`save_ctx`/`restore_ctx` behind `__exc_src_next`/`__exc_src_yield`, the
+  and the return address, which is a subset of what the stackful coroutine
+  machinery already does in `runtime/start.S` (`save_ctx`/`restore_ctx`, the
   stackful context switch). A `setjmp`/`longjmp` pair is a one-shot,
   same-stack special case of that switch (no private stack, resume-once), so
   the per-arch register save/restore blocks could be shared rather than

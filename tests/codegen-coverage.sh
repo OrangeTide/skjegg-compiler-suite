@@ -49,8 +49,8 @@ TARGETS="ir/ir.c ir/util.c ir/arena.c \
 # -D/-I flags its tool is built with, and a driver that compiles its corpus
 # through the freshly built tool. The sources come from the Makefile so this
 # never drifts from how the real tools are built.
-CONFIGS="tinc-cf pc-cf moo-cf scheme-cf cc-cf exc-cf \
-         tinc-x64 cc-x64 exc-x64 cc-rv exc-rv cc-arm64 cc-mips kp-aot"
+CONFIGS="tinc-cf pc-cf moo-cf scheme-cf cc-cf \
+         tinc-x64 cc-x64 cc-rv cc-arm64 cc-mips kp-aot"
 
 srcvar() {
     case $1 in
@@ -59,12 +59,9 @@ srcvar() {
     moo-cf)    echo MOO_SRC ;;
     scheme-cf) echo SC_SRC ;;
     cc-cf)     echo CC_SRC ;;
-    exc-cf)    echo EXC_SRC ;;
     tinc-x64)  echo SRC_X64 ;;
     cc-x64)    echo CC_SRC_X64 ;;
-    exc-x64)   echo EXC_SRC_X64 ;;
     cc-rv)     echo CC_SRC_RV ;;
-    exc-rv)    echo EXC_SRC_RV ;;
     cc-arm64)  echo CC_SRC_A64 ;;
     cc-mips)   echo CC_SRC_MIPS ;;
     kp-aot)    echo __KP_AOT ;;          # a hand-built source set, below
@@ -76,12 +73,9 @@ cflags() {
     tinc-cf|pc-cf|moo-cf|scheme-cf)
                echo "-Itinc -Imoo -Ipascal -Ischeme -Iir" ;;
     cc-cf)     echo "-DCC_M68K -Icc -Icpp -Iir" ;;
-    exc-cf)    echo "-Iexcelsior -Iir" ;;
     tinc-x64)  echo "-DX86_BITS=64 -Itinc -Iir -Ibackend" ;;
     cc-x64)    echo "-DX86_BITS=64 -DCC_LP64 -DCC_PSABI -DCC_STRUCT_ABI -Icc -Icpp -Iir -Ibackend" ;;
-    exc-x64)   echo "-DX86_BITS=64 -DCC_LP64 -DCC_PSABI -DCC_STRUCT_ABI -Iexcelsior -Iir -Ibackend" ;;
     cc-rv)     echo "-Icc -Icpp -Iir" ;;
-    exc-rv)    echo "-DCC_PSABI -Iexcelsior -Iir" ;;
     cc-arm64)  echo "-DCC_LP64 -DCC_PSABI -DCC_ARM64 -Icc -Icpp -Iir -Ibackend" ;;
     cc-mips)   echo "-DCC_PSABI -Icc -Icpp -Iir" ;;
     kp-aot)    echo "-DX86_BITS=64 -Iir -Ibackend -Ikobold" ;;
@@ -121,10 +115,6 @@ drive() {
         done ;;
     cc-cf|cc-x64|cc-rv|cc-arm64|cc-mips)
         for f in "$ROOT"/tests/cc_t*.c; do
-            "$_bin" -o /dev/null "$f" >/dev/null 2>&1 || true
-        done ;;
-    exc-cf|exc-x64|exc-rv)
-        for f in "$ROOT"/tests/exs_*.exs; do
             "$_bin" -o /dev/null "$f" >/dev/null 2>&1 || true
         done ;;
     kp-aot)
