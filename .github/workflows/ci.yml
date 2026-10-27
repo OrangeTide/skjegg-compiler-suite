@@ -106,16 +106,18 @@ jobs:
   # The proof holds because the module kpcom emits is fixed by its own logic,
   # not by which compiler built it (fpc here, skj-pc elsewhere).  'make
   # bootstrap-fpc' builds both the skj rv32 seed and the fpc one and compares
-  # them, so the assertion is the target itself.
+  # them, so the assertion is the target itself.  Building the skj rv32 seed
+  # runs skj-pc-x86-64 over kpcom and assembles its NASM output, so this job
+  # needs nasm as well as fpc.
   bootstrap-fpc:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
-      - name: Install Free Pascal
+      - name: Install Free Pascal and nasm
         run: |
           sudo apt-get update
-          sudo apt-get install -y fpc
+          sudo apt-get install -y fpc nasm
       - name: Rebuild the front end with fpc and assert it matches the skj seed
         run: make bootstrap-fpc
 

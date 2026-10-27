@@ -6,6 +6,14 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.24.2
+
+#### Fixed
+- The continuous integration job that proves the compiler is independent of its
+  build compiler now installs `nasm`. With the committed seed gone, that job
+  rebuilds the reference RISC-V seed from source, which assembles the x86-64
+  front end's NASM output, so it needs `nasm` as well as Free Pascal.
+
 ### 0.24.1
 
 #### Fixed
