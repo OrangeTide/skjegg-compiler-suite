@@ -39,12 +39,23 @@ set -eu
 HERE=$(dirname "$0")
 ROOT=$(cd "$HERE/.." && pwd)
 SRCDIR=${KP_SRCDIR:-"$HERE/kp-multi"}
-BDIR="$ROOT/build/$(basename "$SRCDIR")"
 
 MODE=${MODE:-jit}
 FRONTEND=${FRONTEND:-"$ROOT/build/skj-kp-jit"}
 JIT=${JIT:-"$ROOT/build/skj-kp-jit"}
 QEMU=${QEMU:-}
+
+# Scratch is keyed on the fixture set, the mode, and the runner binary, so that
+# concurrent make -j targets sharing a fixture set (the x86-64, arm64, and rv AOT
+# runs) do not share a scratch directory.  Their unit .kpm modules now carry the
+# target architecture, so a shared directory would let one run's modules clobber
+# another's.
+case $MODE in
+    jit) _tagbin=$JIT ;;
+    aot) _tagbin=${KPAOT:-$FRONTEND} ;;
+    *)   _tagbin=$FRONTEND ;;
+esac
+BDIR="$ROOT/build/$(basename "$SRCDIR")-$MODE-$(basename "$_tagbin")"
 
 rm -rf "$BDIR"
 mkdir -p "$BDIR"

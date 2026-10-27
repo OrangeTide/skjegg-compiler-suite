@@ -21,23 +21,24 @@ prog.pas ──(1)──▶ prog.kpm ──(2)──▶ prog.s ──(3)──�
 ```
 
 Stage 1 runs the `kpcom` front end natively on the host. It is the only
-host-specific stage. It does not need `fpc` or any external Pascal toolchain: the
-front end is the committed `prebuild/kpcom.kpm` seed, which the native front-end
-binary runs and calls to compile the source. Stages 2 to 4 are host-independent
-cross tools that emit and consume RV32 regardless of the machine they run on.
-Stage 5 is the emulator.
+host-specific stage. It needs no `fpc` or external Pascal toolchain: the native
+front-end binary (`skj-kpc-rv` / `skj-kpc-cf`, which `skj-pc` builds from
+`kobold/kpcom.pas`) reads the source and emits the module directly. Stages 2 to 4
+are host-independent cross tools that emit and consume RV32 regardless of the
+machine they run on. Stage 5 is the emulator.
 
 ## No fpc is involved
 
-`fpc` is only used by `make bootstrap-fpc`, a deep-recovery fallback that
-re-mints the seed from scratch, and that target is never on the normal build
-path and never gated in CI. The committed `prebuild/kpcom.kpm` is the front end
-in serialized form. A build that has that seed never calls `fpc`.
+`fpc` is only used by `make bootstrap-fpc`, the compiler-independence proof (it
+rebuilds the front end from source and checks it emits the same module as the
+`skj-pc` build). That target is never on the normal build path. The normal build
+compiles `kobold/kpcom.pas` with `skj-pc` into the front end, so no `fpc` is
+involved.
 
-The seed can only be regenerated (after editing `kobold/kpcom.pas`) on an x86-64
-host, because `make update-kpcom` runs the front end natively through the host
-JIT. That restriction applies to regenerating the compiler, not to compiling
-your own program with it. Compiling a `.pas` works on any supported host.
+There is no committed seed to regenerate. After editing `kobold/kpcom.pas`, a
+plain build rebuilds the front end from source and each target re-emits its own
+seed. That works on any supported host; compiling your own `.pas` with the front
+end works on any supported host too.
 
 ## Build the tools once
 
@@ -138,7 +139,8 @@ Two tiers of check cover it, on both the RV32 and the ColdFire guest:
   (the target passes `--heap 256M`).
 
 The guest ELF is built the same way a program is: `skj-kp-rv` (or the ColdFire
-`skj-kp-cf`) compiles the committed `prebuild/kpcom.kpm` seed to assembly,
+`skj-kp-cf`) compiles the build-time seed (`build/kpcom-rv.kpm`, or
+`build/kpcom-cf.kpm`) to assembly,
 `skj-as-rv` assembles, and `skj-ld-rv` links the freestanding crt, the compiler
 object, and the freestanding runtime archive. Byte-identical output means the
 in-guest compiler is a true peer of the host compiler, not an approximation:

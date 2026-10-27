@@ -6,6 +6,41 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.24.0
+
+#### Added
+- Per-architecture Kobold host front ends. Alongside `skj-kpc` (x86-64) there
+  are now `skj-kpc-rv`, `skj-kpc-cf`, and `skj-kpc-arm64`. Each is the Kobold
+  compiler built for one target: it accepts source and emits a module for that
+  target only, the way the C compiler has one tool per target.
+
+#### Changed
+- A Kobold unit module (`.kpm`) now records its target architecture on the
+  `.target` line (`rv32`, `cf`, `x86-64`, `arm64`), and the backend rejects a
+  module built for another architecture. A unit carries IR, native code, and
+  type definitions bound to one target, so it was never portable between
+  architectures; the reader now enforces that instead of checking pointer width
+  alone.
+- The Kobold compiler no longer ships a committed bootstrap seed. Each
+  architecture's seed is generated at build time from that architecture's front
+  end, and `vendor.sh` generates the seed when it copies the compiler into a
+  consumer project.
+- Removed `skj-kpc-32`, the shared front end that emitted one module fed to both
+  the RISC-V and ColdFire backends. RISC-V and ColdFire builds use their own
+  per-architecture front ends.
+- The documentation now states that Kobold source uses `.kp` and Compact Pascal
+  uses `.pas`, with `kobold/kpcom.pas` (the self-hosting compiler, valid in both
+  languages) the one dual-compilable exception.
+- The libc file-operation diff tests compare against a native host oracle rather
+  than a fixed expected file.
+- Test scratch directories are isolated per mode and per runner so a parallel
+  `make -j` run does not let one target's modules clobber another's.
+
+#### Fixed
+- A coroutine value word is width-tagged, so a coroutine that carries a 64-bit
+  or pointer value through `yield` and resume is handled correctly on every
+  target.
+
 ### 0.23.0
 
 #### Added

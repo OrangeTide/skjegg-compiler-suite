@@ -15,67 +15,78 @@ read back through an IR-in-a-text-format reader in front of the same backend.
 file is the in-tree reference for how the front end is built, bootstrapped, and
 run.
 
-## The bootstrap seed (`prebuild/`)
+## Source file extensions: `.kp` versus `.pas`
 
-`kpcom` is written in its own language, so the tree cannot compile `kobold/kpcom.pas`
-with a C front end: it needs an existing Kobold compiler. That stage0 compiler is
-a committed, generated artifact under `prebuild/`:
+Kobold source files use the `.kp` extension. Pascal source files (the Compact
+Pascal front end, `pascal/`) use `.pas`. The two languages are distinct, so a
+project that uses both should keep the extensions apart.
 
-- `kpcom.kpm`: the seed (stage0): the KPM1 module (serialized shared IR) that
-  `kpcom` emits when it compiles its own source. It is a verified self-host fixed
-  point (`make update-kpcom`: the stage-1 module and the stage-2 module re-emitted
-  from it are byte-identical). It is the only prebuilt artifact in the Kobold path;
-  everything else is source. It is what the Kobold tools JIT and AOT-compile.
-- `kpcom.manifest`: a source-based staleness fingerprint plus integrity data.
-  `fingerprint` is the SHA-256 over the emit inputs in order (`kpcom.pas`,
-  `version.inc`, `stdlib.inc`); `emit-flags` are the `kpcom` arguments that wrote
-  the seed (`--emit-kpm`); `kpm-sha256`/`kpm-bytes` are the seed's integrity.
+`kobold/kpcom.pas` is the one deliberate exception. The Kobold compiler is
+self-hosting and is written in the subset common to both languages, so its
+single source file is valid Pascal and valid Kobold at the same time. It keeps
+the `.pas` extension because the bootstrap compiles it with the Compact Pascal
+front end (`skj-pc`) before a Kobold compiler exists. No other file in a project
+should rely on this dual-language property; treat it as unique to `kpcom`.
 
-The front-end source itself lives in `kobold/`, beside the runtime and reader:
+One in-tree inconsistency to be aware of: the historical Kobold test corpus
+under `tests/kp-corpus/` and `tests/kp-src/` still carries `.pas`, predating the
+`.kp` convention. The tools select the language from how they are invoked, not
+from the suffix, so those tests compile as Kobold regardless. New Kobold code,
+in this tree or in a consuming project, should use `.kp`.
+
+## The bootstrap: no committed seed
+
+`kpcom` is written in its own language, so the tree cannot compile
+`kobold/kpcom.pas` with a C front end. The bootstrap root is `skj-pc`, the
+Compact Pascal compiler: `kpcom.pas` is valid Pascal as well as Kobold (the one
+file that is both, see "Source file extensions" above), so `skj-pc` compiles it
+directly into a host front end with no prior Kobold compiler and no committed
+seed. There is no `prebuild/` artifact.
+
+One front end per target, the C-compiler model: `skj-pc` compiles `kpcom.pas`
+with that target baked in (a `KP_TARGET_*` define) into a host binary that emits
+modules for exactly that target. The host front ends are `skj-kpc` (x86-64),
+`skj-kpc-rv` (rv32), and `skj-kpc-cf` (ColdFire). Each then emits its own source
+as that target's KPM1 **seed** at build time:
+
+- `build/kpcom-rv.kpm` (from `skj-kpc-rv`): feeds the RV32 JIT (`bin2c` embeds
+  it) and the RV32 self-host ELF.
+- `build/kpcom-cf.kpm` (from `skj-kpc-cf`): feeds the ColdFire self-host ELF.
+- `build/kpcom-lp64.kpm` (from `skj-kpc`): feeds the x86-64 JIT.
+
+A seed is bound to its target (its `.target` header names the architecture:
+`rv32`, `cf`, `x86-64`), so the KPM1 reader rejects a seed built for another
+target rather than reading it at the wrong model. Pointer width is a consequence
+of the target, not a separate axis.
+
+The front-end source lives in `kobold/`, beside the runtime and reader:
 
 - `kobold/kpcom.pas`: the whole front end (lexer, parser, semantics, IR, KPM1
   writer), one Pascal file.
 - `kobold/version.inc`, `kobold/stdlib.inc`: the two `{$I ...}` includes
   `kpcom.pas` pulls in (`KP_VERSION`, `KP_STDLIB`). Their bytes are compiled into
-  the IR as string constants (the stdlib path in particular), so the seed
+  the IR as string constants (the stdlib path in particular), so a seed
   reproduces byte-identically only when regenerated against these same includes.
 
-Bootstrap policy: the seed is trusted and the standing regeneration path is a
-self-host fixed point through `skj-kp-jit` (it consumes the prior seed). An `fpc`
-build of `kobold/kpcom.pas` is a deep-recovery fallback only, used to re-mint a
-lost or distrusted seed. See `PLAN.md`.
+### The self-host and compiler-independence checks
 
-### Regenerating and guarding the seed
-
-Three Makefile targets manage the committed seed.
-
-- `make update-kpcom` is the **only** writer of `prebuild/kpcom.kpm`. It
-  regenerates the seed by the self-host fixed point: stage 1 compiles
-  `kobold/kpcom.pas` with the committed seed as the front end
-  (`KPCOM_KPM=prebuild/kpcom.kpm skj-kp-jit --emit-kpm`), stage 2 compiles the
-  same source with stage 1 as the front end, and the two modules must be byte
-  identical (the self-host bootstrap check). Only then does stage 1 become
-  the new seed and the manifest is rewritten. If the fixed point breaks the
-  target fails and writes nothing. `kpcom` resolves `{$I}` relative to the source
-  file, so `version.inc` and `stdlib.inc` sit beside `kpcom.pas` in `kobold/`.
-- `make check-kpcom` is a source-based staleness guard. It recomputes the
-  fingerprint over the emit inputs and compares it to the manifest. A match
-  passes. A mismatch on an x86-64 host (one that can run the regeneration JIT)
-  runs `update-kpcom`, so `check-all` gates on a seed that still regenerates
-  through the fixed point. A mismatch on a host that cannot regenerate warns and
-  falls back to the committed seed.
-- `make bootstrap-fpc` is the deep-recovery fallback. It builds `kobold/kpcom.pas`
-  with `fpc` (a toolchain independent of skjegg itself) and emits a seed to
-  `build/kpcom.kpm.fpc`. It does not touch `prebuild/`; to adopt its output, copy
-  it over `prebuild/kpcom.kpm` and run `update-kpcom` to re-establish the fixed
-  point. It is unexercised in CI.
+- The in-guest self-host (`test-{rv,cf}-selfhost-kpc` and the `-full` variants)
+  runs the Kobold compiler on the target under `skj-run`: it compiles a program
+  (and, for `-full`, the whole of `kpcom.pas`) in-guest and asserts the emitted
+  KPM1 matches the host front end's reference byte for byte.
+- `make bootstrap-fpc` is the compiler-independence proof. It builds `kpcom.pas`
+  with `fpc` (a toolchain independent of skjegg) targeting rv32, and asserts the
+  module it emits matches `build/kpcom-rv.kpm` byte for byte: the module a front
+  end emits is fixed by its own logic, not by which compiler built it.
 
 ### Vendoring
 
 `vendor.sh kobold` ships the Kobold AOT path as one selection: the front-end
 source, the KPM1 reader and runtime (`kobold/`), the x86-64 selector the host
-tools build on, the `jit/` call trampoline `libkpaot.a` links, and the generated
-stage0 seed (`prebuild/kpcom.kpm` plus its manifest). It generates the
+tools build on, and the `jit/` call trampoline `libkpaot.a` links. There is no
+committed seed; vendor.sh generates the x86-64 seed from source at vendor time
+and ships it as `prebuild/kpcom.kpm`, so the consumer AOT-compiles it with
+`skj-kp` into `skj-kpc` without needing `skj-pc` or `fpc`. It generates the
 `skjegg.mk` rules for `skj-kp` (the KPM1 compiler), `skj-kpc` (the native front
 end), and `libkpaot.a`. Adding `riscv` also generates `skj-kp-rv` (the KPM1 to
 RV32 compiler). The hosted RV32 runtime (`libkpaot-rv.a`) and the freestanding
@@ -118,36 +129,37 @@ for single-module and multi-unit programs, overflow traps included.
 
 ## Source compilation
 
-The front end (`kpcom`) is a Kobold program, carried as the committed seed (see
-The bootstrap seed). A tool runs it to turn `.pas` source into a KPM1 module, and
-there are two ways to run it.
+The front end (`kpcom`) is a Kobold program, built from source per target by
+`skj-pc` (see "The bootstrap: no committed seed"). A tool runs it to turn `.pas`
+source into a KPM1 module, and there are two ways to run it.
 
-The **JIT path** carries the seed inside the binary. `build/kpcom_kpm.c` is the
-seed as a C byte array (generated from `prebuild/kpcom.kpm` by `kobold/bin2c.c`) and
-is linked into the three `skj-kp-jit*` tools. When one is handed a `.pas` input,
-`kobold/frontend.c:kp_compile_pas` JITs that embedded seed in-process, binds the
+The **JIT path** carries a seed inside the binary. `build/kpcom_kpm.c` is the
+RV32 seed (`build/kpcom-rv.kpm`) as a C byte array, generated by `kobold/bin2c.c`
+and linked into the RV32 JIT; the x86-64 and arm64 JITs embed their own seeds the
+same way. When a JIT tool is handed a `.pas` input,
+`kobold/frontend.c:kp_compile_pas` JITs the embedded seed in-process, binds the
 runtime, calls its `compile` export with the source name and text, and reads back
 the produced module. So `skj-kp-jit foo.pas` compiles and runs source in one
 process, and `skj-kp-jit --emit-kpm foo.pas` stops after writing the module. The
 `KPCOM_KPM` environment variable overrides the embedded seed with a module on
-disk, which is how `update-kpcom` drives the self-host fixed point.
+disk for dev iteration.
 
-The **AOT path** is the seed compiled to a native front-end binary. `skj-kpc` is
-`prebuild/kpcom.kpm` AOT-compiled by `skj-kp` and linked against `libkpaot.a`, so
-it runs the front end with no JIT: `skj-kpc --emit-kpm foo.pas` reads source and
-writes a module. The front end always runs on the host, so a cross AOT build is
-two steps: the host `skj-kpc` emits the module, then the cross backend
-(`skj-kp-rv` / `skj-kp-arm64`) compiles it for the target. `skj-kpc-rv` and
-`skj-kpc-arm64` exist only to prove the seed AOT-compiles and runs on each
-backend; the build uses the host `skj-kpc`.
+The **AOT path** runs a native front-end binary built directly from source.
+`skj-kpc` (x86-64), `skj-kpc-rv`, and `skj-kpc-cf` are `skj-pc` compiling
+`kpcom.pas` with that target baked in, linked against the host harness, so each
+runs the front end with no JIT: `skj-kpc --emit-kpm foo.pas` reads source and
+writes a module stamped for that target. The front end runs on the host, so a
+cross AOT build is two steps: the host front end for the target emits the module,
+then that target's backend (`skj-kp-rv` / `skj-kp-cf` / `skj-kp-arm64`) compiles
+it. (Vendored trees instead build `skj-kpc` by AOT-compiling a vendor-time seed
+with `skj-kp`, since they ship no `skj-pc`.)
 
-The seed is pointer-width-specific, not arch-neutral: its `.target` line records
-the width class (`ilp32` or `lp64`) and a backend rejects a module of the other
-class. The committed `prebuild/kpcom.kpm` is the ILP32 seed for the 32-bit
-self-host; the LP64 front end the x86-64/arm64 JIT and AOT embed is regenerated
-from source at build time. The integer core and control flow are width-neutral;
-only the pointer and `int64` opcodes differ, so one front-end source emits both
-widths (gcc `-m32`/`-m64` style).
+A module is bound to one target, not merely one width: its `.target` line records
+the architecture (`rv32`, `cf`, `x86-64`, `arm64`), and a backend rejects a
+module built for another architecture. Pointer width is a consequence of the
+target (4 bytes for rv32/cf, 8 for x86-64/arm64), not a separate category: there
+is no shared "ilp32" or "lp64" module. The integer core and control flow are the
+same across targets; only the pointer and `int64` opcodes follow the width.
 
 ## The KPM1 text module format
 
@@ -494,8 +506,11 @@ raises it, and the checked ops never appear in C.
   `check-kp-inc-free` run the AOT and freestanding paths under qemu (in
   `check-emu-all`). The include is resolved by the host front end in every case,
   so the freestanding module carries the spliced text before codegen.
-- **In-tree, seed**: `make check-kpcom` guards the committed seed against its
-  source (see Regenerating and guarding the seed); it is in `check-all`.
+- **In-tree, bootstrap**: `make bootstrap-fpc` rebuilds the front end from source
+  with `fpc` and asserts it emits the same RV32 seed as the `skj-pc`-built front
+  end, the compiler-independence proof (see "The self-host and
+  compiler-independence checks"). The in-guest `test-{rv,cf}-selfhost-kpc` targets
+  assert the compiler reproduces its reference on the target.
 - **Optional external cross-check**: a reference `kprun` build, when one is
   available, can run a wider byte-identical-stdout comparison (the full
   74-to-76-case set, including input-dependent programs) than the in-tree

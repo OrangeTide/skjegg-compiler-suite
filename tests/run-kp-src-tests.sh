@@ -50,14 +50,26 @@ HERE=$(dirname "$0")
 ROOT=$(cd "$HERE/.." && pwd)
 # KP_SRCDIR selects the fixture directory (default tests/kp-src, the portable set
 # every mode runs; tests/kp-corpus is the broader behavioral corpus run on the
-# hosted tiers).  The build scratch dir is named after it so the two never clash.
+# hosted tiers).
 SRCDIR=${KP_SRCDIR:-"$HERE/kp-src"}
-BDIR="$ROOT/build/$(basename "$SRCDIR")"
 
 MODE=${MODE:-jit}
 FRONTEND=${FRONTEND:-"$ROOT/build/skj-kp-jit"}
 JIT=${JIT:-"$ROOT/build/skj-kp-jit"}
 QEMU=${QEMU:-}
+
+# The build scratch dir is named after the fixture set, the mode, and the mode's
+# runner binary, so concurrent make -j targets that share a fixture set do not
+# clobber each other's build/<name>.{out,kpm,s,o,elf}.  Without the mode and
+# runner tag the jit and aot corpus runs, and the x86-64 and ColdFire aot corpus
+# runs, would all land in one build/kp-corpus and race under -j.
+case $MODE in
+    jit)  _tagbin=$JIT ;;
+    aot)  _tagbin=${KPAOT:-$FRONTEND} ;;
+    free) _tagbin=${KPRV:-$FRONTEND} ;;
+    *)    _tagbin=$FRONTEND ;;
+esac
+BDIR="$ROOT/build/$(basename "$SRCDIR")-$MODE-$(basename "$_tagbin")"
 
 mkdir -p "$BDIR"
 

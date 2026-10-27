@@ -348,10 +348,12 @@ fi
 
 # Kobold-Pascal AOT path (kobold).  The front end kpcom is in-tree Pascal source
 # (kobold/kpcom.pas); this carries the KPM1 reader and runtime (kobold/), the
-# x86-64 selector the host tools build on, the jit/ call trampoline libkpaot links,
-# and the generated stage0 bootstrap seed (prebuild/kpcom.kpm + manifest).  With
-# riscv also selected it adds the jit/ pieces the RV32 runtime needs.  The
-# freestanding runtime and its libkpaot*-free rules arrive with a later step.
+# x86-64 selector the host tools build on, and the jit/ call trampoline libkpaot
+# links.  There is no committed seed: the x86-64 bootstrap seed is generated at
+# vendor time from source (skjegg's own build) and shipped under prebuild/, so a
+# consumer AOT-compiles it with skj-kp without needing skj-pc or fpc.  With riscv
+# also selected it adds the jit/ pieces the RV32 runtime needs.  The freestanding
+# runtime and its libkpaot*-free rules arrive with a later step.
 if [ "$has_kp" -eq 1 ]; then
     mkdir -p "$DEST/kobold" "$DEST/backend" "$DEST/jit" "$DEST/prebuild" "$DEST/runtime"
     cp "$S"/kobold/*.c "$S"/kobold/*.h "$S"/kobold/*.S "$DEST/kobold/"
@@ -369,7 +371,12 @@ if [ "$has_kp" -eq 1 ]; then
     if [ "$has_rv" -eq 1 ]; then
         cp "$S/jit/call_guest_rv.S" "$S/jit/rv_jit_i64.S" "$DEST/jit/"
     fi
-    cp "$S/prebuild/kpcom.kpm" "$S/prebuild/kpcom.manifest" "$DEST/prebuild/"
+    # No committed seed: generate the x86-64 (LP64) seed from source now and ship
+    # it as prebuild/kpcom.kpm.  skjegg's own build builds the host front end from
+    # kpcom.pas via skj-pc and emits this module; the consumer's skjegg.mk then
+    # AOT-compiles it with skj-kp (x86-64) into skj-kpc.
+    make -s -C "$S" build/kpcom-x86-64.kpm
+    cp "$S/build/kpcom-x86-64.kpm" "$DEST/prebuild/kpcom.kpm"
 fi
 
 # Documentation.  Vendor the usage docs for each selected tool and language, so
@@ -854,9 +861,10 @@ $(BUILD)/libkpaot.a: $(SKJ_KP_AOT_RT) $(BUILD)/kp_co.o | $(BUILD)
 	@for f in $(SKJ_KP_AOT_RT); do o=$(BUILD)/aot/`basename $$f | sed 's/\.[cS]$$/.o/'`; $(CC) $(SKJ_KP_CFLAGS) -c $$f -o $$o || exit 1; done
 	$(AR) rcs $@ $(BUILD)/aot/*.o $(BUILD)/kp_co.o
 
-# skj-kpc: the Kobold-Pascal front end as a native x86-64 binary.  The committed seed
-# (prebuild/kpcom.kpm) is AOT-compiled by skj-kp and linked against libkpaot.a, so
-# 'skj-kpc --emit-kpm foo.pas' turns Kobold source into a KPM1 module with no fpc.
+# skj-kpc: the Kobold-Pascal front end as a native x86-64 binary.  The vendor-time
+# x86-64 seed (prebuild/kpcom.kpm) is AOT-compiled by skj-kp and linked against
+# libkpaot.a, so 'skj-kpc --emit-kpm foo.pas' turns Kobold source into a KPM1
+# module with no fpc.
 SKJ_ALL += $(BUILD)/skj-kpc
 $(BUILD)/kpcom.s: $(SKJEGG)prebuild/kpcom.kpm $(BUILD)/skj-kp | $(BUILD)
 	$(BUILD)/skj-kp $(SKJEGG)prebuild/kpcom.kpm -o $@

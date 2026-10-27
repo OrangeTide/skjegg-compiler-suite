@@ -18,6 +18,26 @@
    arm64 AOT, unset for the 32-bit backends (rv32, ColdFire, MIPS). */
 #define KPM_NATIVE_TARGET SKJ_KPM_TARGET
 
+/* The architecture this backend reads modules for.  A unit (KPM module) is bound
+   to one Target, not just one width class: it carries native-code assumptions
+   beyond pointer width (ISA, ABI), so a module built for one architecture is not
+   valid for another even at the same width (an rv32 unit must not load into the
+   ColdFire backend).  The front end stamps the architecture in the `.target`
+   header; the reader rejects a cross-architecture module.  The build passes
+   SKJ_KPM_ARCH per binary (Plan 9 style); target.h derives a fallback. */
+#define KPM_NATIVE_ARCH SKJ_KPM_ARCH
+
+/* Is `t` an architecture tag (binds a unit to one ISA) rather than a legacy
+   width-only tag (ilp32/lp64) or hint (agnostic)?  An arch tag is matched
+   exactly against this backend's own; a width tag keeps the looser width check. */
+static int
+kpm_is_arch_tag(const char *t)
+{
+    return strcmp(t, "rv32") == 0 || strcmp(t, "cf") == 0
+        || strcmp(t, "x86-64") == 0 || strcmp(t, "arm64") == 0
+        || strcmp(t, "mips") == 0 || strcmp(t, "x86-32") == 0;
+}
+
 /****************************************************************
  * Opcode names
  *
@@ -814,11 +834,22 @@ kpm_read(struct kpm_module *m, const char *text, size_t len,
             n = tokenize(line, tok);
             if (n >= 2) {
                 m->target = arena_strdup(&m->arena, tok[1]);
-                /* Reject a pointer-width mismatch outright.  Only the two width
-                   classes are checked; a legacy or hint value (agnostic, an arch
-                   name) is left unchecked so old modules and hand-written reader
-                   fixtures still load. */
-                if ((strcmp(tok[1], "ilp32") == 0 || strcmp(tok[1], "lp64") == 0)
+                /* An architecture tag binds the module to one Target: require an
+                   exact match, since a cross-arch unit carries native-code and
+                   ABI assumptions this backend cannot honor.  The legacy width
+                   tags (ilp32/lp64) keep the looser width check for old modules
+                   and hand-written reader fixtures; any other value (agnostic, a
+                   hint) is left unchecked. */
+                if (kpm_is_arch_tag(tok[1])) {
+                    if (strcmp(tok[1], KPM_NATIVE_ARCH) != 0) {
+                        char msg[128];
+                        snprintf(msg, sizeof msg,
+                                 "KPM target mismatch: module is %s, this backend is %s",
+                                 tok[1], KPM_NATIVE_ARCH);
+                        fail(&r, r.pos + 1, msg);
+                        goto err;
+                    }
+                } else if ((strcmp(tok[1], "ilp32") == 0 || strcmp(tok[1], "lp64") == 0)
                     && strcmp(tok[1], KPM_NATIVE_TARGET) != 0) {
                     fail(&r, r.pos + 1,
                          strcmp(KPM_NATIVE_TARGET, "lp64") == 0

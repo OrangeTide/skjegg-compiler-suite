@@ -134,7 +134,8 @@ TOOLS := build/skj-tinc build/skj-tinc-rv build/skj-tinc-mips build/skj-tinc-arm
          build/skj-cc-rv build/skjcc build/skj-run \
          build/skj-addr2line build/skj-dbg \
          build/skj-jit build/skj-kp-jit build/skj-kp-patrol \
-         build/skj-kp build/libkpaot.a build/skj-kpc build/skj-kpc-32
+         build/skj-kp build/libkpaot.a build/skj-kpc \
+         build/skj-kpc-rv build/skj-kpc-cf build/skj-kpc-arm64
 
 all: $(TOOLS)
 
@@ -255,47 +256,60 @@ KP_CFLAGS := $(CFLAGS) -DX86_BITS=64 -DKP_FREESTANDING -DKP_REAL=double -Iir -Ij
 build/kp_co.o: kobold/co.c kobold/co.h kobold/handle.h kobold/lowmem.h Makefile | build
 	$(CC) -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter -Iir -Ijit -Ibackend -Ikobold -c kobold/co.c -o $@
 
-## bin2c embeds the bootstrap seed as a C byte array (build/kpcom_kpm.c, with a
+## bin2c embeds a bootstrap seed as a C byte array (build/kpcom_kpm.c, with a
 ## matching .h generated as a side effect) so skj-kp-jit* carry the Kobold front
 ## end in the binary.  Then 'skj-kp-jit foo.pas' JITs the embedded front end,
 ## compiles the source in process through its `compile` export, and runs the
-## produced module.  The embedded array is arch-neutral, so one rule serves all
-## three JIT tools.  KPCOM_KPM in the environment overrides it for dev iteration.
+## produced module.  KPCOM_KPM in the environment overrides it for dev iteration.
+## Each JIT embeds its own target's seed (below): the rv JIT this build/kpcom_kpm.c
+## (rv32), the x86-64 and arm64 JITs the per-arch seeds under build/x86-64 and
+## build/arm64.  None is committed: skj-pc is the bootstrap root, so each front end
+## is built from source and emits its own seed at build time.  The -D flags at emit
+## select kpcom's target inside the seed (KP_LP64 for the 8-byte pointer width,
+## KP_TARGET_* for the architecture tag), so the embedded front end emits modules
+## for the right target.
 build/bin2c: kobold/bin2c.c Makefile | build
 	$(CC) $(CFLAGS) -o $@ kobold/bin2c.c
 
-build/kpcom_kpm.c: prebuild/kpcom.kpm build/bin2c | build
-	build/bin2c kpcom_kpm prebuild/kpcom.kpm build/kpcom_kpm.c build/kpcom_kpm.h
+build/kpcom_kpm.c: build/kpcom-rv.kpm build/bin2c | build
+	build/bin2c kpcom_kpm build/kpcom-rv.kpm build/kpcom_kpm.c build/kpcom_kpm.h
 
-## The LP64 bootstrap seed is generated at build time, not committed: skj-pc is the
-## bootstrap root for the 64-bit targets, so the native front end emits its own
-## source as a width-8 KPM1 and bin2c embeds it under build/lp64 (same symbol and
-## header name as the ILP32 seed, so frontend.c's `#include "kpcom_kpm.h"` picks it
-## up when the LP64 JITs compile with -Ibuild/lp64 ahead of -Ibuild).  The native
-## and arm64 JITs carry this LP64 front end; the rv JIT keeps the ILP32 seed above.
-## -D KP_LP64 is essential: it selects kpcom's own LP64 target width
-## (KpNativePtrBytes=8) inside the seed, so the embedded front end emits width-8
-## modules.  Without it the seed would be a width-8 program that still emits width-4
-## output, truncating guest heap pointers.
-##
 ## kpcom's source and its {$I} includes.  Defined here, before the first rule that
 ## uses it, because make expands a rule's prerequisites when the makefile is read:
 ## a `:=` variable defined later would expand empty here, so the front ends and
 ## seeds would not depend on the source and an edit would not rebuild them.
 KPCOM_SRC_PAS := kobold/kpcom.pas
 KPCOM_SRCS    := kobold/kpcom.pas kobold/version.inc kobold/stdlib.inc
-build/kpcom-lp64.kpm: build/skj-kpc $(KPCOM_SRCS) | build
-	build/skj-kpc -D KP_LP64 --emit-kpm $(KPCOM_SRC_PAS) > $@
 
-build/lp64/kpcom_kpm.c: build/kpcom-lp64.kpm build/bin2c | build
-	@mkdir -p build/lp64
-	build/bin2c kpcom_kpm build/kpcom-lp64.kpm build/lp64/kpcom_kpm.c build/lp64/kpcom_kpm.h
+## The per-architecture bootstrap seeds, generated at build time (not committed):
+## each target's host front end emits its own source as that target's KPM1, stamped
+## with its architecture (there is no shared ilp32 or lp64 seed).  skj-pc is the
+## bootstrap root, so the front ends are built from source with no prior seed.  Each
+## seed feeds that target's JIT (bin2c embeds it) and/or self-host ELF.
+build/kpcom-x86-64.kpm: build/skj-kpc $(KPCOM_SRCS) | build
+	build/skj-kpc -D KP_LP64 -D KP_TARGET_X64 --emit-kpm $(KPCOM_SRC_PAS) > $@
+build/kpcom-arm64.kpm: build/skj-kpc-arm64 $(KPCOM_SRCS) | build
+	build/skj-kpc-arm64 -D KP_LP64 -D KP_TARGET_ARM64 --emit-kpm $(KPCOM_SRC_PAS) > $@
+build/kpcom-rv.kpm: build/skj-kpc-rv $(KPCOM_SRCS) | build
+	build/skj-kpc-rv -D KP_TARGET_RV --emit-kpm $(KPCOM_SRC_PAS) > $@
+build/kpcom-cf.kpm: build/skj-kpc-cf $(KPCOM_SRCS) | build
+	build/skj-kpc-cf -D KP_TARGET_CF --emit-kpm $(KPCOM_SRC_PAS) > $@
+
+## bin2c embeds the seed per architecture (same symbol and header name; each JIT
+## compiles with its own -Ibuild/<arch> ahead of -Ibuild so frontend.c's
+## `#include "kpcom_kpm.h"` picks up the matching seed).
+build/x86-64/kpcom_kpm.c: build/kpcom-x86-64.kpm build/bin2c | build
+	@mkdir -p build/x86-64
+	build/bin2c kpcom_kpm build/kpcom-x86-64.kpm build/x86-64/kpcom_kpm.c build/x86-64/kpcom_kpm.h
+build/arm64/kpcom_kpm.c: build/kpcom-arm64.kpm build/bin2c | build
+	@mkdir -p build/arm64
+	build/bin2c kpcom_kpm build/kpcom-arm64.kpm build/arm64/kpcom_kpm.c build/arm64/kpcom_kpm.h
 
 ## skj-kp-jit: the native (x86-64, LP64) in-process JIT.  Runtime and front end
 ## compiled -DKP_LP64 so guest pointers are full 64-bit; the embedded seed is the
-## LP64 one and kp_co is the LP64 coroutine object.
-build/skj-kp-jit: kobold/jit_main.c kobold/frontend.c build/lp64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o kobold/frontend.h $(KP_HDRS) Makefile | build
-	$(CC) $(KP_CFLAGS) -DKP_LP64 -Ibuild/lp64 -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/lp64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o -lm
+## x86-64 one and kp_co is the LP64 coroutine object.
+build/skj-kp-jit: kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o kobold/frontend.h $(KP_HDRS) Makefile | build
+	$(CC) $(KP_CFLAGS) -DKP_LP64 -Ibuild/x86-64 -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o -lm
 
 ## kp_co_lp64.o: the coroutine core compiled -DKP_LP64 (native 64-bit guest
 ## pointer/handle, guest stacks in full memory), linked into the native and arm64
@@ -303,31 +317,47 @@ build/skj-kp-jit: kobold/jit_main.c kobold/frontend.c build/lp64/kpcom_kpm.c $(K
 build/kp_co_lp64.o: kobold/co.c kobold/co.h kobold/handle.h kobold/lowmem.h kobold/obj.h Makefile | build
 	$(CC) -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter -DKP_LP64 -Iir -Ijit -Ibackend -Ikobold -c kobold/co.c -o $@
 
-## skj-kpc: the native Kobold front end (x86-64, so the LP64 toolchain mode).
-## Plan 9 style, the mode baked at build: skj-pc compiles kpcom.pas with -d KP_LP64
-## so CurTarget.PtrBytes is 8 and every module it emits is width-8 KPM1.  No seed
-## and no libkpaot; it links the host-import shim (ReadFileStr, WriteFileStr,
-## kpd_*) and skj-pc's Pascal runtime, the same ones check-pc-kpcom uses.
-## skj-kpc-x86-64 is the explicit arch name for the same binary.
+## skj-kpc: the native Kobold front end, the host compiler for the x86-64 target.
+## Plan 9 style, the target baked at build: skj-pc compiles kpcom.pas with
+## -d KP_LP64 -d KP_TARGET_X64, so CurTarget is x86-64 (8-byte pointers) and every
+## module it emits is stamped `.target x86-64`.  No seed and no libkpaot; it links
+## the host-import shim (ReadFileStr, WriteFileStr, kpd_*) and skj-pc's Pascal
+## runtime, the same ones check-pc-kpcom uses.  skj-kpc-x86-64 is the explicit arch
+## name for the same binary.
 build/skj-kpc: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) | build
-	build/skj-pc-x86-64 -d KOBOLD -d KP_LP64 -o build/kpcom-lp64.s $(KPCOM_SRC_PAS)
-	$(X64_ASM) -f elf64 build/kpcom-lp64.s -o build/kpcom-lp64.o
-	$(CC) -no-pie build/kpcom-lp64.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
+	build/skj-pc-x86-64 -d KOBOLD -d KP_LP64 -d KP_TARGET_X64 -o build/kpcom-x86-64-fe.s $(KPCOM_SRC_PAS)
+	$(X64_ASM) -f elf64 build/kpcom-x86-64-fe.s -o build/kpcom-x86-64-fe.o
+	$(CC) -no-pie build/kpcom-x86-64-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
+
+## skj-kpc-arm64: the host front end for the AArch64 target.  Same LP64 width as
+## skj-kpc, but KP_TARGET_ARM64 stamps `.target arm64`, so the arm64 backend accepts
+## its modules and rejects the x86-64 ones.  It runs on the x86-64 host (skj-pc
+## output); the arch it names is the target it emits for, not where it runs.
+build/skj-kpc-arm64: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) | build
+	build/skj-pc-x86-64 -d KOBOLD -d KP_LP64 -d KP_TARGET_ARM64 -o build/kpcom-arm64-fe.s $(KPCOM_SRC_PAS)
+	$(X64_ASM) -f elf64 build/kpcom-arm64-fe.s -o build/kpcom-arm64-fe.o
+	$(CC) -no-pie build/kpcom-arm64-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
 
 build/skj-kpc-x86-64: build/skj-kpc | build
 	cp -f build/skj-kpc $@
 
-## skj-kpc-32: the ILP32-mode host front end, built the same Plan 9 way but
-## without KP_LP64, so CurTarget.PtrBytes is 4 and it emits width-4 KPM1.  It is
-## the host emitter for the 32-bit targets (rv, cf): their AOT corpus/io/multi/
-## inc cross-builds, their freestanding unit .kpm modules, and the self-host
-## reference KPMs come from it, since a width-4 backend must receive a width-4
-## module.  (The front-end logic is identical to skj-kpc's; only the baked pointer
-## width differs, exactly as gcc -m32 and -m64 are one compiler in two modes.)
-build/skj-kpc-32: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) | build
-	build/skj-pc-x86-64 -d KOBOLD -o build/kpcom-ilp32.s $(KPCOM_SRC_PAS)
-	$(X64_ASM) -f elf64 build/kpcom-ilp32.s -o build/kpcom-ilp32.o
-	$(CC) -no-pie build/kpcom-ilp32.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
+
+## skj-kpc-rv / skj-kpc-cf: the per-target host front ends for the rv32 and
+## ColdFire backends.  Each is skj-pc compiling kpcom.pas with its target baked in
+## (KP_TARGET_RV / KP_TARGET_CF), so the module it emits is stamped `.target rv32`
+## or `.target cf` and is bound to that one architecture.  One compiler per target,
+## the cc model: a unit built for rv32 is not a unit for ColdFire, so there is no
+## shared "ilp32" front end.  (The architecture decides the pointer width; both
+## happen to be 4 bytes, but that is a consequence, not a shared category.)
+build/skj-kpc-rv: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) | build
+	build/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_RV -o build/kpcom-rv-fe.s $(KPCOM_SRC_PAS)
+	$(X64_ASM) -f elf64 build/kpcom-rv-fe.s -o build/kpcom-rv-fe.o
+	$(CC) -no-pie build/kpcom-rv-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
+
+build/skj-kpc-cf: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) | build
+	build/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_CF -o build/kpcom-cf-fe.s $(KPCOM_SRC_PAS)
+	$(X64_ASM) -f elf64 build/kpcom-cf-fe.s -o build/kpcom-cf-fe.o
+	$(CC) -no-pie build/kpcom-cf-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
 
 ## skj-kp-jit-san: build/skj-kp-jit with the guest-heap write-after-free instrument
 ## (GH_POISON, kobold/rt_host.c) plus ASan/UBSan, at -O1 -g so a report carries a usable
@@ -338,8 +368,8 @@ build/skj-kpc-32: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_
 ## check-kp-corpus-san.
 ## It is the native (LP64) JIT, so a width-8 truncation (a 64-bit guest address
 ## narrowed to 32 bits dereferencing wild) also trips here under ASan.
-build/skj-kp-jit-san: kobold/jit_main.c kobold/frontend.c build/lp64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o kobold/frontend.h $(KP_HDRS) Makefile | build
-	$(CC) $(KP_CFLAGS) -DKP_LP64 -Ibuild/lp64 -O1 -g -DGH_POISON $(SAN_CFLAGS) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/lp64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o -lm
+build/skj-kp-jit-san: kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o kobold/frontend.h $(KP_HDRS) Makefile | build
+	$(CC) $(KP_CFLAGS) -DKP_LP64 -Ibuild/x86-64 -O1 -g -DGH_POISON $(SAN_CFLAGS) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o -lm
 
 build/skj-kp-patrol: kobold/patrol_main.c $(KP_RT) build/kp_co.o $(KP_HDRS) Makefile | build
 	$(CC) $(KP_CFLAGS) -o $@ kobold/patrol_main.c $(KP_RT) build/kp_co.o -lm
@@ -366,7 +396,7 @@ build/kp_co_rv.o: kobold/co.c kobold/co.h kobold/handle.h kobold/lowmem.h Makefi
 	$(RVJIT_CC) -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter -Iir -Ijit -Ibackend -Ikobold -c kobold/co.c -o $@
 
 build/skj-kp-jit-rv: kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c $(KP_RT_RV) build/kp_co_rv.o kobold/frontend.h $(KP_HDRS_RV) runtime/i64_rv.S Makefile | build
-	$(RVJIT_CC) $(KP_CFLAGS_RV) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c $(KP_RT_RV) build/kp_co_rv.o -lm
+	$(RVJIT_CC) $(KP_CFLAGS_RV) -DSKJ_KPM_ARCH='"rv32"' -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c $(KP_RT_RV) build/kp_co_rv.o -lm
 
 ## skj-kp-jit-arm64: the in-process AArch64 JIT for Kobold modules, the cross-arch
 ## counterpart of skj-kp-jit.  Same driver, ported runtime, and selector, over the
@@ -407,8 +437,8 @@ build/kp_co_cf.o: kobold/co.c kobold/co.h kobold/handle.h kobold/lowmem.h Makefi
 ## skj-kp-jit-arm64: the AArch64 in-process JIT.  AArch64 is an LP64 target, so the
 ## runtime and front end are compiled -DKP_LP64, the embedded seed is the LP64 one,
 ## and kp_co is the LP64 coroutine object.  Runs under qemu-aarch64.
-build/skj-kp-jit-arm64: kobold/jit_main.c kobold/frontend.c build/lp64/kpcom_kpm.c $(KP_RT_A64) build/kp_co_a64_lp64.o kobold/frontend.h $(KP_HDRS_A64) Makefile | build
-	$(A64_CC) $(KP_CFLAGS_A64) -DKP_LP64 -Ibuild/lp64 -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/lp64/kpcom_kpm.c $(KP_RT_A64) build/kp_co_a64_lp64.o -lm
+build/skj-kp-jit-arm64: kobold/jit_main.c kobold/frontend.c build/arm64/kpcom_kpm.c $(KP_RT_A64) build/kp_co_a64_lp64.o kobold/frontend.h $(KP_HDRS_A64) Makefile | build
+	$(A64_CC) $(KP_CFLAGS_A64) -DKP_LP64 -Ibuild/arm64 -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/arm64/kpcom_kpm.c $(KP_RT_A64) build/kp_co_a64_lp64.o -lm
 
 ## skj-kp: the x86-64 ahead-of-time compiler for Kobold modules.  It reads a KPM1
 ## module and writes NASM assembly through the same selector the JIT drives, over
@@ -464,7 +494,7 @@ build/libkpaot.a: $(KP_AOT_RT) build/kp_co_lp64.o $(KP_HDRS) Makefile | build
 ## soft-float real ABI bridge and the stack-ABI 64-bit multiply/shift helpers).
 build/skj-kp-rv: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_RV) kobold/kpm.h ir/ir.h \
                  backend/rv_mc_text.h backend/rv_select.h Makefile | build
-	$(CC) $(CFLAGS) -DKP_AOT_RV -Iir -Ibackend -Ikobold -o $@ \
+	$(CC) $(CFLAGS) -DKP_AOT_RV -DSKJ_KPM_ARCH='"rv32"' -Iir -Ibackend -Ikobold -o $@ \
 	    kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_RV)
 
 ## AArch64 is LP64, so this AOT compiler is built -DKP_LP64: unlike the x86 selector
@@ -485,7 +515,7 @@ build/skj-kp-arm64: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_A64_SEL) kobol
 ## Kobold's integer-overflow traps are not enforced on ColdFire for now, which is
 ## off the kpcom bootstrap critical path.  Output is GAS assembly for skj-as.
 build/skj-kp-cf: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_CF) kobold/kpm.h ir/ir.h Makefile | build
-	$(CC) $(CFLAGS) -Iir -Ibackend -Ikobold -o $@ \
+	$(CC) $(CFLAGS) -DSKJ_KPM_ARCH='"cf"' -Iir -Ibackend -Ikobold -o $@ \
 	    kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_CF)
 
 ## libkpaot-rv.a / libkpaot-arm64.a: the target runtimes an AOT program links
@@ -544,115 +574,32 @@ build/libkpaot-cf.a: $(KP_AOT_RT_CF) build/kp_co_cf.o $(KP_HDRS) Makefile | buil
 	@rm -f $@
 	$(AR) rcs $@ build/aot-cf/*.o build/kp_co_cf.o
 
-## skj-kpc-rv / skj-kpc-arm64: the Kobold-Pascal front end AOT-compiled to run
-## natively ON each cross target (under qemu), the proof the seed AOT-compiles and
-## links against that target's libkpaot*.a.  Each is a kpcom seed AOT-compiled by
-## skj-kp-{rv,arm64}: rv takes the ILP32 self-host seed (prebuild/kpcom.kpm); arm64,
-## an LP64 target, takes the LP64 seed generated from skj-pc (build/kpcom-lp64.kpm).
-## (The host front ends skj-kpc / skj-kpc-x86-64 (LP64) and skj-kpc-32 (ILP32) are
-## built from skj-pc above, no seed.)  The .s (seed codegen) and .o (assembly) are
-## separate targets so a runtime-only change (libkpaot*.a) relinks without
-## re-running the slow assembly of the large seed module.
-build/kpcom-rv.s: prebuild/kpcom.kpm build/skj-kp-rv | build
-	build/skj-kp-rv prebuild/kpcom.kpm -o $@
-build/kpcom-rv.o: build/kpcom-rv.s | build
-	$(RVJIT_CC) -no-pie -c $< -o $@
-build/skj-kpc-rv: build/kpcom-rv.o build/libkpaot-rv.a | build
-	$(RVJIT_CC) -no-pie build/kpcom-rv.o build/libkpaot-rv.a -o $@ -lm
+## ---- the bootstrap seed ----
+## There is no committed seed.  kpcom is a first-class front end (kobold/kpcom.pas),
+## and skj-pc is its bootstrap root: skj-pc compiles kpcom.pas into a per-target
+## host front end directly, with no prior Kobold compiler.  Each then emits its own
+## source as that target's KPM1 seed at build time: build/kpcom-rv.kpm (from
+## skj-kpc-rv, feeds the rv JIT and the rv self-host ELF), build/kpcom-cf.kpm (from
+## skj-kpc-cf, feeds the ColdFire self-host ELF), build/kpcom-x86-64.kpm (from
+## skj-kpc, feeds the x86-64 JIT), and build/kpcom-arm64.kpm (from skj-kpc-arm64,
+## feeds the arm64 JIT).  The in-guest self-host (test-{rv,cf}-selfhost-kpc-full)
+## checks that the seed, run on the target, reproduces the host front end's
+## reference byte for byte.
 
-build/kpcom-arm64.s: build/kpcom-lp64.kpm build/skj-kp-arm64 | build
-	build/skj-kp-arm64 build/kpcom-lp64.kpm -o $@
-build/kpcom-arm64.o: build/kpcom-arm64.s | build
-	$(A64_CC) -no-pie -c $< -o $@
-build/skj-kpc-arm64: build/kpcom-arm64.o build/libkpaot-arm64.a | build
-	$(A64_CC) -no-pie build/kpcom-arm64.o build/libkpaot-arm64.a -o $@ -lm
-
-## ---- the bootstrap seed: regeneration and staleness guard ----
-## prebuild/kpcom.kpm is the self-host bootstrap seed (stage0), the KPM1 module
-## kpcom emits when it compiles its own source (kobold/kpcom.pas).  The source
-## lives in kobold/ as a first-class front end; only the generated stage0 seed is
-## a prebuilt artifact.  update-kpcom is the seed's only writer: it regenerates it
-## with the Pascal-built ILP32 kpcom (skj-kpc-32) and rewrites the manifest.
-## check-kpcom is a
-## source-based staleness guard that warns when the committed seed no longer
-## matches the source.  bootstrap-fpc is the deep-recovery fallback (an fpc build
-## of the same source), unexercised and never gated in CI.
-KPCOM_SEED        := prebuild/kpcom.kpm
-KPCOM_MANIFEST    := prebuild/kpcom.manifest
-## The emit inputs, in the order the fingerprint concatenates them.
-KPCOM_EMIT_INPUTS := kobold/kpcom.pas kobold/version.inc kobold/stdlib.inc
-## A source-based staleness key over the exact emit inputs.  It is a source
-## compare, not a byte compare of the module, so a different host toolchain does
-## not spuriously flag drift.  kpcom resolves {$I} relative to the source file,
-## so the emit runs from the repo root with no staging of version.inc/stdlib.inc.
-KPCOM_FINGERPRINT = $(shell cat $(KPCOM_EMIT_INPUTS) 2>/dev/null | sha256sum | cut -d' ' -f1)
-
-## Regenerate the committed ILP32 seed, then rewrite the manifest.  The seed is
-## width-4 (it feeds the rv32/ColdFire self-host, which are ILP32); the x86-64 and
-## arm64 hosts are LP64 and take their width-8 front end straight from the
-## Pascal-built skj-kpc, with no committed seed.  Both skj-kpc (LP64) and
-## skj-kpc-32 (ILP32) are compiled directly from kobold/kpcom.pas by the Pascal
-## compiler, so neither depends on a prior seed generation: the canonical width-4
-## seed is the one-step --emit-kpm of skj-kpc-32, not a self-host fixed point.
-## The in-guest self-host (test-{rv,cf}-selfhost-kpc-full) still checks that the
-## seed, run on the target, reproduces skj-kpc-32's reference byte for byte.  This
-## is the only target that writes prebuild/.
-update-kpcom: build/skj-kpc-32
-	@set -e; \
-	echo "update-kpcom: emitting the ILP32 seed with skj-kpc-32"; \
-	build/skj-kpc-32 --emit-kpm $(KPCOM_SRC_PAS) > build/kpcom.kpm.g1; \
-	cp build/kpcom.kpm.g1 $(KPCOM_SEED); \
-	fp='$(KPCOM_FINGERPRINT)'; \
-	ks=$$(sha256sum $(KPCOM_SEED) | cut -d' ' -f1); \
-	kb=$$(wc -c < $(KPCOM_SEED) | tr -d ' '); \
-	{ echo "# regenerated by 'make update-kpcom'; do not edit by hand"; \
-	  echo "# The committed kpcom.kpm is the self-host bootstrap seed (stage0): the KPM1 module"; \
-	  echo "# (serialized shared IR) that kpcom emits when it compiles its own source,"; \
-	  echo "# kobold/kpcom.pas.  The fingerprint is a source-based staleness key over the exact"; \
-	  echo "# emit inputs, in order:"; \
-	  echo "#   kpcom.pas  version.inc  stdlib.inc"; \
-	  echo "# emit-flags are the kpcom arguments that produced kpcom.kpm.  See doc/languages/kobold/kobold.md."; \
-	  echo "fingerprint $$fp"; \
-	  echo "emit-flags --emit-kpm"; \
-	  echo "kpm-sha256 $$ks"; \
-	  echo "kpm-bytes $$kb"; } > $(KPCOM_MANIFEST); \
-	echo "update-kpcom: refreshed $(KPCOM_SEED) ($$kb bytes, fingerprint $$fp)"
-
-## Can this host regenerate the seed?  update-kpcom runs skj-kpc-32, a host
-## x86-64 binary (the Pascal compiler builds it), so an x86-64 host is the
-## toolchain gate, the analog of Kobold's RV_GCC_OK.
-KPJIT_OK := $(shell test "$$(uname -m)" = x86_64 && echo yes)
-
-## Guard the committed seed against its source.  Up to date: pass.  Stale with a
-## host that can regenerate: refresh it (the one-step skj-kpc-32 emit in
-## update-kpcom).  Stale without: warn and use the committed seed as is.
-## Mirrors Kobold's check-prebuilt.
-check-kpcom:
-	@test -f $(KPCOM_SEED) || { echo "check-kpcom: missing $(KPCOM_SEED)" >&2; exit 1; }
-	@test -f $(KPCOM_MANIFEST) || { echo "check-kpcom: missing $(KPCOM_MANIFEST)" >&2; exit 1; }
-	@rec=$$(sed -n 's/^fingerprint //p' $(KPCOM_MANIFEST)); cur='$(KPCOM_FINGERPRINT)'; \
-	if [ "$$rec" = "$$cur" ]; then \
-	    echo "check-kpcom: $(KPCOM_SEED) up to date ($$cur)"; \
-	elif [ "$(KPJIT_OK)" = yes ]; then \
-	    echo "check-kpcom: seed source changed, regenerating $(KPCOM_SEED)"; \
-	    $(MAKE) update-kpcom; \
-	else \
-	    echo "check-kpcom: WARNING $(KPCOM_SEED) is stale (recorded $$rec, current $$cur)" >&2; \
-	    echo "check-kpcom: no x86-64 host to regenerate; run 'make update-kpcom' on an x86-64 host and commit prebuild/" >&2; \
-	fi
-
-## Deep-recovery fallback: rebuild the seed from source with fpc, a toolchain
-## independent of both skjegg and a working Kobold.  It writes build/kpcom.kpm.fpc
-## only; update-kpcom stays the sole writer of the committed seed.  To adopt the
-## result: cp build/kpcom.kpm.fpc prebuild/kpcom.kpm && make update-kpcom.
-## Unexercised and never gated in CI.
+## Compiler-independence proof: rebuild kpcom from source with fpc, a toolchain
+## independent of both skjegg and a working Kobold, targeting rv32, and check it
+## emits the same module as the skj-pc-built rv32 front end.  Since the module
+## kpcom emits is fixed by its own logic, not by which compiler built it,
+## build/kpcom.kpm.fpc must match build/kpcom-rv.kpm byte for byte.
 FPC ?= fpc
-bootstrap-fpc: | build
+bootstrap-fpc: build/kpcom-rv.kpm | build
 	@command -v $(FPC) >/dev/null 2>&1 || { echo "bootstrap-fpc: '$(FPC)' required" >&2; exit 1; }
-	$(FPC) -Fikobold -FEbuild -FUbuild -O2 -Xs -veiwn kobold/kpcom.pas
-	build/kpcom --emit-kpm kobold/kpcom.pas > build/kpcom.kpm.fpc
+	$(FPC) -dKP_TARGET_RV -Fikobold -FEbuild -FUbuild -O2 -Xs -veiwn kobold/kpcom.pas
+	build/kpcom -D KP_TARGET_RV --emit-kpm kobold/kpcom.pas > build/kpcom.kpm.fpc
 	@echo "bootstrap-fpc: wrote build/kpcom.kpm.fpc ($$(wc -c < build/kpcom.kpm.fpc | tr -d ' ') bytes, sha256 $$(sha256sum build/kpcom.kpm.fpc | cut -d' ' -f1))"
-	@echo "bootstrap-fpc: to adopt, cp build/kpcom.kpm.fpc prebuild/kpcom.kpm && make update-kpcom"
+	@cmp build/kpcom.kpm.fpc build/kpcom-rv.kpm \
+	    && echo "bootstrap-fpc: fpc module matches the skj-built rv32 seed (compiler-independent)" \
+	    || { echo "bootstrap-fpc: FAIL fpc module differs from build/kpcom-rv.kpm" >&2; exit 1; }
 
 ## ---- Kobold source fixtures (tests/kp-src/*.pas + *.expected) ----
 ## The source-compilation counterpart of check-kp (which exercises the KPM1
@@ -687,14 +634,14 @@ check-kp-jit-rv: build/skj-kp-jit-rv
 check-kp-jit-arm64: build/skj-kp-jit-arm64
 	@MODE=jit JIT=build/skj-kp-jit-arm64 QEMU="$(QEMU_A64)" sh tests/run-kp-src-tests.sh
 
-check-kp-aot-rv: build/skj-kpc-32 build/skj-kp-rv build/libkpaot-rv.a
-	@MODE=aot FRONTEND=build/skj-kpc-32 \
+check-kp-aot-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
+	@MODE=aot FRONTEND=build/skj-kpc-rv \
 	    KPAOT=build/skj-kp-rv KPAOTLIB=build/libkpaot-rv.a \
 	    KPAOTCC="$(RVJIT_CC)" KPAOTQEMU="$(QEMU_RV)" \
 	    sh tests/run-kp-src-tests.sh
 
-check-kp-aot-arm64: build/skj-kpc build/skj-kp-arm64 build/libkpaot-arm64.a
-	@MODE=aot FRONTEND=build/skj-kpc \
+check-kp-aot-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a
+	@MODE=aot FRONTEND=build/skj-kpc-arm64 \
 	    KPAOT=build/skj-kp-arm64 KPAOTLIB=build/libkpaot-arm64.a \
 	    KPAOTCC="$(A64_CC)" KPAOTQEMU="$(QEMU_A64)" \
 	    sh tests/run-kp-src-tests.sh
@@ -737,14 +684,14 @@ check-kp-corpus-san: build/skj-kp-jit-san
 ## The cross-arch corpus runs the AOT path only: the host front end and backend do
 ## the work, qemu runs the small program (a cross JIT would emulate JITing the
 ## whole seed, far too slow for the whole corpus).
-check-kp-corpus-rv: build/skj-kpc-32 build/skj-kp-rv build/libkpaot-rv.a
-	@KP_SRCDIR=tests/kp-corpus MODE=aot FRONTEND=build/skj-kpc-32 \
+check-kp-corpus-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
+	@KP_SRCDIR=tests/kp-corpus MODE=aot FRONTEND=build/skj-kpc-rv \
 	    KPAOT=build/skj-kp-rv KPAOTLIB=build/libkpaot-rv.a \
 	    KPAOTCC="$(RVJIT_CC)" KPAOTQEMU="$(QEMU_RV)" \
 	    sh tests/run-kp-src-tests.sh
 
-check-kp-corpus-arm64: build/skj-kpc build/skj-kp-arm64 build/libkpaot-arm64.a
-	@KP_SRCDIR=tests/kp-corpus MODE=aot FRONTEND=build/skj-kpc \
+check-kp-corpus-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a
+	@KP_SRCDIR=tests/kp-corpus MODE=aot FRONTEND=build/skj-kpc-arm64 \
 	    KPAOT=build/skj-kp-arm64 KPAOTLIB=build/libkpaot-arm64.a \
 	    KPAOTCC="$(A64_CC)" KPAOTQEMU="$(QEMU_A64)" \
 	    sh tests/run-kp-src-tests.sh
@@ -757,8 +704,8 @@ check-kp-corpus-arm64: build/skj-kpc build/skj-kp-arm64 build/libkpaot-arm64.a
 ## Linked -static: the glibc m68k driver would otherwise produce a dynamic ELF
 ## needing /lib/ld.so.1, which qemu-m68k has no sysroot for (every other
 ## qemu-m68k suite here is static/freestanding).  A static link needs no loader.
-check-kp-corpus-cf: build/skj-kpc-32 build/skj-kp-cf build/libkpaot-cf.a
-	@KP_SRCDIR=tests/kp-corpus MODE=aot FRONTEND=build/skj-kpc-32 \
+check-kp-corpus-cf: build/skj-kpc-cf build/skj-kp-cf build/libkpaot-cf.a
+	@KP_SRCDIR=tests/kp-corpus MODE=aot FRONTEND=build/skj-kpc-cf \
 	    KPAOT=build/skj-kp-cf KPAOTLIB=build/libkpaot-cf.a \
 	    KPAOTCC="$(M68K_CC) -static" KPAOTQEMU="$(QEMU)" \
 	    sh tests/run-kp-src-tests.sh
@@ -781,14 +728,14 @@ check-kp-multi: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a
 	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) -f elf64" \
 	    sh tests/run-kp-multi-tests.sh
 
-check-kp-multi-rv: build/skj-kpc-32 build/skj-kp-rv build/libkpaot-rv.a
-	@KP_SRCDIR=tests/kp-multi MODE=aot FRONTEND=build/skj-kpc-32 \
+check-kp-multi-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
+	@KP_SRCDIR=tests/kp-multi MODE=aot FRONTEND=build/skj-kpc-rv \
 	    KPAOT=build/skj-kp-rv KPAOTLIB=build/libkpaot-rv.a \
 	    KPAOTCC="$(RVJIT_CC)" KPAOTQEMU="$(QEMU_RV)" \
 	    sh tests/run-kp-multi-tests.sh
 
-check-kp-multi-arm64: build/skj-kpc build/skj-kp-arm64 build/libkpaot-arm64.a
-	@KP_SRCDIR=tests/kp-multi MODE=aot FRONTEND=build/skj-kpc \
+check-kp-multi-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a
+	@KP_SRCDIR=tests/kp-multi MODE=aot FRONTEND=build/skj-kpc-arm64 \
 	    KPAOT=build/skj-kp-arm64 KPAOTLIB=build/libkpaot-arm64.a \
 	    KPAOTCC="$(A64_CC)" KPAOTQEMU="$(QEMU_A64)" \
 	    sh tests/run-kp-multi-tests.sh
@@ -806,7 +753,7 @@ build/kp-files/io/files.kpm: kobold/lib/io/files.pas build/skj-kpc | build
 	@mkdir -p build/kp-files/io
 	./build/skj-kpc --emit-kpm $< > $@
 
-check-kp-files: build/skj-kp-jit build/skj-kpc build/skj-kpc-32 build/skj-kp build/libkpaot.a \
+check-kp-files: build/skj-kp-jit build/skj-kpc build/skj-kpc-rv build/skj-kp build/libkpaot.a \
                 build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
                 build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a \
                 build/kp-files/io/files.kpm
@@ -827,10 +774,10 @@ check-kp-files: build/skj-kp-jit build/skj-kpc build/skj-kpc-32 build/skj-kp bui
 	    || { echo "FAIL kp-files (aot)"; cat build/kp-files/aot.err build/kp-files/aot.out; exit 1; }
 	@# freestanding rv32: the free runner does not walk `.uses`, so compile the
 	@# unit and the program for rv32 and link them with the crt + free archive.
-	@# rv32 is ILP32, so re-emit both modules width-4 with skj-kpc-32 (the x86-64
+	@# rv32 is ILP32, so re-emit both modules width-4 with skj-kpc-rv (the x86-64
 	@# AOT path above uses the width-8 skj-kpc modules).
-	@./build/skj-kpc-32 --emit-kpm kobold/lib/io/files.pas > build/kp-files/io/files-32.kpm 2>build/kp-files/rv.err
-	@./build/skj-kpc-32 --emit-kpm build/kp-files/filesrt.pas > build/kp-files/filesrt-32.kpm 2>>build/kp-files/rv.err
+	@./build/skj-kpc-rv --emit-kpm kobold/lib/io/files.pas > build/kp-files/io/files-32.kpm 2>build/kp-files/rv.err
+	@./build/skj-kpc-rv --emit-kpm build/kp-files/filesrt.pas > build/kp-files/filesrt-32.kpm 2>>build/kp-files/rv.err
 	@./build/skj-kp-rv build/kp-files/io/files-32.kpm -o build/kp-files/files_rv.s 2>>build/kp-files/rv.err
 	@./build/skj-as-rv -o build/kp-files/files_rv.o build/kp-files/files_rv.s 2>>build/kp-files/rv.err
 	@./build/skj-kp-rv build/kp-files/filesrt-32.kpm -o build/kp-files/filesrt_rv.s 2>>build/kp-files/rv.err
@@ -852,7 +799,7 @@ build/kp-dirs/io/dirs.kpm: kobold/lib/io/dirs.pas build/skj-kpc | build
 ## check-kp-files.  A scratch directory of three known files is rebuilt before
 ## each runner; the program reports an order-independent entry count and total
 ## name length, so the expected output is deterministic.
-check-kp-dirs: build/skj-kp-jit build/skj-kpc build/skj-kpc-32 build/skj-kp build/libkpaot.a \
+check-kp-dirs: build/skj-kp-jit build/skj-kpc build/skj-kpc-rv build/skj-kp build/libkpaot.a \
                build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
                build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a \
                build/kp-dirs/io/dirs.kpm
@@ -873,8 +820,8 @@ check-kp-dirs: build/skj-kp-jit build/skj-kpc build/skj-kpc-32 build/skj-kp buil
 	     > build/kp-dirs/aot.out 2>build/kp-dirs/aot.err; \
 	 cmp -s build/kp-dirs/aot.out tests/kp-dirs/dirsrt.expected \
 	     || { echo "FAIL kp-dirs (aot)"; cat build/kp-dirs/aot.err build/kp-dirs/aot.out; exit 1; }; \
-	 ./build/skj-kpc-32 --emit-kpm kobold/lib/io/dirs.pas > build/kp-dirs/io/dirs-32.kpm 2>build/kp-dirs/rv.err; \
-	 ./build/skj-kpc-32 --emit-kpm build/kp-dirs/dirsrt.pas > build/kp-dirs/dirsrt-32.kpm 2>>build/kp-dirs/rv.err; \
+	 ./build/skj-kpc-rv --emit-kpm kobold/lib/io/dirs.pas > build/kp-dirs/io/dirs-32.kpm 2>build/kp-dirs/rv.err; \
+	 ./build/skj-kpc-rv --emit-kpm build/kp-dirs/dirsrt.pas > build/kp-dirs/dirsrt-32.kpm 2>>build/kp-dirs/rv.err; \
 	 ./build/skj-kp-rv build/kp-dirs/io/dirs-32.kpm -o build/kp-dirs/dirs_rv.s 2>>build/kp-dirs/rv.err; \
 	 ./build/skj-as-rv -o build/kp-dirs/dirs_rv.o build/kp-dirs/dirs_rv.s 2>>build/kp-dirs/rv.err; \
 	 ./build/skj-kp-rv build/kp-dirs/dirsrt-32.kpm -o build/kp-dirs/dirsrt_rv.s 2>>build/kp-dirs/rv.err; \
@@ -896,26 +843,42 @@ check-kp-dirs: build/skj-kp-jit build/skj-kpc build/skj-kpc-32 build/skj-kp buil
 ## unit and the program compile to rv objects and link with the crt and the free
 ## archive.  The dotted unit names resolve through the front end's own directory
 ## (dot -> path separator), so the unit .kpm files are staged under io/ and std/.
-build/kp-stdlib/io/console.kpm: kobold/lib/io/console.pas build/skj-kpc-32 | build
+build/kp-stdlib/io/console.kpm: kobold/lib/io/console.pas build/skj-kpc-rv | build
 	@mkdir -p build/kp-stdlib/io
-	./build/skj-kpc-32 --emit-kpm $< > $@
-build/kp-stdlib/io/buffered.kpm: kobold/lib/io/buffered.pas build/skj-kpc-32 | build
+	./build/skj-kpc-rv --emit-kpm $< > $@
+build/kp-stdlib/io/buffered.kpm: kobold/lib/io/buffered.pas build/skj-kpc-rv | build
 	@mkdir -p build/kp-stdlib/io
-	./build/skj-kpc-32 --emit-kpm $< > $@
-build/kp-stdlib/std/time.kpm: kobold/lib/std/time.pas build/skj-kpc-32 | build
+	./build/skj-kpc-rv --emit-kpm $< > $@
+build/kp-stdlib/std/time.kpm: kobold/lib/std/time.pas build/skj-kpc-rv | build
 	@mkdir -p build/kp-stdlib/std
-	./build/skj-kpc-32 --emit-kpm $< > $@
-build/kp-stdlib/std/random.kpm: kobold/lib/std/random.pas build/skj-kpc-32 | build
+	./build/skj-kpc-rv --emit-kpm $< > $@
+build/kp-stdlib/std/random.kpm: kobold/lib/std/random.pas build/skj-kpc-rv | build
 	@mkdir -p build/kp-stdlib/std
-	./build/skj-kpc-32 --emit-kpm $< > $@
-build/kp-stdlib/core/strings.kpm: kobold/lib/core/strings.pas build/skj-kpc-32 | build
+	./build/skj-kpc-rv --emit-kpm $< > $@
+build/kp-stdlib/core/strings.kpm: kobold/lib/core/strings.pas build/skj-kpc-rv | build
 	@mkdir -p build/kp-stdlib/core
-	./build/skj-kpc-32 --emit-kpm $< > $@
-build/kp-stdlib/core/convert.kpm: kobold/lib/core/convert.pas build/skj-kpc-32 | build
+	./build/skj-kpc-rv --emit-kpm $< > $@
+build/kp-stdlib/core/convert.kpm: kobold/lib/core/convert.pas build/skj-kpc-rv | build
 	@mkdir -p build/kp-stdlib/core
-	./build/skj-kpc-32 --emit-kpm $< > $@
+	./build/skj-kpc-rv --emit-kpm $< > $@
 
-check-kp-stdlib-free: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
+## The ColdFire sibling units: the same sources emitted by the ColdFire front end,
+## so they carry `.target cf` and the ColdFire backend accepts them.  A unit is
+## bound to its target, so cf gets its own copies rather than reusing the rv ones.
+build/kp-stdlib-cf/io/console.kpm: kobold/lib/io/console.pas build/skj-kpc-cf | build
+	@mkdir -p build/kp-stdlib-cf/io
+	./build/skj-kpc-cf --emit-kpm $< > $@
+build/kp-stdlib-cf/std/time.kpm: kobold/lib/std/time.pas build/skj-kpc-cf | build
+	@mkdir -p build/kp-stdlib-cf/std
+	./build/skj-kpc-cf --emit-kpm $< > $@
+build/kp-stdlib-cf/std/random.kpm: kobold/lib/std/random.pas build/skj-kpc-cf | build
+	@mkdir -p build/kp-stdlib-cf/std
+	./build/skj-kpc-cf --emit-kpm $< > $@
+build/kp-stdlib-cf/core/convert.kpm: kobold/lib/core/convert.pas build/skj-kpc-cf | build
+	@mkdir -p build/kp-stdlib-cf/core
+	./build/skj-kpc-cf --emit-kpm $< > $@
+
+check-kp-stdlib-free: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
                       build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a \
                       build/kp-stdlib/io/console.kpm build/kp-stdlib/io/buffered.kpm \
                       build/kp-stdlib/std/time.kpm \
@@ -923,7 +886,7 @@ check-kp-stdlib-free: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj
                       build/kp-stdlib/core/convert.kpm
 	@cp tests/kp-stdlib/stddemo.pas build/kp-stdlib/stddemo.pas
 	@E=build/kp-stdlib/build.err; : > $$E; \
-	 ./build/skj-kpc-32 --emit-kpm build/kp-stdlib/stddemo.pas > build/kp-stdlib/stddemo.kpm 2>>$$E; \
+	 ./build/skj-kpc-rv --emit-kpm build/kp-stdlib/stddemo.pas > build/kp-stdlib/stddemo.kpm 2>>$$E; \
 	 for u in io/console std/time std/random stddemo; do \
 	   b=$$(basename $$u); \
 	   ./build/skj-kp-rv build/kp-stdlib/$$u.kpm -o build/kp-stdlib/$$b.s 2>>$$E && \
@@ -939,7 +902,7 @@ check-kp-stdlib-free: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj
 	   || { echo "FAIL kp-stdlib (free-rv)"; cat $$E build/kp-stdlib/out; exit 1; }
 	@cp tests/kp-stdlib/consoleio.pas build/kp-stdlib/consoleio.pas
 	@E=build/kp-stdlib/build.err; : > $$E; \
-	 ./build/skj-kpc-32 --emit-kpm build/kp-stdlib/consoleio.pas > build/kp-stdlib/consoleio.kpm 2>>$$E; \
+	 ./build/skj-kpc-rv --emit-kpm build/kp-stdlib/consoleio.pas > build/kp-stdlib/consoleio.kpm 2>>$$E; \
 	 ./build/skj-kp-rv build/kp-stdlib/consoleio.kpm -o build/kp-stdlib/consoleio.s 2>>$$E && \
 	 ./build/skj-as-rv -o build/kp-stdlib/consoleio.o build/kp-stdlib/consoleio.s 2>>$$E || \
 	   { echo "FAIL kp-stdlib (compile consoleio)"; cat $$E; exit 1; }; \
@@ -952,7 +915,7 @@ check-kp-stdlib-free: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj
 	   || { echo "FAIL kp-stdlib (consoleio)"; cat $$E build/kp-stdlib/conout; exit 1; }
 	@cp tests/kp-stdlib/bufferedio.pas build/kp-stdlib/bufferedio.pas
 	@E=build/kp-stdlib/build.err; : > $$E; \
-	 ./build/skj-kpc-32 --emit-kpm build/kp-stdlib/bufferedio.pas > build/kp-stdlib/bufferedio.kpm 2>>$$E; \
+	 ./build/skj-kpc-rv --emit-kpm build/kp-stdlib/bufferedio.pas > build/kp-stdlib/bufferedio.kpm 2>>$$E; \
 	 ./build/skj-kp-rv build/kp-stdlib/io/buffered.kpm -o build/kp-stdlib/buffered.s 2>>$$E && \
 	 ./build/skj-as-rv -o build/kp-stdlib/buffered.o build/kp-stdlib/buffered.s 2>>$$E || \
 	   { echo "FAIL kp-stdlib (compile io.buffered)"; cat $$E; exit 1; }; \
@@ -968,7 +931,7 @@ check-kp-stdlib-free: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj
 	   || { echo "FAIL kp-stdlib (bufferedio)"; cat $$E build/kp-stdlib/bufout; exit 1; }
 	@cp tests/kp-stdlib/realunit.pas build/kp-stdlib/realunit.pas
 	@E=build/kp-stdlib/build.err; : > $$E; \
-	 ./build/skj-kpc-32 --emit-kpm build/kp-stdlib/realunit.pas > build/kp-stdlib/realunit.kpm 2>>$$E; \
+	 ./build/skj-kpc-rv --emit-kpm build/kp-stdlib/realunit.pas > build/kp-stdlib/realunit.kpm 2>>$$E; \
 	 ./build/skj-kp-rv build/kp-stdlib/realunit.kpm -o build/kp-stdlib/realunit.s 2>>$$E && \
 	 ./build/skj-as-rv -o build/kp-stdlib/realunit.o build/kp-stdlib/realunit.s 2>>$$E || \
 	   { echo "FAIL kp-stdlib (compile realunit)"; cat $$E; exit 1; }; \
@@ -982,7 +945,7 @@ check-kp-stdlib-free: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj
 	   || { echo "FAIL kp-stdlib (realunit)"; cat $$E build/kp-stdlib/realout; exit 1; }
 	@cp tests/kp-stdlib/nswild.pas build/kp-stdlib/nswild.pas
 	@E=build/kp-stdlib/build.err; : > $$E; \
-	 ./build/skj-kpc-32 --emit-kpm build/kp-stdlib/nswild.pas > build/kp-stdlib/nswild.kpm 2>>$$E || \
+	 ./build/skj-kpc-rv --emit-kpm build/kp-stdlib/nswild.pas > build/kp-stdlib/nswild.kpm 2>>$$E || \
 	   { echo "FAIL kp-stdlib (compile nswild: uses ns.*)"; cat $$E; exit 1; }; \
 	 ./build/skj-kp-rv build/kp-stdlib/nswild.kpm -o build/kp-stdlib/nswild.s 2>>$$E && \
 	 ./build/skj-as-rv -o build/kp-stdlib/nswild.o build/kp-stdlib/nswild.s 2>>$$E || \
@@ -996,7 +959,7 @@ check-kp-stdlib-free: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj
 	   || { echo "FAIL kp-stdlib (nswild)"; cat $$E build/kp-stdlib/wildout; exit 1; }
 	@cp tests/kp-stdlib/strdemo.pas build/kp-stdlib/strdemo.pas
 	@E=build/kp-stdlib/build.err; : > $$E; \
-	 ./build/skj-kpc-32 --emit-kpm build/kp-stdlib/strdemo.pas > build/kp-stdlib/strdemo.kpm 2>>$$E || \
+	 ./build/skj-kpc-rv --emit-kpm build/kp-stdlib/strdemo.pas > build/kp-stdlib/strdemo.kpm 2>>$$E || \
 	   { echo "FAIL kp-stdlib (compile strdemo: core.strings)"; cat $$E; exit 1; }; \
 	 ./build/skj-kp-rv build/kp-stdlib/strdemo.kpm -o build/kp-stdlib/strdemo.s 2>>$$E && \
 	 ./build/skj-as-rv -o build/kp-stdlib/strdemo.o build/kp-stdlib/strdemo.s 2>>$$E || \
@@ -1012,7 +975,7 @@ check-kp-stdlib-free: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj
 	   || { echo "FAIL kp-stdlib (strdemo)"; cat $$E build/kp-stdlib/strout; exit 1; }
 	@cp tests/kp-stdlib/convertnum.pas build/kp-stdlib/convertnum.pas
 	@E=build/kp-stdlib/build.err; : > $$E; \
-	 ./build/skj-kpc-32 --emit-kpm build/kp-stdlib/convertnum.pas > build/kp-stdlib/convertnum.kpm 2>>$$E || \
+	 ./build/skj-kpc-rv --emit-kpm build/kp-stdlib/convertnum.pas > build/kp-stdlib/convertnum.kpm 2>>$$E || \
 	   { echo "FAIL kp-stdlib (compile convertnum: core.convert)"; cat $$E; exit 1; }; \
 	 ./build/skj-kp-rv build/kp-stdlib/convertnum.kpm -o build/kp-stdlib/convertnum.s 2>>$$E && \
 	 ./build/skj-as-rv -o build/kp-stdlib/convertnum.o build/kp-stdlib/convertnum.s 2>>$$E || \
@@ -1034,19 +997,20 @@ check-kp-stdlib-free: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj
 ## ColdFire time/rng/yield syscall wrappers (syscall_cf.S) and the emulator's
 ## GSYS_CLOCK_GETTIME / GSYS_GETRANDOM / GSYS_NANOSLEEP maps (emu/cf_user.c).  The
 ## .kpm modules are arch-neutral (host skj-kpc), so only the backend and the link
-## differ from the rv target; outputs go to build/kp-stdlib-cf so the rv objects
-## are not clobbered.
-check-kp-stdlib-free-cf: build/skj-kpc-32 build/skj-kp-cf build/skj-as build/skj-ld \
+## differ from the rv target.  The unit .kpm modules are cf-specific (build/
+## kp-stdlib-cf, emitted by the ColdFire front end), since a unit is bound to its
+## target; outputs go there too so the rv objects are not clobbered.
+check-kp-stdlib-free-cf: build/skj-kpc-cf build/skj-kp-cf build/skj-as build/skj-ld \
                          build/skj-run build/kpfree-cf/kp_crt_cf.o build/libkpaot-cf-free.a \
-                         build/kp-stdlib/io/console.kpm build/kp-stdlib/std/time.kpm \
-                         build/kp-stdlib/std/random.kpm build/kp-stdlib/core/convert.kpm
+                         build/kp-stdlib-cf/io/console.kpm build/kp-stdlib-cf/std/time.kpm \
+                         build/kp-stdlib-cf/std/random.kpm build/kp-stdlib-cf/core/convert.kpm
 	@mkdir -p build/kp-stdlib-cf
 	@cp tests/kp-stdlib/stddemo.pas build/kp-stdlib-cf/stddemo.pas
 	@E=build/kp-stdlib-cf/build.err; : > $$E; \
-	 ./build/skj-kpc-32 -U build/kp-stdlib --emit-kpm build/kp-stdlib-cf/stddemo.pas > build/kp-stdlib-cf/stddemo.kpm 2>>$$E; \
+	 ./build/skj-kpc-cf -U build/kp-stdlib-cf --emit-kpm build/kp-stdlib-cf/stddemo.pas > build/kp-stdlib-cf/stddemo.kpm 2>>$$E; \
 	 for u in io/console std/time std/random; do \
 	   b=$$(basename $$u); \
-	   ./build/skj-kp-cf build/kp-stdlib/$$u.kpm -o build/kp-stdlib-cf/$$b.s 2>>$$E && \
+	   ./build/skj-kp-cf build/kp-stdlib-cf/$$u.kpm -o build/kp-stdlib-cf/$$b.s 2>>$$E && \
 	   ./build/skj-as -o build/kp-stdlib-cf/$$b.o build/kp-stdlib-cf/$$b.s 2>>$$E || \
 	     { echo "FAIL kp-stdlib-cf (compile $$u)"; cat $$E; exit 1; }; \
 	 done; \
@@ -1062,9 +1026,9 @@ check-kp-stdlib-free-cf: build/skj-kpc-32 build/skj-kp-cf build/skj-as build/skj
 	   || { echo "FAIL kp-stdlib-cf (free-cf)"; cat $$E build/kp-stdlib-cf/out; exit 1; }
 	@cp tests/kp-stdlib/convertnum.pas build/kp-stdlib-cf/convertnum.pas
 	@E=build/kp-stdlib-cf/build.err; : > $$E; \
-	 ./build/skj-kpc-32 -U build/kp-stdlib --emit-kpm build/kp-stdlib-cf/convertnum.pas > build/kp-stdlib-cf/convertnum.kpm 2>>$$E || \
+	 ./build/skj-kpc-cf -U build/kp-stdlib-cf --emit-kpm build/kp-stdlib-cf/convertnum.pas > build/kp-stdlib-cf/convertnum.kpm 2>>$$E || \
 	   { echo "FAIL kp-stdlib-cf (compile convertnum)"; cat $$E; exit 1; }; \
-	 ./build/skj-kp-cf build/kp-stdlib/core/convert.kpm -o build/kp-stdlib-cf/convert.s 2>>$$E && \
+	 ./build/skj-kp-cf build/kp-stdlib-cf/core/convert.kpm -o build/kp-stdlib-cf/convert.s 2>>$$E && \
 	 ./build/skj-as -o build/kp-stdlib-cf/convert.o build/kp-stdlib-cf/convert.s 2>>$$E || \
 	   { echo "FAIL kp-stdlib-cf (assemble core.convert)"; cat $$E; exit 1; }; \
 	 ./build/skj-kp-cf build/kp-stdlib-cf/convertnum.kpm -o build/kp-stdlib-cf/convertnum.s 2>>$$E && \
@@ -1094,21 +1058,21 @@ check-kp-io: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a
 	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) -f elf64" \
 	    sh tests/run-kp-src-tests.sh
 
-check-kp-io-rv: build/skj-kpc-32 build/skj-kp-rv build/libkpaot-rv.a
-	@KP_SRCDIR=tests/kp-io MODE=aot FRONTEND=build/skj-kpc-32 \
+check-kp-io-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
+	@KP_SRCDIR=tests/kp-io MODE=aot FRONTEND=build/skj-kpc-rv \
 	    KPAOT=build/skj-kp-rv KPAOTLIB=build/libkpaot-rv.a \
 	    KPAOTCC="$(RVJIT_CC)" KPAOTQEMU="$(QEMU_RV)" \
 	    sh tests/run-kp-src-tests.sh
 
-check-kp-io-arm64: build/skj-kpc build/skj-kp-arm64 build/libkpaot-arm64.a
-	@KP_SRCDIR=tests/kp-io MODE=aot FRONTEND=build/skj-kpc \
+check-kp-io-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a
+	@KP_SRCDIR=tests/kp-io MODE=aot FRONTEND=build/skj-kpc-arm64 \
 	    KPAOT=build/skj-kp-arm64 KPAOTLIB=build/libkpaot-arm64.a \
 	    KPAOTCC="$(A64_CC)" KPAOTQEMU="$(QEMU_A64)" \
 	    sh tests/run-kp-src-tests.sh
 
-check-kp-io-free: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
+check-kp-io-free: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
                   build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a
-	@KP_SRCDIR=tests/kp-io MODE=free FRONTEND=build/skj-kpc-32 \
+	@KP_SRCDIR=tests/kp-io MODE=free FRONTEND=build/skj-kpc-rv \
 	    KPRV=build/skj-kp-rv KPAS=build/skj-as-rv KPLD=build/skj-ld-rv \
 	    KPCRT=build/kpfree-rv/kp_crt_rv.o KPLIB=build/libkpaot-rv-free.a \
 	    QEMU="$(QEMU_RV)" \
@@ -1131,21 +1095,21 @@ check-kp-inc: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a
 	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) -f elf64" \
 	    sh tests/run-kp-src-tests.sh
 
-check-kp-inc-rv: build/skj-kpc-32 build/skj-kp-rv build/libkpaot-rv.a
-	@KP_SRCDIR=tests/kp-inc MODE=aot FRONTEND=build/skj-kpc-32 \
+check-kp-inc-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
+	@KP_SRCDIR=tests/kp-inc MODE=aot FRONTEND=build/skj-kpc-rv \
 	    KPAOT=build/skj-kp-rv KPAOTLIB=build/libkpaot-rv.a \
 	    KPAOTCC="$(RVJIT_CC)" KPAOTQEMU="$(QEMU_RV)" \
 	    sh tests/run-kp-src-tests.sh
 
-check-kp-inc-arm64: build/skj-kpc build/skj-kp-arm64 build/libkpaot-arm64.a
-	@KP_SRCDIR=tests/kp-inc MODE=aot FRONTEND=build/skj-kpc \
+check-kp-inc-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a
+	@KP_SRCDIR=tests/kp-inc MODE=aot FRONTEND=build/skj-kpc-arm64 \
 	    KPAOT=build/skj-kp-arm64 KPAOTLIB=build/libkpaot-arm64.a \
 	    KPAOTCC="$(A64_CC)" KPAOTQEMU="$(QEMU_A64)" \
 	    sh tests/run-kp-src-tests.sh
 
-check-kp-inc-free: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
+check-kp-inc-free: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
                    build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a
-	@KP_SRCDIR=tests/kp-inc MODE=free FRONTEND=build/skj-kpc-32 \
+	@KP_SRCDIR=tests/kp-inc MODE=free FRONTEND=build/skj-kpc-rv \
 	    KPRV=build/skj-kp-rv KPAS=build/skj-as-rv KPLD=build/skj-ld-rv \
 	    KPCRT=build/kpfree-rv/kp_crt_rv.o KPLIB=build/libkpaot-rv-free.a \
 	    QEMU="$(QEMU_RV)" \
@@ -1427,9 +1391,9 @@ build/libkpaot-cf-free.a: $(KPFREE_CF_ARCHIVE) | build/kpfree-cf
 ## and skj-ld-rv links the crt, the program, and libkpaot-rv-free.a into a static
 ## ELF whose only host needs are write/read/exit and the handed-in heap.  Run under
 ## qemu-riscv32 (which trivially provides that seam); stdout must match .expected.
-check-kp-free: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
+check-kp-free: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
                build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a
-	@MODE=free FRONTEND=build/skj-kpc-32 \
+	@MODE=free FRONTEND=build/skj-kpc-rv \
 	    KPRV=build/skj-kp-rv KPAS=build/skj-as-rv KPLD=build/skj-ld-rv \
 	    KPCRT=build/kpfree-rv/kp_crt_rv.o KPLIB=build/libkpaot-rv-free.a \
 	    QEMU="$(QEMU_RV)" \
@@ -1443,9 +1407,9 @@ check-kp-free: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj-ld-rv 
 ## constant emission (strobj, typed .init word arrays) running big-endian.  The
 ## full kp-src set passes: coroutines (the ColdFire co_free seed and the argument
 ## liveness fix) and the transcendentals (math_free's ColdFire h_* shims) included.
-check-kp-free-cf: build/skj-kpc-32 build/skj-kp-cf build/skj-as build/skj-ld \
+check-kp-free-cf: build/skj-kpc-cf build/skj-kp-cf build/skj-as build/skj-ld \
                   build/skj-run build/kpfree-cf/kp_crt_cf.o build/libkpaot-cf-free.a
-	@MODE=free FRONTEND=build/skj-kpc-32 \
+	@MODE=free FRONTEND=build/skj-kpc-cf \
 	    KPRV=build/skj-kp-cf KPAS=build/skj-as KPLD="build/skj-ld -T kobold/kp_cf.ld" \
 	    KPCRT=build/kpfree-cf/kp_crt_cf.o KPLIB=build/libkpaot-cf-free.a \
 	    QEMU=build/skj-run \
@@ -2252,8 +2216,10 @@ build/san:
 build/san/test_rv_run: tests/test_rv_run.c emu/rv32.c emu/rv32.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Iemu -o $@ tests/test_rv_run.c emu/rv32.c -lm
 
-build/san/test_guest_mmap: tests/test_guest_mmap.c emu/guest.c emu/guest.h | build build/san
-	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Iemu -o $@ tests/test_guest_mmap.c emu/guest.c -lm
+build/san/test_guest_mmap: tests/test_guest_mmap.c emu/guest.c emu/guest.h \
+                           emu/hostplat.c emu/hostplat.h emu/elf32.c emu/elf32.h | build build/san
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Iemu -Ifs -o $@ tests/test_guest_mmap.c \
+	    emu/guest.c emu/hostplat.c emu/elf32.c -lm
 
 build/san/test_rv_decode_cache: tests/test_rv_decode_cache.c emu/rv32.c emu/rv32.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Iemu -o $@ tests/test_rv_decode_cache.c emu/rv32.c -lm
@@ -2442,8 +2408,8 @@ build/san/skj-ar: $(AR_SRC) ld/mapfile.h ir/util.h ir/arena.h build/version.h | 
 # shipped host so cross-module .kpm loads width-check clean.  kp_co_lp64.o stays
 # unsanitized (raw stack-switch coroutine assembly); the sanitizers are
 # per-TU, so linking it into a sanitized binary is fine.
-build/san/skj-kp-jit: kobold/jit_main.c kobold/frontend.c build/lp64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o kobold/frontend.h $(KP_HDRS) build/version.h Makefile | build build/san
-	$(CC) $(KP_CFLAGS) -DKP_LP64 -Ibuild/lp64 $(SAN_CFLAGS) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/lp64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o -lm
+build/san/skj-kp-jit: kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o kobold/frontend.h $(KP_HDRS) build/version.h Makefile | build build/san
+	$(CC) $(KP_CFLAGS) -DKP_LP64 -Ibuild/x86-64 $(SAN_CFLAGS) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o -lm
 
 ## Each sanitized suite is its own target over the build/san tools, so a failing
 ## slice fails on its own (a single recipe line returns the script's status, no
@@ -2841,8 +2807,10 @@ test-rv-run: build/test_rv_run
 ## The guest dynamic-mapping primitives: the guard page (a stack overrun
 ## must fault), gm_munmap release, the gm_pool aggregate budget, and
 ## gm_read_out.  Drives emu/guest.c directly, no CPU core.  Host-only.
-build/test_guest_mmap: tests/test_guest_mmap.c emu/guest.c emu/guest.h | build
-	$(CC) $(CFLAGS) -Iemu -o $@ tests/test_guest_mmap.c emu/guest.c -lm
+build/test_guest_mmap: tests/test_guest_mmap.c emu/guest.c emu/guest.h \
+                       emu/hostplat.c emu/hostplat.h emu/elf32.c emu/elf32.h | build
+	$(CC) $(CFLAGS) -Iemu -Ifs -o $@ tests/test_guest_mmap.c \
+	    emu/guest.c emu/hostplat.c emu/elf32.c -lm
 
 test-guest-mmap: build/test_guest_mmap
 	@./build/test_guest_mmap
@@ -2922,9 +2890,9 @@ test-rv-fp: build/test_rv_fp
 ## ---------------------------------------------------------------
 RV32_UNIT := test_mem test_fp test_fp_d test_atomic test_zcmp test_zcb \
              test_bitmanip test_irq
-RV32_INC  := -Iemu -Itests/rv32
+RV32_INC  := -Iemu -Ifs -Itests/rv32
 RV32_CORE := emu/rv32.c tests/rv32/machine.c
-RV32_LOAD := emu/elf32.c emu/guest.c
+RV32_LOAD := emu/elf32.c emu/guest.c emu/hostplat.c
 
 ## gdbclient speaks the GDB remote protocol over a socket, and the POSIX
 ## headers for that are hidden by -std=c99.
@@ -3401,10 +3369,10 @@ test-cc-rv-loc: build/skj-cc-rv build/skj-as-rv
 ## and a per-statement LOC, the KPM1 reader carries .file onto ir_func.src_file,
 ## and the RISC-V backend records each as a ".loc 1 N" directive.  Same
 ## assertions as test-cc-rv-loc.
-test-kp-rv-loc: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv
+test-kp-rv-loc: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv
 	@mkdir -p build/debug
-	@./build/skj-kpc-32 --emit-kpm -g -o build/debug/kloc_g.kpm tests/debug/loc.pas
-	@./build/skj-kpc-32 --emit-kpm    -o build/debug/kloc_n.kpm tests/debug/loc.pas
+	@./build/skj-kpc-rv --emit-kpm -g -o build/debug/kloc_g.kpm tests/debug/loc.pas
+	@./build/skj-kpc-rv --emit-kpm    -o build/debug/kloc_n.kpm tests/debug/loc.pas
 	@./build/skj-kp-rv -o build/debug/kloc_g.s build/debug/kloc_g.kpm
 	@./build/skj-kp-rv -o build/debug/kloc_n.s build/debug/kloc_n.kpm
 	@g=`grep -c '\.loc' build/debug/kloc_g.s`; \
@@ -3424,10 +3392,10 @@ test-kp-rv-loc: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv
 ## .debug_* sections, and skj-ld-rv relocates them and re-emits the .symtab.
 ## skj-addr2line must then agree with GNU addr2line on function and line for
 ## every statement, proving a Kobold crash or breakpoint symbolizes like a C one.
-test-kp-rv-dwarf: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
+test-kp-rv-dwarf: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
                   build/skj-addr2line build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a
 	@mkdir -p build/debug
-	@./build/skj-kpc-32 --emit-kpm -g -o build/debug/kdw.kpm tests/debug/loc.pas
+	@./build/skj-kpc-rv --emit-kpm -g -o build/debug/kdw.kpm tests/debug/loc.pas
 	@./build/skj-kp-rv -o build/debug/kdw.s build/debug/kdw.kpm
 	@./build/skj-as-rv -o build/debug/kdw.o build/debug/kdw.s
 	@./build/skj-ld-rv -o build/debug/kdw.elf build/kpfree-rv/kp_crt_rv.o \
@@ -3452,10 +3420,10 @@ test-kp-rv-dwarf: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj-ld-
 ## the same RV_SYS_FATAL ecall C's abort uses, so under skj-run a Kobold trap
 ## shows a source-level stack (deep -> mid) and exits 70.  Combines item 2's
 ## DWARF (-g) with item 4's trap routing, so it needs both landed.
-test-kp-rv-trap-backtrace: build/skj-kpc-32 build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
+test-kp-rv-trap-backtrace: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
                            build/skj-run build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a
 	@mkdir -p build/debug
-	@./build/skj-kpc-32 --emit-kpm -g -o build/debug/ktrap.kpm tests/debug/ktrap.pas
+	@./build/skj-kpc-rv --emit-kpm -g -o build/debug/ktrap.kpm tests/debug/ktrap.pas
 	@./build/skj-kp-rv -o build/debug/ktrap.s build/debug/ktrap.kpm
 	@./build/skj-as-rv -o build/debug/ktrap.o build/debug/ktrap.s
 	@./build/skj-ld-rv -o build/debug/ktrap.elf build/kpfree-rv/kp_crt_rv.o \
@@ -3784,10 +3752,10 @@ test-cf-abort-backtrace: build/skj-cc build/skj-as build/skj-ld build/skj-run \
 ## backend (so .loc/.type/.size come for free), skj-as builds the big-endian
 ## .debug_* sections (R_68K_32), and skj-ld relocates them; skj-addr2line must
 ## then agree with GNU addr2line on function and line for every statement.
-test-kp-cf-dwarf: build/skj-kpc-32 build/skj-kp-cf build/skj-as build/skj-ld \
+test-kp-cf-dwarf: build/skj-kpc-cf build/skj-kp-cf build/skj-as build/skj-ld \
                   build/skj-addr2line build/kpfree-cf/kp_crt_cf.o build/libkpaot-cf-free.a
 	@mkdir -p build/debug
-	@./build/skj-kpc-32 --emit-kpm -g -o build/debug/kdwcf.kpm tests/debug/loc.pas
+	@./build/skj-kpc-cf --emit-kpm -g -o build/debug/kdwcf.kpm tests/debug/loc.pas
 	@./build/skj-kp-cf -o build/debug/kdwcf.s build/debug/kdwcf.kpm
 	@./build/skj-as -o build/debug/kdwcf.o build/debug/kdwcf.s
 	@./build/skj-ld -o build/debug/kdwcf.elf build/kpfree-cf/kp_crt_cf.o \
@@ -3811,10 +3779,10 @@ test-kp-cf-dwarf: build/skj-kpc-32 build/skj-kp-cf build/skj-as build/skj-ld \
 ## through the freestanding trap (rt_free.c), which calls __skj_trap_backtrace
 ## (the CF_SYS_FATAL trap); under skj-run it shows a source-level stack
 ## (deep -> mid) and exits 70.  Exercises the controlled-trap path end to end.
-test-kp-cf-trap-backtrace: build/skj-kpc-32 build/skj-kp-cf build/skj-as build/skj-ld \
+test-kp-cf-trap-backtrace: build/skj-kpc-cf build/skj-kp-cf build/skj-as build/skj-ld \
                            build/skj-run build/kpfree-cf/kp_crt_cf.o build/libkpaot-cf-free.a
 	@mkdir -p build/debug
-	@./build/skj-kpc-32 --emit-kpm -g -o build/debug/ktrapcf.kpm tests/debug/ktrap.pas
+	@./build/skj-kpc-cf --emit-kpm -g -o build/debug/ktrapcf.kpm tests/debug/ktrap.pas
 	@./build/skj-kp-cf -o build/debug/ktrapcf.s build/debug/ktrapcf.kpm
 	@./build/skj-as -o build/debug/ktrapcf.o build/debug/ktrapcf.s
 	@./build/skj-ld -o build/debug/ktrapcf.elf build/kpfree-cf/kp_crt_cf.o \
@@ -4041,10 +4009,11 @@ DRIVER_LIB_MIPS := build/lib/mips/crt0.o build/lib/mips/half.o build/lib/mips/va
 ## Guest libc file I/O + argv (continuing the sandbox openat work): a C program
 ## built through the skjcc driver (crt + libc) slurps an input file with the
 ## fopen/fseek/ftell/rewind/fread idiom the toolchain's slurp uses, writes it
-## back with fopen/fwrite, and echoes argc and the paths.  Run under skj-run and
-## qemu-riscv32 with argv; the round-trip output and the stdout must agree, which
-## pins the crt argv setup, the open/close/llseek syscall wrappers, and skj-run's
-## openat/llseek against qemu as the reference.
+## back with fopen/fwrite, and echoes argc and the paths.  Run under skj-run with
+## argv; the round-trip output and the stdout must agree with the same program
+## built by the host compiler and run natively, which pins the crt argv setup,
+## the open/close/llseek syscall wrappers, and skj-run's openat/llseek against the
+## host as the reference, with no second emulation.
 test-rv-libc-io: build/skjcc $(DRIVER_LIB_RV) build/skj-run
 	@mkdir -p build/libc-io
 	@printf 'line one\nline two\nthe quick brown fox\n' > build/libc-io/in.txt
@@ -4052,51 +4021,56 @@ test-rv-libc-io: build/skjcc $(DRIVER_LIB_RV) build/skj-run
 	@./build/skj-run build/libc-io/fileio build/libc-io/in.txt build/libc-io/out.txt \
 	     > build/libc-io/so.skj 2>&1; rc=$$?; cp build/libc-io/out.txt build/libc-io/out.skj 2>/dev/null; \
 	 [ $$rc = 0 ] || { echo "FAIL: skj-run exit $$rc"; cat build/libc-io/so.skj; exit 1; }
-	@$(QEMU_RV) build/libc-io/fileio build/libc-io/in.txt build/libc-io/out.txt \
-	     > build/libc-io/so.qemu 2>&1; rc=$$?; cp build/libc-io/out.txt build/libc-io/out.qemu 2>/dev/null; \
-	 [ $$rc = 0 ] || { echo "FAIL: qemu exit $$rc"; cat build/libc-io/so.qemu; exit 1; }
+	@$(CC) -O2 -o build/libc-io/fileio.host tests/libc-io/fileio.c
+	@build/libc-io/fileio.host build/libc-io/in.txt build/libc-io/out.txt \
+	     > build/libc-io/so.host 2>&1; rc=$$?; cp build/libc-io/out.txt build/libc-io/out.host 2>/dev/null; \
+	 [ $$rc = 0 ] || { echo "FAIL: host exit $$rc"; cat build/libc-io/so.host; exit 1; }
 	@ok=1; \
 	 cmp -s build/libc-io/in.txt build/libc-io/out.skj || { echo "FAIL: skj-run round-trip"; ok=0; }; \
-	 cmp -s build/libc-io/in.txt build/libc-io/out.qemu || { echo "FAIL: qemu round-trip"; ok=0; }; \
-	 cmp -s build/libc-io/so.skj build/libc-io/so.qemu || { echo "FAIL: skj-run vs qemu stdout"; ok=0; }; \
+	 cmp -s build/libc-io/in.txt build/libc-io/out.host || { echo "FAIL: host round-trip"; ok=0; }; \
+	 cmp -s build/libc-io/so.skj build/libc-io/so.host || { echo "FAIL: skj-run vs host stdout"; ok=0; }; \
 	 grep -q "argc=3" build/libc-io/so.skj || { echo "FAIL: argv not delivered"; ok=0; }; \
 	 if [ $$ok = 1 ]; then \
-	     echo "PASS: libc fopen/fseek/ftell/fread/fwrite + argv (skj-run matches qemu)"; \
-	 else cat build/libc-io/so.skj build/libc-io/so.qemu; exit 1; fi
+	     echo "PASS: libc fopen/fseek/ftell/fread/fwrite + argv (skj-run matches the host)"; \
+	 else cat build/libc-io/so.skj build/libc-io/so.host; exit 1; fi
 
 ## statx-backed stat/fstat for rv32: rv32 has no stat/fstat syscall, so the libc
 ## stat family (libc/stat.c) goes through statx (#291); the rv32 crt carries the
 ## wrapper (runtime/start_rv.S) and skj-run answers statx (emu/guest.c).  A guest
-## stat()s and fstat()s a known 12-byte file; skj-run and qemu-riscv32 must agree
-## and report the real size and type.
+## stat()s and fstat()s a known 12-byte file; skj-run must agree with the same
+## program built by the host compiler and run natively, and report the real size
+## and type.
 test-rv-stat: build/skjcc $(DRIVER_LIB_RV) build/skj-run
 	@mkdir -p build/libc-io
 	@printf 'hello statx\n' > build/libc-io/stat.txt
 	@./build/skjcc -target riscv -o build/libc-io/statio tests/libc-io/statio.c
 	@./build/skj-run build/libc-io/statio build/libc-io/stat.txt > build/libc-io/stat.skj 2>&1; \
 	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: skj-run exit $$rc"; cat build/libc-io/stat.skj; exit 1; }
-	@$(QEMU_RV) build/libc-io/statio build/libc-io/stat.txt > build/libc-io/stat.qemu 2>&1; \
-	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: qemu exit $$rc"; cat build/libc-io/stat.qemu; exit 1; }
+	@$(CC) -O2 -o build/libc-io/statio.host tests/libc-io/statio.c
+	@build/libc-io/statio.host build/libc-io/stat.txt > build/libc-io/stat.host 2>&1; \
+	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: host exit $$rc"; cat build/libc-io/stat.host; exit 1; }
 	@ok=1; \
-	 cmp -s build/libc-io/stat.skj build/libc-io/stat.qemu || { echo "FAIL: skj-run vs qemu stdout"; ok=0; }; \
+	 cmp -s build/libc-io/stat.skj build/libc-io/stat.host || { echo "FAIL: skj-run vs host stdout"; ok=0; }; \
 	 grep -q "stat size=12 reg=1 dir=0" build/libc-io/stat.skj || { echo "FAIL: wrong stat output"; ok=0; }; \
 	 grep -q "fstat size=12 reg=1" build/libc-io/stat.skj || { echo "FAIL: wrong fstat output"; ok=0; }; \
 	 if [ $$ok = 1 ]; then \
-	     echo "PASS: libc stat/fstat via statx (skj-run matches qemu)"; \
-	 else cat build/libc-io/stat.skj build/libc-io/stat.qemu; exit 1; fi
+	     echo "PASS: libc stat/fstat via statx (skj-run matches the host)"; \
+	 else cat build/libc-io/stat.skj build/libc-io/stat.host; exit 1; fi
 
 ## The path file operations (mkdir/rename/remove/rmdir) over skj-run's
-## GSYS_MKDIRAT/UNLINKAT/RENAMEAT2 handlers, compared against the real kernel
-## under qemu.  A distinct scratch dir per runner keeps the two from colliding.
+## GSYS_MKDIRAT/UNLINKAT/RENAMEAT2 handlers, compared against the same program
+## built by the host compiler and run natively.  A distinct scratch dir per
+## runner keeps the two from colliding.
 test-rv-fileops: build/skjcc $(DRIVER_LIB_RV) build/skj-run
-	@mkdir -p build/libc-io/pod-skj build/libc-io/pod-qemu
+	@mkdir -p build/libc-io/pod-skj build/libc-io/pod-host
 	@./build/skjcc -target riscv -o build/libc-io/pathops tests/libc-io/pathops.c
 	@./build/skj-run build/libc-io/pathops build/libc-io/pod-skj > build/libc-io/pod.skj 2>&1; \
 	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: skj-run exit $$rc"; cat build/libc-io/pod.skj; exit 1; }
-	@$(QEMU_RV) build/libc-io/pathops build/libc-io/pod-qemu > build/libc-io/pod.qemu 2>&1; \
-	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: qemu exit $$rc"; cat build/libc-io/pod.qemu; exit 1; }
+	@$(CC) -O2 -o build/libc-io/pathops.host tests/libc-io/pathops.c
+	@build/libc-io/pathops.host build/libc-io/pod-host > build/libc-io/pod.host 2>&1; \
+	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: host exit $$rc"; cat build/libc-io/pod.host; exit 1; }
 	@ok=1; \
-	 cmp -s build/libc-io/pod.skj build/libc-io/pod.qemu || { echo "FAIL: skj-run vs qemu stdout"; ok=0; }; \
+	 cmp -s build/libc-io/pod.skj build/libc-io/pod.host || { echo "FAIL: skj-run vs host stdout"; ok=0; }; \
 	 grep -q "mkdir=0"        build/libc-io/pod.skj || { echo "FAIL: mkdir";   ok=0; }; \
 	 grep -q "rename=0"       build/libc-io/pod.skj || { echo "FAIL: rename";  ok=0; }; \
 	 grep -q "statold=0"      build/libc-io/pod.skj || { echo "FAIL: statold"; ok=0; }; \
@@ -4105,62 +4079,67 @@ test-rv-fileops: build/skjcc $(DRIVER_LIB_RV) build/skj-run
 	 grep -q "rmdir=0"        build/libc-io/pod.skj || { echo "FAIL: rmdir";   ok=0; }; \
 	 grep -q "statdir=0"      build/libc-io/pod.skj || { echo "FAIL: statdir"; ok=0; }; \
 	 if [ $$ok = 1 ]; then \
-	     echo "PASS: libc mkdir/rename/remove/rmdir (skj-run matches qemu)"; \
-	 else cat build/libc-io/pod.skj build/libc-io/pod.qemu; exit 1; fi
+	     echo "PASS: libc mkdir/rename/remove/rmdir (skj-run matches the host)"; \
+	 else cat build/libc-io/pod.skj build/libc-io/pod.host; exit 1; fi
 
 ## Directory reads (opendir/readdir/closedir) over skj-run's GSYS_GETDENTS64
-## handler, compared against the real kernel under qemu.  Each runner gets its
-## own scratch directory of three known files.
+## handler, compared against the same program built by the host compiler and run
+## natively.  Each runner gets its own scratch directory of three known files, so
+## the readdir order matches (skj-run enumerates through the host's readdir too).
 test-rv-dirs: build/skjcc $(DRIVER_LIB_RV) build/skj-run
 	@mkdir -p build/libc-io
-	@for d in dir-skj dir-qemu; do \
+	@for d in dir-skj dir-host; do \
 	    rm -rf build/libc-io/$$d; mkdir -p build/libc-io/$$d; \
 	    : > build/libc-io/$$d/alpha; : > build/libc-io/$$d/beta; : > build/libc-io/$$d/gamma; \
 	 done
 	@./build/skjcc -target riscv -o build/libc-io/dirio tests/libc-io/dirio.c
 	@./build/skj-run build/libc-io/dirio build/libc-io/dir-skj > build/libc-io/dir.skj 2>&1; \
 	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: skj-run exit $$rc"; cat build/libc-io/dir.skj; exit 1; }
-	@$(QEMU_RV) build/libc-io/dirio build/libc-io/dir-qemu > build/libc-io/dir.qemu 2>&1; \
-	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: qemu exit $$rc"; cat build/libc-io/dir.qemu; exit 1; }
+	@$(CC) -O2 -o build/libc-io/dirio.host tests/libc-io/dirio.c
+	@build/libc-io/dirio.host build/libc-io/dir-host > build/libc-io/dir.host 2>&1; \
+	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: host exit $$rc"; cat build/libc-io/dir.host; exit 1; }
 	@ok=1; \
-	 cmp -s build/libc-io/dir.skj build/libc-io/dir.qemu || { echo "FAIL: skj-run vs qemu stdout"; ok=0; }; \
+	 cmp -s build/libc-io/dir.skj build/libc-io/dir.host || { echo "FAIL: skj-run vs host stdout"; ok=0; }; \
 	 grep -q "entries=3" build/libc-io/dir.skj || { echo "FAIL: entry count"; ok=0; }; \
 	 grep -q "namelen=14" build/libc-io/dir.skj || { echo "FAIL: name lengths"; ok=0; }; \
 	 if [ $$ok = 1 ]; then \
-	     echo "PASS: libc opendir/readdir (skj-run matches qemu)"; \
-	 else cat build/libc-io/dir.skj build/libc-io/dir.qemu; exit 1; fi
+	     echo "PASS: libc opendir/readdir (skj-run matches the host)"; \
+	 else cat build/libc-io/dir.skj build/libc-io/dir.host; exit 1; fi
 
 ## The ColdFire siblings of test-rv-stat / -fileops / -dirs: the same libc file-op
 ## fixtures compiled -target coldfire and run under skj-run, whose CFV4e core and
 ## m68k syscall maps (emu/cf_user.c) answer statx / mkdirat / unlinkat / renameat2
-## / getdents64, compared against the real kernel under qemu-m68k.  This exercises
-## the emulator's ColdFire file-metadata handlers the way the rv targets exercise
-## the rv ones; check-libc-cf already runs the fixtures under qemu alone.
+## / getdents64, compared against the same program built by the host compiler and
+## run natively.  This exercises the emulator's ColdFire file-metadata handlers
+## the way the rv targets exercise the rv ones; check-libc-cf already runs the
+## fixtures under qemu alone.
 test-cf-stat: build/skjcc $(DRIVER_LIB_CF) build/skj-run
 	@mkdir -p build/libc-io-cf
 	@printf 'hello statx\n' > build/libc-io-cf/stat.txt
 	@./build/skjcc -target coldfire -o build/libc-io-cf/statio tests/libc-io/statio.c
 	@./build/skj-run build/libc-io-cf/statio build/libc-io-cf/stat.txt > build/libc-io-cf/stat.skj 2>&1; \
 	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: skj-run exit $$rc"; cat build/libc-io-cf/stat.skj; exit 1; }
-	@$(QEMU) build/libc-io-cf/statio build/libc-io-cf/stat.txt > build/libc-io-cf/stat.qemu 2>&1; \
-	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: qemu exit $$rc"; cat build/libc-io-cf/stat.qemu; exit 1; }
+	@$(CC) -O2 -o build/libc-io-cf/statio.host tests/libc-io/statio.c
+	@build/libc-io-cf/statio.host build/libc-io-cf/stat.txt > build/libc-io-cf/stat.host 2>&1; \
+	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: host exit $$rc"; cat build/libc-io-cf/stat.host; exit 1; }
 	@ok=1; \
-	 cmp -s build/libc-io-cf/stat.skj build/libc-io-cf/stat.qemu || { echo "FAIL: skj-run vs qemu stdout"; ok=0; }; \
+	 cmp -s build/libc-io-cf/stat.skj build/libc-io-cf/stat.host || { echo "FAIL: skj-run vs host stdout"; ok=0; }; \
 	 grep -q "stat size=12 reg=1 dir=0" build/libc-io-cf/stat.skj || { echo "FAIL: wrong stat output"; ok=0; }; \
 	 grep -q "fstat size=12 reg=1" build/libc-io-cf/stat.skj || { echo "FAIL: wrong fstat output"; ok=0; }; \
 	 if [ $$ok = 1 ]; then \
-	     echo "PASS: libc stat/fstat via statx on ColdFire (skj-run matches qemu)"; \
-	 else cat build/libc-io-cf/stat.skj build/libc-io-cf/stat.qemu; exit 1; fi
+	     echo "PASS: libc stat/fstat via statx on ColdFire (skj-run matches the host)"; \
+	 else cat build/libc-io-cf/stat.skj build/libc-io-cf/stat.host; exit 1; fi
 
 test-cf-fileops: build/skjcc $(DRIVER_LIB_CF) build/skj-run
-	@mkdir -p build/libc-io-cf/pod-skj build/libc-io-cf/pod-qemu
+	@mkdir -p build/libc-io-cf/pod-skj build/libc-io-cf/pod-host
 	@./build/skjcc -target coldfire -o build/libc-io-cf/pathops tests/libc-io/pathops.c
 	@./build/skj-run build/libc-io-cf/pathops build/libc-io-cf/pod-skj > build/libc-io-cf/pod.skj 2>&1; \
 	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: skj-run exit $$rc"; cat build/libc-io-cf/pod.skj; exit 1; }
-	@$(QEMU) build/libc-io-cf/pathops build/libc-io-cf/pod-qemu > build/libc-io-cf/pod.qemu 2>&1; \
-	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: qemu exit $$rc"; cat build/libc-io-cf/pod.qemu; exit 1; }
+	@$(CC) -O2 -o build/libc-io-cf/pathops.host tests/libc-io/pathops.c
+	@build/libc-io-cf/pathops.host build/libc-io-cf/pod-host > build/libc-io-cf/pod.host 2>&1; \
+	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: host exit $$rc"; cat build/libc-io-cf/pod.host; exit 1; }
 	@ok=1; \
-	 cmp -s build/libc-io-cf/pod.skj build/libc-io-cf/pod.qemu || { echo "FAIL: skj-run vs qemu stdout"; ok=0; }; \
+	 cmp -s build/libc-io-cf/pod.skj build/libc-io-cf/pod.host || { echo "FAIL: skj-run vs host stdout"; ok=0; }; \
 	 grep -q "mkdir=0"        build/libc-io-cf/pod.skj || { echo "FAIL: mkdir";   ok=0; }; \
 	 grep -q "rename=0"       build/libc-io-cf/pod.skj || { echo "FAIL: rename";  ok=0; }; \
 	 grep -q "statold=0"      build/libc-io-cf/pod.skj || { echo "FAIL: statold"; ok=0; }; \
@@ -4169,27 +4148,28 @@ test-cf-fileops: build/skjcc $(DRIVER_LIB_CF) build/skj-run
 	 grep -q "rmdir=0"        build/libc-io-cf/pod.skj || { echo "FAIL: rmdir";   ok=0; }; \
 	 grep -q "statdir=0"      build/libc-io-cf/pod.skj || { echo "FAIL: statdir"; ok=0; }; \
 	 if [ $$ok = 1 ]; then \
-	     echo "PASS: libc mkdir/rename/remove/rmdir on ColdFire (skj-run matches qemu)"; \
-	 else cat build/libc-io-cf/pod.skj build/libc-io-cf/pod.qemu; exit 1; fi
+	     echo "PASS: libc mkdir/rename/remove/rmdir on ColdFire (skj-run matches the host)"; \
+	 else cat build/libc-io-cf/pod.skj build/libc-io-cf/pod.host; exit 1; fi
 
 test-cf-dirs: build/skjcc $(DRIVER_LIB_CF) build/skj-run
 	@mkdir -p build/libc-io-cf
-	@for d in dir-skj dir-qemu; do \
+	@for d in dir-skj dir-host; do \
 	    rm -rf build/libc-io-cf/$$d; mkdir -p build/libc-io-cf/$$d; \
 	    : > build/libc-io-cf/$$d/alpha; : > build/libc-io-cf/$$d/beta; : > build/libc-io-cf/$$d/gamma; \
 	 done
 	@./build/skjcc -target coldfire -o build/libc-io-cf/dirio tests/libc-io/dirio.c
 	@./build/skj-run build/libc-io-cf/dirio build/libc-io-cf/dir-skj > build/libc-io-cf/dir.skj 2>&1; \
 	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: skj-run exit $$rc"; cat build/libc-io-cf/dir.skj; exit 1; }
-	@$(QEMU) build/libc-io-cf/dirio build/libc-io-cf/dir-qemu > build/libc-io-cf/dir.qemu 2>&1; \
-	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: qemu exit $$rc"; cat build/libc-io-cf/dir.qemu; exit 1; }
+	@$(CC) -O2 -o build/libc-io-cf/dirio.host tests/libc-io/dirio.c
+	@build/libc-io-cf/dirio.host build/libc-io-cf/dir-host > build/libc-io-cf/dir.host 2>&1; \
+	 rc=$$?; [ $$rc = 0 ] || { echo "FAIL: host exit $$rc"; cat build/libc-io-cf/dir.host; exit 1; }
 	@ok=1; \
-	 cmp -s build/libc-io-cf/dir.skj build/libc-io-cf/dir.qemu || { echo "FAIL: skj-run vs qemu stdout"; ok=0; }; \
+	 cmp -s build/libc-io-cf/dir.skj build/libc-io-cf/dir.host || { echo "FAIL: skj-run vs host stdout"; ok=0; }; \
 	 grep -q "entries=3" build/libc-io-cf/dir.skj || { echo "FAIL: entry count"; ok=0; }; \
 	 grep -q "namelen=14" build/libc-io-cf/dir.skj || { echo "FAIL: name lengths"; ok=0; }; \
 	 if [ $$ok = 1 ]; then \
-	     echo "PASS: libc opendir/readdir on ColdFire (skj-run matches qemu)"; \
-	 else cat build/libc-io-cf/dir.skj build/libc-io-cf/dir.qemu; exit 1; fi
+	     echo "PASS: libc opendir/readdir on ColdFire (skj-run matches the host)"; \
+	 else cat build/libc-io-cf/dir.skj build/libc-io-cf/dir.host; exit 1; fi
 
 ## The confined-capability mount end to end: a C guest built with the
 ## fs/-interpose libc (FS_INTERPOSE) is run under skj-run with --mount, so the
@@ -4460,20 +4440,20 @@ test-cf-selfhost-toolchain: test-cf-selfhost build/selfhost-cf/skj-as-cf.elf \
 ## kobold/io_free.c already supplies ParamStr/ParamCount, ReadFileStr/
 ## WriteFileStr and the kpd_* directory surface over open/read/write/lseek.
 
-build/selfhost/skj-kpc-rv.elf: prebuild/kpcom.kpm build/skj-kp-rv build/skj-as-rv \
+build/selfhost/skj-kpc-rv.elf: build/kpcom-rv.kpm build/skj-kp-rv build/skj-as-rv \
                                build/skj-ld-rv build/kpfree-rv/kp_crt_rv.o \
                                build/libkpaot-rv-free.a | build
 	@mkdir -p build/selfhost
-	./build/skj-kp-rv prebuild/kpcom.kpm -o build/selfhost/kpcom-free-rv.s
+	./build/skj-kp-rv build/kpcom-rv.kpm -o build/selfhost/kpcom-free-rv.s
 	./build/skj-as-rv -o build/selfhost/kpcom-free-rv.o build/selfhost/kpcom-free-rv.s
 	./build/skj-ld-rv -o $@ build/kpfree-rv/kp_crt_rv.o \
 	    build/selfhost/kpcom-free-rv.o build/libkpaot-rv-free.a
 
-build/selfhost-cf/skj-kpc-cf.elf: prebuild/kpcom.kpm build/skj-kp-cf build/skj-as \
+build/selfhost-cf/skj-kpc-cf.elf: build/kpcom-cf.kpm build/skj-kp-cf build/skj-as \
                                   build/skj-ld build/kpfree-cf/kp_crt_cf.o \
                                   build/libkpaot-cf-free.a | build
 	@mkdir -p build/selfhost-cf
-	./build/skj-kp-cf prebuild/kpcom.kpm -o build/selfhost-cf/kpcom-free-cf.s
+	./build/skj-kp-cf build/kpcom-cf.kpm -o build/selfhost-cf/kpcom-free-cf.s
 	./build/skj-as -o build/selfhost-cf/kpcom-free-cf.o build/selfhost-cf/kpcom-free-cf.s
 	./build/skj-ld -o $@ build/kpfree-cf/kp_crt_cf.o \
 	    build/selfhost-cf/kpcom-free-cf.o build/libkpaot-cf-free.a
@@ -4485,10 +4465,10 @@ build/selfhost-cf/skj-kpc-cf.elf: prebuild/kpcom.kpm build/skj-kp-cf build/skj-a
 ## source read, the KPM write).  The far heavier self-compile of kpcom's own
 ## 480 KB source is the opt-in -full target below (minutes under the RV32
 ## interpreter), kept out of the routine suite.
-test-rv-selfhost-kpc: build/selfhost/skj-kpc-rv.elf build/skj-kpc-32 build/skj-run \
+test-rv-selfhost-kpc: build/selfhost/skj-kpc-rv.elf build/skj-kpc-rv build/skj-run \
                       tests/kp-corpus/hello.pas
 	@mkdir -p build/selfhost
-	@./build/skj-kpc-32 --emit-kpm tests/kp-corpus/hello.pas > build/selfhost/hello.host.kpm
+	@./build/skj-kpc-rv --emit-kpm tests/kp-corpus/hello.pas > build/selfhost/hello.host.kpm
 	@./build/skj-run build/selfhost/skj-kpc-rv.elf --emit-kpm tests/kp-corpus/hello.pas \
 	    > build/selfhost/hello.guest.kpm 2>build/selfhost/kpc.err \
 	    || { echo "FAIL: in-guest skj-kpc (hello)"; cat build/selfhost/kpc.err; exit 1; }
@@ -4496,10 +4476,10 @@ test-rv-selfhost-kpc: build/selfhost/skj-kpc-rv.elf build/skj-kpc-32 build/skj-r
 	    || { echo "FAIL: in-guest KPM differs from host (hello)"; exit 1; }
 	@echo "PASS: skj-kpc self-hosts under skj-run (RV32): hello KPM == host"
 
-test-cf-selfhost-kpc: build/selfhost-cf/skj-kpc-cf.elf build/skj-kpc-32 build/skj-run \
+test-cf-selfhost-kpc: build/selfhost-cf/skj-kpc-cf.elf build/skj-kpc-cf build/skj-run \
                       tests/kp-corpus/hello.pas
 	@mkdir -p build/selfhost-cf
-	@./build/skj-kpc-32 --emit-kpm tests/kp-corpus/hello.pas > build/selfhost-cf/hello.host.kpm
+	@./build/skj-kpc-cf --emit-kpm tests/kp-corpus/hello.pas > build/selfhost-cf/hello.host.kpm
 	@./build/skj-run build/selfhost-cf/skj-kpc-cf.elf --emit-kpm tests/kp-corpus/hello.pas \
 	    > build/selfhost-cf/hello.guest.kpm 2>build/selfhost-cf/kpc.err \
 	    || { echo "FAIL: in-guest skj-kpc (hello)"; cat build/selfhost-cf/kpc.err; exit 1; }
@@ -4511,10 +4491,10 @@ test-cf-selfhost-kpc: build/selfhost-cf/skj-kpc-cf.elf build/skj-kpc-32 build/sk
 ## the emitted KPM1 must match the host.  Opt-in and slow (the 480 KB source
 ## through the RV32/ColdFire interpreter takes minutes), and it needs a larger
 ## guest heap than the 16M default, so --heap 256M.
-test-rv-selfhost-kpc-full: build/selfhost/skj-kpc-rv.elf build/skj-kpc-32 build/skj-run \
+test-rv-selfhost-kpc-full: build/selfhost/skj-kpc-rv.elf build/skj-kpc-rv build/skj-run \
                            kobold/kpcom.pas
 	@mkdir -p build/selfhost
-	@./build/skj-kpc-32 --emit-kpm kobold/kpcom.pas > build/selfhost/kpcom.host.kpm
+	@./build/skj-kpc-rv --emit-kpm kobold/kpcom.pas > build/selfhost/kpcom.host.kpm
 	@./build/skj-run --heap 256M build/selfhost/skj-kpc-rv.elf --emit-kpm kobold/kpcom.pas \
 	    > build/selfhost/kpcom.guest.kpm 2>build/selfhost/kpc2.err \
 	    || { echo "FAIL: in-guest skj-kpc (kpcom self-compile)"; cat build/selfhost/kpc2.err; exit 1; }
@@ -4522,10 +4502,10 @@ test-rv-selfhost-kpc-full: build/selfhost/skj-kpc-rv.elf build/skj-kpc-32 build/
 	    || { echo "FAIL: in-guest kpcom KPM differs from host"; exit 1; }
 	@echo "PASS: skj-kpc compiles its own source in-guest under skj-run (RV32): KPM == host"
 
-test-cf-selfhost-kpc-full: build/selfhost-cf/skj-kpc-cf.elf build/skj-kpc-32 build/skj-run \
+test-cf-selfhost-kpc-full: build/selfhost-cf/skj-kpc-cf.elf build/skj-kpc-cf build/skj-run \
                            kobold/kpcom.pas
 	@mkdir -p build/selfhost-cf
-	@./build/skj-kpc-32 --emit-kpm kobold/kpcom.pas > build/selfhost-cf/kpcom.host.kpm
+	@./build/skj-kpc-cf --emit-kpm kobold/kpcom.pas > build/selfhost-cf/kpcom.host.kpm
 	@./build/skj-run --heap 256M build/selfhost-cf/skj-kpc-cf.elf --emit-kpm kobold/kpcom.pas \
 	    > build/selfhost-cf/kpcom.guest.kpm 2>build/selfhost-cf/kpc2.err \
 	    || { echo "FAIL: in-guest skj-kpc (kpcom self-compile)"; cat build/selfhost-cf/kpc2.err; exit 1; }
@@ -5027,8 +5007,8 @@ build/xlang-sandbox/cchild.o: tests/xlang-sandbox/cchild.c build/skj-cc-rv build
 build/xlang-sandbox/cchild.elf: build/xlang-sandbox/cchild.o build/rv-skj/start.o build/skj-ld-rv
 	./build/skj-ld-rv -o $@ build/rv-skj/start.o build/xlang-sandbox/cchild.o
 
-build/xlang-sandbox/kchild.kpm: tests/xlang-sandbox/kchild.pas build/skj-kpc-32 | build/xlang-sandbox
-	./build/skj-kpc-32 --emit-kpm $< > $@
+build/xlang-sandbox/kchild.kpm: tests/xlang-sandbox/kchild.pas build/skj-kpc-rv | build/xlang-sandbox
+	./build/skj-kpc-rv --emit-kpm $< > $@
 
 build/xlang-sandbox/kchild.o: build/xlang-sandbox/kchild.kpm build/skj-kp-rv build/skj-as-rv
 	./build/skj-kp-rv -o build/xlang-sandbox/kchild.s $<
@@ -5753,7 +5733,7 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            check-cc-rv-psabi test-cc-rv-psabi-interop \
            test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive \
            test-cc-rv-psabi-struct test-cc-driver check-libc \
-           check-kp check-kpcom \
+           check-kp \
            check-kp-frontend check-kp-jit check-kp-aot check-kp-corpus check-kp-corpus-cf check-kp-multi check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-inc
 	@echo "All architecture test suites passed."
 
@@ -5773,4 +5753,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE

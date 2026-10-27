@@ -70,4 +70,30 @@
    the 64-bit guests are "lp64", the 32-bit ones "ilp32". */
 #define SKJ_KPM_TARGET (SKJ_LP64 ? "lp64" : "ilp32")
 
+/* The target ARCHITECTURE a backend emits and accepts unit modules for. Unlike
+   the width class above, this binds a unit to one ISA/ABI: a Kobold unit carries
+   native-code assumptions beyond pointer width, so an rv32 unit is not valid for
+   ColdFire even though both are ilp32. One backend per target (Plan 9 style), so
+   the build passes SKJ_KPM_ARCH per binary; this is a best-effort fallback from
+   the ISA selectors for any tool that does not set it explicitly. */
+#ifndef SKJ_KPM_ARCH
+#  if defined(X86_BITS) && (X86_BITS == 64)
+#    define SKJ_KPM_ARCH "x86-64"
+#  elif defined(X86_BITS) && (X86_BITS == 32)
+#    define SKJ_KPM_ARCH "x86-32"
+#  elif defined(CC_ARM64)
+#    define SKJ_KPM_ARCH "arm64"
+#  elif defined(KP_AOT_RV) || defined(CC_RISCV)
+#    define SKJ_KPM_ARCH "rv32"
+#  elif defined(CC_MIPS)
+#    define SKJ_KPM_ARCH "mips"
+#  elif defined(CC_M68K)
+#    define SKJ_KPM_ARCH "cf"
+#  elif SKJ_LP64
+#    define SKJ_KPM_ARCH "arm64"   /* an LP64 kobold tool with no X86_BITS is the arm64 backend */
+#  else
+#    define SKJ_KPM_ARCH "ilp32"   /* unknown 32-bit ISA: a width string, never matches an arch tag */
+#  endif
+#endif
+
 #endif /* SKJ_TARGET_H */

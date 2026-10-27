@@ -251,6 +251,13 @@ type
   TTarget = record
     PtrBytes: LongInt;   { guest pointer/handle width: 4 (ILP32: rv32/cf/mips)
                            or 8 (LP64: x86-64/arm64) }
+    Arch: string;        { the target architecture this binary compiles for:
+                           'rv32', 'cf', 'x86-64', 'arm64', baked at build time
+                           from a KP_TARGET_* define. A unit is bound to one Arch
+                           (not just one width), so the KPM header stamps it and
+                           the reader rejects a cross-arch module. Empty when the
+                           binary was built without a target define (the width tag
+                           is then emitted, the legacy behaviour). }
   end;
 
 const
@@ -10313,11 +10320,28 @@ function LowerYield(node: LongInt): LongInt;
 { yield E: suspend the current coroutine, delivering E (or 0), and evaluate to the
   value the next resume passes back. Lowers to kp_co_yield. }
 var
-  v, d: LongInt;
+  v, d, vty, vkind: LongInt;
 begin
-  if Nodes[node].A >= 0 then v := LowerExpr(Nodes[node].A) else v := EmitLIC(0);
+  { Lower the yielded value first (so the instruction order is unchanged), then pass
+    it as one coroutine-protocol word.  On LP64 the hosted kp_co_yield takes a full
+    int64_t, so a handle crosses pointer-wide and an ordinal/Int64 is widened to 64
+    bits; ILP32 keeps the single 32-bit ARG, which matches both the hosted (narrowed)
+    and the freestanding i32 value ABIs byte for byte. vkind: 0 = ARG, 1 = ARG ptr,
+    2 = ARG64. }
+  vkind := 0;
+  if Nodes[node].A >= 0 then begin
+    vty := Nodes[Nodes[node].A].Ty;
+    if CurTarget.PtrBytes <> 8 then v := LowerExpr(Nodes[node].A)
+    else if IsPtrSized(vty) then begin v := LowerExpr(Nodes[node].A); vkind := 1; end
+    else if IsRealType(vty) or IsAggregate(vty) then v := LowerExpr(Nodes[node].A)
+    else begin v := AsInt64(Nodes[node].A); vkind := 2; end;
+  end
+  else if CurTarget.PtrBytes = 8 then begin v := EmitUn('SEXT64', EmitLIC(0)); vkind := 2; end
+  else v := EmitLIC(0);
   EnsureHelper('kp_co_yield', 1, 'int');
-  EmitArg(v);
+  if vkind = 1 then EmitArgPtr(v)
+  else if vkind = 2 then EmitArg64(v)
+  else EmitArg(v);
   d := NewTemp;
   PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_co_yield nargs=1');
   EmitCancelCheck;
@@ -10328,13 +10352,29 @@ function LowerResume(callee: LongInt; const argNodes: array of LongInt): LongInt
 { k(v): resume the process `callee` with value v (or 0), evaluating to the value it
   yields. The first resume runs the body from the top, so v is ignored then. }
 var
-  kv, v, d: LongInt;
+  kv, v, d, vty, vkind: LongInt;
 begin
   kv := LowerExpr(callee);
-  if Length(argNodes) >= 1 then v := LowerExpr(argNodes[0]) else v := EmitLIC(0);
+  { Lower the resume value up front (unchanged instruction order), then pass it as one
+    coroutine-protocol word.  On LP64 the hosted kp_co_resume takes a full int64_t, so
+    a handle crosses pointer-wide and an ordinal/Int64 is widened to 64 bits; ILP32
+    keeps the single 32-bit ARG, which matches both the hosted (narrowed) and the
+    freestanding i32 value ABIs byte for byte. vkind: 0 = ARG, 1 = ARG ptr, 2 = ARG64. }
+  vkind := 0;
+  if Length(argNodes) >= 1 then begin
+    vty := Nodes[argNodes[0]].Ty;
+    if CurTarget.PtrBytes <> 8 then v := LowerExpr(argNodes[0])
+    else if IsPtrSized(vty) then begin v := LowerExpr(argNodes[0]); vkind := 1; end
+    else if IsRealType(vty) or IsAggregate(vty) then v := LowerExpr(argNodes[0])
+    else begin v := AsInt64(argNodes[0]); vkind := 2; end;
+  end
+  else if CurTarget.PtrBytes = 8 then begin v := EmitUn('SEXT64', EmitLIC(0)); vkind := 2; end
+  else v := EmitLIC(0);
   EnsureHelper('kp_co_resume', 2, 'int');
   EmitArgPtr(kv);   { the process handle }
-  EmitArg(v);       { TODO(lp64): the resume value word follows the kp_word coroutine protocol }
+  if vkind = 1 then EmitArgPtr(v)
+  else if vkind = 2 then EmitArg64(v)
+  else EmitArg(v);
   d := NewTemp;
   PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_co_resume nargs=2');
   LowerResume := d;
@@ -13427,10 +13467,15 @@ var
 begin
   ModLineCount := 0;
   EmitLine('.kpm 1');
-  { The pointer-width class, authoritative (not a hint): a module's opcodes bake
-    in the guest pointer width, so the reader rejects a module of the other class.
-    4 bytes is ilp32 (rv32/cf/mips), 8 is lp64 (x86-64/arm64). }
-  if CurTarget.PtrBytes = 8 then
+  { The target tag, authoritative (not a hint). A unit is bound to one target:
+    its opcodes bake in the guest pointer width, and it carries native-code and
+    ABI assumptions beyond that, so the reader rejects a module built for another
+    target. A binary built for a specific architecture stamps it ('rv32', 'cf',
+    'x86-64', 'arm64'); otherwise the module carries only the pointer-width class
+    (ilp32 for rv32/cf/mips, lp64 for x86-64/arm64), the legacy width-only tag. }
+  if CurTarget.Arch <> '' then
+    EmitLine('.target ' + CurTarget.Arch)
+  else if CurTarget.PtrBytes = 8 then
     EmitLine('.target lp64')
   else
     EmitLine('.target ilp32');
@@ -13649,6 +13694,15 @@ procedure InitTarget;
   compile-time native width (KpNativePtrBytes); there is no runtime choice. }
 begin
   CurTarget.PtrBytes := KpNativePtrBytes;
+  { The target architecture, baked at build time the way the width is. One
+    compiler per target (Plan 9 style): a KP_TARGET_* define selects it, so the
+    module stamps a Target-bound `.target <arch>` tag. Left empty when no define
+    was given, in which case the writer falls back to the width-only tag. }
+  CurTarget.Arch := '';
+  {$IFDEF KP_TARGET_RV}    CurTarget.Arch := 'rv32';   {$ENDIF}
+  {$IFDEF KP_TARGET_CF}    CurTarget.Arch := 'cf';     {$ENDIF}
+  {$IFDEF KP_TARGET_X64}   CurTarget.Arch := 'x86-64'; {$ENDIF}
+  {$IFDEF KP_TARGET_ARM64} CurTarget.Arch := 'arm64';  {$ENDIF}
 end;
 
 function compile(const srcName, srcText: string): string; export;

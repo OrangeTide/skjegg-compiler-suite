@@ -45,7 +45,8 @@ The host reads `game.kpm` into memory and passes the bytes to `kp_load`. This ke
 the front end out of the shipped program entirely.
 
 **In the process.** The front end self-hosts, so it is itself a module
-(`build/kpcom.kpm`) with an exported `compile(srcName, srcText): string` entry. A
+(a build-time seed such as `build/kpcom-rv.kpm`) with an exported
+`compile(srcName, srcText): string` entry. A
 host can load that module, call `compile` on source text, take the produced module
 back as a string, and run it, with no temporary file and no subprocess. This is the
 two-stage boot; `examples/runpas.c` is the complete worked example. Use it when the
