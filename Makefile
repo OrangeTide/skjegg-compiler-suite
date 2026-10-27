@@ -1641,7 +1641,11 @@ build/version.h: FORCE | build
 
 # Every tool's main.c includes "version.h".  This covers the tools outside
 # $(TOOLS) too, since they are built by their own targets, not by `make all`.
-VERSIONED := $(TOOLS) build/skj-tinc-x86-64 build/skj-sc-x86-64
+# The skj-pc LP64 host variants are such tools: they are not in $(TOOLS) but
+# build/skj-kpc-rv, -cf, and -arm64 are built from build/skj-pc-x86-64, so a
+# bootstrap that starts from a kpcom seed reaches them without `make all` first.
+VERSIONED := $(TOOLS) build/skj-tinc-x86-64 build/skj-sc-x86-64 \
+             build/skj-pc-x86-64 build/skj-pc-arm64
 $(VERSIONED): build/version.h
 
 ## Verify version.mk and the git tag agree before cutting a release.

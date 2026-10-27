@@ -6,6 +6,16 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.24.1
+
+#### Fixed
+- A clean build of the `bootstrap-fpc` path failed with `version.h: No such
+  file or directory`. The `skj-pc` LP64 host variants (`skj-pc-x86-64` and
+  `skj-pc-arm64`) compile a source that includes the generated `version.h` but
+  were not registered as needing it, so a build that reached them without
+  building the main tool set first (as `bootstrap-fpc` does when it generates
+  the RISC-V seed from source) did not generate the header in time.
+
 ### 0.24.0
 
 #### Added
