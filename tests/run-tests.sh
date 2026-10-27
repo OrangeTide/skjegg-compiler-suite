@@ -13,7 +13,10 @@
 
 set -eu
 
-QEMU=${1:-qemu-m68k}
+# An explicitly empty first argument means "run the binary natively" (the target
+# ELF is a host binary); only a missing argument falls back to qemu-m68k.  The
+# run lines below expand an empty $QEMU to nothing, so the binary runs directly.
+QEMU=${1-qemu-m68k}
 HERE=$(dirname "$0")
 ROOT=$(cd "$HERE/.." && pwd)
 BUILDDIR=${2:-build}

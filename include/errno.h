@@ -16,5 +16,15 @@ extern int errno;
 #define EIO     8       /* input/output error */
 #define EACCES  9       /* permission denied */
 #define ENOSPC  10      /* no space left on device */
+#define EEXIST  11      /* file exists */
+#define ENOTDIR 12      /* not a directory */
+#define EISDIR  13      /* is a directory */
+#define ENOTEMPTY 14    /* directory not empty */
+#define ENAMETOOLONG 15 /* path component too long */
+#define EMFILE  16      /* too many open files */
+#define EXDEV   17      /* cross-device link */
+#define EROFS   18      /* read-only file system */
+#define ESPIPE  19      /* illegal seek */
+#define ENODEV  20      /* no such device (no backend for the mount) */
 
 #endif

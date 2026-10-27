@@ -369,6 +369,7 @@ run_coldfire(const run_opts *o, int *status)
     gm_map(&g.mem, stack_base, o->stack_size, GM_R | GM_W, "stack");
     g.stack_top = stack_base + o->stack_size;
     sp = guest_build_stack(&g, o);
+    guest_install_mounts(&g, o->path, o);
 
     /* Vector table: reset SP and PC, then every exception into the magic
      * window so the driver sees it. */

@@ -100,6 +100,43 @@ rt_memcmp(const void *a, const void *b, size_t n)
     return 0;
 }
 
+/* The standard-named string primitives the shared fs/ layer uses (memcmp,
+   strcmp, strlen, strncpy).  The freestanding tier has no libc string.c, so
+   they live here next to memcpy/memset. */
+int
+memcmp(const void *a, const void *b, size_t n)
+{
+    return rt_memcmp(a, b, n);
+}
+
+size_t
+strlen(const char *s)
+{
+    const char *p = s;
+    while (*p)
+        p++;
+    return (size_t)(p - s);
+}
+
+int
+strcmp(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+        a++, b++;
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+char *
+strncpy(char *dst, const char *src, size_t n)
+{
+    size_t i = 0;
+    for (; i < n && src[i]; i++)
+        dst[i] = src[i];
+    for (; i < n; i++)
+        dst[i] = 0;
+    return dst;
+}
+
 /****************************************************************
  * Traps
  *
@@ -208,6 +245,28 @@ uint32_t
 kp_gheap_live(void)
 {
     return gh_live();
+}
+
+/* Standard malloc/free/realloc over the same native heap (gh_*), for shared
+   code that expects them (the fs/ ramfs backend's file bytes).  free(NULL) and
+   realloc(NULL, n) follow the C contract. */
+void *
+malloc(size_t n)
+{
+    return gh_alloc((uint32_t)n);
+}
+
+void
+free(void *p)
+{
+    if (p)
+        gh_free(p);
+}
+
+void *
+realloc(void *p, size_t n)
+{
+    return p ? gh_realloc(p, (uint32_t)n) : gh_alloc((uint32_t)n);
 }
 
 /****************************************************************

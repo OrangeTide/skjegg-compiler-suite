@@ -3328,6 +3328,18 @@ lower_expr(struct cc_node *n)
         } else {
             is_indirect = 1;
             fptr = lower_expr(n->a);
+            /* The callee is any other expression (a struct/union member
+               function pointer b->f, an array element fps[i], *pp, a cast).
+               Recover its type so the call's return width is known; without
+               this callee_type stays NULL and the result defaults to 32-bit
+               int, silently narrowing an i64/float/struct return (a member
+               function pointer returning long long came back as its high
+               word alone).  lvalue_type types the member/index/deref/cast
+               callees and falls back to int for anything it cannot, matching
+               the prior behavior. */
+            callee_type = lvalue_type(n->a);
+            if (callee_type && callee_type->kind == TY_PTR)
+                callee_type = callee_type->base;
         }
         int args[32];
         int arg_kind[32];       /* 0 int, 1 float, 2 i64, 3 MEMORY struct,

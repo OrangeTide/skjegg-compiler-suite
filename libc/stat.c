@@ -64,6 +64,61 @@ from_statx(const struct statx *sx, struct stat *buf)
     buf->st_ctime   = sx->stx_ctime_sec;
 }
 
+#ifdef SKJ_FS_INTERPOSE
+
+/* fs/ interposition: stat by path and fstat by an fs fd resolve through the
+   mount table.  A console fd (0/1/2) is not fs-managed, so fstat on one still
+   uses the raw statx seam. */
+#include "fs.h"
+
+static void
+from_fs_stat(const struct fs_stat *fs, struct stat *buf)
+{
+    buf->st_dev   = fs->dev;
+    buf->st_ino   = fs->ino;
+    buf->st_mode  = fs->mode;
+    buf->st_nlink = fs->nlink;
+    buf->st_size  = fs->size;
+    buf->st_uid = buf->st_gid = 0;
+    buf->st_rdev = 0;
+    buf->st_blksize = 512;
+    buf->st_blocks = (fs->size + 511) / 512;
+    buf->st_atime = buf->st_mtime = buf->st_ctime = 0;
+}
+
+int
+fstat(int fd, struct stat *buf)
+{
+    struct fs_stat fs;
+    int r;
+    if (fd < FS_FD_BASE) {
+        struct statx sx;
+        r = statx(fd, "", AT_EMPTY_PATH, STATX_BASIC_STATS, &sx);
+        if (r < 0)
+            return r;
+        from_statx(&sx, buf);
+        return 0;
+    }
+    r = fs_fstat(fd, &fs);
+    if (r < 0)
+        return r;
+    from_fs_stat(&fs, buf);
+    return 0;
+}
+
+int
+stat(const char *path, struct stat *buf)
+{
+    struct fs_stat fs;
+    int r = fs_stat(path, &fs);
+    if (r < 0)
+        return r;
+    from_fs_stat(&fs, buf);
+    return 0;
+}
+
+#else
+
 int
 fstat(int fd, struct stat *buf)
 {
@@ -87,3 +142,5 @@ stat(const char *path, struct stat *buf)
     from_statx(&sx, buf);
     return 0;
 }
+
+#endif /* SKJ_FS_INTERPOSE */

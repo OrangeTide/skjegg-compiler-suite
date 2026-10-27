@@ -14,11 +14,22 @@
    VM_ERR_* read back through sys_errno), which this freestanding seam never
    touches: it issues only the raw Linux calls. */
 
-	.globl write
-	.globl read
-	.globl open
-	.globl close
-	.globl lseek
+	/* The five fd primitives are weak so the C libc's fs/ layer (libc/fdio.c)
+	   can override them with path-resolving versions; a consumer that links no
+	   fdio.c (the Kobold runtime, a bare crt) keeps these raw wrappers.  Their
+	   __sys_* aliases are the raw entry points the fs/ backends call so they
+	   reach the kernel without recursing through an override. */
+	.weak  write
+	.weak  read
+	.weak  open
+	.weak  close
+	.weak  lseek
+	.globl __sys_write
+	.globl __sys_read
+	.globl __sys_open
+	.globl __sys_close
+	.globl __sys_lseek
+	.globl openat
 	.globl getdents64
 	.globl statx
 	.globl mkdirat
@@ -35,25 +46,33 @@
 
 /* int write(int fd, const char *buf, int n); */
 	.type	write,@function
+	.type	__sys_write,@function
 write:
+__sys_write:
 	li	a7, 64
 	ecall
 	ret
 	.size	write,.-write
+	.size	__sys_write,.-__sys_write
 
 /* int read(int fd, char *buf, int n); */
 	.type	read,@function
+	.type	__sys_read,@function
 read:
+__sys_read:
 	li	a7, 63
 	ecall
 	ret
 	.size	read,.-read
+	.size	__sys_read,.-__sys_read
 
 /* int open(const char *path, int flags, int mode);
    rv32 Linux has no bare open, so this is openat(AT_FDCWD, path, flags, mode)
    with the arguments shifted up one register. */
 	.type	open,@function
+	.type	__sys_open,@function
 open:
+__sys_open:
 	mv	a3, a2			/* mode */
 	mv	a2, a1			/* flags */
 	mv	a1, a0			/* path */
@@ -62,14 +81,30 @@ open:
 	ecall
 	ret
 	.size	open,.-open
+	.size	__sys_open,.-__sys_open
+
+/* int openat(int dirfd, const char *path, int flags, int mode);
+   The confined hostcap backend (fs/hostcap.c) issues this against a mount
+   capability fd, so the raw dirfd matters; it is not interposed (no weak
+   alias).  Args already in a0..a3 on the ILP32 psABI. */
+	.globl	openat
+	.type	openat,@function
+openat:
+	li	a7, 56			/* openat */
+	ecall
+	ret
+	.size	openat,.-openat
 
 /* int close(int fd); */
 	.type	close,@function
+	.type	__sys_close,@function
 close:
+__sys_close:
 	li	a7, 57
 	ecall
 	ret
 	.size	close,.-close
+	.size	__sys_close,.-__sys_close
 
 /* long lseek(int fd, long offset, int whence);
    rv32 Linux has no simple lseek; syscall 62 is _llseek(fd, off_hi, off_lo,
@@ -80,7 +115,9 @@ close:
    a0 to a negative Linux errno; return it unchanged, so the raw seam keeps the
    negative-errno convention the other wrappers pass through. */
 	.type	lseek,@function
+	.type	__sys_lseek,@function
 lseek:
+__sys_lseek:
 	addi	sp, sp, -16
 	mv	t0, a1			/* t0 = offset */
 	mv	a4, a2			/* a4 = whence */
@@ -94,6 +131,7 @@ lseek:
 1:	addi	sp, sp, 16
 	ret
 	.size	lseek,.-lseek
+	.size	__sys_lseek,.-__sys_lseek
 
 /* int getdents64(int fd, void *buf, int count); reads directory entries into
    buf as a packed sequence of struct linux_dirent64.  Shared with the Kobold

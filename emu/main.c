@@ -195,6 +195,14 @@ main(int argc, char **argv)
             o.child_max_insns = parse_size(argv[++i]);
             continue;
         }
+        if (strcmp(a, "--mount") == 0 && i + 1 < argc) {
+            if (o.nmounts >= RUN_MAX_MOUNTS) {
+                fprintf(stderr, "skj-run: too many --mount options\n");
+                return 2;
+            }
+            o.mounts[o.nmounts++] = argv[++i];
+            continue;
+        }
         fprintf(stderr, "skj-run: unknown option '%s'\n", a);
         usage(stderr);
         return 2;

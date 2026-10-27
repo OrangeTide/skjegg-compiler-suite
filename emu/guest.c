@@ -1,9 +1,20 @@
 /* guest.c : sparse guest memory, the syscall layer, and the initial stack */
 
-#define _POSIX_C_SOURCE 200809L         /* openat (and AT_FDCWD via fcntl.h) */
-#define _DEFAULT_SOURCE                 /* syscall() for SYS_getdents64 */
+/* This file is the host-agnostic guest syscall layer: it carries no host-OS
+ * #ifdefs.  Every facility that differs by host (confined opens, directory
+ * enumeration, the clock, random bytes) is reached through hostplat.h, whose
+ * one implementation per OS lives in hostplat.c. */
+#if defined(__APPLE__)
+# define _DARWIN_C_SOURCE               /* the *at family, fdopendir, ...        */
+#else
+# define _POSIX_C_SOURCE 200809L        /* openat / fstatat / renameat, AT_FDCWD  */
+# define _DEFAULT_SOURCE
+#endif
 
 #include "guest.h"
+#include "elf32.h"
+#include "fs.h"             /* the guest fs/ mount-table layout the launcher fills */
+#include "hostplat.h"       /* the host facilities that service the guest ABI     */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,9 +22,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
-#include <time.h>
 #include <sched.h>
+#include <errno.h>
 
 /****************************************************************
  * Sparse memory
@@ -412,12 +422,178 @@ copy_from_guest(guest *g, uint32_t addr, void *dst, uint32_t len)
     return 1;
 }
 
+/* ---- the sandbox fd table (see guest.h) --------------------------------
+ *
+ * A guest fd is an opaque index into g->fdtab; the host fd lives only in the
+ * entry, so the guest can never name a host fd it was not granted.  0/1/2 are
+ * pre-opened as the console; open/openat allocate a fresh index for the host
+ * fd; close frees the index (and closes the real file, but not the console).
+ */
+#define GUEST_AT_FDCWD (-100)           /* same value on guest and host */
+
+static void
+gfd_init(guest *g)
+{
+    int i;
+    if (g->fds_inited)
+        return;
+    for (i = 0; i < 3; i++) {           /* stdin/stdout/stderr -> console */
+        g->fdtab[i].used = 1;
+        g->fdtab[i].dev = GDEV_CONSOLE;
+        g->fdtab[i].host_fd = i;
+    }
+    g->fds_inited = 1;
+}
+
+/* A guest fd -> its host fd, or -1 if the index is not an open entry. */
+static int
+gfd_host(guest *g, uint32_t gfd)
+{
+    if (gfd >= GUEST_MAX_FDS || !g->fdtab[gfd].used)
+        return -1;
+    return g->fdtab[gfd].host_fd;
+}
+
+/* A guest fd -> its table entry, or NULL if the index is not open.  getdents64
+ * caches a directory stream (hp_dir) on the entry. */
+static struct gfd *
+gfd_entry(guest *g, uint32_t gfd)
+{
+    if (gfd >= GUEST_MAX_FDS || !g->fdtab[gfd].used)
+        return 0;
+    return &g->fdtab[gfd];
+}
+
+/* A guest dirfd -> host dirfd via *out.  AT_FDCWD passes straight through (it
+ * names no table entry).  Returns 0, or -1 on a bad index. */
+static int
+gfd_dir(guest *g, uint32_t dirfd, int *out)
+{
+    if ((int32_t)dirfd == GUEST_AT_FDCWD) {
+        *out = GUEST_AT_FDCWD;
+        return 0;
+    }
+    *out = gfd_host(g, dirfd);
+    return *out < 0 ? -1 : 0;
+}
+
+/* Record an opened host fd, returning the guest index (-1 if the table full). */
+static int
+gfd_alloc(guest *g, int dev, int host_fd)
+{
+    int i;
+    for (i = 3; i < GUEST_MAX_FDS; i++)
+        if (!g->fdtab[i].used) {
+            g->fdtab[i].used = 1;
+            g->fdtab[i].dev = dev;
+            g->fdtab[i].host_fd = host_fd;
+            g->fdtab[i].dirp = 0;       /* a directory stream is opened lazily */
+            return i;
+        }
+    return -1;
+}
+
+static int32_t
+gfd_close(guest *g, uint32_t gfd)
+{
+    int hf;
+    if (gfd >= GUEST_MAX_FDS || !g->fdtab[gfd].used)
+        return -GUEST_EBADF;
+    hf = g->fdtab[gfd].host_fd;
+    if (g->fdtab[gfd].dirp) {           /* a getdents64 stream owns its own dup fd */
+        hp_dirclose((hp_dir *)g->fdtab[gfd].dirp);
+        g->fdtab[gfd].dirp = 0;
+    }
+    g->fdtab[gfd].used = 0;
+    if (gfd >= 3)                       /* keep 0/1/2's host fds open */
+        close(hf);
+    return 0;
+}
+
+/* The launcher: turn each --mount grant into a hostfs capability fd and write
+ * the fs/ mount table into guest memory.  The guest never mounts; it reads this
+ * pre-populated table.  A guest that links no fs_mounts symbol just runs with no
+ * mounts (a warning if --mount was nonetheless given). */
+void
+guest_install_mounts(guest *g, const char *elf_path, const run_opts *o)
+{
+    uint32_t tbl, cnt_sym, cur_sym;
+    int i, installed = 0;
+
+    if (o->nmounts == 0)
+        return;
+
+    gfd_init(g);                        /* reserve 0/1/2 before any grant fd */
+
+    tbl = elf32_symbol(elf_path, "fs_mounts");
+    cnt_sym = elf32_symbol(elf_path, "fs_mount_count");
+    cur_sym = elf32_symbol(elf_path, "fs_cur_mount");
+    if (!tbl || !cnt_sym) {
+        fprintf(stderr, "skj-run: --mount given but %s links no fs_mounts "
+                "table; ignoring %d mount(s)\n", elf_path, o->nmounts);
+        return;
+    }
+
+    for (i = 0; i < o->nmounts && installed < FS_MAX_MOUNTS; i++) {
+        const char *spec = o->mounts[i];
+        const char *colon = strchr(spec, ':');
+        const char *dir;
+        int hostfd, idx, nl, k;
+        uint32_t ent;
+
+        if (!colon) {
+            fprintf(stderr, "skj-run: bad --mount '%s' (want name:hostdir)\n",
+                    spec);
+            continue;
+        }
+        nl = (int)(colon - spec);
+        if (nl <= 0 || nl > FS_NAME_MAX) {
+            fprintf(stderr, "skj-run: mount name in '%s' must be 1..%d bytes\n",
+                    spec, FS_NAME_MAX);
+            continue;
+        }
+        dir = colon + 1;
+        hostfd = open(dir, O_RDONLY | O_DIRECTORY);
+        if (hostfd < 0) {
+            fprintf(stderr, "skj-run: cannot mount '%s': %s\n", dir,
+                    strerror(errno));
+            continue;
+        }
+        idx = gfd_alloc(g, GDEV_HOSTFS, hostfd);
+        if (idx < 0) {
+            fprintf(stderr, "skj-run: fd table full mounting '%s'\n", dir);
+            close(hostfd);
+            continue;
+        }
+
+        /* struct fs_mount { char name[8]; int16 fd; int16 cwd; u32 flags } */
+        ent = tbl + (uint32_t)installed * 16u;
+        for (k = 0; k < FS_NAME_MAX; k++)
+            gm_store(&g->mem, ent + (uint32_t)k, 1, 0,
+                     (uint32_t)(k < nl ? (unsigned char)spec[k] : 0));
+        gm_store(&g->mem, ent + 8, 2, g->big_endian, (uint32_t)(uint16_t)idx);
+        gm_store(&g->mem, ent + 10, 2, g->big_endian, 0xffffu); /* cwd = root */
+        gm_store(&g->mem, ent + 12, 4, g->big_endian, (uint32_t)FS_KIND_HOST);
+        installed++;
+    }
+
+    gm_store(&g->mem, cnt_sym, 4, g->big_endian, (uint32_t)installed);
+    if (cur_sym)
+        gm_store(&g->mem, cur_sym, 4, g->big_endian, 0);   /* default mount 0 */
+    if (g->mem.fault)
+        fprintf(stderr, "skj-run: fault writing the mount table into %s\n",
+                elf_path);
+}
+
 static int32_t
 sys_write(guest *g, uint32_t fd, uint32_t buf, uint32_t len)
 {
     uint8_t tmp[4096];
     uint32_t done = 0;
+    int hf = gfd_host(g, fd);
 
+    if (hf < 0)
+        return -GUEST_EBADF;
     while (done < len) {
         uint32_t chunk = len - done;
         ssize_t n;
@@ -430,7 +606,7 @@ sys_write(guest *g, uint32_t fd, uint32_t buf, uint32_t len)
             done += chunk;
             continue;
         }
-        n = write((int)fd, tmp, chunk);
+        n = write(hf, tmp, chunk);
         if (n <= 0)
             return done ? (int32_t)done : -GUEST_EBADF;
         done += (uint32_t)n;
@@ -443,10 +619,13 @@ sys_read(guest *g, uint32_t fd, uint32_t buf, uint32_t len)
 {
     uint8_t tmp[4096];
     ssize_t n;
+    int hf = gfd_host(g, fd);
 
+    if (hf < 0)
+        return -GUEST_EBADF;
     if (len > sizeof(tmp))
         len = sizeof(tmp);
-    n = read((int)fd, tmp, len);
+    n = read(hf, tmp, len);
     if (n < 0)
         return -GUEST_EBADF;
     gm_write(&g->mem, buf, tmp, (uint32_t)n);
@@ -493,28 +672,42 @@ sys_open(guest *g, uint32_t pathp, uint32_t flags, uint32_t mode)
     fd = open(path, (int)flags, mode);
     if (fd < 0)
         return -GUEST_ENOENT;
-    return (int32_t)fd;
+    e = gfd_alloc(g, GDEV_HOSTFS, fd);
+    if (e < 0) {
+        close(fd);
+        return -GUEST_EBADF;            /* table full */
+    }
+    return e;
 }
 
 /* openat(dirfd, path, flags, mode): the form rv32 (and any asm-generic Linux
- * target) uses, since it has no bare open.  dirfd is passed through to the host
- * openat, so AT_FDCWD (-100, the same value on the guest) and a real directory
- * fd the guest opened both work.  The flags and mode are the asm-generic Linux
- * values, which match the host's. */
+ * target) uses, since it has no bare open.  A capability dirfd resolves through
+ * hp_open_beneath, confined to the granted tree; AT_FDCWD (-100, the same value
+ * on the guest) stays the unconfined ambient path.  The flags and mode are the
+ * asm-generic Linux values, which match the host's. */
 static int32_t
 sys_openat(guest *g, uint32_t dirfd, uint32_t pathp, uint32_t flags,
            uint32_t mode)
 {
     char path[1024];
     int32_t e;
-    int fd;
+    int fd, hd;
 
     if ((e = copy_path(g, pathp, path, sizeof(path))) != 0)
         return e;
-    fd = openat((int)dirfd, path, (int)flags, mode);
+    if (gfd_dir(g, dirfd, &hd) < 0)
+        return -GUEST_EBADF;
+    fd = (hd == GUEST_AT_FDCWD)         /* ambient: unconfined, as before */
+             ? openat(hd, path, (int)flags, (mode_t)mode)
+             : hp_open_beneath(hd, path, (int)flags, (int)mode);  /* confined */
     if (fd < 0)
         return -GUEST_ENOENT;
-    return (int32_t)fd;
+    e = gfd_alloc(g, GDEV_HOSTFS, fd);
+    if (e < 0) {
+        close(fd);
+        return -GUEST_EBADF;
+    }
+    return e;
 }
 
 /* lseek(fd, offset, whence): a 32-bit offset for the ILP32 guests, sign
@@ -524,9 +717,11 @@ static int32_t
 sys_lseek(guest *g, uint32_t fd, uint32_t offset, uint32_t whence)
 {
     off_t r;
+    int hf = gfd_host(g, fd);
 
-    (void)g;
-    r = lseek((int)fd, (off_t)(int32_t)offset, (int)whence);
+    if (hf < 0)
+        return -GUEST_EBADF;
+    r = lseek(hf, (off_t)(int32_t)offset, (int)whence);
     if (r < 0)
         return -GUEST_EBADF;
     return (int32_t)r;
@@ -541,8 +736,12 @@ sys_llseek(guest *g, uint32_t fd, uint32_t off_hi, uint32_t off_lo,
            uint32_t resultp, uint32_t whence)
 {
     int64_t off = (int64_t)(((uint64_t)off_hi << 32) | off_lo);
-    off_t r = lseek((int)fd, (off_t)off, (int)whence);
+    int hf = gfd_host(g, fd);
+    off_t r;
 
+    if (hf < 0)
+        return -GUEST_EBADF;
+    r = lseek(hf, (off_t)off, (int)whence);
     if (r < 0)
         return -GUEST_EBADF;
     /* write the 8-byte loff_t result, little-endian, to the guest */
@@ -578,12 +777,22 @@ sys_statx(guest *g, uint32_t dirfd, uint32_t pathp, uint32_t flags,
 
     (void)mask;
     if (flags & 0x1000u) {                      /* AT_EMPTY_PATH: fstat the fd */
-        r = fstat((int)(int32_t)dirfd, &hs);
+        int hf = gfd_host(g, dirfd);
+        if (hf < 0)
+            return -GUEST_EBADF;
+        r = fstat(hf, &hs);
     } else {
+        int hd;
         int32_t e = copy_path(g, pathp, path, sizeof(path));
         if (e != 0)
             return e;
-        r = fstatat((int)(int32_t)dirfd, path, &hs, 0);
+        if (gfd_dir(g, dirfd, &hd) < 0)
+            return -GUEST_EBADF;
+        if (hd == GUEST_AT_FDCWD) {
+            r = fstatat(hd, path, &hs, 0);          /* ambient: unconfined */
+        } else {
+            r = hp_stat_beneath(hd, path, &hs);     /* confined to the grant */
+        }
     }
     if (r < 0)
         return -GUEST_ENOENT;
@@ -616,11 +825,23 @@ sys_mkdirat(guest *g, uint32_t dirfd, uint32_t pathp, uint32_t mode)
 {
     char path[1024];
     int32_t e;
+    int hd;
 
     if ((e = copy_path(g, pathp, path, sizeof(path))) != 0)
         return e;
-    return mkdirat((int)(int32_t)dirfd, path, (mode_t)mode) == 0
-               ? 0 : -GUEST_ENOENT;
+    if (gfd_dir(g, dirfd, &hd) < 0)
+        return -GUEST_EBADF;
+    if (hd == GUEST_AT_FDCWD)
+        return mkdirat(hd, path, (mode_t)mode) == 0 ? 0 : -GUEST_ENOENT;
+    {
+        const char *base;
+        int pf = hp_parent_beneath(hd, path, &base), rc;
+        if (pf < 0)
+            return -GUEST_ENOENT;
+        rc = mkdirat(pf, base, (mode_t)mode);
+        close(pf);
+        return rc == 0 ? 0 : -GUEST_ENOENT;
+    }
 }
 
 static int32_t
@@ -628,11 +849,23 @@ sys_unlinkat(guest *g, uint32_t dirfd, uint32_t pathp, uint32_t flags)
 {
     char path[1024];
     int32_t e;
+    int hd;
 
     if ((e = copy_path(g, pathp, path, sizeof(path))) != 0)
         return e;
-    return unlinkat((int)(int32_t)dirfd, path, (int)flags) == 0
-               ? 0 : -GUEST_ENOENT;
+    if (gfd_dir(g, dirfd, &hd) < 0)
+        return -GUEST_EBADF;
+    if (hd == GUEST_AT_FDCWD)
+        return unlinkat(hd, path, (int)flags) == 0 ? 0 : -GUEST_ENOENT;
+    {
+        const char *base;
+        int pf = hp_parent_beneath(hd, path, &base), rc;
+        if (pf < 0)
+            return -GUEST_ENOENT;
+        rc = unlinkat(pf, base, (int)flags);
+        close(pf);
+        return rc == 0 ? 0 : -GUEST_ENOENT;
+    }
 }
 
 /* fchmodat(dirfd, path, mode, flags): the guest libc's chmod backs on this, so
@@ -643,11 +876,24 @@ sys_fchmodat(guest *g, uint32_t dirfd, uint32_t pathp, uint32_t mode,
 {
     char path[1024];
     int32_t e;
+    int hd;
 
     if ((e = copy_path(g, pathp, path, sizeof(path))) != 0)
         return e;
-    return fchmodat((int)(int32_t)dirfd, path, (mode_t)mode, (int)flags) == 0
-               ? 0 : -GUEST_ENOENT;
+    if (gfd_dir(g, dirfd, &hd) < 0)
+        return -GUEST_EBADF;
+    if (hd == GUEST_AT_FDCWD)
+        return fchmodat(hd, path, (mode_t)mode, (int)flags) == 0
+                   ? 0 : -GUEST_ENOENT;
+    {
+        const char *base;
+        int pf = hp_parent_beneath(hd, path, &base), rc;
+        if (pf < 0)
+            return -GUEST_ENOENT;
+        rc = fchmodat(pf, base, (mode_t)mode, (int)flags);
+        close(pf);
+        return rc == 0 ? 0 : -GUEST_ENOENT;
+    }
 }
 
 /* renameat2(olddirfd, oldpath, newdirfd, newpath, flags): the guest libc always
@@ -659,6 +905,7 @@ sys_renameat2(guest *g, uint32_t od, uint32_t oldp, uint32_t nd,
 {
     char oldpath[1024], newpath[1024];
     int32_t e;
+    int ho, hn;
 
     if (flags != 0)
         return -GUEST_EINVAL;
@@ -666,8 +913,30 @@ sys_renameat2(guest *g, uint32_t od, uint32_t oldp, uint32_t nd,
         return e;
     if ((e = copy_path(g, newp, newpath, sizeof(newpath))) != 0)
         return e;
-    return renameat((int)(int32_t)od, oldpath, (int)(int32_t)nd, newpath) == 0
-               ? 0 : -GUEST_ENOENT;
+    if (gfd_dir(g, od, &ho) < 0 || gfd_dir(g, nd, &hn) < 0)
+        return -GUEST_EBADF;
+    if (ho == GUEST_AT_FDCWD && hn == GUEST_AT_FDCWD)
+        return renameat(ho, oldpath, hn, newpath) == 0 ? 0 : -GUEST_ENOENT;
+    if (ho == GUEST_AT_FDCWD || hn == GUEST_AT_FDCWD)
+        return -GUEST_EINVAL;           /* no rename across ambient and a capability */
+    {
+        /* Confine both ends beneath their capabilities, then rename within the
+         * resolved parents.  fs/ only ever renames inside one mount, so both
+         * capabilities are the same granted tree. */
+        const char *ob, *nb;
+        int opf = hp_parent_beneath(ho, oldpath, &ob), npf, rc;
+        if (opf < 0)
+            return -GUEST_ENOENT;
+        npf = hp_parent_beneath(hn, newpath, &nb);
+        if (npf < 0) {
+            close(opf);
+            return -GUEST_ENOENT;
+        }
+        rc = renameat(opf, ob, npf, nb);
+        close(opf);
+        close(npf);
+        return rc == 0 ? 0 : -GUEST_ENOENT;
+    }
 }
 
 /* Store a 64-bit value to guest memory honoring the guest's byte order: the low
@@ -683,46 +952,75 @@ store64(guest *g, uint32_t addr, uint64_t v)
     gm_store(&g->mem, addr + (be ? 0 : 4), 4, be, (uint32_t)(v >> 32));
 }
 
-/* getdents64(fd, dirp, count): read directory entries into the guest buffer.
- * The host is asked (via the raw syscall) for entries into a local buffer, then
- * each struct linux_dirent64 is re-emitted into guest memory field by field so
- * the multi-byte fields take the guest's byte order; the name bytes copy raw.
- * The kernel computes d_reclen as round_up(19 + namelen + 1, 8) with the same
- * 19-byte head on every arch, so the guest layout matches the host one byte for
- * byte and the total equals the host's return.  Returns bytes written, 0 at end
- * of directory, -errno on error. */
+/* Emit one directory entry into the guest buffer as a struct linux_dirent64:
+ * ino and off as 64-bit guest-ordered words, d_reclen = round_up(19 + namelen +
+ * 1, 8) as a guest halfword, d_type as a byte, then the NUL-terminated name with
+ * the record padded out with zeroes.  Returns the record length.  The 19-byte
+ * head is the same on every guest arch, so the layout matches what the guest's
+ * linux_dirent64 reader (libc dirent.c, the fs/ backends) expects. */
+static uint16_t
+emit_dirent64(guest *g, uint32_t dirp, uint32_t gpos, uint64_t ino, uint64_t off,
+              uint8_t type, const char *name, int namelen)
+{
+    uint16_t reclen = (uint16_t)((19 + namelen + 1 + 7) & ~7);
+    int pad = reclen - 19 - namelen;    /* NUL + alignment padding */
+
+    store64(g, dirp + gpos + 0, ino);
+    store64(g, dirp + gpos + 8, off);
+    gm_store(&g->mem, dirp + gpos + 16, 2, g->big_endian, reclen);
+    gm_store(&g->mem, dirp + gpos + 18, 1, 0, type);
+    gm_write(&g->mem, dirp + gpos + 19, name, (uint32_t)namelen);
+    gm_zero(&g->mem, dirp + gpos + 19 + (uint32_t)namelen, (uint32_t)pad);
+    return reclen;
+}
+
+/* getdents64(fd, dirp, count): read directory entries into the guest buffer as a
+ * packed run of struct linux_dirent64 (0 at end of directory, -errno on error).
+ *
+ * The directory is read through hp_dir, a host directory stream cached on the fd
+ * table (opened on the first call, kept across calls).  hp_dirnext yields one
+ * entry at a time and hp_dirtell/hp_dirseek rewind the stream when the next entry
+ * will not fit, so the guest resumes there on its next call. */
 static int32_t
 sys_getdents64(guest *g, uint32_t fd, uint32_t dirp, uint32_t count)
 {
-    char hbuf[4096];
-    long n;
-    int hoff;
+    struct gfd *ent = gfd_entry(g, fd);
     uint32_t gpos = 0;
-    uint32_t want = count < sizeof(hbuf) ? count : (uint32_t)sizeof(hbuf);
+    hp_dir *d;
 
-    n = syscall(SYS_getdents64, (int)fd, hbuf, (size_t)want);
-    if (n < 0)
-        return -GUEST_ENOENT;
-    for (hoff = 0; hoff + 19 <= (int)n; ) {
-        /* host entry fields at their fixed offsets (host native order) */
-        uint64_t ino, off;
+    if (!ent)
+        return -GUEST_EBADF;
+    d = (hp_dir *)ent->dirp;
+    if (!d) {                           /* open the stream on the first call */
+        d = hp_diropen(ent->host_fd);
+        if (!d)
+            return -GUEST_ENOENT;
+        ent->dirp = d;
+    }
+    for (;;) {
+        long cookie = hp_dirtell(d);
+        uint64_t ino;
+        unsigned type;
+        const char *name;
+        int namelen, r;
         uint16_t reclen;
-        uint8_t  type;
-        int namebytes;
-        memcpy(&ino, hbuf + hoff + 0, 8);
-        memcpy(&off, hbuf + hoff + 8, 8);
-        memcpy(&reclen, hbuf + hoff + 16, 2);
-        type = (uint8_t)hbuf[hoff + 18];
-        if (reclen < 20 || hoff + reclen > (int)n)
+
+        r = hp_dirnext(d, &ino, &type, &name);
+        if (r < 0)
+            return -GUEST_ENOENT;
+        if (r == 0)
+            break;                      /* end of directory */
+        namelen = (int)strlen(name);
+        reclen = (uint16_t)((19 + namelen + 1 + 7) & ~7);
+        if (gpos + reclen > count) {    /* will not fit: resume here next call */
+            hp_dirseek(d, cookie);
+            if (gpos == 0)              /* not even one entry fits */
+                return -GUEST_EINVAL;
             break;
-        namebytes = reclen - 19;        /* name + NUL + padding */
-        store64(g, dirp + gpos + 0, ino);
-        store64(g, dirp + gpos + 8, off);
-        gm_store(&g->mem, dirp + gpos + 16, 2, g->big_endian, reclen);
-        gm_store(&g->mem, dirp + gpos + 18, 1, 0, type);
-        gm_write(&g->mem, dirp + gpos + 19, hbuf + hoff + 19, (uint32_t)namebytes);
+        }
+        emit_dirent64(g, dirp, gpos, ino, (uint64_t)hp_dirtell(d),
+                      (uint8_t)type, name, namelen);
         gpos += reclen;
-        hoff += reclen;
     }
     if (g->mem.fault)
         return -GUEST_EFAULT;
@@ -749,14 +1047,14 @@ sys_brk(guest *g, uint32_t want)
 static int32_t
 sys_clock_gettime(guest *g, uint32_t clk_id, uint32_t ts_ptr)
 {
-    struct timespec host;
+    uint32_t sec, nsec;
 
     if (ts_ptr == 0)
         return -GUEST_EFAULT;
-    if (clock_gettime(clk_id == 0 ? CLOCK_REALTIME : CLOCK_MONOTONIC, &host) != 0)
+    if (hp_clock(clk_id == 0, &sec, &nsec) != 0)
         return -GUEST_EINVAL;
-    gm_store(&g->mem, ts_ptr + 0, 4, g->big_endian, (uint32_t)host.tv_sec);
-    gm_store(&g->mem, ts_ptr + 4, 4, g->big_endian, (uint32_t)host.tv_nsec);
+    gm_store(&g->mem, ts_ptr + 0, 4, g->big_endian, sec);
+    gm_store(&g->mem, ts_ptr + 4, 4, g->big_endian, nsec);
     return 0;
 }
 
@@ -776,11 +1074,11 @@ sys_getrandom(guest *g, uint32_t buf, uint32_t len, uint32_t flags)
         return -GUEST_EFAULT;
     while (done < len) {
         uint32_t chunk = len - done;
-        long n;
+        int n;
 
         if (chunk > sizeof tmp)
             chunk = sizeof tmp;
-        n = syscall(SYS_getrandom, tmp, (size_t)chunk, 0);
+        n = hp_random(tmp, (int)chunk);
         if (n <= 0)
             return done > 0 ? (int32_t)done : -GUEST_EINVAL;
         gm_write(&g->mem, buf + done, tmp, (uint32_t)n);
@@ -797,7 +1095,6 @@ sys_getrandom(guest *g, uint32_t buf, uint32_t len, uint32_t flags)
 static int32_t
 sys_nanosleep(guest *g, uint32_t req_ptr, uint32_t rem_ptr)
 {
-    struct timespec req;
     uint32_t sec, nsec;
 
     (void)rem_ptr;
@@ -807,10 +1104,7 @@ sys_nanosleep(guest *g, uint32_t req_ptr, uint32_t rem_ptr)
     nsec = gm_load(&g->mem, req_ptr + 4, 4, g->big_endian);
     if (nsec >= 1000000000u)
         return -GUEST_EINVAL;
-    req.tv_sec = (time_t)sec;
-    req.tv_nsec = (long)nsec;
-    while (nanosleep(&req, &req) != 0)
-        ;                               /* resume across a host signal */
+    hp_sleep(sec, nsec);
     return 0;
 }
 
@@ -821,6 +1115,7 @@ guest_syscall(guest *g, int sys, uint32_t a0, uint32_t a1, uint32_t a2,
     (void)a5;
 
     g->syscalls++;
+    gfd_init(g);                        /* pre-open 0/1/2 on first syscall */
 
     switch (sys) {
     case GSYS_WRITE:
@@ -869,10 +1164,7 @@ guest_syscall(guest *g, int sys, uint32_t a0, uint32_t a1, uint32_t a2,
         return sys_openat(g, a0, a1, a2, a3);
 
     case GSYS_CLOSE:
-        /* Keep the standard streams open; close a real file. */
-        if (a0 > 2)
-            return close((int)a0) == 0 ? 0 : -GUEST_EBADF;
-        return 0;
+        return gfd_close(g, a0);
 
     case GSYS_LSEEK:
         return sys_lseek(g, a0, a1, a2);

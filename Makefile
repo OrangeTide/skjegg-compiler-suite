@@ -80,7 +80,11 @@ QEMU_A64 ?= qemu-aarch64
 RVJIT_CC ?= zig cc -target riscv32-linux-musl
 X64_ASM ?= nasm
 X64_LD  ?= ld
-QEMU_X64 ?= qemu-x86_64
+# On an x86-64 Linux host the x86-64 target ELF is a native binary, so the test
+# harness runs it directly and an empty QEMU_X64 means "run natively".  Any other
+# host emulates it with qemu-x86_64.  Override on the command line (for example
+# QEMU_X64=qemu-x86_64) to force the emulator on an x86-64 host.
+QEMU_X64 ?= $(if $(filter Linux-x86_64,$(shell uname -s)-$(shell uname -m)),,qemu-x86_64)
 
 IR_SRC  := ir/ir.c ir/util.c ir/arena.c
 BE_CF   := backend/regalloc_cf.c backend/cf_emit.c
@@ -1243,14 +1247,19 @@ build/kpfree-rv/numfmt.o: libc/numfmt.c libc/fmt.h $(wildcard include/*.h) build
 ## struct stat and stat/mkdir, so this one object is built with the libc include
 ## path on top of the freestanding flags; the stat/fileops wrappers below supply
 ## stat/unlink/rename/mkdir over the crt's statx and *at syscalls.
-build/kpfree-rv/io_free.o: kobold/io_free.c $(KP_HDRS_RV) $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	./build/skj-cc-rv $(KPFREE_RV_SKJFLAGS) -Iinclude -Ilibc -o $(@:.o=.s) kobold/io_free.c
+## The Kobold freestanding file I/O routes through the shared fs/ layer, the
+## same seam the C libc uses (SKJ_FS_INTERPOSE), with the temporary ambient host
+## backend (FS_WITH_AMBIENT).  io_free.c is the Kobold-side shim; stat.c and
+## fileops.c are the shared libc path ops its metadata calls funnel through.
+KPFREE_RV_FS := -DSKJ_FS_INTERPOSE -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -Ifs
+build/kpfree-rv/io_free.o: kobold/io_free.c $(KP_HDRS_RV) $(FS_HDR) $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	./build/skj-cc-rv $(KPFREE_RV_SKJFLAGS) -Iinclude -Ilibc $(KPFREE_RV_FS) -o $(@:.o=.s) kobold/io_free.c
 	./build/skj-as-rv -o $@ $(@:.o=.s)
-build/kpfree-rv/stat.o: libc/stat.c $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	./build/skj-cc-rv -Iinclude -Ilibc -o $(@:.o=.s) libc/stat.c
+build/kpfree-rv/stat.o: libc/stat.c $(FS_HDR) $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	./build/skj-cc-rv -Iinclude -Ilibc $(KPFREE_RV_FS) -o $(@:.o=.s) libc/stat.c
 	./build/skj-as-rv -o $@ $(@:.o=.s)
-build/kpfree-rv/fileops.o: libc/fileops.c $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	./build/skj-cc-rv -Iinclude -Ilibc -o $(@:.o=.s) libc/fileops.c
+build/kpfree-rv/fileops.o: libc/fileops.c $(FS_HDR) $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	./build/skj-cc-rv -Iinclude -Ilibc $(KPFREE_RV_FS) -o $(@:.o=.s) libc/fileops.c
 	./build/skj-as-rv -o $@ $(@:.o=.s)
 ## The brk-bump both runtimes share: rt_free.c's gheap grows through __libc_sbrk
 ## (libc/sbrk.c), the same source libc's malloc uses.  skj-cc-rv defines
@@ -1261,6 +1270,7 @@ build/kpfree-rv/sbrk.o: libc/sbrk.c $(wildcard include/*.h) build/skj-cc-rv buil
 
 KPFREE_RV_ARCHIVE := build/kpfree-rv/rt_free.o build/kpfree-rv/io_free.o build/kpfree-rv/kp_io.o \
                      build/kpfree-rv/io_free_rv.o build/kpfree-rv/sbrk.o \
+                     build/kpfree-rv/fs.o build/kpfree-rv/ramfs.o build/kpfree-rv/ambientfs.o build/kpfree-rv/hostcap.o \
                      build/kpfree-rv/numfmt.o build/kpfree-rv/stat.o build/kpfree-rv/fileops.o \
                      build/kpfree-rv/strtod.o build/kpfree-rv/ctype.o \
                      build/kpfree-rv/str_core.o build/kpfree-rv/dynarr.o \
@@ -1349,14 +1359,31 @@ build/kpfree-cf/numfmt.o: libc/numfmt.c libc/fmt.h $(wildcard include/*.h) build
 	./build/skj-as -o $@ $(@:.o=.s)
 
 ## io_free.c's file-metadata ops need struct stat and stat/mkdir (see the rv rule).
-build/kpfree-cf/io_free.o: kobold/io_free.c $(KP_HDRS_CF) $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	./build/skj-cc $(KPFREE_CF_SKJFLAGS) -Iinclude -Ilibc -o $(@:.o=.s) kobold/io_free.c
+## Kobold freestanding file I/O through the shared fs/ layer (the cf sibling of
+## the rv rules): the Kobold-side io_free.c shim plus the shared stat.c/fileops.c
+## path ops, built with SKJ_FS_INTERPOSE and the temporary ambient host backend.
+KPFREE_CF_FS := -DSKJ_FS_INTERPOSE -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -Ifs
+FS_FREE_CC_CF := ./build/skj-cc -Iinclude -Ilibc -Ifs -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_AMBIENT_DEFAULT
+build/kpfree-cf/io_free.o: kobold/io_free.c $(KP_HDRS_CF) $(FS_HDR) $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	./build/skj-cc $(KPFREE_CF_SKJFLAGS) -Iinclude -Ilibc $(KPFREE_CF_FS) -o $(@:.o=.s) kobold/io_free.c
 	./build/skj-as -o $@ $(@:.o=.s)
-build/kpfree-cf/stat.o: libc/stat.c $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	./build/skj-cc -Iinclude -Ilibc -o $(@:.o=.s) libc/stat.c
+build/kpfree-cf/stat.o: libc/stat.c $(FS_HDR) $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	./build/skj-cc -Iinclude -Ilibc $(KPFREE_CF_FS) -o $(@:.o=.s) libc/stat.c
 	./build/skj-as -o $@ $(@:.o=.s)
-build/kpfree-cf/fileops.o: libc/fileops.c $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	./build/skj-cc -Iinclude -Ilibc -o $(@:.o=.s) libc/fileops.c
+build/kpfree-cf/fileops.o: libc/fileops.c $(FS_HDR) $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	./build/skj-cc -Iinclude -Ilibc $(KPFREE_CF_FS) -o $(@:.o=.s) libc/fileops.c
+	./build/skj-as -o $@ $(@:.o=.s)
+build/kpfree-cf/fs.o: fs/fs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/fs.c
+	./build/skj-as -o $@ $(@:.o=.s)
+build/kpfree-cf/ramfs.o: fs/ramfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/ramfs.c
+	./build/skj-as -o $@ $(@:.o=.s)
+build/kpfree-cf/ambientfs.o: fs/ambientfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/ambientfs.c
+	./build/skj-as -o $@ $(@:.o=.s)
+build/kpfree-cf/hostcap.o: fs/hostcap.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/hostcap.c
 	./build/skj-as -o $@ $(@:.o=.s)
 ## The shared brk-bump (see the rv rule above): rt_free.c's gheap over __libc_sbrk.
 build/kpfree-cf/sbrk.o: libc/sbrk.c $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
@@ -1380,6 +1407,7 @@ build/kpfree-cf/sched_glue.o: runtime/sched_glue.c build/skj-cc build/skj-as Mak
 
 KPFREE_CF_ARCHIVE := build/kpfree-cf/rt_free.o build/kpfree-cf/io_free.o build/kpfree-cf/kp_io.o \
                      build/kpfree-cf/io_free_cf.o build/kpfree-cf/sbrk.o \
+                     build/kpfree-cf/fs.o build/kpfree-cf/ramfs.o build/kpfree-cf/ambientfs.o build/kpfree-cf/hostcap.o \
                      build/kpfree-cf/numfmt.o build/kpfree-cf/stat.o build/kpfree-cf/fileops.o \
                      build/kpfree-cf/strtod.o build/kpfree-cf/ctype.o \
                      build/kpfree-cf/str_core.o build/kpfree-cf/dynarr.o \
@@ -1514,9 +1542,9 @@ build/skj-cc-mips-sf: $(CC_SRC_MIPS) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | 
 EMU_COLDFIRE ?= 1
 EMU_RV32     ?= 1
 
-EMU_SRC   := emu/main.c emu/guest.c emu/elf32.c
-EMU_HDR   := emu/guest.h emu/elf32.h
-EMU_FLAGS := -DEMU_COLDFIRE=$(EMU_COLDFIRE) -DEMU_RV32=$(EMU_RV32)
+EMU_SRC   := emu/main.c emu/guest.c emu/hostplat.c emu/elf32.c
+EMU_HDR   := emu/guest.h emu/hostplat.h emu/elf32.h fs/fs.h
+EMU_FLAGS := -DEMU_COLDFIRE=$(EMU_COLDFIRE) -DEMU_RV32=$(EMU_RV32) -Ifs
 ifeq ($(EMU_COLDFIRE),1)
 EMU_SRC += emu/coldfire.c emu/cf_user.c
 EMU_HDR += emu/coldfire.h
@@ -1541,6 +1569,26 @@ endif
 
 build/skj-run: $(EMU_SRC) $(EMU_HDR) dwarf/dwread.h build/version.h | build
 	$(CC) $(CFLAGS) $(EMU_FLAGS) -Iemu -o $@ $(EMU_SRC) -lm
+
+## macOS (and other non-Linux hosts): skj-run is portable C.  The host-varying
+## facilities (confined opens, directory enumeration, clock, sleep, random) sit
+## behind emu/hostplat.c, the one file that branches on the host OS, so the
+## emulator builds with the stock host compiler (clang on macOS) and needs no
+## cross toolchain or qemu.  `make macos` builds just the emulator, the tool the
+## non-Linux port targets; the rest of the host toolchain (the compilers,
+## assembler, linker) is host-native too and builds the same way with `make all`.
+## The one path this exercises that is still UNTESTED on a real Darwin machine is
+## the cap_walk confined open (see TODO.md); everything else is shared POSIX.
+.PHONY: macos
+macos: build/skj-run
+	@echo "built build/skj-run for $$(uname -s)"
+
+## CI coverage for the portable confinement path: the same emulator with
+## -DHP_FORCE_POSIX, which selects the cap_walk component walk in place of the
+## Linux openat2 accelerator.  On Linux openat2 would otherwise hide cap_walk, so
+## this is how CI compiles and exercises the path every non-Linux host relies on.
+build/skj-run-posix: $(EMU_SRC) $(EMU_HDR) dwarf/dwread.h build/version.h | build
+	$(CC) $(CFLAGS) $(EMU_FLAGS) -DHP_FORCE_POSIX -Iemu -o $@ $(EMU_SRC) -lm
 
 ## ColdFire assembler
 AS_SRC := as/main.c as/asm_lex.c as/asm_obj.c as/parse.c as/encode.c as/elf.c \
@@ -1913,6 +1961,45 @@ build/test_jit_arena: tests/jit_arena.c jit/jit_arena.c jit/jit_arena.h ir/targe
 
 test-jit-arena: build/test_jit_arena
 	@./build/test_jit_arena
+
+## The shared fs/ mount-table + namespace layer (host-only, no qemu): path
+## resolution, DOS current-mount + per-mount-cwd state, the ramfs and hostfs
+## backends, and hostfs confinement.  Driven directly from C.
+FS_SRC := fs/fs.c fs/ramfs.c fs/hostfs.c
+FS_HDR := fs/fs.h fs/fs_internal.h fs/ramfs.h fs/hostfs.h fs/ambientfs.h fs/hostcap.h
+
+build/test_fs: tests/fs_test.c $(FS_SRC) $(FS_HDR) | build
+	$(CC) $(CFLAGS) -DFS_WITH_HOSTFS -Ifs -o $@ tests/fs_test.c $(FS_SRC)
+
+test-fs: build/test_fs
+	@./build/test_fs
+
+## The freestanding (guest) build of the fs/ layer: fs.c + ramfs.c + ambientfs.c.
+## hostfs is the hosted/dev backend (host libc DIR*/fstatat); the guest's host
+## backend is ambientfs, the temporary AT_FDCWD passthrough compiled with the
+## cross toolchain against the guest libc headers (FS_WITH_AMBIENT selects it for
+## a FS_RAWPATH host mount).  A real host tree is reached through hostcap, the
+## confined backend over a launcher-granted capability fd (FS_WITH_HOSTCAP, the
+## default for a host mount).  The default landing spot is now the scratch ramfs;
+## FS_AMBIENT_DEFAULT is the documented temporary override that lands a no-mount
+## guest on the ambient host instead, kept while the freestanding test harnesses
+## still open host files by bare path under qemu.
+FS_FREE_CC := ./build/skj-cc-rv -Iinclude -Ilibc -Ifs -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_AMBIENT_DEFAULT
+build/kpfree-rv/fs.o: fs/fs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	$(FS_FREE_CC) -o $(@:.o=.s) fs/fs.c
+	./build/skj-as-rv -o $@ $(@:.o=.s)
+build/kpfree-rv/ramfs.o: fs/ramfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	$(FS_FREE_CC) -o $(@:.o=.s) fs/ramfs.c
+	./build/skj-as-rv -o $@ $(@:.o=.s)
+build/kpfree-rv/ambientfs.o: fs/ambientfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	$(FS_FREE_CC) -o $(@:.o=.s) fs/ambientfs.c
+	./build/skj-as-rv -o $@ $(@:.o=.s)
+build/kpfree-rv/hostcap.o: fs/hostcap.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	$(FS_FREE_CC) -o $(@:.o=.s) fs/hostcap.c
+	./build/skj-as-rv -o $@ $(@:.o=.s)
+
+check-fs-free: build/kpfree-rv/fs.o build/kpfree-rv/ramfs.o build/kpfree-rv/ambientfs.o build/kpfree-rv/hostcap.o
+	@echo "PASS: fs/ (fs.c + ramfs.c + ambientfs.c + hostcap.c) builds freestanding for rv32"
 
 ## Regenerate the committed golden master and the index (run after editing
 ## tests/f32_vectors.h, then commit tests/f32_golden.inc).
@@ -4104,6 +4191,58 @@ test-cf-dirs: build/skjcc $(DRIVER_LIB_CF) build/skj-run
 	     echo "PASS: libc opendir/readdir on ColdFire (skj-run matches qemu)"; \
 	 else cat build/libc-io-cf/dir.skj build/libc-io-cf/dir.qemu; exit 1; fi
 
+## The confined-capability mount end to end: a C guest built with the
+## fs/-interpose libc (FS_INTERPOSE) is run under skj-run with --mount, so the
+## launcher opens the granted directory as a capability fd and fills the guest
+## fs_mounts table.  Paths through the "data" mount reach the confined hostcap
+## backend (openat against the capability fd); a seeded file reads back, a
+## written file round-trips, and a "data:../escape.txt" open is denied although
+## the escape target exists just outside the granted directory.  This is the one
+## place the launcher --mount path and the guest-side confined backend meet, so
+## it cannot run under bare qemu (no sandbox fd table / mount installer).  The
+## guest self-checks and exits 42; run-libc-tests.sh drives it with skj-run as
+## QEMU.  rv and cf cover both freestanding VM tiers.
+## The skj-run binary the fs-cap confinement tests drive.  check-emu-posix
+## overrides it with build/skj-run-posix (-DHP_FORCE_POSIX) so the same end-to-end
+## confinement runs through cap_walk on Linux as well as the openat2 default.
+FS_CAP_RUN ?= build/skj-run
+
+test-rv-fs-cap: build/skj-cc-rv build/rv/start.o build/rv/va_rv.o build/rv/soft64_div.o build/rv/co_switch.o $(FS_CAP_RUN)
+	@rm -rf build/fs-cap-rv
+	@mkdir -p build/fs-cap-rv/data
+	@printf 'capability-granted\n' > build/fs-cap-rv/data/seed.txt
+	@printf 'ESCAPED\n' > build/fs-cap-rv/escape.txt
+	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
+	 ASM="$(RV_AS) -march=rv32imfd_zfh -mabi=ilp32 -o" \
+	 LD="$(RV_LD) -m elf32lriscv -o" \
+	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --mount data:$(CURDIR)/build/fs-cap-rv/data" \
+	 START="$(CURDIR)/build/rv/start.o" \
+	 HALF="$(CURDIR)/build/rv/va_rv.o $(CURDIR)/build/rv/soft64_div.o $(CURDIR)/build/rv/co_switch.o" \
+	 OUTDIR="$(CURDIR)/build/fs-cap-rv" \
+	 TEST="$(CURDIR)/tests/fs-cap/capguest.c" \
+	 FS_INTERPOSE=1 EXPECT=42 \
+	 sh tests/run-libc-tests.sh
+
+test-cf-fs-cap: build/skj-cc build/skj-as build/start.o build/half.o build/va_cf.o build/co_switch_cf.o $(FS_CAP_RUN)
+	@rm -rf build/fs-cap-cf
+	@mkdir -p build/fs-cap-cf/data
+	@printf 'capability-granted\n' > build/fs-cap-cf/data/seed.txt
+	@printf 'ESCAPED\n' > build/fs-cap-cf/escape.txt
+	@OUTDIR="$(CURDIR)/build/fs-cap-cf" \
+	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --mount data:$(CURDIR)/build/fs-cap-cf/data" \
+	 HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o $(CURDIR)/build/co_switch_cf.o" \
+	 TEST="$(CURDIR)/tests/fs-cap/capguest.c" \
+	 FS_INTERPOSE=1 EXPECT=42 \
+	 sh tests/run-libc-tests.sh
+
+## Run the fs-cap confinement end to end against build/skj-run-posix, so the
+## cap_walk component walk (the portable confinement floor every non-Linux host
+## uses) is compiled and exercised on Linux too, where openat2 is the default.
+## A recursive make re-drives the fs-cap targets with the forced-POSIX runner.
+check-emu-posix: build/skj-run-posix
+	@$(MAKE) --no-print-directory test-rv-fs-cap test-cf-fs-cap FS_CAP_RUN=build/skj-run-posix
+	@echo "PASS: fs-cap confinement via cap_walk (-DHP_FORCE_POSIX) on $$(uname -s)"
+
 ## The C guest's RNG: libc rand/srand draw from the shared fast generator and
 ## arc4random* from the shared ChaCha20 CSPRNG (runtime/rng.c), the same code
 ## Kobold's std.random uses.  rand/srand are deterministic and covered on every
@@ -4399,6 +4538,15 @@ test-cf-selfhost-kpc-full: build/selfhost-cf/skj-kpc-cf.elf build/skj-kpc-32 bui
 check-selfhost-all: test-rv-selfhost-toolchain test-cf-selfhost-toolchain \
                     test-rv-selfhost-kpc test-cf-selfhost-kpc
 	@echo "PASS: skj toolchain (cc+as+ld+kpc) self-hosts under skj-run (RV32 + ColdFire)"
+
+## The heavy self-compiles, run under the skj-run interpreter: a full C TU
+## (cc/lower.c) and kpcom's own ~480 KB source compiled in-guest, minutes each.
+## The light hello.pas / add.c self-hosts in check-all already prove the
+## mechanism, so these deeper invariants run on their own tier rather than
+## gating every check-all.  Run before a release or on demand.
+check-slow: test-rv-selfhost-full test-cf-selfhost-full \
+            test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full
+	@echo "PASS: full in-guest self-compiles (cc TU + kpcom) on RV32 + ColdFire"
 
 ## The MIPS counterpart of the self-host tests.  skj-run decodes only ColdFire
 ## and RV32 ELFs, so the in-guest compiler runs under qemu-mipsel rather than
@@ -5156,6 +5304,7 @@ test-cc-driver: build/skjcc \
 check-libc-cf: build/skj-cc build/skj-as build/start.o build/half.o build/va_cf.o build/co_switch_cf.o
 	@OUTDIR="$(CURDIR)/build/libc-cf" \
 	 HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o $(CURDIR)/build/co_switch_cf.o" \
+	 FS_INTERPOSE=1 FS_AMBIENT_DEFAULT=1 \
 	 sh tests/run-libc-tests.sh
 
 check-libc-rv: build/skj-cc-rv build/rv/start.o build/rv/va_rv.o build/rv/soft64_div.o build/rv/co_switch.o
@@ -5166,6 +5315,7 @@ check-libc-rv: build/skj-cc-rv build/rv/start.o build/rv/va_rv.o build/rv/soft64
 	 START="$(CURDIR)/build/rv/start.o" \
 	 HALF="$(CURDIR)/build/rv/va_rv.o $(CURDIR)/build/rv/soft64_div.o $(CURDIR)/build/rv/co_switch.o" \
 	 OUTDIR="$(CURDIR)/build/libc-rv" \
+	 FS_INTERPOSE=1 FS_AMBIENT_DEFAULT=1 \
 	 sh tests/run-libc-tests.sh
 
 check-libc-mips: build/skj-cc-mips build/mips/start.o build/mips/half.o build/mips/va_mips.o build/mips/soft64_div.o build/mips/co_switch.o
@@ -5584,7 +5734,7 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 \
            check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm \
            test-jit-trap test-jit-trap-arm64 \
-           test-jit-arena \
+           test-jit-arena test-fs \
            test-gc test-coro test-threads \
            test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 \
            test-f32-diff \
@@ -5599,7 +5749,7 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            test-cf-addr2line test-mips-addr2line \
            test-cf-wild-backtrace test-cf-abort-backtrace \
            test-kp-cf-dwarf test-kp-cf-trap-backtrace \
-           test-rv-dbg test-rv-gdb test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-help \
+           test-rv-dbg test-rv-gdb test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-cf-selfhost test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc check-selfhost-all test-help \
            check-cc-rv-psabi test-cc-rv-psabi-interop \
            test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive \
            test-cc-rv-psabi-struct test-cc-driver check-libc \
@@ -5623,4 +5773,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse update-kpcom check-kpcom bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE

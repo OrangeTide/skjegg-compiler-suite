@@ -10,11 +10,22 @@
 | errno in d0, passed through unchanged (lseek included), the same convention
 | the rv32 seam and boris honor, so a guest reads one -errno space everywhere.
 
-    .globl read
-    .globl write
-    .globl open
-    .globl close
-    .globl lseek
+    | The five fd primitives are weak so the C libc's fs/ layer (libc/fdio.c)
+    | can override them with path-resolving versions; a consumer that links no
+    | fdio.c (the Kobold runtime, a bare crt) keeps these raw wrappers.  Their
+    | __sys_* aliases are the raw entry points the fs/ backends call so they
+    | reach the kernel without recursing through an override.
+    .weak  read
+    .weak  write
+    .weak  open
+    .weak  close
+    .weak  lseek
+    .globl __sys_read
+    .globl __sys_write
+    .globl __sys_open
+    .globl __sys_close
+    .globl __sys_lseek
+    .globl openat
     .globl getdents64
     .globl statx
     .globl mkdirat
@@ -31,6 +42,7 @@
 
 | int read(int fd, char *buf, int n);
 read:
+__sys_read:
     movem.l %d2-%d3, -(%sp)
     move.l  12(%sp), %d1        | fd
     move.l  16(%sp), %d2        | buf
@@ -42,6 +54,7 @@ read:
 
 | int write(int fd, const char *buf, int n);
 write:
+__sys_write:
     movem.l %d2-%d3, -(%sp)     | save callee-saved regs
     move.l  12(%sp), %d1        | fd
     move.l  16(%sp), %d2        | buf
@@ -53,6 +66,7 @@ write:
 
 | int open(const char *path, int flags, int mode);
 open:
+__sys_open:
     movem.l %d2-%d3, -(%sp)
     move.l  12(%sp), %d1        | path
     move.l  16(%sp), %d2        | flags
@@ -62,8 +76,23 @@ open:
     movem.l (%sp)+, %d2-%d3
     rts
 
+| int openat(int dirfd, const char *path, int flags, int mode);
+| The confined hostcap backend (fs/hostcap.c) issues this against a mount
+| capability fd, so the raw dirfd matters; it is not interposed (no weak alias).
+openat:
+    movem.l %d2-%d5, -(%sp)
+    move.l  20(%sp), %d1        | dirfd
+    move.l  24(%sp), %d2        | path
+    move.l  28(%sp), %d3        | flags
+    move.l  32(%sp), %d4        | mode
+    move.l  #288, %d0           | __NR_openat
+    trap    #0
+    movem.l (%sp)+, %d2-%d5
+    rts
+
 | int close(int fd);
 close:
+__sys_close:
     move.l  4(%sp), %d1         | fd
     move.l  #6, %d0             | __NR_close
     trap    #0
@@ -71,6 +100,7 @@ close:
 
 | long lseek(int fd, long offset, int whence);  (m68k has a simple 3-arg lseek)
 lseek:
+__sys_lseek:
     movem.l %d2-%d3, -(%sp)
     move.l  12(%sp), %d1        | fd
     move.l  16(%sp), %d2        | offset

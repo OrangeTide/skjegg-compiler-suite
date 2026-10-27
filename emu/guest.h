@@ -150,6 +150,27 @@ enum guest_sys {
     GSYS_SCHED_YIELD,
 };
 
+/* The sandbox fd table.  A guest fd is an opaque INDEX into this table; the
+ * host fd lives only in the entry and is never handed to the guest, so a guest
+ * cannot name a host fd it was not given.  Each entry routes to a device
+ * driver; its param is the host fd.  (Only console and hostfs exist today, both
+ * backed by a host fd; the tag is there for ramfs / 9p / null drivers later.) */
+#define GUEST_MAX_FDS 64
+
+enum guest_dev {
+    GDEV_NONE = 0,
+    GDEV_CONSOLE,               /* 0/1/2 */
+    GDEV_HOSTFS,                /* param is a host fd (file or directory) */
+};
+
+struct gfd {
+    int used;
+    int dev;                    /* enum guest_dev */
+    int host_fd;                /* the driver's parameter */
+    void *dirp;                 /* a cached host directory stream (hp_dir *) for
+                                 * getdents64, opened on first use; NULL until then */
+};
+
 typedef struct guest {
     guest_mem mem;
     int arch;
@@ -162,6 +183,8 @@ typedef struct guest {
     uint32_t brk_limit;         /* end of the heap region */
     uint32_t stack_top;
     int big_endian;
+    int fds_inited;
+    struct gfd fdtab[GUEST_MAX_FDS];
 } guest;
 
 /* Service one syscall.  args are already in host order; the return value
@@ -173,10 +196,14 @@ int32_t guest_syscall(guest *g, int sys, uint32_t a0, uint32_t a1,
  * Run options, filled by the driver and read by the arch front ends
  ****************************************************************/
 
+#define RUN_MAX_MOUNTS 16       /* matches fs/fs.h FS_MAX_MOUNTS */
+
 typedef struct run_opts {
     const char *path;
     char **argv;                /* guest argv, argv[0] is the program */
     int argc;
+    const char *mounts[RUN_MAX_MOUNTS]; /* --mount name:hostdir grants */
+    int nmounts;
     uint64_t mem_limit;
     uint32_t stack_size;
     uint32_t heap_size;
@@ -188,6 +215,12 @@ typedef struct run_opts {
     int quiet;
     int gdb_port;               /* >0: serve the GDB remote protocol on this port (RV32) */
 } run_opts;
+
+/* The launcher: open each --mount host directory as a hostfs capability in the
+ * guest fd table and write the fs/ mount table (the fs_mounts / fs_mount_count /
+ * fs_cur_mount symbols) into guest memory.  A no-op if the guest links no fs/
+ * table or no mounts were granted. */
+void guest_install_mounts(guest *g, const char *elf_path, const run_opts *o);
 
 /* Each front end loads the ELF, builds the machine, runs it, and returns
  * the process exit status the driver should adopt. */

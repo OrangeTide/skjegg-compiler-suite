@@ -26,7 +26,8 @@ ROOT=$(cd "$HERE/.." && pwd)
 CCBIN="${CCBIN:-$ROOT/build/skj-cc}"
 ASM="${ASM:-$ROOT/build/skj-as -o}"
 LD="${LD:-m68k-linux-gnu-ld -o}"
-QEMU="${QEMU:-qemu-m68k}"
+# An explicitly empty QEMU means "run natively"; only an unset QEMU defaults.
+QEMU="${QEMU-qemu-m68k}"
 START="${START:-$ROOT/build/start.o}"
 HALF="${HALF-$ROOT/build/half.o}"
 OUTDIR="${OUTDIR:-$ROOT/build}"
@@ -39,8 +40,26 @@ LIBC_DEFAULT="$ROOT/libc/string.c $ROOT/libc/ctype.c $ROOT/libc/stdlib.c $ROOT/l
 if [ -n "${ARC4RANDOM:-}" ]; then
     LIBC_DEFAULT="$LIBC_DEFAULT $ROOT/libc/arc4random.c"
 fi
+# FS_INTERPOSE routes the libc fd model (open/read/write/lseek/close and the
+# path and directory ops) through the shared fs/ layer with the temporary
+# ambient host backend.  Selected on the freestanding VM tiers (rv, cf).
+if [ -n "${FS_INTERPOSE:-}" ]; then
+    LIBC_DEFAULT="$LIBC_DEFAULT $ROOT/libc/fdio.c $ROOT/fs/fs.c $ROOT/fs/ramfs.c $ROOT/fs/ambientfs.c $ROOT/fs/hostcap.c"
+fi
 LIBC="${LIBC:-$LIBC_DEFAULT}"
 CFLAGS="${CFLAGS--DSKJ_LIBC_FLOAT}"
+if [ -n "${FS_INTERPOSE:-}" ]; then
+    CFLAGS="$CFLAGS -DSKJ_FS_INTERPOSE -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -I$ROOT/fs"
+fi
+# FS_AMBIENT_DEFAULT makes fs_init land a no-mount guest on the unconfined
+# ambient host mount (the pre-fs bare-path-reaches-host behaviour), rather than
+# the scratch ramfs that is now the default.  The file-op suites set it because
+# they open host files by bare path under qemu with no launcher to grant a
+# mount; the capability test deliberately leaves it off to prove the folded-out
+# default (scratch landing, host only through a named grant).
+if [ -n "${FS_AMBIENT_DEFAULT:-}" ]; then
+    CFLAGS="$CFLAGS -DFS_AMBIENT_DEFAULT"
+fi
 EXPECT="${EXPECT:-42}"
 mkdir -p "$OUTDIR"
 

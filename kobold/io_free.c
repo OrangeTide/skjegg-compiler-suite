@@ -439,6 +439,38 @@ __libc_fini(void)
 #define KP_SEEK_SET  0
 #define KP_SEEK_END  2
 
+/* The fd primitives the file functions below go through.  With fs/
+   interposition (SKJ_FS_INTERPOSE) a path resolves through the shared mount
+   table and the fd is an fs fd, the Kobold-side shim over the same fs/ core the
+   C libc uses; otherwise they are the raw syscall wrappers, as before.  The
+   console side (kp_io.c and io_write_real) is unaffected: it stays on the raw
+   write/read seam for descriptors 0/1/2. */
+#ifdef SKJ_FS_INTERPOSE
+#include "fs.h"
+#define KPIO_RDONLY   FS_O_RDONLY
+#define KPIO_WRCREAT  (FS_O_WRONLY | FS_O_CREAT | FS_O_TRUNC)
+#define KPIO_SEEK_SET FS_SEEK_SET
+#define KPIO_SEEK_END FS_SEEK_END
+/* A console fd (0/1/2) is not fs-managed: a unit may open it directly
+   (OpenReader(r, 0)) and hand it to kpf_read/kpf_write, so those descriptors
+   go to the raw seam, as in libc/fdio.c. */
+static int  kpio_open(const char *p, int f)          { return fs_open(p, f, 0644); }
+static long kpio_read(int fd, void *b, long n)       { return fd < FS_FD_BASE ? read(fd, b, (int)n)  : fs_read(fd, b, (int)n); }
+static long kpio_write(int fd, const void *b, long n){ return fd < FS_FD_BASE ? write(fd, b, (int)n) : fs_write(fd, b, (int)n); }
+static long kpio_lseek(int fd, long o, int w)        { return fd < FS_FD_BASE ? lseek(fd, o, w) : (long)fs_lseek(fd, o, w); }
+static void kpio_close(int fd)                       { if (fd >= FS_FD_BASE) fs_close(fd); else close(fd); }
+#else
+#define KPIO_RDONLY   KP_O_RDONLY
+#define KPIO_WRCREAT  (KP_O_WRONLY | KP_O_CREAT | KP_O_TRUNC)
+#define KPIO_SEEK_SET KP_SEEK_SET
+#define KPIO_SEEK_END KP_SEEK_END
+static int  kpio_open(const char *p, int f)          { return (int)open(p, f, 0644); }
+static long kpio_read(int fd, void *b, long n)       { return read(fd, b, (int)n); }
+static long kpio_write(int fd, const void *b, long n){ return write(fd, b, (int)n); }
+static long kpio_lseek(int fd, long o, int w)        { return lseek(fd, o, w); }
+static void kpio_close(int fd)                       { close(fd); }
+#endif
+
 kp_gptr
 ReadFileStr(kp_gptr pathstr)
 {
@@ -455,19 +487,19 @@ ReadFileStr(kp_gptr pathstr)
     memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
     path[plen] = '\0';
 
-    fd = (int)open(path, KP_O_RDONLY, 0);
+    fd = kpio_open(path, KPIO_RDONLY);
     if (fd < 0)
         return kp_str_new("", 0);
 
     /* Size the file so one allocation holds it.  A non-seekable fd (a pipe, or
        a host without lseek) returns < 0; then fall back to growing the buffer
        and reading to EOF. */
-    size = lseek(fd, 0, KP_SEEK_END);
-    if (size >= 0 && lseek(fd, 0, KP_SEEK_SET) == 0) {
+    size = kpio_lseek(fd, 0, KPIO_SEEK_END);
+    if (size >= 0 && kpio_lseek(fd, 0, KPIO_SEEK_SET) == 0) {
         cap = (uint32_t)size;
         buf = gheap_alloc(cap ? cap : 1);
         while (len < cap) {
-            n = read(fd, (void *)(uintptr_t)(buf + len), (long)(cap - len));
+            n = kpio_read(fd, (void *)(uintptr_t)(buf + len), (long)(cap - len));
             if (n <= 0)
                 break;              /* short file or read error: keep what we got */
             len += (uint32_t)n;
@@ -480,13 +512,13 @@ ReadFileStr(kp_gptr pathstr)
                 cap *= 2;
                 buf = gheap_realloc(buf, cap);
             }
-            n = read(fd, (void *)(uintptr_t)(buf + len), (long)(cap - len));
+            n = kpio_read(fd, (void *)(uintptr_t)(buf + len), (long)(cap - len));
             if (n <= 0)
                 break;
             len += (uint32_t)n;
         }
     }
-    close(fd);
+    kpio_close(fd);
 
     s = kp_str_new_guest(buf, (int)len);
     gheap_free(buf);
@@ -507,12 +539,12 @@ WriteFileStr(kp_gptr pathstr, kp_gptr datastr)
     memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
     path[plen] = '\0';
 
-    fd = (int)open(path, KP_O_WRONLY | KP_O_CREAT | KP_O_TRUNC, 0644);
+    fd = kpio_open(path, KPIO_WRCREAT);
     if (fd < 0)
         return 0;
     len = (uint32_t)kp_str_len(datastr);
-    n = write(fd, kp_str_bytes(datastr), (long)len);
-    close(fd);
+    n = kpio_write(fd, kp_str_bytes(datastr), (long)len);
+    kpio_close(fd);
     return n == (long)len;
 }
 
@@ -532,7 +564,7 @@ kpf_open_read(kp_gptr pathstr)
         return -1;
     memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
     path[plen] = '\0';
-    return (int)open(path, KP_O_RDONLY, 0);
+    return kpio_open(path, KPIO_RDONLY);
 }
 
 int
@@ -545,14 +577,14 @@ kpf_open_write(kp_gptr pathstr)
         return -1;
     memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
     path[plen] = '\0';
-    return (int)open(path, KP_O_WRONLY | KP_O_CREAT | KP_O_TRUNC, 0644);
+    return kpio_open(path, KPIO_WRCREAT);
 }
 
 kp_gptr
 kpf_read(int fd)
 {
     char tmp[KPF_CHUNK];
-    long n = (fd < 0) ? -1 : read(fd, tmp, (long)sizeof tmp);
+    long n = (fd < 0) ? -1 : kpio_read(fd, tmp, (long)sizeof tmp);
 
     if (n <= 0)
         return kp_str_new("", 0);
@@ -564,14 +596,14 @@ kpf_write(int fd, kp_gptr datastr)
 {
     if (fd < 0)
         return -1;
-    return (int)write(fd, kp_str_bytes(datastr), (long)kp_str_len(datastr));
+    return (int)kpio_write(fd, kp_str_bytes(datastr), (long)kp_str_len(datastr));
 }
 
 void
 kpf_close(int fd)
 {
     if (fd >= 0)
-        close(fd);
+        kpio_close(fd);
 }
 
 /* Path metadata and operations the `files` unit exposes Pascal-style: existence,
@@ -693,7 +725,11 @@ kpd_open(kp_gptr pathstr)
             break;
     if (i == KPD_MAX)
         return -1;
+#ifdef SKJ_FS_INTERPOSE
+    fd = fs_open(path, FS_O_DIRECTORY | FS_O_RDONLY, 0);
+#else
     fd = (int)open(path, KP_O_RDONLY, 0);
+#endif
     if (fd < 0)
         return -1;
     kpd_tab[i].fd = fd;
@@ -706,39 +742,55 @@ kpd_open(kp_gptr pathstr)
 kp_gptr
 kpd_next(int h)
 {
-    char *e;
-    unsigned short reclen;
-    const char *name;
-    int nl;
-
     if (h < 0 || h >= KPD_MAX || !kpd_tab[h].inuse)
         return kp_str_new("", 0);
-    if (kpd_tab[h].pos >= kpd_tab[h].len) {
-        int n = getdents64(kpd_tab[h].fd, kpd_tab[h].buf, KPD_BUF);
-        if (n <= 0)
+#ifdef SKJ_FS_INTERPOSE
+    {
+        /* A directory fs fd yields one fixed fs_dirent per fs_read; fs.c owns
+           the cursor, so the per-handle buffer below is unused on this path. */
+        struct fs_dirent fe;
+        int nl = 0;
+        if (fs_read(kpd_tab[h].fd, &fe, (int)sizeof fe) != (int)sizeof fe)
             return kp_str_new("", 0);
-        kpd_tab[h].len = n;
-        kpd_tab[h].pos = 0;
+        while (nl < FS_DIRENT_NAMEMAX - 1 && fe.name[nl])
+            nl++;
+        return kp_str_new(fe.name, nl);
     }
-    e = kpd_tab[h].buf + kpd_tab[h].pos;
-    memcpy(&reclen, e + 16, sizeof reclen);   /* struct linux_dirent64 d_reclen */
-    if (reclen < 20) {                        /* guard a malformed entry */
-        kpd_tab[h].pos = kpd_tab[h].len;
-        return kp_str_new("", 0);
+#else
+    {
+        char *e;
+        unsigned short reclen;
+        const char *name;
+        int nl;
+
+        if (kpd_tab[h].pos >= kpd_tab[h].len) {
+            int n = getdents64(kpd_tab[h].fd, kpd_tab[h].buf, KPD_BUF);
+            if (n <= 0)
+                return kp_str_new("", 0);
+            kpd_tab[h].len = n;
+            kpd_tab[h].pos = 0;
+        }
+        e = kpd_tab[h].buf + kpd_tab[h].pos;
+        memcpy(&reclen, e + 16, sizeof reclen);   /* linux_dirent64 d_reclen */
+        if (reclen < 20) {                        /* guard a malformed entry */
+            kpd_tab[h].pos = kpd_tab[h].len;
+            return kp_str_new("", 0);
+        }
+        kpd_tab[h].pos += reclen;
+        name = e + 19;                            /* d_name, NUL-terminated */
+        nl = 0;
+        while (nl < reclen - 19 && name[nl])
+            nl++;
+        return kp_str_new(name, nl);
     }
-    kpd_tab[h].pos += reclen;
-    name = e + 19;                            /* d_name, NUL-terminated */
-    nl = 0;
-    while (nl < reclen - 19 && name[nl])
-        nl++;
-    return kp_str_new(name, nl);
+#endif
 }
 
 void
 kpd_close(int h)
 {
     if (h >= 0 && h < KPD_MAX && kpd_tab[h].inuse) {
-        close(kpd_tab[h].fd);
+        kpio_close(kpd_tab[h].fd);
         kpd_tab[h].inuse = 0;
     }
 }

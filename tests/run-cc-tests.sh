@@ -24,7 +24,8 @@ ROOT=$(cd "$HERE/.." && pwd)
 CCBIN="${CCBIN:-$ROOT/build/skj-cc}"
 ASM="${ASM:-$ROOT/build/skj-as -o}"
 LD="${LD:-m68k-linux-gnu-ld -o}"
-QEMU="${QEMU:-qemu-m68k}"
+# An explicitly empty QEMU means "run natively"; only an unset QEMU defaults.
+QEMU="${QEMU-qemu-m68k}"
 START="${START:-$ROOT/build/start.o}"
 # no colon: an explicitly-empty HALF (e.g. arm64, native fcvt) stays empty
 HALF="${HALF-$ROOT/build/half.o}"

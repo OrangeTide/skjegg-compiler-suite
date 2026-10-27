@@ -8,6 +8,55 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+#ifdef SKJ_FS_INTERPOSE
+
+/* fs/ interposition: the path operations resolve through the mount table, the
+   same way open() does, so a `name:` selector and the per-mount cwd apply. */
+#include "fs.h"
+
+int
+mkdir(const char *path, int mode)
+{
+    (void)mode;
+    return fs_mkdir(path);
+}
+
+int
+unlink(const char *path)
+{
+    return fs_unlink(path);
+}
+
+int
+rmdir(const char *path)
+{
+    return fs_rmdir(path);
+}
+
+int
+chmod(const char *path, int mode)
+{
+    /* No fs/ chmod op (the mount model has no permission bits yet); fall back to
+       the ambient host call so a program that chmods keeps working. */
+    return fchmodat(AT_FDCWD, path, mode, 0);
+}
+
+int
+rename(const char *oldpath, const char *newpath)
+{
+    return fs_rename(oldpath, newpath);
+}
+
+int
+remove(const char *path)
+{
+    if (fs_unlink(path) == 0)
+        return 0;
+    return fs_rmdir(path);
+}
+
+#else /* raw *at wrappers */
+
 int
 mkdir(const char *path, int mode)
 {
@@ -47,3 +96,5 @@ remove(const char *path)
         return 0;
     return unlinkat(AT_FDCWD, path, AT_REMOVEDIR);
 }
+
+#endif /* SKJ_FS_INTERPOSE */

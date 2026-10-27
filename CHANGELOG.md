@@ -6,6 +6,54 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.23.0
+
+#### Added
+- A shared `fs/` filesystem layer: a flat, DOS-style mount table of named
+  namespaces (not a VFS), with a `ramfs` backend and a tier-portable
+  multi-instance `hostfs` backend. It builds freestanding for the guest and is
+  shared by the C libc and the Kobold runtime, so both reach files through one
+  mount table and namespace model.
+- A sandbox fd table in skj-run: each guest gets its own fd table, so host file
+  descriptors never leak to the guest. A `--mount name:hostdir` grant opens the
+  host directory as a capability and populates the guest's `fs/` mount table.
+- A confined capability host backend for the freestanding guest. A `--mount`
+  grant is a capability directory fd, and every open is confined beneath it:
+  kernel-enforced with `openat2(RESOLVE_BENEATH)` on Linux, a portable
+  component-walk (`cap_walk`, which also refuses in-tree symlinks and any `..`)
+  on other POSIX hosts, and failing closed on a host with neither.
+- macOS and other non-Linux host support for skj-run. The host-varying
+  facilities sit behind the `emu/hostplat.{c,h}` shim (confined opens, directory
+  enumeration, clock, sleep, random), the only file that branches on the host
+  OS. `make macos` builds the emulator with the stock host compiler, no cross
+  toolchain or qemu required. The Darwin code paths are written but not yet
+  exercised on a real machine.
+- A `check-slow` target for the heavy in-guest self-compiles (a full C
+  translation unit and kpcom's own source compiled under the interpreter), split
+  out of `check-all` so the routine suite stays fast.
+
+#### Changed
+- Scratch `ramfs` is now the default landing for a guest with no mount grant;
+  the ambient host backend is opt-in (`FS_AMBIENT_DEFAULT`), a temporary
+  convenience for the qemu harnesses that have no launcher.
+- The freestanding file I/O for the rv32 and ColdFire C libc and the Kobold
+  runtime now routes through the shared `fs/` layer instead of raw syscalls.
+- skj-run's host-platform code is a pure-POSIX floor with a single Linux
+  accelerator: directory enumeration, clock, sleep, and random bytes (through
+  `/dev/urandom`) are shared POSIX across all hosts, and the one host branch is
+  the `openat2` confinement accelerator over the portable `cap_walk`.
+- On an x86-64 Linux host the x86-64 test suite runs the target binaries
+  natively instead of under `qemu-x86_64`. Set `QEMU_X64=qemu-x86_64` to force
+  the emulator.
+
+#### Fixed
+- skj-cc dropped the return type of a call whose callee was not a plain
+  identifier (a struct or union member function pointer, an array element, a
+  dereference, or a cast), so an `int64_t`, `float`, or struct return through
+  such a callee was silently narrowed to a 32-bit `int`. A member function
+  pointer returning `long long` came back as its high word alone. The call now
+  keeps the callee's declared return type.
+
 ### 0.22.0
 
 #### Added

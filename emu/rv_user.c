@@ -772,6 +772,7 @@ run_rv32(const run_opts *o, int *status)
         return -1;
 
     rp = S.procs[0];
+    guest_install_mounts(&rp->g, o->path, o);
 #ifdef SKJ_RV_GDB
     if (o->gdb_port > 0) {
         /* Debug the root process under the GDB remote protocol instead of
