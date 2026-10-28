@@ -21,11 +21,10 @@
  * the tinc/scheme/pascal arm64 tools select it by compiling backend/arm64_emit.c
  * (which asserts LP64 itself) and pass -DSKJ_LP64=1.
  *
- * KP_LP64 is the kobold runtime's own 64-bit codegen model (8-byte pointers AND
- * the uniform 64-bit integer-register home in the arm64 selector, a backend
- * choice that is NOT pointer width: cc-arm64 is LP64 yet keeps a 32-bit integer
- * home). KP_LP64 therefore implies the width here, but the register-model half
- * stays keyed on KP_LP64 in backend/arm64_select.c.
+ * AArch64 is always LP64 in this tree (there is no ILP32 arm64 build), so the
+ * arm64 selector uses a uniform 64-bit integer-register home unconditionally
+ * (INT_HOME_X in backend/arm64_select.c) rather than a per-build opt-in. Width
+ * there derives from the ISA selector (CC_ARM64) like every other target.
  */
 
 #ifndef SKJ_TARGET_H
@@ -34,7 +33,7 @@
 /* Derive the width from the instruction-set selector (unless a tool set it
    explicitly). A 64-bit ISA is LP64; everything else is ILP32. */
 #ifndef SKJ_LP64
-#  if defined(KP_LP64) || (defined(X86_BITS) && (X86_BITS == 64)) || defined(CC_ARM64)
+#  if (defined(X86_BITS) && (X86_BITS == 64)) || defined(CC_ARM64)
 #    define SKJ_LP64 1
 #  else
 #    define SKJ_LP64 0

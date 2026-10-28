@@ -5,8 +5,8 @@
  *                        double *fret)
  *   entry = x0, stack_top = x1, iargs = x2, fargs = x3, fret = x4.
  *
- * The guest runs on the JIT's low-memory execution stack (its locals' addresses
- * must fit 32 bits), so switch sp to stack_top (already 16-byte aligned) for the
+ * The guest runs on the JIT's execution stack (LP64: a frame address is a full
+ * 64-bit value), so switch sp to stack_top (already 16-byte aligned) for the
  * call and restore it after.  Load the AAPCS64 argument registers from the
  * arrays: all eight float registers and the first six integer registers, since
  * the guest reads only the ones its signature declares and ignores the rest.

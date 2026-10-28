@@ -262,11 +262,21 @@ type
 
 const
   { The guest pointer/handle width this compiler binary was built for, baked at
-    build time the way cc's CC_PTR_SIZE is. skj-pc (or fpc) compiles kpcom with
-    -d KP_LP64 for an LP64 backend (x86-64/arm64, 8 bytes) and without it for an
-    ILP32 backend (rv32/cf/mips, 4 bytes). The width is a static property of the
-    binary, Plan 9 style: one front end per backend, native width, no cross flag. }
-  KpNativePtrBytes = {$IFDEF KP_LP64}8{$ELSE}4{$ENDIF};
+    build time the way cc's CC_PTR_SIZE is. It derives from the target
+    architecture: skj-pc (or fpc) compiles kpcom with -d KP_TARGET_X64 or
+    -d KP_TARGET_ARM64 for an LP64 backend (8 bytes), and -d KP_TARGET_RV or
+    -d KP_TARGET_CF for an ILP32 backend (4 bytes). The width is a static
+    property of the binary, Plan 9 style: one front end per backend, native
+    width, no cross flag. }
+{$IFDEF KP_TARGET_X64}
+  KpNativePtrBytes = 8;
+{$ELSE}
+  {$IFDEF KP_TARGET_ARM64}
+  KpNativePtrBytes = 8;
+  {$ELSE}
+  KpNativePtrBytes = 4;
+  {$ENDIF}
+{$ENDIF}
 
 { ---- Lookup tables ---- }
 
@@ -1457,7 +1467,7 @@ begin
   CondTop := 0;
   SetLength(Defines, 0);
   AddDefineSym('kobold');
-  { re-apply command-line -D symbols (e.g. KP_LP64 when emitting an LP64 seed) }
+  { re-apply command-line -D symbols (e.g. KP_TARGET_X64 when emitting an x86-64 seed) }
   for cdi := 0 to Length(CmdDefines) - 1 do
     AddDefineSym(CmdDefines[cdi]);
 end;
@@ -13822,7 +13832,7 @@ begin
     end
     else if (Length(arg) >= 2) and (arg[1] = '-') and (arg[2] = 'D') then begin
       { -D<sym> or -D <sym>: define a conditional-compilation symbol, as skj-pc's
-        -d does, so a seed build can select the LP64 target width (-D KP_LP64) }
+        -d does, so a seed build can select the target (-D KP_TARGET_X64) }
       if Length(arg) > 2 then dir := Copy(arg, 3, Length(arg) - 2)
       else begin
         Inc(i);

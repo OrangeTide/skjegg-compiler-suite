@@ -6,6 +6,33 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.25.0
+
+#### Added
+- A `writev` wrapper on the shared freestanding syscall seam (number 66 on
+  RV32, 146 on ColdFire) with `struct iovec` in `<sys/uio.h>`. The buffered
+  stdio core uses it to send a stream's pending buffer and a large `fwrite`
+  block in one call on the freestanding tiers, instead of draining the buffer
+  and then the block as two writes. The other targets fall back to two `write`
+  calls, which is still fewer syscalls than the character path. The deliberately
+  unbuffered Kobold console is unchanged.
+- The skjegg/boris hosting contract, `doc/skjegg-kobold-requirements.md`. It is
+  the authoritative handoff: the raw Linux RV32 syscall seam skjegg commits to
+  (kept at the real Linux numbers), the name-bound host-call seam boris owns, and
+  the status of boris's follow-on wishlist. It records that full hosting of the
+  compiler and toolchain inside the rv32 sandbox is confirmed, proven in-tree by
+  `make check-kp-free`.
+
+#### Changed
+- Pointer width now derives from one axis. The `KP_LP64` build macro is gone;
+  whether a tool is LP64 or ILP32 follows from its instruction-set selector
+  through the single `SKJ_LP64` fact in `ir/target.h`, so a tool can no longer
+  name a 64-bit backend yet stay ILP32, the mismatch that once bit the Kobold
+  JIT. On AArch64 every build is LP64, so the backend now uses a uniform 64-bit
+  integer-register home unconditionally rather than a per-build opt-in, which
+  also lets the arm64 C JIT map its guest memory anywhere instead of only in the
+  low 32-bit address space.
+
 ### 0.24.2
 
 #### Fixed

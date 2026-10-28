@@ -7,6 +7,7 @@
 #include "target.h"
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <sys/mman.h>
 
 #ifndef MAP_FIXED_NOREPLACE
@@ -20,46 +21,42 @@
 #define KP_ARENA_LEN (16u << 20)
 
 /* Map a region for the guest code, data, and stack.  Under LP64 a guest address
-   is a full 64-bit host pointer, so the mapping can live anywhere.  Otherwise the
-   guest is 32-bit and the region must sit below 4GB: on x86-64 that is MAP_32BIT;
-   a 32-bit host is low by construction; any other 64-bit host (arm64 cross JIT)
-   has neither, so request successive low addresses with MAP_FIXED_NOREPLACE and
-   take the first that lands (and stays) below 4GB.  Mirrors rt_host.c:rt_map_low.
+   is a full 64-bit host pointer, so the mapping can live anywhere.  On a 32-bit
+   host (rv32/ColdFire) a plain mapping is low by construction.  The name is
+   historical: there is no longer a low-memory constraint on any LP64 backend.
    PROT_READ|PROT_WRITE; a caller that wants executable memory mprotects it
-   afterward. */
+   afterward.
+
+   SKJ_JIT_MAP_HIGH (LP64 only) forces the mapping to a fixed high base so a test
+   can exercise guest addresses above 4GB deterministically, independent of where
+   the kernel or an emulator would otherwise place an anonymous mapping; see the
+   test-jit-arm64-high target. */
 void *
 kp_map_low(size_t len)
 {
-#if defined(KP_LP64) || (SKJ_LP64 && defined(__x86_64__))
-    /* LP64 with a backend proven for high addresses (the kobold JIT on any arch,
-       and the x86-64 C JIT): guest addresses are full 64-bit host pointers, so
-       the region can live anywhere, with no low-memory constraint.  The arm64 C
-       JIT is LP64 too but its varargs register-save-area addressing is not yet
-       audited for high addresses, so it keeps the low arena below (not the 32-on
-       -64 model being retired, just a bounded address range), pending that fix. */
+#if SKJ_LP64
+    const char *hi = getenv("SKJ_JIT_MAP_HIGH");
+    if (hi && *hi) {
+        uintptr_t base = 0x400000000000ULL;
+        while (base + len <= 0x600000000000ULL) {
+            void *p = mmap((void *)base, len, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                           -1, 0);
+            base += (len + 0xffffffUL) & ~(uintptr_t)0xffffff;   /* advance 16MB */
+            if (p != MAP_FAILED && (uintptr_t)p >= 0x400000000000ULL)
+                return p;
+            if (p != MAP_FAILED)
+                munmap(p, len);
+        }
+        return MAP_FAILED;
+    }
     return mmap(NULL, len, PROT_READ | PROT_WRITE,
                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-#elif UINTPTR_MAX <= 0xffffffffULL
-    /* A 32-bit host (e.g. rv32): every address already fits the front end's
+#else
+    /* A 32-bit host (rv32/ColdFire): every address already fits the front end's
        32-bit model, so a plain mapping is low by construction. */
     return mmap(NULL, len, PROT_READ | PROT_WRITE,
                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-#elif defined(__x86_64__)
-    return mmap(NULL, len, PROT_READ | PROT_WRITE,
-                MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
-#else
-    static uintptr_t hint = 0x10000000;
-    while (hint + len <= 0x100000000ULL) {
-        uintptr_t at = hint;
-        void *p = mmap((void *)at, len, PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-        hint += (len + 0xffffffUL) & ~(uintptr_t)0xffffff;   /* advance 16MB */
-        if (p != MAP_FAILED && (uintptr_t)p == at)
-            return p;
-        if (p != MAP_FAILED)
-            munmap(p, len);
-    }
-    return MAP_FAILED;
 #endif
 }
 

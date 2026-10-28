@@ -22,6 +22,7 @@
     .weak  lseek
     .globl __sys_read
     .globl __sys_write
+    .globl writev
     .globl __sys_open
     .globl __sys_close
     .globl __sys_lseek
@@ -62,6 +63,17 @@ __sys_write:
     move.l  #4, %d0             | __NR_write
     trap    #0
     movem.l (%sp)+, %d2-%d3     | restore
+    rts
+
+| int writev(int fd, const struct iovec *iov, int iovcnt);
+writev:
+    movem.l %d2-%d3, -(%sp)
+    move.l  12(%sp), %d1        | fd
+    move.l  16(%sp), %d2        | iov
+    move.l  20(%sp), %d3        | iovcnt
+    move.l  #146, %d0           | __NR_writev
+    trap    #0
+    movem.l (%sp)+, %d2-%d3
     rts
 
 | int open(const char *path, int flags, int mode);

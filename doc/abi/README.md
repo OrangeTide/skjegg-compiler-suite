@@ -32,6 +32,14 @@ exactly; the ColdFire numbers are the
 Linux/m68k ones. `RV_SYS_FATAL` is `0x000f0000`, boris's `VM_SYS_TRAP`, so a
 runtime fault looks the same on skj-run and in the VM.
 
+boris keeps a second convention at the same `a7` selector for its rich
+services (object and world access, the mailbox, the authority calls):
+`a7 = 0x00100000 + import_index`, resolved by name from a `KPIMPT1` import
+table. skjegg does not emit that table; it is authored in boris's own guest
+SDK, and a guest that stays on the raw seam above needs none of it. The full
+contract, boris's requirements and skjegg's guarantees, is in
+`doc/skjegg-kobold-requirements.md`.
+
 ## The entry and argv contract (B4)
 
 `runtime/crt_entry_{rv,cf}.S` is the shared `_start`: it reads `argc` and the

@@ -1,10 +1,10 @@
 /* jit_arena.c : the guest runtime arena the JIT hands Excelsior programs.
  *
- * The arena must sit below 4GB (a guest pointer is 32 bits), map lazily (a
- * C-only guest never allocates from it), align every allocation to a word,
- * and fail cleanly when exhausted rather than hand back an out-of-range or
- * overlapping address. Host-only: no cross toolchain, no qemu. Built and run
- * by `make test-jit-arena`.
+ * The arena maps lazily (a C-only guest never allocates from it), aligns every
+ * allocation to a word, and fails cleanly when exhausted rather than hand back
+ * an out-of-range or overlapping address. Built -DSKJ_LP64=1, so the region can
+ * live anywhere in the address space (no low-memory constraint). Host-only: no
+ * cross toolchain, no qemu. Built and run by `make test-jit-arena`.
  */
 
 #include "jit_arena.h"
@@ -38,8 +38,7 @@ main(void)
     p1 = kp_arena_alloc(&a, 4);
     check("first alloc maps the arena", a.base != NULL);
     check("first alloc succeeds", p1 != NULL);
-    check("the arena is low (< 4GB)", (uintptr_t)a.base < 0x100000000ull);
-    check("the alloc is low (< 4GB)", (uintptr_t)p1 < 0x100000000ull);
+    check("the arena base is page-aligned", ((uintptr_t)a.base & 0xfffu) == 0);
 
     /* a 4-byte word request advances the bump by 8, keeping the next word
        8-byte aligned (as the guest's i64 and pointer values expect) */

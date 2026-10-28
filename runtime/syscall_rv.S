@@ -25,6 +25,7 @@
 	.weak  close
 	.weak  lseek
 	.globl __sys_write
+	.globl writev
 	.globl __sys_read
 	.globl __sys_open
 	.globl __sys_close
@@ -54,6 +55,14 @@ __sys_write:
 	ret
 	.size	write,.-write
 	.size	__sys_write,.-__sys_write
+
+/* int writev(int fd, const struct iovec *iov, int iovcnt); */
+	.type	writev,@function
+writev:
+	li	a7, 66
+	ecall
+	ret
+	.size	writev,.-writev
 
 /* int read(int fd, char *buf, int n); */
 	.type	read,@function

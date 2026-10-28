@@ -264,10 +264,10 @@ build/kp_co.o: kobold/co.c kobold/co.h kobold/handle.h kobold/lowmem.h Makefile 
 ## Each JIT embeds its own target's seed (below): the rv JIT this build/kpcom_kpm.c
 ## (rv32), the x86-64 and arm64 JITs the per-arch seeds under build/x86-64 and
 ## build/arm64.  None is committed: skj-pc is the bootstrap root, so each front end
-## is built from source and emits its own seed at build time.  The -D flags at emit
-## select kpcom's target inside the seed (KP_LP64 for the 8-byte pointer width,
-## KP_TARGET_* for the architecture tag), so the embedded front end emits modules
-## for the right target.
+## is built from source and emits its own seed at build time.  The -D KP_TARGET_*
+## flag at emit selects kpcom's target inside the seed (the architecture tag, from
+## which the pointer width derives), so the embedded front end emits modules for
+## the right target.
 build/bin2c: kobold/bin2c.c Makefile | build
 	$(CC) $(CFLAGS) -o $@ kobold/bin2c.c
 
@@ -287,9 +287,9 @@ KPCOM_SRCS    := kobold/kpcom.pas kobold/version.inc kobold/stdlib.inc
 ## bootstrap root, so the front ends are built from source with no prior seed.  Each
 ## seed feeds that target's JIT (bin2c embeds it) and/or self-host ELF.
 build/kpcom-x86-64.kpm: build/skj-kpc $(KPCOM_SRCS) | build
-	build/skj-kpc -D KP_LP64 -D KP_TARGET_X64 --emit-kpm $(KPCOM_SRC_PAS) > $@
+	build/skj-kpc -D KP_TARGET_X64 --emit-kpm $(KPCOM_SRC_PAS) > $@
 build/kpcom-arm64.kpm: build/skj-kpc-arm64 $(KPCOM_SRCS) | build
-	build/skj-kpc-arm64 -D KP_LP64 -D KP_TARGET_ARM64 --emit-kpm $(KPCOM_SRC_PAS) > $@
+	build/skj-kpc-arm64 -D KP_TARGET_ARM64 --emit-kpm $(KPCOM_SRC_PAS) > $@
 build/kpcom-rv.kpm: build/skj-kpc-rv $(KPCOM_SRCS) | build
 	build/skj-kpc-rv -D KP_TARGET_RV --emit-kpm $(KPCOM_SRC_PAS) > $@
 build/kpcom-cf.kpm: build/skj-kpc-cf $(KPCOM_SRCS) | build
@@ -306,26 +306,28 @@ build/arm64/kpcom_kpm.c: build/kpcom-arm64.kpm build/bin2c | build
 	build/bin2c kpcom_kpm build/kpcom-arm64.kpm build/arm64/kpcom_kpm.c build/arm64/kpcom_kpm.h
 
 ## skj-kp-jit: the native (x86-64, LP64) in-process JIT.  Runtime and front end
-## compiled -DKP_LP64 so guest pointers are full 64-bit; the embedded seed is the
-## x86-64 one and kp_co is the LP64 coroutine object.
+## compiled for x86-64 (-DX86_BITS=64 in KP_CFLAGS) so guest pointers are full
+## 64-bit; the embedded seed is the x86-64 one and kp_co is the LP64 coroutine
+## object.
 build/skj-kp-jit: kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o kobold/frontend.h $(KP_HDRS) Makefile | build
-	$(CC) $(KP_CFLAGS) -DKP_LP64 -Ibuild/x86-64 -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o -lm
+	$(CC) $(KP_CFLAGS) -Ibuild/x86-64 -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o -lm
 
-## kp_co_lp64.o: the coroutine core compiled -DKP_LP64 (native 64-bit guest
-## pointer/handle, guest stacks in full memory), linked into the native and arm64
+## kp_co_lp64.o: the coroutine core compiled LP64 (-DX86_BITS=64: native 64-bit
+## guest pointer/handle, guest stacks in full memory), linked into the x86-64
 ## LP64 tools.
 build/kp_co_lp64.o: kobold/co.c kobold/co.h kobold/handle.h kobold/lowmem.h kobold/obj.h Makefile | build
-	$(CC) -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter -DKP_LP64 -Iir -Ijit -Ibackend -Ikobold -c kobold/co.c -o $@
+	$(CC) -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter -DX86_BITS=64 -Iir -Ijit -Ibackend -Ikobold -c kobold/co.c -o $@
 
 ## skj-kpc: the native Kobold front end, the host compiler for the x86-64 target.
 ## Plan 9 style, the target baked at build: skj-pc compiles kpcom.pas with
-## -d KP_LP64 -d KP_TARGET_X64, so CurTarget is x86-64 (8-byte pointers) and every
-## module it emits is stamped `.target x86-64`.  No seed and no libkpaot; it links
+## -d KP_TARGET_X64, so CurTarget is x86-64 (8-byte pointers, width derived from
+## the target) and every module it emits is stamped `.target x86-64`.  No seed and
+## no libkpaot; it links
 ## the host-import shim (ReadFileStr, WriteFileStr, kpd_*) and skj-pc's Pascal
 ## runtime, the same ones check-pc-kpcom uses.  skj-kpc-x86-64 is the explicit arch
 ## name for the same binary.
 build/skj-kpc: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) | build
-	build/skj-pc-x86-64 -d KOBOLD -d KP_LP64 -d KP_TARGET_X64 -o build/kpcom-x86-64-fe.s $(KPCOM_SRC_PAS)
+	build/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_X64 -o build/kpcom-x86-64-fe.s $(KPCOM_SRC_PAS)
 	$(X64_ASM) -f elf64 build/kpcom-x86-64-fe.s -o build/kpcom-x86-64-fe.o
 	$(CC) -no-pie build/kpcom-x86-64-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
 
@@ -334,7 +336,7 @@ build/skj-kpc: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_hos
 ## its modules and rejects the x86-64 ones.  It runs on the x86-64 host (skj-pc
 ## output); the arch it names is the target it emits for, not where it runs.
 build/skj-kpc-arm64: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) | build
-	build/skj-pc-x86-64 -d KOBOLD -d KP_LP64 -d KP_TARGET_ARM64 -o build/kpcom-arm64-fe.s $(KPCOM_SRC_PAS)
+	build/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_ARM64 -o build/kpcom-arm64-fe.s $(KPCOM_SRC_PAS)
 	$(X64_ASM) -f elf64 build/kpcom-arm64-fe.s -o build/kpcom-arm64-fe.o
 	$(CC) -no-pie build/kpcom-arm64-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
 
@@ -369,7 +371,7 @@ build/skj-kpc-cf: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_
 ## It is the native (LP64) JIT, so a width-8 truncation (a 64-bit guest address
 ## narrowed to 32 bits dereferencing wild) also trips here under ASan.
 build/skj-kp-jit-san: kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o kobold/frontend.h $(KP_HDRS) Makefile | build
-	$(CC) $(KP_CFLAGS) -DKP_LP64 -Ibuild/x86-64 -O1 -g -DGH_POISON $(SAN_CFLAGS) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o -lm
+	$(CC) $(KP_CFLAGS) -Ibuild/x86-64 -O1 -g -DGH_POISON $(SAN_CFLAGS) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o -lm
 
 build/skj-kp-patrol: kobold/patrol_main.c $(KP_RT) build/kp_co.o $(KP_HDRS) Makefile | build
 	$(CC) $(KP_CFLAGS) -o $@ kobold/patrol_main.c $(KP_RT) build/kp_co.o -lm
@@ -424,21 +426,22 @@ KP_CFLAGS_CF := $(CFLAGS) -DKP_FREESTANDING -DKP_REAL=double -Iir -Ijit -Ibacken
 build/kp_co_a64.o: kobold/co.c kobold/co.h kobold/handle.h kobold/lowmem.h Makefile | build
 	$(A64_CC) -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter -Iir -Ijit -Ibackend -Ikobold -c kobold/co.c -o $@
 
-## kp_co_a64_lp64.o: the coroutine core for arm64, compiled -DKP_LP64 (native
-## 64-bit guest pointer, guest stacks in full memory), linked into the arm64 LP64
-## JIT and runtime.
+## kp_co_a64_lp64.o: the coroutine core for arm64, compiled LP64 (-DCC_ARM64:
+## native 64-bit guest pointer, guest stacks in full memory), linked into the
+## arm64 LP64 JIT and runtime.
 build/kp_co_a64_lp64.o: kobold/co.c kobold/co.h kobold/handle.h kobold/lowmem.h kobold/obj.h Makefile | build
-	$(A64_CC) -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter -DKP_LP64 -Iir -Ijit -Ibackend -Ikobold -c kobold/co.c -o $@
+	$(A64_CC) -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter -DCC_ARM64 -Iir -Ijit -Ibackend -Ikobold -c kobold/co.c -o $@
 
 ## co.c built for ColdFire/m68k with the same vendored-warning set as kp_co.o.
 build/kp_co_cf.o: kobold/co.c kobold/co.h kobold/handle.h kobold/lowmem.h Makefile | build
 	$(M68K_CC) -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter -Iir -Ijit -Ibackend -Ikobold -c kobold/co.c -o $@
 
 ## skj-kp-jit-arm64: the AArch64 in-process JIT.  AArch64 is an LP64 target, so the
-## runtime and front end are compiled -DKP_LP64, the embedded seed is the LP64 one,
-## and kp_co is the LP64 coroutine object.  Runs under qemu-aarch64.
+## runtime and front end are compiled -DCC_ARM64 (8-byte pointers), the embedded
+## seed is the arm64 one, and kp_co is the LP64 coroutine object.  Runs under
+## qemu-aarch64.
 build/skj-kp-jit-arm64: kobold/jit_main.c kobold/frontend.c build/arm64/kpcom_kpm.c $(KP_RT_A64) build/kp_co_a64_lp64.o kobold/frontend.h $(KP_HDRS_A64) Makefile | build
-	$(A64_CC) $(KP_CFLAGS_A64) -DKP_LP64 -Ibuild/arm64 -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/arm64/kpcom_kpm.c $(KP_RT_A64) build/kp_co_a64_lp64.o -lm
+	$(A64_CC) $(KP_CFLAGS_A64) -DCC_ARM64 -Ibuild/arm64 -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/arm64/kpcom_kpm.c $(KP_RT_A64) build/kp_co_a64_lp64.o -lm
 
 ## skj-kp: the x86-64 ahead-of-time compiler for Kobold modules.  It reads a KPM1
 ## module and writes NASM assembly through the same selector the JIT drives, over
@@ -450,11 +453,11 @@ build/skj-kp-jit-arm64: kobold/jit_main.c kobold/frontend.c build/arm64/kpcom_kp
 ## AArch64 and x86-64 are LP64 targets: a guest pointer is a native 64-bit value and
 ## the runtime maps the guest heap and execution stack in full memory (no low-memory
 ## trick).  The x86 selector keeps every integer temp in a uniform 64-bit home, so
-## skj-kp itself needs no width define; the LP64-ness lives in the KPM it reads and
-## in libkpaot.a (built -DKP_LP64 below).
+## skj-kp is built -DX86_BITS=64 (its LP64 width); the LP64-ness also lives in the
+## KPM it reads and in libkpaot.a (built for x86-64 below).
 build/skj-kp: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL) kobold/kpm.h ir/ir.h \
               backend/mc_text.h backend/x86_select.h Makefile | build
-	$(CC) $(CFLAGS) -DX86_BITS=64 -DKP_LP64 -Iir -Ibackend -Ikobold -o $@ \
+	$(CC) $(CFLAGS) -DX86_BITS=64 -Iir -Ibackend -Ikobold -o $@ \
 	    kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL)
 
 ## Exercise the KPM1 module reader's input validation (kobold/kpm.c) through skj-kp.
@@ -480,7 +483,7 @@ build/libkpaot.a: $(KP_AOT_RT) build/kp_co_lp64.o $(KP_HDRS) Makefile | build
 	@for f in $(KP_AOT_RT); do \
 	    o=build/aot/`basename $$f | sed 's/\.[cS]$$/.o/'`; \
 	    echo "  CC $$f"; \
-	    $(CC) $(KP_CFLAGS) -DKP_LP64 -c $$f -o $$o || exit 1; \
+	    $(CC) $(KP_CFLAGS) -c $$f -o $$o || exit 1; \
 	done
 	@rm -f $@
 	$(AR) rcs $@ build/aot/*.o build/kp_co_lp64.o
@@ -497,14 +500,13 @@ build/skj-kp-rv: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_RV) kobold/kpm.h 
 	$(CC) $(CFLAGS) -DKP_AOT_RV -DSKJ_KPM_ARCH='"rv32"' -Iir -Ibackend -Ikobold -o $@ \
 	    kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_RV)
 
-## AArch64 is LP64, so this AOT compiler is built -DKP_LP64: unlike the x86 selector
-## (uniform 64-bit integer home, unconditional), arm64_select.c gates its 64-bit
-## integer home (INT_HOME_X: ldrx/strx/mov x reloads and call-result captures) on
-## KP_LP64.  Without the define an AOT-compiled width-8 pointer would be truncated to
-## 32 bits, as the JIT's arm64 selector would too.
+## AArch64 is LP64, so this AOT compiler is built -DCC_ARM64 (its 8-byte pointer
+## width).  arm64_select.c uses a uniform 64-bit integer home (INT_HOME_X:
+## ldrx/strx/mov x reloads and call-result captures) unconditionally, since every
+## arm64 build is LP64, so a width-8 pointer is never truncated to 32 bits.
 build/skj-kp-arm64: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_A64_SEL) kobold/kpm.h ir/ir.h \
                     backend/arm64_mc_text.h backend/arm64_select.h Makefile | build
-	$(CC) $(CFLAGS) -DKP_LP64 -Iir -Ibackend -Ikobold -o $@ \
+	$(CC) $(CFLAGS) -DCC_ARM64 -Iir -Ibackend -Ikobold -o $@ \
 	    kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_A64_SEL)
 
 ## skj-kp-cf: the ColdFire ahead-of-time compiler for Kobold modules, the AOT
@@ -547,7 +549,7 @@ build/libkpaot-arm64.a: $(KP_AOT_RT_A64) build/kp_co_a64_lp64.o $(KP_HDRS_A64) M
 	@for f in $(KP_AOT_RT_A64); do \
 	    o=build/aot-arm64/`basename $$f | sed 's/\.[cS]$$/.o/'`; \
 	    echo "  A64CC $$f"; \
-	    $(A64_CC) $(KP_CFLAGS_A64) -DKP_LP64 -c $$f -o $$o || exit 1; \
+	    $(A64_CC) $(KP_CFLAGS_A64) -DCC_ARM64 -c $$f -o $$o || exit 1; \
 	done
 	@rm -f $@
 	$(AR) rcs $@ build/aot-arm64/*.o build/kp_co_a64_lp64.o
@@ -1433,6 +1435,22 @@ check-jit-arm64: build/skj-jit-arm64
 	@JIT="$(CURDIR)/build/skj-jit-arm64" RUNNER="$(QEMU_A64)" \
 	 EXCLUDE="cc_t077_inline_asm" sh tests/run-jit-tests.sh
 
+## test-jit-arm64-high: prove the arm64 C JIT is high-address-safe.  Run the
+## self-checking varargs+pointer test through skj-jit-arm64 (under qemu-aarch64)
+## with the guest regions forced above 4GB (SKJ_JIT_MAP_HIGH), and require the
+## same exit code as a normal run.  This exercises the uniform 64-bit integer
+## home (ldrx address reloads) at a base with nonzero high bits; a 32-bit reload
+## would truncate the base and fault or miscompute.
+test-jit-arm64-high: build/skj-jit-arm64
+	@t=tests/cc_t081_varargs_stdarg.c; want=`cat tests/cc_t081_varargs_stdarg.exitcode`; \
+	 set +e; \
+	 SKJ_JIT_MAP_HIGH=1 $(QEMU_A64) ./build/skj-jit-arm64 $$t >build/jit-arm64-high.out 2>&1; \
+	 rc=$$?; set -e; \
+	 if [ "$$rc" -ne "$$want" ]; then \
+	     echo "FAIL: skj-jit-arm64 (guest >4GB) exit $$rc, want $$want"; \
+	     sed 's/^/    /' build/jit-arm64-high.out; exit 1; fi; \
+	 echo "PASS: skj-jit-arm64 varargs+pointers correct with guest mapped >4GB (exit $$rc)"
+
 ## Validate the arm64 byte sink: disassemble each JIT-compiled test's code and
 ## confirm every 4-byte word is a legal instruction (composed-encoding coverage
 ## the per-instruction oracle and the exit-code suite do not give on their own).
@@ -1922,10 +1940,11 @@ build/test_rv_oracle: tests/rv_oracle.c jit/emit_rv.c jit/code.c jit/emit_rv.h j
 check-rv-oracle: build/test_rv_oracle
 	@./build/test_rv_oracle $(RV_AS) riscv64-linux-gnu-objcopy
 
-## The guest runtime arena (host-only): lazy low-memory mapping, word-aligned
-## bump allocation, and clean exhaustion.  Runs on the host, no qemu.
+## The guest runtime arena (host-only): lazy mapping, word-aligned bump
+## allocation, and clean exhaustion.  Built -DSKJ_LP64=1 (the region can live
+## anywhere).  Runs on the host, no qemu.
 build/test_jit_arena: tests/jit_arena.c jit/jit_arena.c jit/jit_arena.h ir/target.h | build
-	$(CC) $(CFLAGS) -Ijit -Iir -o $@ tests/jit_arena.c jit/jit_arena.c
+	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Ijit -Iir -o $@ tests/jit_arena.c jit/jit_arena.c
 
 test-jit-arena: build/test_jit_arena
 	@./build/test_jit_arena
@@ -2413,7 +2432,7 @@ build/san/skj-ar: $(AR_SRC) ld/mapfile.h ir/util.h ir/arena.h build/version.h | 
 # unsanitized (raw stack-switch coroutine assembly); the sanitizers are
 # per-TU, so linking it into a sanitized binary is fine.
 build/san/skj-kp-jit: kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o kobold/frontend.h $(KP_HDRS) build/version.h Makefile | build build/san
-	$(CC) $(KP_CFLAGS) -DKP_LP64 -Ibuild/x86-64 $(SAN_CFLAGS) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o -lm
+	$(CC) $(KP_CFLAGS) -Ibuild/x86-64 $(SAN_CFLAGS) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o -lm
 
 ## Each sanitized suite is its own target over the build/san tools, so a failing
 ## slice fails on its own (a single recipe line returns the script's status, no
@@ -5717,7 +5736,7 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            check-rv check-x86-64 check-arm64 \
            check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 \
            check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm \
-           test-jit-trap test-jit-trap-arm64 \
+           test-jit-trap test-jit-trap-arm64 test-jit-arm64-high \
            test-jit-arena test-fs \
            test-gc test-coro test-threads \
            test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 \
@@ -5757,4 +5776,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE
