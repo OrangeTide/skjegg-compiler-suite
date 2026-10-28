@@ -835,7 +835,10 @@ if [ "$has_kp" -eq 1 ]; then
     cat >> "$MK" <<'MK'
 
 AR      ?= ar
-X64_ASM ?= nasm
+# The x86-64 assembler.  The vendored backend emits GNU `.intel_syntax noprefix`
+# assembly, so the default is the host GNU `as` (intel mode via --64).
+X64_ASM      ?= as
+X64_ASMFLAGS ?= --64
 
 SKJ_BE_X64 := $(SKJEGG)backend/regalloc_x86.c $(SKJEGG)backend/x86_select.c \
               $(SKJEGG)backend/mc_text.c $(SKJEGG)backend/x86_aot.c
@@ -846,7 +849,7 @@ SKJ_KP_AOT_RT := $(SKJEGG)kobold/aot_rt.c $(SKJEGG)kobold/kp_host.c $(SKJEGG)kob
 SKJ_KP_CFLAGS := $(CFLAGS) -DX86_BITS=64 -DKP_FREESTANDING -DKP_REAL=double \
                  -I$(SKJEGG)ir -I$(SKJEGG)jit -I$(SKJEGG)backend -I$(SKJEGG)kobold
 
-# skj-kp: the x86-64 KPM1 AOT compiler (reads a .kpm, writes NASM assembly).
+# skj-kp: the x86-64 KPM1 AOT compiler (reads a .kpm, writes GNU intel assembly).
 SKJ_ALL += $(BUILD)/skj-kp
 $(BUILD)/skj-kp: $(SKJEGG)kobold/aot_main.c $(SKJEGG)kobold/kpm.c $(SKJ_IR) $(SKJ_BE_X64) | $(BUILD)
 	$(CC) $(CFLAGS) -DX86_BITS=64 -I$(SKJEGG)ir -I$(SKJEGG)backend -I$(SKJEGG)kobold -o $@ $(SKJEGG)kobold/aot_main.c $(SKJEGG)kobold/kpm.c $(SKJ_IR) $(SKJ_BE_X64)
@@ -869,7 +872,7 @@ SKJ_ALL += $(BUILD)/skj-kpc
 $(BUILD)/kpcom.s: $(SKJEGG)prebuild/kpcom.kpm $(BUILD)/skj-kp | $(BUILD)
 	$(BUILD)/skj-kp $(SKJEGG)prebuild/kpcom.kpm -o $@
 $(BUILD)/kpcom.o: $(BUILD)/kpcom.s | $(BUILD)
-	$(X64_ASM) -f elf64 $< -o $@
+	$(X64_ASM) $(X64_ASMFLAGS) $< -o $@
 $(BUILD)/skj-kpc: $(BUILD)/kpcom.o $(BUILD)/libkpaot.a | $(BUILD)
 	$(CC) -no-pie $(BUILD)/kpcom.o $(BUILD)/libkpaot.a -o $@ -lm
 MK

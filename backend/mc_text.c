@@ -1,8 +1,9 @@
-/* mc_text.c : the NASM text sink (see mc_text.h).
+/* mc_text.c : the GNU intel-syntax text sink (see mc_text.h).
 
-   One implementation of backend/mc.h that writes NASM (elf64) assembly.  Each
-   mc_* call prints one instruction; the selector drives it exactly as it drives
-   the JIT's byte sink, so the two paths emit the same code from the same
+   One implementation of backend/mc.h that writes GNU `.intel_syntax noprefix`
+   (elf64) assembly.  Each mc_* call prints one instruction; the selector drives
+   it exactly as it drives the JIT's byte sink, so the two paths emit the same
+   code from the same
    selection logic.  Registers arrive as hardware numbers (the mc_reg / mc_xmm
    enums), indexed here into the name tables; an operation's width rides its
    opcode name (the 32-bit forms use the e-registers, the 64-bit forms the
@@ -176,17 +177,17 @@ void mc_movsxd_rr(struct mc *m, int d, int s)
 /* ---- Memory.  A sub-word load extends into a 32-bit result; a sub-word store
    writes the register's low byte / low 16 bits. */
 void mc_load8(struct mc *m, int d, int b, int32_t o)
-{ char t[32]; fprintf(m->out, "\tmovzx %s, byte %s\n", reg32[d], memop(t, sizeof t, b, o)); }
+{ char t[32]; fprintf(m->out, "\tmovzx %s, byte ptr %s\n", reg32[d], memop(t, sizeof t, b, o)); }
 void mc_load8s(struct mc *m, int d, int b, int32_t o)
-{ char t[32]; fprintf(m->out, "\tmovsx %s, byte %s\n", reg32[d], memop(t, sizeof t, b, o)); }
+{ char t[32]; fprintf(m->out, "\tmovsx %s, byte ptr %s\n", reg32[d], memop(t, sizeof t, b, o)); }
 void mc_load16(struct mc *m, int d, int b, int32_t o)
-{ char t[32]; fprintf(m->out, "\tmovzx %s, word %s\n", reg32[d], memop(t, sizeof t, b, o)); }
+{ char t[32]; fprintf(m->out, "\tmovzx %s, word ptr %s\n", reg32[d], memop(t, sizeof t, b, o)); }
 void mc_load16s(struct mc *m, int d, int b, int32_t o)
-{ char t[32]; fprintf(m->out, "\tmovsx %s, word %s\n", reg32[d], memop(t, sizeof t, b, o)); }
+{ char t[32]; fprintf(m->out, "\tmovsx %s, word ptr %s\n", reg32[d], memop(t, sizeof t, b, o)); }
 void mc_store8(struct mc *m, int b, int32_t o, int s)
-{ char t[32]; fprintf(m->out, "\tmov byte %s, %s\n", memop(t, sizeof t, b, o), reg8[s]); }
+{ char t[32]; fprintf(m->out, "\tmov byte ptr %s, %s\n", memop(t, sizeof t, b, o), reg8[s]); }
 void mc_store16(struct mc *m, int b, int32_t o, int s)
-{ char t[32]; fprintf(m->out, "\tmov word %s, %s\n", memop(t, sizeof t, b, o), reg16[s]); }
+{ char t[32]; fprintf(m->out, "\tmov word ptr %s, %s\n", memop(t, sizeof t, b, o), reg16[s]); }
 void mc_load32(struct mc *m, int d, int b, int32_t o)
 { char t[32]; fprintf(m->out, "\tmov %s, %s\n", reg32[d], memop(t, sizeof t, b, o)); }
 void mc_store32(struct mc *m, int b, int32_t o, int s)
@@ -217,16 +218,61 @@ void mc_nop(struct mc *m) { fputs("\tnop\n", m->out); }
 void mc_call_reg(struct mc *m, int r) { fprintf(m->out, "\tcall %s\n", reg64[r]); }
 void mc_jmp_reg(struct mc *m, int r) { fprintf(m->out, "\tjmp %s\n", reg64[r]); }
 void mc_lea_label(struct mc *m, int r, int id)
-{ fprintf(m->out, "\tlea %s, [rel .Lf%d_%d]\n", reg64[r], m->serial, id); }
+{ fprintf(m->out, "\tlea %s, [rip+.Lf%d_%d]\n", reg64[r], m->serial, id); }
 
-/* NASM reserves many words (the SEG and WRT operators, the size specifiers, every
-   instruction mnemonic), so a guest symbol that happens to match one breaks
-   assembly.  A `$` prefix forces NASM to read the word as an identifier and is
-   stripped from the emitted object symbol, so it is always safe to apply.  A local
-   label (leading '.') is never a reserved word and is left untouched.  Several
-   buffers rotate so a single statement can format more than one symbol. */
+/* In GNU intel syntax (noprefix) a bare register name in an operand is the
+   register, so a guest symbol that happens to spell one (a global named "di",
+   "ss", "al", ...) assembles as "invalid use of register".  Report whether a
+   name collides with a register name or an intel operand keyword, so asm_sym can
+   escape it.  Matched case-insensitively, the way `as` reads the tokens. */
+static int
+is_reserved_token(const char *s)
+{
+    static const char *const words[] = {
+        /* 8/16/32/64-bit GPRs and their r8..r15 forms */
+        "al","cl","dl","bl","spl","bpl","sil","dil","ah","ch","dh","bh",
+        "ax","cx","dx","bx","sp","bp","si","di",
+        "eax","ecx","edx","ebx","esp","ebp","esi","edi",
+        "rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi",
+        "r8","r9","r10","r11","r12","r13","r14","r15",
+        "r8b","r9b","r10b","r11b","r12b","r13b","r14b","r15b",
+        "r8w","r9w","r10w","r11w","r12w","r13w","r14w","r15w",
+        "r8d","r9d","r10d","r11d","r12d","r13d","r14d","r15d",
+        "rip","eip","ip",
+        /* segment registers */
+        "cs","ds","es","fs","gs","ss",
+        /* xmm/ymm and x87/mmx */
+        "xmm0","xmm1","xmm2","xmm3","xmm4","xmm5","xmm6","xmm7",
+        "xmm8","xmm9","xmm10","xmm11","xmm12","xmm13","xmm14","xmm15",
+        "st","mm0","mm1","mm2","mm3","mm4","mm5","mm6","mm7",
+        /* operand keywords */
+        "byte","word","dword","qword","tbyte","oword","xmmword",
+        "ptr","offset","flat","short","near","far",
+        NULL,
+    };
+    int k;
+    for (k = 0; words[k]; k++) {
+        const char *a = s, *b = words[k];
+        while (*a && *b && ((*a | 0x20) == (*b | 0x20)))
+            a++, b++;
+        if (!*a && !*b)
+            return 1;
+    }
+    return 0;
+}
+
+/* GNU `as` accepts dotted and most reserved-word-like names verbatim, so almost
+   no escaping is needed.  Two adjustments: (1) a guest routine name arrives with
+   a leading `.` (for example ".coentry.1"), and `as` reserves the `.L` prefix for
+   local labels it does not emit into the symbol table, so strip the single
+   leading `.` to make an ordinary global ("coentry.1"); (2) a name that spells an
+   intel register or operand keyword ("di", "ss", "byte", ...) would be read as
+   that token in an operand, so append a `$` (a legal symbol character `as` keeps)
+   to disambiguate.  Both the defining label and every reference run through here,
+   so the spelling stays consistent.  Several buffers rotate so a single statement
+   can format more than one symbol. */
 const char *
-nasm_sym(const char *name)
+asm_sym(const char *name)
 {
     static char pool[4][256];
     static int which = 0;
@@ -238,27 +284,24 @@ nasm_sym(const char *name)
     which = (which + 1) & 3;
     buf = pool[which];
 
-    /* A `$` at the start escapes a reserved word and is stripped from the object
-       symbol.  A `.` anywhere makes NASM read a local label, so map every `.` to a
-       `$`, a plain identifier character it keeps: a leading one then doubles as the
-       escape.  A name such as ".coentry.1" (a compiler-generated routine, leading
-       dot and all) becomes the global symbol "coentry$1"; a runtime name with no
-       dots keeps its spelling after the escape is stripped. */
-    if (name[0] != '.')
-        buf[j++] = '$';
+    if (name[0] == '.')
+        name++;                 /* drop the leading dot of a generated name */
     for (i = 0; name[i] && j + 1 < sizeof pool[0]; i++)
-        buf[j++] = (name[i] == '.') ? '$' : name[i];
+        buf[j++] = name[i];
     buf[j] = '\0';
+    if (is_reserved_token(buf) && j + 1 < sizeof pool[0])
+        buf[j++] = '$', buf[j] = '\0';
     return buf;
 }
 
 /* ---- Symbolic call and address.  The linker resolves the name, so a local and
-   an external symbol are the same `call name` / `mov reg, name`; the driver
-   declares the externs NASM needs. */
+   an external symbol are the same `call name` / `mov reg, offset name`.  The
+   address load uses `offset` because in GNU intel syntax a bare symbol operand
+   means the contents at that symbol (MASM semantics), not its address. */
 void mc_call_sym(struct mc *m, const char *name)
-{ fprintf(m->out, "\tcall %s\n", nasm_sym(name)); }
+{ fprintf(m->out, "\tcall %s\n", asm_sym(name)); }
 void mc_lea_sym(struct mc *m, int reg, const char *name)
-{ fprintf(m->out, "\tmov %s, %s\n", reg64[reg], nasm_sym(name)); }
+{ fprintf(m->out, "\tmov %s, offset %s\n", reg64[reg], asm_sym(name)); }
 
 /* ---- Traps.  Under the AOT (TRAP_HARDWARE) trap policy the selector never
    emits these, so they are unreachable in text output; keep the sink complete
@@ -271,7 +314,7 @@ void mc_trap_overflow(struct mc *m)
 /* A source-line marker: the text sink has no address-to-line table to build, so
    it records the line as a comment for a human reading the assembly. */
 void mc_loc(struct mc *m, int line)
-{ fprintf(m->out, "\t; line %d\n", line); }
+{ fprintf(m->out, "\t# line %d\n", line); }
 
 /* ---- Double-precision SSE (f64). */
 void mc_movsd_rr(struct mc *m, int d, int s)
@@ -323,7 +366,7 @@ void mc_cvtss2sd_rr(struct mc *m, int d, int s)
 void mc_cvtsd2ss_rr(struct mc *m, int d, int s)
 { fprintf(m->out, "\tcvtsd2ss %s, %s\n", xmmn[d], xmmn[s]); }
 void mc_cvtss2sd_load(struct mc *m, int d, int b, int32_t o)
-{ char t[32]; fprintf(m->out, "\tcvtss2sd %s, dword %s\n", xmmn[d], memop(t, sizeof t, b, o)); }
+{ char t[32]; fprintf(m->out, "\tcvtss2sd %s, dword ptr %s\n", xmmn[d], memop(t, sizeof t, b, o)); }
 
 /* movq between a 64-bit GPR and an xmm. */
 void mc_movq_from_xmm(struct mc *m, int d, int s)
@@ -337,6 +380,7 @@ void mc_movd_from_xmm(struct mc *m, int d, int s)
 void mc_movd_to_xmm(struct mc *m, int d, int s)
 { fprintf(m->out, "\tmovd %s, %s\n", xmmn[d], reg32[s]); }
 
-/* Inline assembly: the string is emitted verbatim (nasm assembles it). */
+/* Inline assembly: the string is emitted verbatim.  It is now GNU intel-syntax
+   (the host assembler, and later skj-as-x86-64, assembles it). */
 void mc_asm(struct mc *m, const char *text)
 { fprintf(m->out, "%s\n", text); }

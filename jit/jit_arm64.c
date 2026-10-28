@@ -44,6 +44,7 @@ struct mc64 {
     struct mc64lab *lab;
     int nlab, clab;
     const char *errsym;
+    const char *asm_unsup;  /* inline-asm text the JIT cannot assemble, or NULL */
 };
 
 #define SCR 15                  /* the address/immediate scratch (x15) */
@@ -57,6 +58,7 @@ mc64_reset(struct mc64 *m, struct code *c, struct emitctx *e)
     m->lab = NULL;
     m->nlab = m->clab = 0;
     m->errsym = NULL;
+    m->asm_unsup = NULL;
 }
 
 static void
@@ -300,9 +302,10 @@ void mc64_trap_overflow(struct mc64 *m) { mc64_trap(m, "kp_trap_overflow"); }
 
 void mc64_loc(struct mc64 *m, int line) { kp_add_line(m->e, m->c->len, line); }
 
-/* Inline assembly has no byte-sink form: report it unsupported (the cc JIT suite
-   excludes the inline-asm test, so this is never reached). */
-void mc64_asm(struct mc64 *m, const char *text) { m->errsym = text; }
+/* Inline assembly has no byte-sink form: report it unsupported. The cc JIT suite
+   excludes the inline-asm test; a Kobold asm('...') program run under the JIT
+   lands here and gets the ahead-of-time diagnostic in emit_func. */
+void mc64_asm(struct mc64 *m, const char *text) { m->asm_unsup = text; }
 
 /****************************************************************
  * kp_target: the AArch64 back end kp_jit() drives
@@ -317,7 +320,10 @@ emit_func(struct emitctx *e, struct code *c, struct ir_func *fn)
 
     mc64_reset(&M, c, e);
     rc = arm64_select_func(&M, fn, ARM64_TRAP_GUARDED, errbuf, sizeof errbuf);
-    if (rc == 0 && M.errsym)
+    if (rc == 0 && M.asm_unsup)
+        rc = kp_fail(e, "inline asm is not supported by the JIT; "
+                        "compile ahead-of-time (asm \"%s\")", M.asm_unsup, 0);
+    else if (rc == 0 && M.errsym)
         rc = kp_fail(e, "unresolved symbol '%s'", M.errsym, 0);
     else if (rc != 0)
         rc = kp_fail(e, "%s", errbuf, 0);

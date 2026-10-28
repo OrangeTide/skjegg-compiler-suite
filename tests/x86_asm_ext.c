@@ -1,6 +1,6 @@
 /* Extended inline asm on x86-64: generic "r"/"=r"/"+r" operands with %N
  * substitution (the register name takes the operand's width, eax vs rax; the
- * backend emits NASM/Intel syntax, so templates and names carry no % prefix),
+ * backend emits GNU intel syntax, so templates and names carry no % prefix),
  * and register pinning through GNU local register variables bound to the Linux
  * x86-64 syscall registers (rax = number, rdi/rsi/rdx = args, result in rax).
  * Those registers are not allocatable, so the pins are free.  write(1, msg,

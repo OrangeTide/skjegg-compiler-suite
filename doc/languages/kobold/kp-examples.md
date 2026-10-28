@@ -272,6 +272,31 @@ end.
 99
 ```
 
+## Inline assembly
+
+`tests/kp-asm/inline_asm.pas`. `asm('text')` emits its one string literal
+verbatim into the generated assembly. The text must match the target
+assembler's syntax; here it is a C-style comment, which every target assembler
+accepts. A live value spans the `asm` to show it does not disturb the code
+around it. Unlike the other examples, this one is **ahead-of-time only**: the
+JIT has no assembler for a verbatim string, so build it with `skj-kpc` +
+`aot-run.sh`, not `skj-kp-jit`.
+
+```pascal
+program inline_asm;
+var
+  a: integer;
+begin
+  a := 40;
+  asm('/* kobold inline asm marker */');   { emitted verbatim }
+  WriteLn('a = ', a + 2);
+end.
+```
+
+```
+a = 42
+```
+
 ## More programs
 
 The skjegg test corpora hold many more Kobold programs, each paired with its
@@ -279,6 +304,7 @@ expected output:
 
 - `tests/kp-src/` the portable set that runs on every tier, including the
   no-libc freestanding one (integers, strings, int64, reals, coroutines).
+- `tests/kp-asm/` the inline-assembly example, run ahead-of-time only.
 - `tests/kp-corpus/` the broad behavioral set: records, arrays, maps, dynamic
   arrays, strings, enums, sets, casts, `var` parameters, and control flow.
 - `tests/kp-multi/` cross-unit programs that exercise `uses` and separate

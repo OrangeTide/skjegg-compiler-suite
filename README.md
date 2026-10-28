@@ -112,7 +112,7 @@ Per-target toolchains, needed only to build and test that target:
 - AArch64: `gcc-aarch64-linux-gnu`, `binutils-aarch64-linux-gnu`.
 - MIPS: `binutils-mipsel-linux-gnu` (or a bare-metal `mipsel-none-elf`
   cross).  `skj-as-mips`/`skj-ld-mips` can replace binutils.
-- x86: `nasm` and a host `ld`.
+- x86: a host `as` (GNU binutils, intel mode) and a host `ld`.
 
 ## Build and Run
 

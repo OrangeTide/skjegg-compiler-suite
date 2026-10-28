@@ -3,7 +3,7 @@
    The byte-level counterpart of backend/x86_emit.c, which emits GAS text for
    the AOT path.  This encoder writes raw machine code into a growable buffer,
    the form an in-process JIT needs.  Every encoder here is checked byte for
-   byte against nasm by tests/x86_oracle.c. */
+   byte against GNU as by tests/x86_oracle.c. */
 
 #ifndef EMIT_X86_H
 #define EMIT_X86_H

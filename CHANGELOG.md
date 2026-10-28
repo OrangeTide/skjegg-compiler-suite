@@ -6,6 +6,30 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.26.0
+
+#### Added
+- `skj-as-x86-64`, an in-tree x86-64 assembler. It reads GNU `.intel_syntax
+  noprefix` and writes ELF64 relocatable objects, and is now the default
+  assembler for the x86-64 toolchain, so a build no longer needs `nasm`.
+- `skj-as-aarch64`, an in-tree AArch64 assembler. It reads the native GNU
+  AArch64 assembler syntax and writes ELF64 relocatable objects, and is now the
+  default AArch64 assembler, so assembling the toolkit's own AArch64 output no
+  longer needs an external assembler.
+- Inline assembly in TinC (`asm("text")`) and Kobold (`asm('text')`), joining
+  the C front end. The one string literal is emitted verbatim into the generated
+  assembly; there are no operand constraints and no interpolation. Inline
+  assembly is ahead-of-time only, since the in-process JIT does not assemble
+  text.
+
+#### Changed
+- The x86-64 code generators and the hand-written x86-64 runtime now emit GNU
+  `.intel_syntax` assembly. `nasm` is retired: it is no longer used by the
+  build, the test suite, or CI.
+- The JIT reports a program that uses inline assembly with a clear message that
+  it must be compiled ahead of time, instead of a misleading "unresolved
+  symbol".
+
 ### 0.25.0
 
 #### Added

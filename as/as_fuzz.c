@@ -53,8 +53,26 @@ typedef struct mips_asm as_state;
 #define AS_WRITE(a,f) mips_elf_write((a), (f))
 #define AS_FREE(a)    mips_free(a)
 
+#elif defined(ASFUZZ_X86_64)
+#include "x86_64.h"
+typedef struct x86_64_asm as_state;
+#define AS_LABEL "as-x86-64"
+#define AS_INIT(a, s) x86_64_init((a), (s))
+#define AS_RUN(a)     x86_64_assemble(a)
+#define AS_WRITE(a,f) x86_64_elf_write((a), (f))
+#define AS_FREE(a)    x86_64_free(a)
+
+#elif defined(ASFUZZ_AARCH64)
+#include "aarch64.h"
+typedef struct a64_asm as_state;
+#define AS_LABEL "as-aarch64"
+#define AS_INIT(a, s) a64_init((a), (s))
+#define AS_RUN(a)     a64_assemble(a)
+#define AS_WRITE(a,f) a64_elf_write((a), (f))
+#define AS_FREE(a)    a64_free(a)
+
 #else
-#error "define ASFUZZ_CF, ASFUZZ_RV, or ASFUZZ_MIPS"
+#error "define ASFUZZ_CF, ASFUZZ_RV, ASFUZZ_MIPS, ASFUZZ_X86_64, or ASFUZZ_AARCH64"
 #endif
 
 /* Assemble one NUL-terminated source. The assemblers keep pointers into the

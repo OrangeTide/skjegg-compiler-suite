@@ -37,8 +37,9 @@ jobs:
       - uses: actions/checkout@v6
 
       # check-all spans every backend, so install every cross toolchain it
-      # touches (m68k, riscv64, aarch64, mipsel), NASM for x86, and the full
-      # qemu-user set (m68k / riscv32 / i386 / x86_64 / aarch64 / mipsel).
+      # touches (m68k, riscv64, aarch64, mipsel), the host binutils `as` for
+      # x86-64 (intel mode, via gcc/build-essential), and the full qemu-user set
+      # (m68k / riscv32 / i386 / x86_64 / aarch64 / mipsel).
       - name: Install cross toolchains and QEMU
         run: |
           sudo apt-get update
@@ -47,7 +48,7 @@ jobs:
             gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             gcc-mipsel-linux-gnu binutils-mipsel-linux-gnu \
-            nasm qemu-user \
+            qemu-user \
             llvm   # provides llvm-dwarfdump for the DWARF line-table tests
 
       # The RV32 JIT (skj-jit-rv) is cross-built for hosted rv32 with zig cc,
@@ -107,17 +108,17 @@ jobs:
   # not by which compiler built it (fpc here, skj-pc elsewhere).  'make
   # bootstrap-fpc' builds both the skj rv32 seed and the fpc one and compares
   # them, so the assertion is the target itself.  Building the skj rv32 seed
-  # runs skj-pc-x86-64 over kpcom and assembles its NASM output, so this job
-  # needs nasm as well as fpc.
+  # runs skj-pc-x86-64 over kpcom and assembles its GNU intel output with the
+  # host `as`, so this job needs binutils as well as fpc.
   bootstrap-fpc:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
-      - name: Install Free Pascal and nasm
+      - name: Install Free Pascal and binutils
         run: |
           sudo apt-get update
-          sudo apt-get install -y fpc nasm
+          sudo apt-get install -y fpc binutils
       - name: Rebuild the front end with fpc and assert it matches the skj seed
         run: make bootstrap-fpc
 
@@ -162,7 +163,7 @@ jobs:
             gcc-m68k-linux-gnu binutils-m68k-linux-gnu \
             gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            nasm qemu-user
+            qemu-user
       # check-emu-all builds skj-jit-rv (hosted rv32, run under qemu-riscv32)
       # for the Kobold RV JIT tier, so zig is needed here too.
       - name: Install zig

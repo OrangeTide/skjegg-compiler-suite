@@ -42,6 +42,7 @@ struct mc {
     struct mclabel *lab;
     int nlab, clab;
     const char *errsym;     /* an unresolved symbol name, or NULL */
+    const char *asm_unsup;  /* inline-asm text the JIT cannot assemble, or NULL */
 };
 
 static void
@@ -52,6 +53,7 @@ mc_reset(struct mc *m, struct code *c, struct emitctx *e)
     m->lab = NULL;
     m->nlab = m->clab = 0;
     m->errsym = NULL;
+    m->asm_unsup = NULL;
 }
 
 static void
@@ -276,8 +278,9 @@ void mc_movd_to_xmm(struct mc *m, int d, int s) { x_movd_to_xmm(m->c, d, s); }
 
 /* Inline assembly has no byte-sink form: the JIT emits machine code directly and
    has no downstream assembler for a verbatim string, so report it unsupported.
-   The cc JIT suite excludes the inline-asm test, so this is never reached. */
-void mc_asm(struct mc *m, const char *text) { m->errsym = text; }
+   The cc JIT suite excludes the inline-asm test; a Kobold asm('...') program run
+   under the JIT lands here and gets the ahead-of-time diagnostic below. */
+void mc_asm(struct mc *m, const char *text) { m->asm_unsup = text; }
 void mc_cvtss2sd_rr(struct mc *m, int d, int s) { x_cvtss2sd_rr(m->c, d, s); }
 void mc_cvtsd2ss_rr(struct mc *m, int d, int s) { x_cvtsd2ss_rr(m->c, d, s); }
 void mc_cvtss2sd_load(struct mc *m, int d, int b, int32_t o) { x_cvtss2sd_load(m->c, d, b, o); }
@@ -300,7 +303,10 @@ emit_func(struct emitctx *e, struct code *c, struct ir_func *fn)
 
     mc_reset(&M, c, e);
     rc = x86_select_func(&M, fn, TRAP_GUARDED, errbuf, sizeof errbuf);
-    if (rc == 0 && M.errsym)
+    if (rc == 0 && M.asm_unsup)
+        rc = kp_fail(e, "inline asm is not supported by the JIT; "
+                        "compile ahead-of-time (asm \"%s\")", M.asm_unsup, 0);
+    else if (rc == 0 && M.errsym)
         rc = kp_fail(e, "unresolved symbol '%s'", M.errsym, 0);
     else if (rc != 0)
         rc = kp_fail(e, "%s", errbuf, 0);

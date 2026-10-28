@@ -91,8 +91,8 @@ and ships it as `prebuild/kpcom.kpm`, so the consumer AOT-compiles it with
 end), and `libkpaot.a`. Adding `riscv` also generates `skj-kp-rv` (the KPM1 to
 RV32 compiler). The hosted RV32 runtime (`libkpaot-rv.a`) and the freestanding
 runtime tier arrive with later steps. The selection carries its own x86-64
-backend, so it needs no separate backend selection; it needs `nasm` to assemble
-the seed, as the rest of the x86 path already does.
+backend, so it needs no separate backend selection; it needs the host `as` to
+assemble the seed, as the rest of the x86 path already does.
 
 ## Tools
 

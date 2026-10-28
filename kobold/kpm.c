@@ -691,6 +691,22 @@ read_func(struct reader *r, struct ir_func *fn)
         } else {
             struct ir_insn *in;
             int op;
+            /* ASM carries verbatim assembly text as a C-escaped quoted string
+               that may contain spaces, so it is read from the raw line like a
+               .string rather than split into key=value tokens (which tokenize,
+               below, would do destructively). */
+            if (strncmp(line, "ASM", 3) == 0 &&
+                (line[3] == ' ' || line[3] == '\t')) {
+                char *body = quoted_body(line);
+                int slen;
+                if (!body) {
+                    fail(r, r->pos + 1, "malformed ASM");
+                    return -1;
+                }
+                in = ir_emit(fn, IR_ASM);
+                in->sym = unescape(a, body, &slen);
+                continue;
+            }
             n = tokenize(line, tok);
             if (n == 0)
                 continue;

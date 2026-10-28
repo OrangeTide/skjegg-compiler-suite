@@ -16,7 +16,7 @@
 #   KPAOT      the AOT driver (build/skj-kp, skj-kp-rv, skj-kp-arm64)   [required]
 #   KPAOTLIB   the runtime archive to link (build/libkpaot*.a)          [required]
 #   KPAOTCC    the compiler driver that assembles the .s and links      [required]
-#   KPAOTAS    an explicit assembler step (x86 nasm); empty elsewhere
+#   KPAOTAS    an explicit assembler step (x86 host as, intel mode); empty elsewhere
 #   KPAOTQEMU  an emulator prefix for a cross target; empty on the host
 #   KOBOLD_UNITS  colon-separated extra directories to find unit .kpm files
 set -e

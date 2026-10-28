@@ -1082,6 +1082,13 @@ lower_stmt(struct node *n)
             (void)lower_expr(n->a);
         return;
 
+    case N_ASM:
+        /* basic inline asm: the text is emitted verbatim by the backend. */
+        ins = emit(IR_ASM);
+        ins->sym = arena_strndup(lower_arena, n->sval, n->slen);
+        ins->asm_info = NULL;
+        return;
+
     case N_IF:
         ltrue = new_label();
         lfalse = new_label();

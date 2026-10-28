@@ -69,17 +69,44 @@ MIPS_OBJDUMP ?= mipsel-none-elf-objdump
 MIPS_ADDR2LINE ?= mipsel-linux-gnu-addr2line
 QEMU_MIPS ?= qemu-mipsel
 SPIM ?= spim
-A64_AS  ?= aarch64-linux-gnu-as
+# The arm64 assembler: the in-tree build/skj-as-aarch64, which reads the GNU as
+# syntax the arm64 backends emit and writes ELF64 EM_AARCH64 objects.  Override
+# to the host cross assembler with A64_AS=aarch64-linux-gnu-as.  Linking stays
+# external (A64_LD).
+A64_AS  ?= build/skj-as-aarch64
 A64_LD  ?= aarch64-linux-gnu-ld
 A64_CC  ?= aarch64-linux-gnu-gcc
+# Rules that run $(A64_AS) depend on $(A64_ASM_DEP) so the in-tree assembler is
+# built first and dependents re-assemble when it changes; an override to the
+# host as clears the dependency.
+ifeq ($(A64_AS),build/skj-as-aarch64)
+A64_ASM_DEP := build/skj-as-aarch64
+else
+A64_ASM_DEP :=
+endif
 QEMU_A64 ?= qemu-aarch64
 # The in-process RV32 JIT driver is a hosted program (mmap/stdio/malloc), which
 # the rv64 riscv64-linux-gnu toolchain cannot build for rv32 (no ilp32 glibc
 # multilib).  zig cc bundles an rv32 libc, so it cross-builds the driver; it runs
 # under qemu-riscv32.  Override RVJIT_CC if a native rv32 hosted toolchain exists.
 RVJIT_CC ?= zig cc -target riscv32-linux-musl
-X64_ASM ?= nasm
+# The x86-64 assembler: the in-tree build/skj-as-x86-64, which reads the GNU
+# .intel_syntax noprefix the x86-64 backends emit and writes ELF64 objects.
+# X64_ASMFLAGS carries any per-assembler flag; the in-tree tool needs none, so
+# override both to use the host GNU `as` instead (X64_ASM=as X64_ASMFLAGS=--64).
+# Every call site uses "$(X64_ASM) $(X64_ASMFLAGS)".  Linking stays external.
+X64_ASM      ?= build/skj-as-x86-64
+X64_ASMFLAGS ?=
 X64_LD  ?= ld
+# Rules that run $(X64_ASM) depend on $(X64_ASM_DEP) so the in-tree assembler is
+# built before anything assembles with it, and dependents re-assemble when it
+# changes (matching the skj-as-rv convention); an override to the host `as`
+# (X64_ASM=as) clears the dependency.
+ifeq ($(X64_ASM),build/skj-as-x86-64)
+X64_ASM_DEP := build/skj-as-x86-64
+else
+X64_ASM_DEP :=
+endif
 # On an x86-64 Linux host the x86-64 target ELF is a native binary, so the test
 # harness runs it directly and an empty QEMU_X64 means "run natively".  Any other
 # host emulates it with qemu-x86_64.  Override on the command line (for example
@@ -102,7 +129,7 @@ BE_X64  := backend/regalloc_x86.c backend/x86_emit.c
 # split x86 has between BE_X64_SEL and BE_X64.
 BE_A64_SEL := backend/regalloc_arm64.c backend/arm64_select.c backend/arm64_mc_text.c
 # The unified x86-64 (LP64) backend: the shared instruction selector over the
-# NASM text sink, driven by the AOT driver.  skj-cc-x86-64 uses this; the other
+# GNU intel-syntax text sink, driven by the AOT driver.  skj-cc-x86-64 uses this; the other
 # x86-64 tools still use BE_X64 (x86_emit.c) until M3 moves them over.
 BE_X64_SEL := backend/regalloc_x86.c backend/x86_select.c backend/mc_text.c \
               backend/x86_aot.c
@@ -130,6 +157,7 @@ TOOLS := build/skj-tinc build/skj-tinc-rv build/skj-tinc-mips build/skj-tinc-arm
          build/skj-sc build/skj-sc-rv build/skj-sc-mips build/skj-sc-arm64 \
          build/skj-mooc build/skj-pc build/skj-as build/skj-ld \
          build/skj-as-rv build/skj-ld-rv build/skj-as-mips build/skj-ld-mips build/skj-ar \
+         build/skj-as-x86-64 build/skj-as-aarch64 \
          build/skj-cpp build/skj-cc build/skj-cc-x86-64 build/skj-cc-arm64 \
          build/skj-cc-rv build/skjcc build/skj-run \
          build/skj-addr2line build/skj-dbg \
@@ -326,18 +354,18 @@ build/kp_co_lp64.o: kobold/co.c kobold/co.h kobold/handle.h kobold/lowmem.h kobo
 ## the host-import shim (ReadFileStr, WriteFileStr, kpd_*) and skj-pc's Pascal
 ## runtime, the same ones check-pc-kpcom uses.  skj-kpc-x86-64 is the explicit arch
 ## name for the same binary.
-build/skj-kpc: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) | build
+build/skj-kpc: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(X64_ASM_DEP) | build
 	build/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_X64 -o build/kpcom-x86-64-fe.s $(KPCOM_SRC_PAS)
-	$(X64_ASM) -f elf64 build/kpcom-x86-64-fe.s -o build/kpcom-x86-64-fe.o
+	$(X64_ASM) $(X64_ASMFLAGS) build/kpcom-x86-64-fe.s -o build/kpcom-x86-64-fe.o
 	$(CC) -no-pie build/kpcom-x86-64-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
 
 ## skj-kpc-arm64: the host front end for the AArch64 target.  Same LP64 width as
 ## skj-kpc, but KP_TARGET_ARM64 stamps `.target arm64`, so the arm64 backend accepts
 ## its modules and rejects the x86-64 ones.  It runs on the x86-64 host (skj-pc
 ## output); the arch it names is the target it emits for, not where it runs.
-build/skj-kpc-arm64: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) | build
+build/skj-kpc-arm64: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(X64_ASM_DEP) | build
 	build/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_ARM64 -o build/kpcom-arm64-fe.s $(KPCOM_SRC_PAS)
-	$(X64_ASM) -f elf64 build/kpcom-arm64-fe.s -o build/kpcom-arm64-fe.o
+	$(X64_ASM) $(X64_ASMFLAGS) build/kpcom-arm64-fe.s -o build/kpcom-arm64-fe.o
 	$(CC) -no-pie build/kpcom-arm64-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
 
 build/skj-kpc-x86-64: build/skj-kpc | build
@@ -351,14 +379,14 @@ build/skj-kpc-x86-64: build/skj-kpc | build
 ## the cc model: a unit built for rv32 is not a unit for ColdFire, so there is no
 ## shared "ilp32" front end.  (The architecture decides the pointer width; both
 ## happen to be 4 bytes, but that is a consequence, not a shared category.)
-build/skj-kpc-rv: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) | build
+build/skj-kpc-rv: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(X64_ASM_DEP) | build
 	build/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_RV -o build/kpcom-rv-fe.s $(KPCOM_SRC_PAS)
-	$(X64_ASM) -f elf64 build/kpcom-rv-fe.s -o build/kpcom-rv-fe.o
+	$(X64_ASM) $(X64_ASMFLAGS) build/kpcom-rv-fe.s -o build/kpcom-rv-fe.o
 	$(CC) -no-pie build/kpcom-rv-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
 
-build/skj-kpc-cf: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) | build
+build/skj-kpc-cf: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(X64_ASM_DEP) | build
 	build/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_CF -o build/kpcom-cf-fe.s $(KPCOM_SRC_PAS)
-	$(X64_ASM) -f elf64 build/kpcom-cf-fe.s -o build/kpcom-cf-fe.o
+	$(X64_ASM) $(X64_ASMFLAGS) build/kpcom-cf-fe.s -o build/kpcom-cf-fe.o
 	$(CC) -no-pie build/kpcom-cf-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
 
 ## skj-kp-jit-san: build/skj-kp-jit with the guest-heap write-after-free instrument
@@ -444,11 +472,11 @@ build/skj-kp-jit-arm64: kobold/jit_main.c kobold/frontend.c build/arm64/kpcom_kp
 	$(A64_CC) $(KP_CFLAGS_A64) -DCC_ARM64 -Ibuild/arm64 -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/arm64/kpcom_kpm.c $(KP_RT_A64) build/kp_co_a64_lp64.o -lm
 
 ## skj-kp: the x86-64 ahead-of-time compiler for Kobold modules.  It reads a KPM1
-## module and writes NASM assembly through the same selector the JIT drives, over
+## module and writes GNU intel assembly through the same selector the JIT drives, over
 ## the text sink (backend/mc_text.c) and AOT driver (backend/x86_aot.c).  The output
-## is assembled with nasm and linked -no-pie against libkpaot.a:
-##     skj-kp prog.kpm -o prog.asm
-##     nasm -f elf64 prog.asm -o prog.o
+## is assembled with the host `as` (intel mode) and linked -no-pie against libkpaot.a:
+##     skj-kp prog.kpm -o prog.s
+##     as --64 prog.s -o prog.o
 ##     cc -no-pie prog.o build/libkpaot.a -o prog
 ## AArch64 and x86-64 are LP64 targets: a guest pointer is a native 64-bit value and
 ## the runtime maps the guest heap and execution stack in full memory (no low-memory
@@ -624,7 +652,16 @@ check-kp-jit: build/skj-kp-jit
 check-kp-aot: build/skj-kpc build/skj-kp build/libkpaot.a
 	@MODE=aot FRONTEND=build/skj-kpc \
 	    KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
-	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) -f elf64" \
+	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
+	    sh tests/run-kp-src-tests.sh
+
+## Inline assembly in Kobold (asm('text')) is AOT only: the JIT does not
+## assemble text.  This runs the asm fixture set through the native front end
+## and the x86-64 backend AOT path, the same lane as check-kp-aot.
+check-kp-asm: build/skj-kpc build/skj-kp build/libkpaot.a
+	@KP_SRCDIR=tests/kp-asm MODE=aot FRONTEND=build/skj-kpc \
+	    KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
+	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
 	    sh tests/run-kp-src-tests.sh
 
 ## The RV32 and AArch64 cross runs, under qemu.  JIT: the embedded front end JITs
@@ -663,7 +700,7 @@ check-kp-corpus: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a
 	@QEMU= KP_SRCDIR=tests/kp-corpus MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-src-tests.sh
 	@KP_SRCDIR=tests/kp-corpus MODE=aot FRONTEND=build/skj-kpc \
 	    KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
-	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) -f elf64" \
+	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
 	    sh tests/run-kp-src-tests.sh
 
 ## check-kp-corpus-san: run the whole behavioral corpus through the instrumented JIT
@@ -727,7 +764,7 @@ check-kp-multi: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a
 	@QEMU= KP_SRCDIR=tests/kp-multi MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-multi-tests.sh
 	@KP_SRCDIR=tests/kp-multi MODE=aot FRONTEND=build/skj-kpc \
 	    KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
-	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) -f elf64" \
+	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
 	    sh tests/run-kp-multi-tests.sh
 
 check-kp-multi-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
@@ -769,7 +806,7 @@ check-kp-files: build/skj-kp-jit build/skj-kpc build/skj-kpc-rv build/skj-kp bui
 	    > build/kp-files/filesrt.kpm 2>build/kp-files/emit.err
 	@rm -f build/kp-files/rt.txt
 	@KOBOLD_UNITS=$(CURDIR)/build/kp-files KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
-	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) -f elf64" \
+	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
 	    sh kobold/aot-run.sh build/kp-files/filesrt.kpm $(CURDIR)/build/kp-files/rt.txt \
 	    > build/kp-files/aot.out 2>build/kp-files/aot.err; \
 	 cmp -s build/kp-files/aot.out tests/kp-files/filesrt.expected \
@@ -817,7 +854,7 @@ check-kp-dirs: build/skj-kp-jit build/skj-kpc build/skj-kpc-rv build/skj-kp buil
 	     > build/kp-dirs/dirsrt.kpm 2>build/kp-dirs/emit.err; \
 	 mkscan $$D; \
 	 KOBOLD_UNITS=$(CURDIR)/build/kp-dirs KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
-	     KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) -f elf64" \
+	     KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
 	     sh kobold/aot-run.sh build/kp-dirs/dirsrt.kpm $$D \
 	     > build/kp-dirs/aot.out 2>build/kp-dirs/aot.err; \
 	 cmp -s build/kp-dirs/aot.out tests/kp-dirs/dirsrt.expected \
@@ -1057,7 +1094,7 @@ check-kp-io: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a
 	@QEMU= KP_SRCDIR=tests/kp-io MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-src-tests.sh
 	@KP_SRCDIR=tests/kp-io MODE=aot FRONTEND=build/skj-kpc \
 	    KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
-	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) -f elf64" \
+	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
 	    sh tests/run-kp-src-tests.sh
 
 check-kp-io-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
@@ -1094,7 +1131,7 @@ check-kp-inc: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a
 	@QEMU= KP_SRCDIR=tests/kp-inc MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-src-tests.sh
 	@KP_SRCDIR=tests/kp-inc MODE=aot FRONTEND=build/skj-kpc \
 	    KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
-	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) -f elf64" \
+	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
 	    sh tests/run-kp-src-tests.sh
 
 check-kp-inc-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
@@ -1596,6 +1633,25 @@ AS_MIPS_SRC := as/mips_main.c as/asm_lex.c as/asm_obj.c as/mips_parse.c \
 build/skj-as-mips: $(AS_MIPS_SRC) as/mips.h as/asm_lex.h as/asm_obj.h dwarf/dwarf.h | build
 	$(CC) $(CFLAGS) -Ias -Iir -Idwarf -o $@ $(AS_MIPS_SRC)
 
+## x86-64 assembler (shares the lexer + object helpers with skj-as).  Reads the
+## GNU .intel_syntax noprefix the x86-64 backends emit; no DWARF (the bounded
+## input has no .loc).
+AS_X64_SRC := as/x86_64_main.c as/asm_lex.c as/asm_obj.c as/x86_64_parse.c \
+              as/x86_64_encode.c as/x86_64_elf.c \
+              ir/util.c ir/arena.c
+
+build/skj-as-x86-64: $(AS_X64_SRC) as/x86_64.h as/asm_lex.h as/asm_obj.h | build
+	$(CC) $(CFLAGS) -Ias -Iir -o $@ $(AS_X64_SRC)
+
+## AArch64 assembler (shares the lexer + object helpers with skj-as).  Reads the
+## native GNU as syntax the arm64 backends emit; no DWARF (bounded input).
+AS_A64_SRC := as/aarch64_main.c as/asm_lex.c as/asm_obj.c as/aarch64_parse.c \
+              as/aarch64_encode.c as/aarch64_elf.c \
+              ir/util.c ir/arena.c
+
+build/skj-as-aarch64: $(AS_A64_SRC) as/aarch64.h as/asm_lex.h as/asm_obj.h | build
+	$(CC) $(CFLAGS) -Ias -Iir -o $@ $(AS_A64_SRC)
+
 ## skj-ld linker
 LD_SRC := ld/main.c ld/elf_read.c ld/script.c ld/link.c ld/elf_write.c ld/mapfile.c ld/archive.c ir/util.c ir/arena.c
 
@@ -1910,11 +1966,11 @@ test-f32-mips-sf: build/mips/f32_test_sf
 build/test_f32_oracle: tests/f32_oracle.c tests/f32_vectors.h emu/rv32.c emu/rv32.h | build
 	$(CC) $(CFLAGS) -Iemu -Itests -o $@ tests/f32_oracle.c emu/rv32.c -lm
 
-## The x86-64 byte encoder (jit/emit_x86.c) checked byte for byte against
-## nasm, the golden-master counterpart of check-rvas / check-mipsas.  Needs
-## nasm (already an x86 prerequisite); no IR or backend is involved.
-## Named test_* so `make check`'s run-tests.sh skips it (it is a host tool,
-## not a qemu-m68k guest), the same guard build/test_f32_oracle relies on.
+## The x86-64 byte encoder (jit/emit_x86.c) checked byte for byte against the
+## host GNU `as` (intel mode) via objcopy, the golden-master counterpart of
+## check-rvas / check-mipsas.  Needs binutils (as, objcopy); no IR or backend is
+## involved.  Named test_* so `make check`'s run-tests.sh skips it (it is a host
+## tool, not a qemu-m68k guest), the same guard build/test_f32_oracle relies on.
 build/test_x86_oracle: tests/x86_oracle.c jit/emit_x86.c jit/code.c jit/emit_x86.h jit/code.h | build
 	$(CC) $(CFLAGS) -Ijit -o $@ tests/x86_oracle.c jit/emit_x86.c jit/code.c
 
@@ -1929,7 +1985,7 @@ build/test_arm64_oracle: tests/arm64_oracle.c jit/emit_arm64.c jit/code.c jit/em
 	$(CC) $(CFLAGS) -Ijit -o $@ tests/arm64_oracle.c jit/emit_arm64.c jit/code.c
 
 check-arm64-oracle: build/test_arm64_oracle
-	@./build/test_arm64_oracle $(A64_AS) aarch64-linux-gnu-objcopy
+	@./build/test_arm64_oracle aarch64-linux-gnu-as aarch64-linux-gnu-objcopy
 
 ## The RV32 byte encoder golden-master (host-only): every jit/emit_rv.c encoder
 ## checked byte for byte against riscv64-linux-gnu-as, the counterpart of
@@ -2027,7 +2083,7 @@ test-f32-diff-rv: build/skj-cc-rv build/rv/start.o $(F32_DIFF_DEPS)
 ## model) are a verified f32 sync set.
 test-f32-diff-x86-64: build/skj-cc-x86-64 build/x86_64/start_sysv.o $(F32_DIFF_DEPS)
 	@CCBIN="$(CURDIR)/build/skj-cc-x86-64" \
-	 ASM="$(X64_ASM) -f elf64 -o" LD="$(X64_LD) -m elf_x86_64 -o" \
+	 ASM="$(X64_ASM) $(X64_ASMFLAGS) -o" LD="$(X64_LD) -m elf_x86_64 -o" \
 	 QEMU="$(QEMU_X64)" START="$(CURDIR)/build/x86_64/start_sysv.o" \
 	 OUTDIR="$(CURDIR)/build/f32diff-x86_64" LABEL="x86-64" XFAIL=1 \
 	 sh tests/run-f32-diff.sh
@@ -2081,7 +2137,7 @@ TORTURE_DIFF_DEPS := build/skj-cc build/skj-cc-rv build/skj-cc-x86-64 \
 test-torture-diff: $(TORTURE_DIFF_DEPS)
 	@GCC="$(CC)" M68K_AS="$(M68K_AS)" M68K_LD="$(M68K_LD)" QEMU="$(QEMU)" \
 	 RV_AS="$(RV_AS)" RV_LD="$(RV_LD)" QEMU_RV="$(QEMU_RV)" \
-	 X64_ASM="$(X64_ASM)" X64_LD="$(X64_LD)" QEMU_X64="$(QEMU_X64)" \
+	 X64_ASM="$(X64_ASM)" X64_ASMFLAGS="$(X64_ASMFLAGS)" X64_LD="$(X64_LD)" QEMU_X64="$(QEMU_X64)" \
 	 A64_AS="$(A64_AS)" A64_LD="$(A64_LD)" QEMU_A64="$(QEMU_A64)" \
 	 MIPS_AS="$(MIPS_AS)" MIPS_LD="$(MIPS_LD)" QEMU_MIPS="$(QEMU_MIPS)" \
 	 sh tests/run-torture-diff.sh
@@ -2345,6 +2401,8 @@ build/san/cpp-fuzz: cpp/cpp_fuzz.c $(CPP_SRC) cpp/cpp.h cpp/internal.h ir/util.h
 AS_FUZZ_LIB    := $(filter-out as/main.c,$(AS_SRC))
 AS_RV_FUZZ_LIB := $(filter-out as/rv_main.c,$(AS_RV_SRC))
 AS_MIPS_FUZZ_LIB := $(filter-out as/mips_main.c,$(AS_MIPS_SRC))
+AS_X64_FUZZ_LIB := $(filter-out as/x86_64_main.c,$(AS_X64_SRC))
+AS_A64_FUZZ_LIB := $(filter-out as/aarch64_main.c,$(AS_A64_SRC))
 
 build/san/as-fuzz: as/as_fuzz.c $(AS_FUZZ_LIB) as/as.h as/asm_lex.h as/asm_obj.h \
                    tests/fuzz_mutate.h build/version.h | build build/san
@@ -2360,6 +2418,16 @@ build/san/as-mips-fuzz: as/as_fuzz.c $(AS_MIPS_FUZZ_LIB) as/mips.h as/asm_lex.h 
                         tests/fuzz_mutate.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DASFUZZ_MIPS -Ias -Iir -Idwarf -Itests -o $@ \
 	    as/as_fuzz.c $(AS_MIPS_FUZZ_LIB)
+
+build/san/as-x86-64-fuzz: as/as_fuzz.c $(AS_X64_FUZZ_LIB) as/x86_64.h as/asm_lex.h as/asm_obj.h \
+                          tests/fuzz_mutate.h build/version.h | build build/san
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DASFUZZ_X86_64 -Ias -Iir -Itests -o $@ \
+	    as/as_fuzz.c $(AS_X64_FUZZ_LIB)
+
+build/san/as-aarch64-fuzz: as/as_fuzz.c $(AS_A64_FUZZ_LIB) as/aarch64.h as/asm_lex.h as/asm_obj.h \
+                           tests/fuzz_mutate.h build/version.h | build build/san
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DASFUZZ_AARCH64 -Ias -Iir -Itests -o $@ \
+	    as/as_fuzz.c $(AS_A64_FUZZ_LIB)
 
 # The IR front-end parser fuzz harnesses (one arch-parameterized source over
 # each front end's library, main.c dropped).  Lexer + parser + lowering, source
@@ -2586,6 +2654,20 @@ test-as-mips-fuzz: build/san/as-mips-fuzz
 	   || { echo "as-mips-fuzz: FAILED"; tail -40 build/as-mips-fuzz.log; exit 1; }
 	@tail -1 build/as-mips-fuzz.log
 
+test-as-x86-64-fuzz: build/san/as-x86-64-fuzz
+	@echo "== x86-64 assembler fuzz ($(AS_FUZZ_ITERS) iterations, rng $(AS_FUZZ_RNG)) =="
+	@$(SAN_RUNENV) ./build/san/as-x86-64-fuzz --mutate $(AS_FUZZ_ITERS) --rng $(AS_FUZZ_RNG) \
+	   $(wildcard tests/x86-64as/*.s) >/dev/null 2>build/as-x86-64-fuzz.log \
+	   || { echo "as-x86-64-fuzz: FAILED"; tail -40 build/as-x86-64-fuzz.log; exit 1; }
+	@tail -1 build/as-x86-64-fuzz.log
+
+test-as-aarch64-fuzz: build/san/as-aarch64-fuzz
+	@echo "== aarch64 assembler fuzz ($(AS_FUZZ_ITERS) iterations, rng $(AS_FUZZ_RNG)) =="
+	@$(SAN_RUNENV) ./build/san/as-aarch64-fuzz --mutate $(AS_FUZZ_ITERS) --rng $(AS_FUZZ_RNG) \
+	   $(wildcard tests/aarch64as/*.s) >/dev/null 2>build/as-aarch64-fuzz.log \
+	   || { echo "as-aarch64-fuzz: FAILED"; tail -40 build/as-aarch64-fuzz.log; exit 1; }
+	@tail -1 build/as-aarch64-fuzz.log
+
 ## The IR front-end parser fuzzers.  Seeds are each front end's test sources.
 FE_FUZZ_ITERS ?= 20000
 FE_FUZZ_RNG   ?= 1
@@ -2635,7 +2717,7 @@ check-san-kobold: check-san-kp check-san-kp-corpus check-san-kp-multi \
 ## Every sanitized slice.
 check-san: check-san-tools check-san-rvas check-san-jit check-san-kobold \
            test-kpm-fuzz test-cpp-fuzz \
-           test-as-fuzz test-as-rv-fuzz test-as-mips-fuzz \
+           test-as-fuzz test-as-rv-fuzz test-as-mips-fuzz test-as-x86-64-fuzz test-as-aarch64-fuzz \
            test-fe-tinc-fuzz test-fe-pascal-fuzz test-fe-moo-fuzz \
            test-fe-cc-fuzz
 	@echo "All check-san suites passed under the sanitizers."
@@ -2645,7 +2727,7 @@ check-san: check-san-tools check-san-rvas check-san-jit check-san-kobold \
         check-san-jit check-san-tinc check-san-scheme check-san-moo \
         check-san-pc check-san-ar check-san-kp-corpus check-san-kp-multi \
         check-san-kp-io check-san-kp-inc test-kpm-fuzz test-cpp-fuzz \
-        test-as-fuzz test-as-rv-fuzz test-as-mips-fuzz \
+        test-as-fuzz test-as-rv-fuzz test-as-mips-fuzz test-as-x86-64-fuzz test-as-aarch64-fuzz \
         test-fe-tinc-fuzz test-fe-pascal-fuzz test-fe-moo-fuzz \
         test-fe-cc-fuzz
 
@@ -2659,13 +2741,13 @@ build/arm64/%.s: tests/%.tc build/skj-tinc-arm64 | build/arm64
 build/arm64/scm_%.s: tests/scm_%.scm build/skj-sc-arm64 | build/arm64
 	./build/skj-sc-arm64 -o $@ $<
 
-build/arm64/%.o: build/arm64/%.s
+build/arm64/%.o: build/arm64/%.s $(A64_ASM_DEP)
 	$(A64_AS) -o $@ $<
 
-build/arm64/start.o: runtime/start_arm64.S | build/arm64
+build/arm64/start.o: runtime/start_arm64.S $(A64_ASM_DEP) | build/arm64
 	$(A64_AS) -o $@ $<
 
-build/arm64/start_aapcs.o: runtime/start_arm64_aapcs.S | build/arm64
+build/arm64/start_aapcs.o: runtime/start_arm64_aapcs.S $(A64_ASM_DEP) | build/arm64
 	$(A64_AS) -o $@ $<
 
 build/arm64/va.o: runtime/va_aarch64.c | build/arm64
@@ -2693,14 +2775,14 @@ build/x86_64/%.s: tests/%.tc build/skj-tinc-x86-64 | build/x86_64
 build/x86_64/scm_%.s: tests/scm_%.scm build/skj-sc-x86-64 | build/x86_64
 	./build/skj-sc-x86-64 -o $@ $<
 
-build/x86_64/%.o: build/x86_64/%.s
-	$(X64_ASM) -f elf64 -o $@ $<
+build/x86_64/%.o: build/x86_64/%.s $(X64_ASM_DEP)
+	$(X64_ASM) $(X64_ASMFLAGS) -o $@ $<
 
-build/x86_64/start.o: runtime/start_x86_64.asm | build/x86_64
-	$(X64_ASM) -f elf64 -o $@ $<
+build/x86_64/start.o: runtime/start_x86_64.s $(X64_ASM_DEP) | build/x86_64
+	$(X64_ASM) $(X64_ASMFLAGS) -o $@ $<
 
-build/x86_64/start_sysv.o: runtime/start_x86_64_sysv.asm | build/x86_64
-	$(X64_ASM) -f elf64 -o $@ $<
+build/x86_64/start_sysv.o: runtime/start_x86_64_sysv.s $(X64_ASM_DEP) | build/x86_64
+	$(X64_ASM) $(X64_ASMFLAGS) -o $@ $<
 
 build/x86_64/va.o: runtime/va_x86_64.c | build/x86_64
 	$(CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<
@@ -3253,7 +3335,7 @@ build/pascal_rt_host_asan.o: runtime/pascal_rt.c | build
 ## free or use after free in the managed string runtime fails the suite.
 check-pc-host: check-pc-host-leak build/skj-pc-x86-64 build/pascal_rt_host.o
 	@MODE=x64 PC=build/skj-pc-x86-64 RT=build/pascal_rt_host.o \
-	    NASM="$(X64_ASM)" CC="$(CC)" sh tests/run-pc-host.sh $(PAS_TESTS)
+	    NASM="$(X64_ASM)" ASMFLAGS="$(X64_ASMFLAGS)" CC="$(CC)" sh tests/run-pc-host.sh $(PAS_TESTS)
 
 check-pc-arm64: build/skj-pc-arm64 build/pascal_rt_host_a64.o
 	@MODE=a64 PC=build/skj-pc-arm64 RT=build/pascal_rt_host_a64.o \
@@ -3265,7 +3347,7 @@ check-pc-arm64: build/skj-pc-arm64 build/pascal_rt_host_a64.o
 ## under qemu-user, so the aarch64 suite stays value-only).
 check-pc-host-leak: build/skj-pc-x86-64 build/pascal_rt_host_asan.o
 	@MODE=x64 SAN=1 PC=build/skj-pc-x86-64 RT=build/pascal_rt_host_asan.o \
-	    NASM="$(X64_ASM)" CC="$(CC)" sh tests/run-pc-host.sh $(PAS_TESTS)
+	    NASM="$(X64_ASM)" ASMFLAGS="$(X64_ASMFLAGS)" CC="$(CC)" sh tests/run-pc-host.sh $(PAS_TESTS)
 .PHONY: check-pc-host-leak
 
 ## kpcom acceptance: compile the real Kobold compiler (kobold/kpcom.pas) with
@@ -3276,7 +3358,7 @@ check-pc-kpcom: build/skj-pc-x86-64 build/pascal_rt_host.o build/skj-kp-jit
 	@PC=build/skj-pc-x86-64 RT=build/pascal_rt_host.o \
 	    HOST=tests/pascal_kpcom_host.c SRC=$(KPCOM_SRC_PAS) \
 	    REF=build/skj-kp-jit CORPUS=tests/kp-corpus OUT=build \
-	    NASM="$(X64_ASM)" CC="$(CC)" sh tests/run-pc-kpcom.sh
+	    NASM="$(X64_ASM)" ASMFLAGS="$(X64_ASMFLAGS)" CC="$(CC)" sh tests/run-pc-kpcom.sh
 .PHONY: check-pc-kpcom
 
 ## Pascal runtime (cross-compiled C)
@@ -4587,7 +4669,7 @@ build/test_i64_arm64: $(I64_TEST_A64_SRC) ir/ir.h | build
 build/arm64/i64_test.s: build/test_i64_arm64 | build/arm64
 	./build/test_i64_arm64 -o $@
 
-build/arm64/i64_test.o: build/arm64/i64_test.s
+build/arm64/i64_test.o: build/arm64/i64_test.s $(A64_ASM_DEP)
 	$(A64_AS) -o $@ $<
 
 build/arm64/i64_test: build/arm64/i64_test.o build/arm64/start.o
@@ -4606,8 +4688,8 @@ build/test_i64_x64: $(I64_TEST_X64_SRC) ir/ir.h | build
 build/x86_64/i64_test.s: build/test_i64_x64 | build/x86_64
 	./build/test_i64_x64 -o $@
 
-build/x86_64/i64_test.o: build/x86_64/i64_test.s
-	$(X64_ASM) -f elf64 -o $@ $<
+build/x86_64/i64_test.o: build/x86_64/i64_test.s $(X64_ASM_DEP)
+	$(X64_ASM) $(X64_ASMFLAGS) -o $@ $<
 
 build/x86_64/i64_test: build/x86_64/i64_test.o build/x86_64/start.o
 	$(X64_LD) -m elf_x86_64 -o $@ build/x86_64/start.o $<
@@ -4626,8 +4708,8 @@ build/test_threaded_x64: $(THREADED_TEST_X64_SRC) ir/ir.h | build
 build/x86_64/threaded_test.s: build/test_threaded_x64 | build/x86_64
 	./build/test_threaded_x64 -o $@
 
-build/x86_64/threaded_test.o: build/x86_64/threaded_test.s
-	$(X64_ASM) -f elf64 -o $@ $<
+build/x86_64/threaded_test.o: build/x86_64/threaded_test.s $(X64_ASM_DEP)
+	$(X64_ASM) $(X64_ASMFLAGS) -o $@ $<
 
 build/x86_64/threaded_test: build/x86_64/threaded_test.o build/x86_64/start.o
 	$(X64_LD) -m elf_x86_64 -o $@ build/x86_64/start.o $<
@@ -4670,7 +4752,7 @@ build/test_threaded_arm64: $(THREADED_TEST_A64_SRC) ir/ir.h | build
 	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Iir -o $@ $(THREADED_TEST_A64_SRC)
 build/arm64/threaded_test.s: build/test_threaded_arm64 | build/arm64
 	./build/test_threaded_arm64 -o $@
-build/arm64/threaded_test.o: build/arm64/threaded_test.s
+build/arm64/threaded_test.o: build/arm64/threaded_test.s $(A64_ASM_DEP)
 	$(A64_AS) -o $@ $<
 build/arm64/threaded_test: build/arm64/threaded_test.o build/arm64/start.o
 	$(A64_LD) -o $@ build/arm64/start.o $<
@@ -4739,7 +4821,7 @@ build/test_ops_arm64: $(OPS_TEST_A64_SRC) ir/ir.h | build
 build/arm64/ops_test.s: build/test_ops_arm64 | build/arm64
 	./build/test_ops_arm64 -o $@
 
-build/arm64/ops_test.o: build/arm64/ops_test.s
+build/arm64/ops_test.o: build/arm64/ops_test.s $(A64_ASM_DEP)
 	$(A64_AS) -o $@ $<
 
 build/arm64/ops_test: build/arm64/ops_test.o build/arm64/start.o
@@ -4758,8 +4840,8 @@ build/test_ops_x64: $(OPS_TEST_X64_SRC) ir/ir.h | build
 build/x86_64/ops_test.s: build/test_ops_x64 | build/x86_64
 	./build/test_ops_x64 -o $@
 
-build/x86_64/ops_test.o: build/x86_64/ops_test.s
-	$(X64_ASM) -f elf64 -o $@ $<
+build/x86_64/ops_test.o: build/x86_64/ops_test.s $(X64_ASM_DEP)
+	$(X64_ASM) $(X64_ASMFLAGS) -o $@ $<
 
 build/x86_64/ops_test: build/x86_64/ops_test.o build/x86_64/start.o
 	$(X64_LD) -m elf_x86_64 -o $@ build/x86_64/start.o $<
@@ -4779,7 +4861,7 @@ build/test_fpu_arm64: $(FPU_TEST_A64_SRC) ir/ir.h | build
 build/arm64/fpu_test.s: build/test_fpu_arm64 | build/arm64
 	./build/test_fpu_arm64 -o $@
 
-build/arm64/fpu_test.o: build/arm64/fpu_test.s
+build/arm64/fpu_test.o: build/arm64/fpu_test.s $(A64_ASM_DEP)
 	$(A64_AS) -o $@ $<
 
 build/arm64/fpu_test: build/arm64/fpu_test.o build/arm64/start.o
@@ -4822,8 +4904,8 @@ build/test_fpu_x64: $(FPU_TEST_X64_SRC) ir/ir.h | build
 build/x86_64/fpu_test.s: build/test_fpu_x64 | build/x86_64
 	./build/test_fpu_x64 -o $@
 
-build/x86_64/fpu_test.o: build/x86_64/fpu_test.s
-	$(X64_ASM) -f elf64 -o $@ $<
+build/x86_64/fpu_test.o: build/x86_64/fpu_test.s $(X64_ASM_DEP)
+	$(X64_ASM) $(X64_ASMFLAGS) -o $@ $<
 
 build/x86_64/half.o: runtime/half.c | build/x86_64
 	$(CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<
@@ -4847,8 +4929,8 @@ build/test_f32_x64: $(F32_TEST_X64_SRC) ir/ir.h | build
 	$(CC) $(CFLAGS) -DX86_BITS=64 -Iir -o $@ $(F32_TEST_X64_SRC)
 build/x86_64/f32_test.s: build/test_f32_x64 | build/x86_64
 	./build/test_f32_x64 -o $@
-build/x86_64/f32_test.o: build/x86_64/f32_test.s
-	$(X64_ASM) -f elf64 -o $@ $<
+build/x86_64/f32_test.o: build/x86_64/f32_test.s $(X64_ASM_DEP)
+	$(X64_ASM) $(X64_ASMFLAGS) -o $@ $<
 build/x86_64/f32_test: build/x86_64/f32_test.o build/x86_64/start.o
 	$(X64_LD) -m elf_x86_64 -o $@ build/x86_64/start.o $<
 test-f32-x86-64: build/x86_64/f32_test
@@ -4860,7 +4942,7 @@ build/test_f32_arm64: $(F32_TEST_A64_SRC) ir/ir.h | build
 	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Iir -o $@ $(F32_TEST_A64_SRC)
 build/arm64/f32_test.s: build/test_f32_arm64 | build/arm64
 	./build/test_f32_arm64 -o $@
-build/arm64/f32_test.o: build/arm64/f32_test.s
+build/arm64/f32_test.o: build/arm64/f32_test.s $(A64_ASM_DEP)
 	$(A64_AS) -o $@ $<
 build/arm64/f32_test: build/arm64/f32_test.o build/arm64/start.o
 	$(A64_LD) -o $@ build/arm64/start.o $<
@@ -4905,7 +4987,7 @@ check-cc: build/skj-cc build/skj-as build/start.o build/half.o build/va_cf.o
 ## native single-precision float rounding is actually exercised.
 check-cc-x86-64: build/skj-cc-x86-64 build/x86_64/start_sysv.o build/x86_64/half.o build/x86_64/va.o
 	@CCBIN="$(CURDIR)/build/skj-cc-x86-64" \
-	 ASM="$(X64_ASM) -f elf64 -o" \
+	 ASM="$(X64_ASM) $(X64_ASMFLAGS) -o" \
 	 LD="$(X64_LD) -m elf_x86_64 -o" \
 	 QEMU="$(QEMU_X64)" \
 	 START="$(CURDIR)/build/x86_64/start_sysv.o" \
@@ -5333,7 +5415,7 @@ check-libc-mips: build/skj-cc-mips build/mips/start.o build/mips/half.o build/mi
 
 check-libc-x86-64: build/skj-cc-x86-64 build/x86_64/start_sysv.o build/x86_64/half.o build/x86_64/va.o build/x86_64/soft64.o build/x86_64/co_switch.o
 	@CCBIN="$(CURDIR)/build/skj-cc-x86-64" \
-	 ASM="$(X64_ASM) -f elf64 -o" \
+	 ASM="$(X64_ASM) $(X64_ASMFLAGS) -o" \
 	 LD="$(X64_LD) -m elf_x86_64 -o" \
 	 QEMU="$(QEMU_X64)" \
 	 START="$(CURDIR)/build/x86_64/start_sysv.o" \
@@ -5512,7 +5594,7 @@ test-cc-rv-asm: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv/start.o
 	 if [ $$ec -eq 42 ]; then echo "PASS: rv_asm_ext (exit $$ec)"; \
 	 else echo "FAIL: rv_asm_ext (exit $$ec, expected 42)"; exit 1; fi
 
-## Extended inline asm on x86-64: skj-cc-x86-64 through nasm/ld on qemu-x86_64.
+## Extended inline asm on x86-64: skj-cc-x86-64 through as/ld on qemu-x86_64.
 ## Generic "r"/"=r"/"+r" operands (names at the operand width, eax vs rax) and
 ## register pinning through GNU local register variables, exercised by a real
 ## write(2) syscall (rax/rdi/rsi/rdx pinned).  Built in build/x86-asm/.
@@ -5520,7 +5602,7 @@ test-cc-x86-64-asm: build/skj-cc-x86-64 build/x86_64/start_sysv.o build/x86_64/h
 	@for t in "x86_asm_ext 42" "x86_asm_syscall 22"; do \
 	    set -- $$t; name=$$1; want=$$2; \
 	    ./build/skj-cc-x86-64 -o build/x86-asm/$$name.s tests/$$name.c || exit 1; \
-	    $(X64_ASM) -f elf64 -o build/x86-asm/$$name.o build/x86-asm/$$name.s || exit 1; \
+	    $(X64_ASM) $(X64_ASMFLAGS) -o build/x86-asm/$$name.o build/x86-asm/$$name.s || exit 1; \
 	    $(X64_LD) -m elf_x86_64 -o build/x86-asm/$$name \
 	        build/x86_64/start_sysv.o build/x86_64/half.o build/x86_64/va.o \
 	        build/x86-asm/$$name.o || exit 1; \
@@ -5707,6 +5789,22 @@ check-rvas: build/skj-as-rv build/skj-ld-rv build/skj-run
 	 GAS="$(RV_AS)" GLD="$(RV_LD)" QEMU="$(QEMU_RV)" \
 	 sh tests/run-rvas-tests.sh
 
+## x86-64 assembler: encoding + relocation golden-master against GNU as in
+## intel mode.  Linking stays external, so there are no run tests here; the
+## x86-64 cc/libc/pc suites exercise running through the assembler when
+## X64_ASM points at it.
+check-x86-64as: build/skj-as-x86-64
+	@SKJ=./build/skj-as-x86-64 GAS=as GASFLAGS=--64 \
+	 sh tests/run-x86-64as-tests.sh
+
+## AArch64 assembler: encoding + relocation golden-master against GNU as.  As
+## with the x86-64 lane, linking stays external so there are no run tests here;
+## the arm64 cc/libc/pc suites exercise running through the assembler when
+## A64_AS points at it.
+check-aarch64as: build/skj-as-aarch64
+	@SKJ=./build/skj-as-aarch64 GAS=aarch64-linux-gnu-as \
+	 sh tests/run-aarch64as-tests.sh
+
 ## Full qemu matrix across every supported architecture: the per-language
 ## suites, plus the IR-builder integration tests (fpu / i64 / unsigned ops).
 ## ColdFire (qemu-m68k), RISC-V (qemu-riscv32, hardware float), x86-64
@@ -5716,7 +5814,7 @@ check-rvas: build/skj-as-rv build/skj-ld-rv build/skj-run
 ## with the host tool, and skj-kpc covers the kpcom seed).  This keeps the -h
 ## surface uniform as tools are added.
 HELP_TOOLS := skj-tinc skj-sc skj-mooc skj-pc skj-cc skj-cpp skj-jit \
-              skj-as skj-as-rv skj-as-mips skj-ld skj-ld-rv skj-ld-mips skj-ar \
+              skj-as skj-as-rv skj-as-mips skj-as-x86-64 skj-as-aarch64 skj-ld skj-ld-rv skj-ld-mips skj-ar \
               skj-run skj-addr2line skj-dbg skj-kp skj-kp-jit skj-kp-patrol \
               skj-kpc
 test-help: $(addprefix build/,$(HELP_TOOLS))
@@ -5744,7 +5842,7 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 \
            test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 \
            test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 \
-           check-rvas check-cc-rv-skj \
+           check-rvas check-x86-64as check-aarch64as check-cc-rv-skj \
            test-cc-rv-loc test-kp-rv-loc test-kp-rv-dwarf test-kp-rv-trap-backtrace test-pc-loc test-moo-loc test-tinc-loc \
            test-dwarf-line test-rv-stt-func test-rv-debug-sections \
            test-rv-debug-link test-rv-addr2line test-rv-backtrace test-rv-abort-backtrace \
@@ -5757,7 +5855,7 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive \
            test-cc-rv-psabi-struct test-cc-driver check-libc \
            check-kp \
-           check-kp-frontend check-kp-jit check-kp-aot check-kp-corpus check-kp-corpus-cf check-kp-multi check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-inc
+           check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-corpus check-kp-corpus-cf check-kp-multi check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-inc
 	@echo "All architecture test suites passed."
 
 clean:
@@ -5776,4 +5874,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE

@@ -4,7 +4,7 @@
    compile (skj-cc*, preprocessing is built in) -> assemble (skj-as*) -> link
    (skj-ld*), linking the right crt, the C library, and the runtime helpers.  A
    target is chosen with -target; the in-tree targets (coldfire, riscv, mips)
-   are fully binutils-free, while x86-64 and arm64 shell out to nasm/as and ld.
+   are fully binutils-free, while x86-64 and arm64 shell out to the host as and ld.
 
    A link pulls in the crt, then the target's libc.a (a pull-only archive, so
    nothing a program does not reference is linked), then the runtime helpers
@@ -67,7 +67,7 @@ static const struct target targets[] = {
       "crt0.o", { "half.o", "va_mips.o", "soft64_div.o", NULL }, "libc.a" },
     { { "x86-64", "x86_64", NULL },
       "skj-cc-x86-64",
-      "nasm", { "-f", "elf64", NULL },
+      "as", { "--64", NULL },
       "ld", { "-m", "elf_x86_64", NULL },
       "crt0.o", { "half.o", "va.o", NULL }, NULL },
     { { "arm64", "aarch64", NULL },

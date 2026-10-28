@@ -274,6 +274,18 @@ return a, b;                // fixed multi-return
 return.. expr;              // append to variable return area
 ```
 
+```
+asm("instruction text");    // basic inline assembly, emitted verbatim
+```
+
+`asm(...)` emits the string verbatim into the generated assembly at
+that point in the instruction stream. It is a statement. The text is a
+single string literal and is passed through unchanged, so it must match
+the target assembler's syntax. There are no operand constraints or
+register substitution. The front end does not parse or validate the
+text, and the surrounding register allocation does not see it, so an
+`asm` block must leave the machine state the caller expects.
+
 `foreach` declares a read-only loop variable and iterates every
 element of an array (owned or view).  The compiler knows the
 array's length and element width, so it emits a tight counted

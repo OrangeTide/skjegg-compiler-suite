@@ -1,7 +1,7 @@
 /* emit_x86.c : x86-64 machine-code encoder (byte emitter).
 
    The byte-level counterpart of backend/x86_emit.c (which emits GAS text for
-   the AOT path).  Checked byte for byte against nasm by tests/x86_oracle.c. */
+   the AOT path).  Checked byte for byte against GNU as by tests/x86_oracle.c. */
 
 #include "emit_x86.h"
 

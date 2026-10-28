@@ -1,4 +1,4 @@
-/* x86_emit.c : x86 back-end, emits NASM-syntax assembly */
+/* x86_emit.c : x86-64 back-end, emits GNU `.intel_syntax noprefix` assembly */
 /*
  * x86-64, Linux ELF64, ILP32-style, emitting the toolkit stack calling
  * convention (the SysV register convention is backend/x86_select.c).  Every
@@ -375,9 +375,9 @@ emit_load(FILE *out, struct ir_func *fn, struct ir_insn *i,
     sa = ars(out, fn, i->a, 0);
     sd = rd(fn, i->dst, 0);
     if (sign_extend)
-        fprintf(out, "\tmovsx %s, %s [%s]\n", sd, size_prefix, sa);
+        fprintf(out, "\tmovsx %s, %s ptr [%s]\n", sd, size_prefix, sa);
     else
-        fprintf(out, "\tmovzx %s, %s [%s]\n", sd, size_prefix, sa);
+        fprintf(out, "\tmovzx %s, %s ptr [%s]\n", sd, size_prefix, sa);
     wd(out, fn, i->dst, sd);
 }
 
@@ -520,14 +520,14 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
 
     case IR_LEA: {
         const char *sd = rd(fn, i->dst, 0);
-        fprintf(out, "\tmov %s, %s\n", sd, i->sym);
+        fprintf(out, "\tmov %s, offset %s\n", sd, i->sym);
         wd(out, fn, i->dst, sd);
         break;
     }
 
     case IR_LABADDR: {
         const char *sd = rd(fn, i->dst, 0);
-        fprintf(out, "\tmov %s, .L%d_%d\n", sd, label_prefix, i->label);
+        fprintf(out, "\tmov %s, offset .L%d_%d\n", sd, label_prefix, i->label);
         wd(out, fn, i->dst, sd);
         break;
     }
@@ -937,7 +937,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_FLS: {
         const char *sa = ars(out, fn, i->a, 0);
         const char *sd = frd(fn, i->dst);
-        fprintf(out, "\tcvtss2sd %s, dword [%s]\n", sd, sa);
+        fprintf(out, "\tcvtss2sd %s, dword ptr [%s]\n", sd, sa);
         fwd(out, fn, i->dst, sd);
         break;
     }
@@ -974,7 +974,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
     case IR_FLH: {
         const char *sd = frd(fn, i->dst);
         const char *sa = ars(out, fn, i->a, 0);
-        fprintf(out, "\tmovzx edi, word [%s]\n", sa);
+        fprintf(out, "\tmovzx edi, word ptr [%s]\n", sa);
         fprintf(out, "\tcall __skj_extendhfsf\n");     /* eax = single bits */
         fprintf(out, "\tmovd xmm0, eax\n");
         fprintf(out, "\tcvtss2sd %s, xmm0\n", sd);
@@ -990,7 +990,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         fprintf(out, "\tmov ecx, eax\n");                /* save half (call-safe reg) */
         {
             const char *sa = ars(out, fn, i->a, 0);      /* reload addr after call */
-            fprintf(out, "\tmov word [%s], cx\n", sa);
+            fprintf(out, "\tmov word ptr [%s], cx\n", sa);
         }
         break;
     }
@@ -1026,7 +1026,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
 
         fprintf(out, "\tmov [" BP "%+d], rbp\n", off);
         fprintf(out, "\tmov [" BP "%+d], rsp\n", off + 8);
-        fprintf(out, "\tmov qword [" BP "%+d], .Lmark%d_%d\n",
+        fprintf(out, "\tmov qword ptr [" BP "%+d], offset .Lmark%d_%d\n",
             off + 16, label_prefix, i->label);
         fprintf(out, "\tlea rax, [" BP "%+d]\n", off);
         fprintf(out, "\tmov [__cont_mark_sp], rax\n");
@@ -1073,7 +1073,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
 
         fprintf(out, "\tmov [" BP "%+d], ebp\n", off);
         fprintf(out, "\tmov [" BP "%+d], esp\n", off + 4);
-        fprintf(out, "\tmov dword [" BP "%+d], .Lmark%d_%d\n",
+        fprintf(out, "\tmov dword ptr [" BP "%+d], offset .Lmark%d_%d\n",
             off + 8, label_prefix, i->label);
         fprintf(out, "\tlea eax, [" BP "%+d]\n", off);
         fprintf(out, "\tmov [__cont_mark_sp], eax\n");
@@ -1229,7 +1229,7 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
 
     case IR_LEA64: {                            /* 64-bit symbol address */
         const char *sd = rdq(fn, i->dst, 0);
-        fprintf(out, "\tmov %s, %s\n", sd, i->sym);
+        fprintf(out, "\tmov %s, offset %s\n", sd, i->sym);
         wdq(out, fn, i->dst, sd);
         break;
     }
@@ -1308,9 +1308,9 @@ emit_function(FILE *out, struct ir_func *fn)
     narg = 0;
     label_prefix = ++fn_serial;
 
-    fprintf(out, "\nsection .text\n");
+    fprintf(out, "\n.text\n");
     if (!fn->is_local)
-        fprintf(out, "global %s\n", fn->name);
+        fprintf(out, ".globl %s\n", fn->name);
     fprintf(out, "%s:\n", fn->name);
     emit_prologue(out, fn);
 
@@ -1336,7 +1336,7 @@ emit_string_bytes(FILE *out, const char *s, int n)
 {
     int k;
 
-    fputs("\tdb ", out);
+    fputs("\t.byte ", out);
     for (k = 0; k < n; k++) {
         unsigned char c = (unsigned char)s[k];
         if (k > 0)
@@ -1373,31 +1373,32 @@ emit_init_image(FILE *out, struct ir_global *g)
 
     for (it = g->inits; it; it = it->next) {
         if (it->offset > cur) {
-            fprintf(out, "times %d db 0\n", it->offset - cur);
+            fprintf(out, ".zero %d\n", it->offset - cur);
             cur = it->offset;
         }
         if (it->sym) {
             char ref[160];
-            fprintf(out, "\t%s %s\n", it->size == 8 ? "dq" : "dd",
+            fprintf(out, "\t%s %s\n", it->size == 8 ? ".quad" : ".long",
                 sym_ref(ref, sizeof ref, it->sym, it->ival));
         } else if (it->size == 8) {
             uint64_t b = (uint64_t)it->ival;
-            fprintf(out, "\tdd 0x%08x\n", (unsigned)(b & 0xFFFFFFFF));
-            fprintf(out, "\tdd 0x%08x\n", (unsigned)(b >> 32));
+            fprintf(out, "\t.long 0x%08x\n", (unsigned)(b & 0xFFFFFFFF));
+            fprintf(out, "\t.long 0x%08x\n", (unsigned)(b >> 32));
         } else if (it->size == 2)
-            fprintf(out, "\tdw 0x%04x\n", (unsigned)(it->ival & 0xFFFF));
+            fprintf(out, "\t.word 0x%04x\n", (unsigned)(it->ival & 0xFFFF));
         else if (it->size == 1)
-            fprintf(out, "\tdb 0x%02x\n", (unsigned)(it->ival & 0xFF));
+            fprintf(out, "\t.byte 0x%02x\n", (unsigned)(it->ival & 0xFF));
         else
-            fprintf(out, "\tdd 0x%08x\n", (unsigned)it->ival);
+            fprintf(out, "\t.long 0x%08x\n", (unsigned)it->ival);
         cur += it->size;
     }
     if (g->arr_size > cur)
-        fprintf(out, "times %d db 0\n", g->arr_size - cur);
+        fprintf(out, ".zero %d\n", g->arr_size - cur);
 }
 
 /* true when a global is zero-filled (no initializer): it belongs in .bss
-   (NOBITS, NASM resb), so its bytes cost no file space, rather than in .data. */
+   (NOBITS, reserved with .zero), so its bytes cost no file space, rather than
+   in .data. */
 static int
 global_is_bss(struct ir_global *g)
 {
@@ -1416,16 +1417,16 @@ global_elsz(struct ir_global *g)
     }
 }
 
-/* natural alignment (NASM byte count, raised by _Alignas) + global + label */
+/* natural alignment (byte count, raised by _Alignas) + global + label */
 static void
 emit_global_head(FILE *out, struct ir_global *g)
 {
     int alb = (g->base_type == IR_F64 || g->base_type == IR_I64) ? 8 : 4;
     if (g->align > alb)
         alb = g->align;
-    fprintf(out, "align %d\n", alb);
+    fprintf(out, ".align %d\n", alb);
     if (!g->is_local)
-        fprintf(out, "global %s\n", g->name);
+        fprintf(out, ".globl %s\n", g->name);
     fprintf(out, "%s:\n", g->name);
 }
 
@@ -1435,7 +1436,7 @@ emit_globals(FILE *out, struct ir_program *prog)
     struct ir_global *g;
     int any_bss = 0;
 
-    fputs("\nsection .data\n", out);
+    fputs("\n.data\n", out);
     for (g = prog->globals; g; g = g->next) {
         int elsz = global_elsz(g);
 
@@ -1454,27 +1455,27 @@ emit_globals(FILE *out, struct ir_program *prog)
             for (k = 0; k < g->init_count; k++) {
                 if (g->init_syms && g->init_syms[k]) {
                     char ref[160];
-                    fprintf(out, "\t%s %s\n", elsz == 8 ? "dq" : "dd",
+                    fprintf(out, "\t%s %s\n", elsz == 8 ? ".quad" : ".long",
                         sym_ref(ref, sizeof ref, g->init_syms[k], g->init_ivals[k]));
                 } else if (g->base_type == IR_F64 ||
                      g->base_type == IR_I64) {
                     uint64_t bits = (uint64_t)g->init_ivals[k];
-                    fprintf(out, "\tdd 0x%08x\n",
+                    fprintf(out, "\t.long 0x%08x\n",
                         (unsigned)(bits & 0xFFFFFFFF));
-                    fprintf(out, "\tdd 0x%08x\n",
+                    fprintf(out, "\t.long 0x%08x\n",
                         (unsigned)(bits >> 32));
                 } else if (elsz == 1)
-                    fprintf(out, "\tdb %" PRId64 "\n",
+                    fprintf(out, "\t.byte %" PRId64 "\n",
                         g->init_ivals[k]);
                 else if (elsz == 2)
-                    fprintf(out, "\tdw %" PRId64 "\n",
+                    fprintf(out, "\t.word %" PRId64 "\n",
                         g->init_ivals[k]);
                 else
-                    fprintf(out, "\tdd %" PRId64 "\n",
+                    fprintf(out, "\t.long %" PRId64 "\n",
                         g->init_ivals[k]);
             }
             if (g->arr_size > g->init_count)
-                fprintf(out, "\ttimes %d db 0\n",
+                fprintf(out, "\t.zero %d\n",
                     (g->arr_size - g->init_count) * elsz);
         }
     }
@@ -1482,8 +1483,9 @@ emit_globals(FILE *out, struct ir_program *prog)
     if (!any_bss)
         return;
 
-    /* Zero-filled globals: NASM .bss reserves them (resb), no file space. */
-    fputs("\nsection .bss\n", out);
+    /* Zero-filled globals: .bss reserves them with .zero (NOBITS), no file
+       space. */
+    fputs("\n.bss\n", out);
     for (g = prog->globals; g; g = g->next) {
         int elsz = global_elsz(g);
         int sz;
@@ -1492,34 +1494,38 @@ emit_globals(FILE *out, struct ir_program *prog)
             continue;
         emit_global_head(out, g);
         sz = (g->arr_size > 0) ? g->arr_size * elsz : elsz;
-        fprintf(out, "\tresb %d\n", sz);
+        fprintf(out, "\t.zero %d\n", sz);
     }
 }
 
 static void
 emit_fp_constants(FILE *out)
 {
-    fputs("\nsection .rodata\n", out);
-    fputs("align 16\n", out);
+    fputs("\n.section .rodata\n", out);
+    fputs(".align 16\n", out);
     fputs("__x86_signmask:\n", out);
-    fputs("\tdd 0x00000000, 0x80000000, 0x00000000, 0x80000000\n", out);
+    fputs("\t.long 0x00000000, 0x80000000, 0x00000000, 0x80000000\n", out);
     fputs("__x86_absmask:\n", out);
-    fputs("\tdd 0xFFFFFFFF, 0x7FFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF\n", out);
+    fputs("\t.long 0xFFFFFFFF, 0x7FFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF\n", out);
     fputs("__x86_signmask_ss:\n", out);
-    fputs("\tdd 0x80000000, 0x80000000, 0x80000000, 0x80000000\n", out);
+    fputs("\t.long 0x80000000, 0x80000000, 0x80000000, 0x80000000\n", out);
     fputs("__x86_absmask_ss:\n", out);
-    fputs("\tdd 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF\n", out);
+    fputs("\t.long 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF\n", out);
 }
 
 /****************************************************************
- * Extern declarations (NASM requires explicit extern for undefined symbols)
+ * Extern declarations
+ *
+ * GNU `as` treats every undefined symbol as external, so no `.extern` is
+ * needed.  The scan is kept (cheap, and it documents the referenced set) but
+ * emits nothing.
  ****************************************************************/
 
 static void
 emit_extern_once(FILE *out, struct strset *seen, const char *sym)
 {
-    if (strset_add(seen, sym))
-        fprintf(out, "extern %s\n", sym);
+    (void)out;
+    strset_add(seen, sym);      /* keep the dedup set; emit no directive */
 }
 
 static void
@@ -1548,9 +1554,10 @@ emit_externs(FILE *out, struct ir_program *prog)
                  i->op == IR_CALL_AGG ||
                  i->op == IR_LEA || i->op == IR_LEA64)) {
                 /* A symbol-address load (IR_LEA/LEA64) can reference an
-                 * external data symbol, e.g. a runtime's global, which
-                 * NASM needs declared extern.  The defined set filters out the
-                 * program's own globals and functions. */
+                 * external data symbol, e.g. a runtime's global.  With GNU `as`
+                 * it needs no declaration; the defined set filters out the
+                 * program's own globals and functions (the scan is kept for its
+                 * structure; emit_extern_once prints nothing). */
                 if (!strset_contains(&defined, i->sym))
                     emit_extern_once(out, &seen, i->sym);
             }
@@ -1606,7 +1613,8 @@ target_emit(FILE *out, struct ir_program *prog)
 {
     struct ir_func *fn;
 
-    fputs("; generated i686 (IA-32) assembly, NASM syntax\n", out);
+    fputs(".intel_syntax noprefix\n", out);
+    fputs("# generated x86-64 (LP64) assembly, GNU intel syntax\n", out);
     emit_externs(out, prog);
     for (fn = prog->funcs; fn; fn = fn->next)
         emit_function(out, fn);
@@ -1614,5 +1622,5 @@ target_emit(FILE *out, struct ir_program *prog)
     emit_fp_constants(out);
     /* mark the stack non-executable so the GNU linker does not warn (and
        default to an executable stack) about the missing note */
-    fputs("\nsection .note.GNU-stack noalloc noexec nowrite progbits\n", out);
+    fputs("\n.section .note.GNU-stack,\"\",@progbits\n", out);
 }

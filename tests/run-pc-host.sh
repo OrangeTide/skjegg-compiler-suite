@@ -9,7 +9,7 @@
 #   MODE   x64 | a64
 #   PC     the skj-pc binary for this target
 #   RT     the host runtime object for this target
-#   NASM   x64: the NASM assembler            (default: nasm)
+#   NASM   x64: the x86-64 assembler (host as) (default: as)
 #   CC     x64: the host C linker driver       (default: cc)
 #   A64CC  a64: the aarch64 cross cc           (default: aarch64-linux-gnu-gcc)
 #   QEMU   a64: the user-mode emulator         (default: qemu-aarch64)
@@ -23,7 +23,8 @@ set -u
 MODE=${MODE:-x64}
 PC=${PC:?PC not set}
 RT=${RT:?RT not set}
-NASM=${NASM:-nasm}
+NASM=${NASM:-as}
+ASMFLAGS=${ASMFLAGS:---64}
 CC=${CC:-cc}
 A64CC=${A64CC:-aarch64-linux-gnu-gcc}
 QEMU=${QEMU:-qemu-aarch64}
@@ -52,7 +53,7 @@ for pas in "$@"; do
         if ! "$PC" -o "$W/$b.asm" "$pas" 2>"$W/$b.err"; then
             failed="$failed $b(compile)"; fail=$((fail+1)); continue
         fi
-        if ! "$NASM" -f elf64 "$W/$b.asm" -o "$W/$b.o" 2>"$W/$b.err"; then
+        if ! "$NASM" $ASMFLAGS "$W/$b.asm" -o "$W/$b.o" 2>"$W/$b.err"; then
             failed="$failed $b(asm)"; fail=$((fail+1)); continue
         fi
         if ! "$CC" -no-pie $sanlink "$W/$b.o" "$RT" -lm -o "$bin" 2>"$W/$b.err"; then

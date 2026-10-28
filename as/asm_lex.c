@@ -245,11 +245,52 @@ lex_number(struct lexer *l)
     char *end;
 
     l->tok.type = T_INT;
+    /* Parse unsigned so a full-width immediate such as 0x8000000000000000 (the
+       x86-64 double sign mask) keeps its bit pattern instead of clamping at
+       LONG_MAX.  A literal is always non-negative here; a leading '-' is a
+       separate T_MINUS the parser applies. */
     if (l->pos[0] == '0' && (l->pos[1] == 'x' || l->pos[1] == 'X'))
-        l->tok.ival = strtol(l->pos, &end, 16);
+        l->tok.ival = (long)strtoull(l->pos, &end, 16);
     else
-        l->tok.ival = strtol(l->pos, &end, 10);
+        l->tok.ival = (long)strtoull(l->pos, &end, 10);
     l->pos = end;
+}
+
+/* A character constant 'c' (with the common C escapes) as an integer token, the
+   way `as` reads `.byte 'h'` and an immediate like `cmp al, 'A'`.  `l->pos` is on
+   the opening quote.  An unterminated or empty literal yields 0. */
+static void
+lex_char(struct lexer *l)
+{
+    int v = 0;
+
+    l->tok.type = T_INT;
+    l->pos++;                           /* opening ' */
+    if (*l->pos == '\\') {
+        l->pos++;
+        switch (*l->pos) {
+        case 'n':  v = '\n'; break;
+        case 't':  v = '\t'; break;
+        case 'r':  v = '\r'; break;
+        case '0':  v = '\0'; break;
+        case 'b':  v = '\b'; break;
+        case 'f':  v = '\f'; break;
+        case 'v':  v = '\v'; break;
+        case 'a':  v = '\a'; break;
+        case '\\': v = '\\'; break;
+        case '\'': v = '\''; break;
+        case '"':  v = '"';  break;
+        default:   v = (unsigned char)*l->pos; break;
+        }
+        if (*l->pos)
+            l->pos++;
+    } else if (*l->pos) {
+        v = (unsigned char)*l->pos;
+        l->pos++;
+    }
+    if (*l->pos == '\'')                 /* closing ' */
+        l->pos++;
+    l->tok.ival = v;
 }
 
 void
@@ -282,6 +323,13 @@ lex_next(struct lexer *l)
         }
 
         if (*l->pos == l->comment_ch) {
+            skip_line_comment(l);
+            continue;
+        }
+
+        /* C++-style line comment (the AArch64 GAS line comment; harmless on the
+           other targets, which never emit it). */
+        if (l->pos[0] == '/' && l->pos[1] == '/') {
             skip_line_comment(l);
             continue;
         }
@@ -349,12 +397,21 @@ lex_next(struct lexer *l)
             return;
         }
 
+        if (*l->pos == '\'') {          /* character constant 'c' -> T_INT */
+            lex_char(l);
+            return;
+        }
+
         switch (*l->pos) {
         case '#': l->pos++; l->tok.type = T_HASH; return;
         case ',': l->pos++; l->tok.type = T_COMMA; return;
         case ':': l->pos++; l->tok.type = T_COLON; return;
         case '(': l->pos++; l->tok.type = T_LPAREN; return;
         case ')': l->pos++; l->tok.type = T_RPAREN; return;
+        case '[': l->pos++; l->tok.type = T_LBRACKET; return;
+        case ']': l->pos++; l->tok.type = T_RBRACKET; return;
+        case '*': l->pos++; l->tok.type = T_STAR; return;
+        case '=': l->pos++; l->tok.type = T_EQUAL; return;
         case '-': l->pos++; l->tok.type = T_MINUS; return;
         case '+': l->pos++; l->tok.type = T_PLUS; return;
         case '%':

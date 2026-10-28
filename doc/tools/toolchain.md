@@ -166,7 +166,8 @@ test runner only runs a `build/<name>` that has a matching source or fixture, so
 a stray build is skipped rather than reported.
 
 The cross toolchain the build expects is `m68k-linux-gnu-gcc`,
-`riscv64-linux-gnu-{as,ld}`, `nasm`, and the matching `qemu-*` runners. The
+`riscv64-linux-gnu-{as,ld}`, a host `as`/`ld` (GNU binutils, for x86-64), and the
+matching `qemu-*` runners. The
 ColdFire `m68k-linux-gnu-as` and `-ld` are optional, since `skj-as` and `skj-ld`
 replace them.
 

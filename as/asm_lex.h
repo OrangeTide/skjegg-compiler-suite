@@ -33,6 +33,16 @@ enum token_type {
     T_RELOC,                /* %hi / %lo / %pcrel_hi / %pcrel_lo (name in str) */
     T_NEWLINE,
     T_EOF,
+    /* x86 intel-syntax memory operands: `[base + index*scale + disp]`.  These
+       characters were silently skipped before, so adding them is a pure superset
+       that leaves the other assemblers' token streams unchanged. */
+    T_LBRACKET,
+    T_RBRACKET,
+    T_STAR,
+    /* AArch64 `ldr Rt, =literal`: the '=' sigil introducing a literal-pool
+       operand.  Previously skipped by the default arm, so this is a pure
+       superset that leaves the other assemblers' token streams unchanged. */
+    T_EQUAL,
 };
 
 struct token {

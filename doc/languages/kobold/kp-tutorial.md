@@ -279,6 +279,40 @@ A larger program is divided into units that compile separately and are linked by
 part (the bodies). See `kp-units.md` for the full model, including interface
 fingerprints and guest-record traits.
 
+## 11. Inline assembly
+
+When you need an instruction the language does not expose, `asm('text')` drops
+one line straight into the generated assembly:
+
+```
+program spin;
+var
+    i: integer;
+begin
+    for i := 1 to 3 do begin
+        asm('/* unrolled spin tick */');   { emitted verbatim }
+        WriteLn('tick ', i);
+    end;
+end.
+```
+
+The string is passed through unchanged, so its text must match the assembler
+for the target you are building. Here the payload is a C-style comment, which
+every target assembler accepts, so the program builds on each backend. For a
+real instruction you would write target-specific text, for example
+`asm('syscall')` on x86-64 or `asm('svc #0')` on AArch64.
+
+There are no operand constraints and no register substitution: the compiler does
+not read the text and register allocation does not see it, so an `asm` block must
+leave the machine state the surrounding code expects. The literal is also taken
+as written, with no `${...}` interpolation even in a double-quoted string.
+
+Inline assembly is ahead-of-time only. The in-process JIT emits machine code
+directly and has no assembler for a verbatim string, so a program that uses
+`asm` must be compiled with the AOT path (`skj-kp`); running it under the JIT
+reports that inline asm is unsupported. See `kp-grammar.md` for the grammar and
+`kp-language.md` for the reference.
+
 ## Where to go next
 
 - `kp-examples.md` collects complete, annotated programs to compile and run.

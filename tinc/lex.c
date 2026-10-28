@@ -33,6 +33,7 @@ static const struct kw keywords[] = {
     { "continue", T_CONTINUE },
     { "return",   T_RETURN },
     { "foreach",  T_FOREACH },
+    { "asm",      T_ASM },
     { NULL, 0 },
 };
 

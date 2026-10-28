@@ -450,10 +450,23 @@ Statement        = [ LabelPrefix ]
                    | BreakStmt
                    | ContinueStmt
                    | DeferStmt
-                   | GotoStmt ] .
+                   | GotoStmt
+                   | AsmStmt ] .
                  (* StartExpr, BindExpr, and YieldExpr are also expressions; as
                     statements their value is discarded. See Coroutine
                     constructs. *)
+
+AsmStmt          = 'asm' '(' StringLiteral ')' .
+                 (* basic inline assembly: the one StringLiteral is emitted
+                    verbatim into the generated assembly at that point, so its
+                    text must match the target assembler's syntax. There are no
+                    operand constraints, no register substitution, and no '${}'
+                    interpolation (the literal is taken as written; a single- or
+                    double-quoted literal is accepted, but a double-quoted one
+                    does not interpolate here). The compiler does not parse the
+                    text and register allocation does not see it, so the block
+                    must leave the machine state the surrounding code expects.
+                    AOT only: the in-process JIT does not assemble text. *)
 
 LabelPrefix      = Identifier ':' .
                  (* names the statement that follows as a jump target, scoped to

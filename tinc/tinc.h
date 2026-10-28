@@ -15,7 +15,7 @@ enum tok {
 
     /* keywords */
     T_INT, T_BYTE, T_DEFINE, T_IF, T_ELSE, T_WHILE,
-    T_BREAK, T_CONTINUE, T_RETURN, T_FOREACH,
+    T_BREAK, T_CONTINUE, T_RETURN, T_FOREACH, T_ASM,
 
     /* literals and identifiers */
     T_IDENT, T_NUMBER, T_STRING, T_CHARLIT, T_UNDERSCORE,
@@ -76,6 +76,7 @@ enum node_kind {
     N_RETURN,       /* fixed return: a = expr list (or NULL for void) */
     N_RETURN_PUSH,  /* return.. expr: a = expr */
     N_EXPR_STMT,
+    N_ASM,          /* basic inline asm: sval/slen hold the verbatim text */
 
     /* expressions */
     N_BINOP, N_UNOP, N_ASSIGN, N_COMPOUND_ASSIGN,

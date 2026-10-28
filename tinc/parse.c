@@ -495,6 +495,21 @@ parse_stmt(void)
         n->b = parse_stmt();
         return n;
     }
+    if (cur.kind == T_ASM) {
+        /* basic inline asm: asm ( "text" ) ;  The text is emitted verbatim;
+           there are no operand constraints. */
+        advance();
+        expect(T_LPAREN, "(");
+        if (cur.kind != T_STRING)
+            die("parse:%d: expected string literal in asm()", cur.line);
+        n = new_node(N_ASM, line);
+        n->sval = cur.sval;
+        n->slen = cur.slen;
+        advance();
+        expect(T_RPAREN, ")");
+        expect(T_SEMI, ";");
+        return n;
+    }
     if (cur.kind == T_BREAK) {
         advance();
         expect(T_SEMI, ";");

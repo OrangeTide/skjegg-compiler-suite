@@ -256,8 +256,7 @@ targets.
   both (a `char *` parameter rather than `&ch`, an explicit array dimension in
   `strerror`); the bugs themselves are still open.
 - Exit-time flushing and `atexit`. Done, via weak symbols (the `.weak`
-  support added to the in-tree assemblers and linkers; nasm and GNU as already
-  have it). Each crt's `_start` makes a guarded call to a weak-*undefined*
+  support added to the in-tree assemblers and linkers; GNU as already has it). Each crt's `_start` makes a guarded call to a weak-*undefined*
   `__libc_fini` before it exits: the reference is a relocation that resolves to
   0 when no libc is linked (the call is skipped) and to libc's finalizer when
   one is. `libc/fini.c` supplies `__libc_fini` (run `atexit` handlers LIFO,

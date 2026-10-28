@@ -1,9 +1,18 @@
-/* x86_oracle.c : verify the jit/ x86-64 byte encoder against nasm.
+/* x86_oracle.c : verify the jit/ x86-64 byte encoder against GNU as.
 
    The x86 golden-master, the counterpart of check-rvas (skj-as-rv vs GNU as)
    and check-mipsas (skj-as-mips vs GNU as) for the byte encoder.  Each case
-   encodes one instruction two ways, through jit/emit_x86.c and through
-   `nasm -O0 -f bin`, and fails on any byte difference. */
+   encodes one instruction two ways, through jit/emit_x86.c and through the host
+   `as --64` reading GNU `.intel_syntax noprefix`, and fails on any byte
+   difference.
+
+   The encoder always emits the canonical long forms (imm32, rel32, full imm64),
+   while `as` picks the shortest encoding, so each case is written with operands
+   that have a single encoding: immediates that do not fit a sign-extended imm8,
+   a mov-immediate that does not fit imm32 (forcing movabs), and branch targets
+   that are undefined external symbols (forcing a rel32 with a zero displacement
+   field, which matches the encoder's unpatched placeholder; the relocation sits
+   in .rela.text, outside the .text bytes compared here). */
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -14,31 +23,37 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Assemble one line of NASM `bits 64` source to flat binary. Returns the
-   byte count, or -1 on failure, writing the bytes into out (up to omax). */
+/* Assemble one line of GNU intel-syntax source and return its .text bytes.
+   Returns the byte count, or -1 on failure, writing the bytes into out (up to
+   omax).  The host `as` emits ELF; objcopy extracts the raw .text section. */
 static int
 assemble(const char *line, uint8_t *out, int omax)
 {
     char src[] = "/tmp/kp_oracleXXXXXX";
+    char obj[] = "/tmp/kp_oracloXXXXXX";
     char bin[] = "/tmp/kp_oraclbXXXXXX";
-    char cmd[512];
-    int sfd, bfd, n;
+    char cmd[640];
+    int sfd, ofd, bfd, n;
     FILE *f, *b;
 
     sfd = mkstemp(src);
+    ofd = mkstemp(obj);
     bfd = mkstemp(bin);
-    if (sfd < 0 || bfd < 0)
+    if (sfd < 0 || ofd < 0 || bfd < 0)
         return -1;
+    close(ofd);
     close(bfd);
     f = fdopen(sfd, "w");
-    fprintf(f, "bits 64\n%s\n", line);
+    fprintf(f, ".intel_syntax noprefix\n.text\n%s\n", line);
     fclose(f);
 
-    /* -O0 disables nasm's form optimization so it emits the same canonical
-       long forms (imm32, rel32, full imm64) the encoder uses. */
-    snprintf(cmd, sizeof(cmd), "nasm -O0 -f bin -o %s %s 2>/dev/null", bin, src);
+    snprintf(cmd, sizeof(cmd),
+             "as --64 -o %s %s 2>/dev/null && "
+             "objcopy -O binary --only-section=.text %s %s 2>/dev/null",
+             obj, src, obj, bin);
     if (system(cmd) != 0) {
         unlink(src);
+        unlink(obj);
         unlink(bin);
         return -1;
     }
@@ -47,13 +62,14 @@ assemble(const char *line, uint8_t *out, int omax)
     if (b)
         fclose(b);
     unlink(src);
+    unlink(obj);
     unlink(bin);
     return n;
 }
 
 static int fails;
 
-/* Compare the encoder's output in c against nasm's assembly of `line`. */
+/* Compare the encoder's output in c against as's assembly of `line`. */
 static void
 check(const char *line, struct code *c)
 {
@@ -68,7 +84,7 @@ check(const char *line, struct code *c)
         printf("        mine:");
         for (size_t i = 0; i < c->len; i++)
             printf(" %02x", c->buf[i]);
-        printf("\n        nasm:");
+        printf("\n        as:  ");
         for (int i = 0; i < rn; i++)
             printf(" %02x", ref[i]);
         printf("\n");
@@ -77,7 +93,7 @@ check(const char *line, struct code *c)
 }
 
 /* Encode `line` with the given encoder call, then check it. Each use opens a
-   fresh buffer, runs the encoder, and diffs against nasm. */
+   fresh buffer, runs the encoder, and diffs against as. */
 #define CASE(line, ...) do { \
         struct code c; code_init(&c); __VA_ARGS__; check(line, &c); \
     } while (0)
@@ -89,7 +105,7 @@ main(void)
     CASE("mov r12d, 0xdeadbeef", x_mov_ri32(&c, X_R12, 0xdeadbeef));
     CASE("mov rbx, 0x1122334455667788",
          x_mov_ri64(&c, X_RBX, 0x1122334455667788ULL));
-    CASE("mov r15, 0x4030201", x_mov_ri64(&c, X_R15, 0x4030201ULL));
+    CASE("mov r15, 0x104030201", x_mov_ri64(&c, X_R15, 0x104030201ULL));
 
     CASE("mov rbx, r12", x_mov_rr(&c, X_RBX, X_R12));
     CASE("mov r13, rax", x_mov_rr(&c, X_R13, X_RAX));
@@ -103,8 +119,8 @@ main(void)
     CASE("not rbx", x_not_r(&c, X_RBX));
 
     CASE("add rbx, 0x100", x_add_ri32(&c, X_RBX, 0x100));
-    CASE("sub rsp, 0x28", x_sub_ri32(&c, X_RSP, 0x28));
-    CASE("add rsp, 0x28", x_add_ri32(&c, X_RSP, 0x28));
+    CASE("sub rsp, 0x128", x_sub_ri32(&c, X_RSP, 0x128));
+    CASE("add rsp, 0x128", x_add_ri32(&c, X_RSP, 0x128));
 
     CASE("cqo", x_cqo(&c));
     CASE("idiv r12", x_idiv_r(&c, X_R12));
@@ -165,13 +181,13 @@ main(void)
     CASE("jmp rax", x_jmp_r(&c, X_RAX));
     CASE("jmp r11", x_jmp_r(&c, X_R11));
 
-    /* rel32 forms: nasm resolves "$" to this instruction, so a target of the
-       instruction's own start is the displacement nasm computes for "jmp $"
-       etc. Encode with a zero field, then patch to offset 0. */
-    CASE("call $", { size_t a = x_call_rel32(&c); x_patch_rel32(&c, a, 0); });
-    CASE("jmp near $", { size_t a = x_jmp_rel32(&c); x_patch_rel32(&c, a, 0); });
-    CASE("jz near $", { size_t a = x_jcc_rel32(&c, X_E); x_patch_rel32(&c, a, 0); });
-    CASE("jle near $", { size_t a = x_jcc_rel32(&c, X_LE); x_patch_rel32(&c, a, 0); });
+    /* rel32 forms: an undefined external target forces `as` to emit a rel32 with
+       a zero displacement field (the reloc lives in .rela.text, outside the
+       .text bytes), which matches the encoder's unpatched zero placeholder. */
+    CASE("call oracle_ext", x_call_rel32(&c));
+    CASE("jmp oracle_ext", x_jmp_rel32(&c));
+    CASE("jz oracle_ext", x_jcc_rel32(&c, X_E));
+    CASE("jle oracle_ext", x_jcc_rel32(&c, X_LE));
 
     /* unsigned divide (div, /6) */
     CASE("div r12", x_div_r(&c, X_R12));
@@ -180,12 +196,12 @@ main(void)
     CASE("div ebx", x_div32_r(&c, X_RBX));
 
     /* sub-word loads (byte/half, sign- or zero-extended into r32) */
-    CASE("movsx ebx, byte [rbp-4]", x_load8s(&c, X_RBX, X_RBP, -4));
-    CASE("movsx r12d, byte [r13+0x10]", x_load8s(&c, X_R12, X_R13, 0x10));
-    CASE("movzx ebx, word [rbp-4]", x_load16(&c, X_RBX, X_RBP, -4));
-    CASE("movzx r12d, word [rsp+0x10]", x_load16(&c, X_R12, X_RSP, 0x10));
-    CASE("movsx ebx, word [rbp-4]", x_load16s(&c, X_RBX, X_RBP, -4));
-    CASE("movsx r12d, word [r13]", x_load16s(&c, X_R12, X_R13, 0));
+    CASE("movsx ebx, byte ptr [rbp-4]", x_load8s(&c, X_RBX, X_RBP, -4));
+    CASE("movsx r12d, byte ptr [r13+0x10]", x_load8s(&c, X_R12, X_R13, 0x10));
+    CASE("movzx ebx, word ptr [rbp-4]", x_load16(&c, X_RBX, X_RBP, -4));
+    CASE("movzx r12d, word ptr [rsp+0x10]", x_load16(&c, X_R12, X_RSP, 0x10));
+    CASE("movsx ebx, word ptr [rbp-4]", x_load16s(&c, X_RBX, X_RBP, -4));
+    CASE("movsx r12d, word ptr [r13]", x_load16s(&c, X_R12, X_R13, 0));
 
     /* sub-word stores (low byte / low 16 bits) */
     CASE("mov [rbp-8], r13b", x_store8(&c, X_RBP, -8, X_R13));
@@ -215,8 +231,8 @@ main(void)
     CASE("cvtss2sd xmm1, xmm2", x_cvtss2sd_rr(&c, X_XMM1, X_XMM2));
     CASE("cvtss2sd xmm8, xmm0", x_cvtss2sd_rr(&c, X_XMM8, X_XMM0));
     CASE("cvtsd2ss xmm1, xmm2", x_cvtsd2ss_rr(&c, X_XMM1, X_XMM2));
-    CASE("cvtss2sd xmm1, dword [rbp-8]", x_cvtss2sd_load(&c, X_XMM1, X_RBP, -8));
-    CASE("cvtss2sd xmm7, dword [r12+0x20]", x_cvtss2sd_load(&c, X_XMM7, X_R12, 0x20));
+    CASE("cvtss2sd xmm1, dword ptr [rbp-8]", x_cvtss2sd_load(&c, X_XMM1, X_RBP, -8));
+    CASE("cvtss2sd xmm7, dword ptr [r12+0x20]", x_cvtss2sd_load(&c, X_XMM7, X_R12, 0x20));
     CASE("addss xmm0, xmm1", x_addss_rr(&c, X_XMM0, X_XMM1));
     CASE("subss xmm1, xmm2", x_subss_rr(&c, X_XMM1, X_XMM2));
     CASE("mulss xmm3, xmm8", x_mulss_rr(&c, X_XMM3, X_XMM8));
@@ -239,8 +255,8 @@ main(void)
     CASE("movq xmm8, rbx", x_movq_to_xmm(&c, X_XMM8, X_RBX));
 
     if (fails == 0)
-        printf("oracle: all encodings match nasm\n");
+        printf("oracle: all encodings match as\n");
     else
-        printf("oracle: %d encoding(s) differ from nasm\n", fails);
+        printf("oracle: %d encoding(s) differ from as\n", fails);
     return fails ? 1 : 0;
 }

@@ -17,7 +17,7 @@
 #   REF     the reference emitter, run as `REF --emit-kpm f` (required)
 #   CORPUS  directory of .pas modules to compare     (required)
 #   OUT     a writable directory for build artifacts (required)
-#   NASM    the NASM assembler                        (default: nasm)
+#   NASM    the x86-64 assembler (host as, intel mode) (default: as)
 #   CC      the host C linker driver                  (default: cc)
 
 set -u
@@ -28,7 +28,8 @@ SRC=${SRC:?SRC not set}
 REF=${REF:?REF not set}
 CORPUS=${CORPUS:?CORPUS not set}
 OUT=${OUT:?OUT not set}
-NASM=${NASM:-nasm}
+NASM=${NASM:-as}
+ASMFLAGS=${ASMFLAGS:---64}
 CC=${CC:-cc}
 
 asm="$OUT/pc-kpcom.asm"
@@ -44,7 +45,7 @@ if ! "$PC" -d KOBOLD -o "$asm" "$SRC" 2>"$OUT/pc-kpcom.feerr"; then
     exit 1
 fi
 t1=$(date +%s.%N)
-if ! "$NASM" -f elf64 "$asm" -o "$obj" 2>"$OUT/pc-kpcom.aserr"; then
+if ! "$NASM" $ASMFLAGS "$asm" -o "$obj" 2>"$OUT/pc-kpcom.aserr"; then
     echo "pc-kpcom: FAIL assembler rejected the emitted module" >&2
     exit 1
 fi

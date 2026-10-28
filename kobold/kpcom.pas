@@ -25,7 +25,7 @@ type
     { literals and identifiers }
     tkIdent, tkIntLit, tkRealLit, tkStrLit, tkInterpStr,
     { reserved words (doc/languages/kobold/kp-grammar.md) }
-    tkAnd, tkArray, tkBegin, tkBreak, tkCase, tkConst, tkContinue, tkDefer, tkDiv,
+    tkAnd, tkAsm, tkArray, tkBegin, tkBreak, tkCase, tkConst, tkContinue, tkDefer, tkDiv,
     tkDo, tkDownto, tkElse, tkEnd, tkExternal, tkFor, tkForward, tkFunction,
     tkIf, tkIn, tkInterface, tkMod, tkNil, tkNot, tkOf, tkOr, tkProcedure,
     tkProgram, tkRecord, tkRepeat, tkStart, tkSet, tkBind, tkString, tkThen,
@@ -121,7 +121,10 @@ type
     nkToStr,
     { `for x in e do` and `for k, v in m do`: iterate an array, string, map, set,
       or a cursor type (doc/languages/kobold/kp-foreach.md) }
-    nkForIn
+    nkForIn,
+    { `asm('text')`: basic inline assembly, emitted verbatim (AOT only)
+      (doc/languages/kobold/kp-grammar.md) }
+    nkAsm
   );
 
   TNode = record
@@ -285,7 +288,7 @@ const
   TokenName: array[TTokenKind] of string = (
     'tkEOF',
     'tkIdent', 'tkIntLit', 'tkRealLit', 'tkStrLit', 'tkInterpStr',
-    'tkAnd', 'tkArray', 'tkBegin', 'tkBreak', 'tkCase', 'tkConst', 'tkContinue', 'tkDefer',
+    'tkAnd', 'tkAsm', 'tkArray', 'tkBegin', 'tkBreak', 'tkCase', 'tkConst', 'tkContinue', 'tkDefer',
     'tkDiv', 'tkDo', 'tkDownto', 'tkElse', 'tkEnd', 'tkExternal', 'tkFor',
     'tkForward', 'tkFunction', 'tkIf', 'tkIn', 'tkInterface', 'tkMod', 'tkNil',
     'tkNot', 'tkOf', 'tkOr', 'tkProcedure', 'tkProgram', 'tkRecord', 'tkRepeat',
@@ -303,11 +306,12 @@ const
     'tkShl', 'tkShr'
   );
 
-  KeywordCount = 57;
+  KeywordCount = 58;
   Keywords: array[1..KeywordCount] of TKeyword = (
     (Name: 'and';       Kind: tkAnd),
     (Name: 'array';     Kind: tkArray),
     (Name: 'as';        Kind: tkAs),
+    (Name: 'asm';       Kind: tkAsm),
     (Name: 'begin';     Kind: tkBegin),
     (Name: 'bind';      Kind: tkBind),
     (Name: 'break';     Kind: tkBreak),
@@ -384,7 +388,7 @@ const
     'Interface', 'Implementation', 'Reexport', 'ReexportItem',
     'Implement',
     'FailsTest', 'OrElse', 'OrDivert',
-    'PropertyDecl', 'Defer', 'ToStr', 'ForIn'
+    'PropertyDecl', 'Defer', 'ToStr', 'ForIn', 'Asm'
   );
 
   { Token-kind sets the parser tests against. }
@@ -396,7 +400,7 @@ const
     [tkConst, tkType, tkVar, tkProcedure, tkFunction, tkImplement, tkProperty];
   StmtStart:    set of TTokenKind =
     [tkBegin, tkIf, tkWhile, tkFor, tkRepeat, tkCase, tkWith, tkStart, tkBind,
-     tkYield, tkBreak, tkContinue, tkDefer, tkGoto, tkIdent];
+     tkYield, tkBreak, tkContinue, tkDefer, tkGoto, tkAsm, tkIdent];
   StmtTerm:     set of TTokenKind = [tkEnd, tkUntil, tkEOF];
   ExprStart:    set of TTokenKind =
     [tkIntLit, tkRealLit, tkStrLit, tkInterpStr, tkNil, tkLParen, tkNot, tkLBracket,
@@ -2484,6 +2488,20 @@ begin
     tkYield: n := ParseYield;
     tkBreak: begin n := NewNode(nkBreak); NextToken; end;
     tkContinue: begin n := NewNode(nkContinue); NextToken; end;
+    tkAsm: begin
+      { `asm('text')`: basic inline assembly. The one string literal is emitted
+        verbatim to the generated assembly; there are no operand constraints and
+        no dollar-brace interpolation (the text is taken as written). AOT only:
+        the JIT does not assemble text (doc/languages/kobold/kp-grammar.md). }
+      n := NewNode(nkAsm); NextToken;
+      Expect(tkLParen);
+      if Tok.Kind in [tkStrLit, tkInterpStr] then begin
+        Nodes[n].Text := Tok.StrVal; NextToken;
+      end
+      else
+        ParseErr('asm expects a string literal with the assembly text');
+      Expect(tkRParen);
+    end;
     tkDefer: begin
       { `defer STMT` registers STMT for LIFO teardown at the end of its block
         (doc/languages/kobold/kp-defer.md); use a begin..end block for several }
@@ -5630,6 +5648,7 @@ begin
     nkBreak, nkContinue:
       if LoopDepth = 0 then
         SemErr(node, 'break or continue outside of a loop');
+    nkAsm: ;   { basic inline asm carries verbatim text; nothing to analyze }
     nkDefer: begin
       CheckDeferBody(Nodes[node].A, node);
       AnalyzeStmt(Nodes[node].A);
@@ -12088,6 +12107,11 @@ begin
         EmitDeferUnwind(LoopDeferBase[LoopSP - 1]);
         EmitJmp(LoopCont[LoopSP - 1]);
       end;
+    nkAsm:
+      { basic inline asm: emit the verbatim text as an IR_ASM instruction. The
+        text is carried as a C-escaped quoted string, the same encoding the
+        module's .string data uses, so the KPM reader decodes it back verbatim. }
+      PushInsn('ASM', EscapeStr(Nodes[node].Text));
     nkLabelStmt: begin
       { a `name:` label marks a jump target: emit its IR label here, then the
         statement it labels }

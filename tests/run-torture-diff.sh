@@ -14,7 +14,7 @@
 #   cf-emu   (the cf ELF)                         -> skj-run
 #   rv       skj-cc-rv     -> GNU riscv as/ld     -> qemu-riscv32
 #   rv-emu   (the rv ELF)                         -> skj-run
-#   x86-64   skj-cc-x86-64 -> nasm / ld           -> qemu-x86_64
+#   x86-64   skj-cc-x86-64 -> as / ld             -> qemu-x86_64
 #   arm64    skj-cc-arm64  -> GNU aarch64 as/ld   -> qemu-aarch64
 #   mips     skj-cc-mips   -> GNU mipsel as/ld    -> qemu-mipsel
 #   jit      skj-jit                               (runs in-process)
@@ -58,7 +58,8 @@ M68K_AS=${M68K_AS:-m68k-linux-gnu-as}
 M68K_LD=${M68K_LD:-m68k-linux-gnu-ld}
 RV_AS=${RV_AS:-riscv64-linux-gnu-as}
 RV_LD=${RV_LD:-riscv64-linux-gnu-ld}
-X64_ASM=${X64_ASM:-nasm}
+X64_ASM=${X64_ASM:-as}
+X64_ASMFLAGS=${X64_ASMFLAGS:---64}
 X64_LD=${X64_LD:-ld}
 A64_AS=${A64_AS:-aarch64-linux-gnu-as}
 A64_LD=${A64_LD:-aarch64-linux-gnu-ld}
@@ -133,7 +134,7 @@ build_and_run() {
         "$SKJRUN" "$OUT/$(basename "$src" .c).rv.elf" >"$so" 2>/dev/null; echo $? ;;
     x86-64)
         "$CC_X64" -o "$b.s" "$src" 2>"$b.err" && \
-        "$X64_ASM" -f elf64 -o "$b.o" "$b.s" 2>>"$b.err" && \
+        "$X64_ASM" $X64_ASMFLAGS -o "$b.o" "$b.s" 2>>"$b.err" && \
         "$X64_LD" -m elf_x86_64 -o "$b.elf" "$START_X64" "$b.o" 2>>"$b.err" || { echo x; return; }
         "$QEMU_X64" "$b.elf" >"$so" 2>/dev/null; echo $? ;;
     arm64)

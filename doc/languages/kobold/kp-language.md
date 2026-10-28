@@ -55,7 +55,7 @@ the same name, and `Begin` is the keyword `begin`.
 Reserved words:
 
 ```
-and array as begin bind break buffer case const continue defer div do downto else
+and array as asm begin bind break buffer case const continue defer div do downto else
 end external for forward function goto if implement implementation in interface label
 map mod nil not of or procedure program property record reexport ref repeat set
 shared shl shr slice start string then to type unit until uses var while with yield
@@ -436,6 +436,14 @@ Argument and operand evaluation order is right to left.
   `NEXT`. There is no unstructured `goto`: a bare `goto name` to a label is a compile
   error, and because a label value cannot leave its frame, a computed jump always
   lands in a live frame. See kp-semantics.md for the `label` type's rules.
+- **inline assembly.** `asm('text')` emits its one string literal verbatim into the
+  generated assembly at that point, so the text must match the target assembler's
+  syntax. There are no operand constraints, no register substitution, and no string
+  interpolation (the literal is taken as written). The compiler does not read the text
+  and register allocation does not see it, so the block must leave the machine state the
+  surrounding code expects. Inline assembly is AOT only: the in-process JIT does not
+  assemble text, so a program that uses it must be compiled ahead of time. See
+  kp-grammar.md.
 
 ## Routines
 

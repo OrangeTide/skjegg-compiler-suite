@@ -1,0 +1,18 @@
+/* inline_asm.tc : basic inline asm passes a verbatim string through to the
+   generated assembly without disturbing the surrounding code.  The payload is
+   a C-style block comment, which every target assembler accepts, so this one
+   test runs on all backends.  A live value spans the asm statement to confirm
+   the asm does not perturb register allocation around it. */
+
+define main() -> int
+{
+    int a;
+    int b;
+
+    a = 40;
+    asm("/* tinc inline asm marker */");
+    b = a + 2;
+    if (b != 42)
+        return 1;
+    return 0;
+}

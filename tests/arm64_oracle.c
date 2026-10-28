@@ -1,6 +1,6 @@
 /* arm64_oracle.c : verify the jit/ AArch64 byte encoder against GNU as.
 
-   The AArch64 golden-master, the counterpart of check-x86-oracle (vs nasm) and
+   The AArch64 golden-master, the counterpart of check-x86-oracle (vs as) and
    check-rvas / check-mipsas (vs GNU as) for the byte encoder.  Each case encodes
    one instruction two ways, through jit/emit_arm64.c and through
    aarch64-linux-gnu-as (its .text extracted with objcopy), and fails on any byte

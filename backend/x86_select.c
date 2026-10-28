@@ -745,7 +745,7 @@ emit_asm_ext(struct mc *m, struct ir_func *fn, struct frame *fr,
             s--;
             if (idx >= n)
                 die("x86: asm operand %%%d out of range", idx);
-            /* the mc_text sink emits NASM/Intel syntax, so a register name
+            /* the mc_text sink emits GNU intel syntax, so a register name
                carries no % prefix (the template is Intel too) */
             nm = ai->ops[idx].size >= 8 ? x86_reg64[ophw[idx]]
                                         : x86_reg32[ophw[idx]];

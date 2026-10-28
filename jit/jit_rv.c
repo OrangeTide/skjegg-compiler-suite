@@ -47,6 +47,7 @@ struct rv_mc {
     struct rvlab *lab;
     int nlab, clab;
     const char *errsym;
+    const char *asm_unsup;  /* inline-asm text the JIT cannot assemble, or NULL */
 };
 
 #define T6 31                   /* the address/immediate scratch (reserved) */
@@ -59,6 +60,7 @@ rv_reset(struct rv_mc *m, struct code *c, struct emitctx *e)
     m->lab = NULL;
     m->nlab = m->clab = 0;
     m->errsym = NULL;
+    m->asm_unsup = NULL;
 }
 
 static void
@@ -366,9 +368,10 @@ rv_mc_j_sym(struct rv_mc *m, const char *name)
     rv_jalr(m->c, 0, T6, 0);            /* jr t6 */
 }
 
-/* Inline assembly has no byte-sink form: report it unsupported (the cc JIT suite
-   excludes the inline-asm test, so this is never reached). */
-void rv_mc_asm(struct rv_mc *m, const char *text) { m->errsym = text; }
+/* Inline assembly has no byte-sink form: report it unsupported. The cc JIT suite
+   excludes the inline-asm test; a Kobold asm('...') program run under the JIT
+   lands here and gets the ahead-of-time diagnostic in emit_func. */
+void rv_mc_asm(struct rv_mc *m, const char *text) { m->asm_unsup = text; }
 
 /****************************************************************
  * kp_target: the RISC-V back end kp_jit() drives
@@ -383,7 +386,10 @@ emit_func(struct emitctx *e, struct code *c, struct ir_func *fn)
 
     rv_reset(&M, c, e);
     rc = rv_select_func(&M, fn, RV_TRAP_GUARDED, errbuf, sizeof errbuf);
-    if (rc == 0 && M.errsym)
+    if (rc == 0 && M.asm_unsup)
+        rc = kp_fail(e, "inline asm is not supported by the JIT; "
+                        "compile ahead-of-time (asm \"%s\")", M.asm_unsup, 0);
+    else if (rc == 0 && M.errsym)
         rc = kp_fail(e, "unresolved symbol '%s'", M.errsym, 0);
     else if (rc != 0)
         rc = kp_fail(e, "%s", errbuf, 0);

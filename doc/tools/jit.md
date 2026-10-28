@@ -51,7 +51,7 @@ assembler, the same golden-master method the standalone assemblers use.
   U-type and jumps, the F/D/Zfh float set and the full conversion matrix,
   and the B/J displacement patchers including their range guards. Host
   only, no qemu.
-- x86-64: `tests/x86_oracle.c` against `nasm`.
+- x86-64: `tests/x86_oracle.c` against `as`.
 - AArch64: `tests/arm64_oracle.c` against `aarch64-linux-gnu-as`.
 
 ## The shared driver and the guest ABIs
