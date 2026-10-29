@@ -97,6 +97,20 @@ check "granted mount reads back"      42 ./build/skj-run --mount data:data confg
 check "escape above the mount denied"  7 ./build/skj-run --mount data:data escguest
 check "no grant: scratch default"     10 ./build/skj-run confguest
 
+# The hardware-virtualization arches vendor too.  With --with emulator an HV arch
+# (x86-64 / aarch64) ships the HV core (hvcore.c + the KVM backend + the gdb stub)
+# and builds EMU_HV=1, alongside any emulated cores.  Build-only here: running an
+# HV guest needs /dev/kvm and a native guest, which a generic runner lacks, but
+# the link (the vendor wiring that first broke this) is what we guard.
+echo "== vendoring riscv,x86-64 --with emulator (emulated + HV) =="
+sh "$work/vendor.sh" -d "$work/hv/skjegg" -u "$work/hv" -r "$ref" \
+   --arch riscv,x86-64 --with emulator >/dev/null
+( cd "$work/hv"
+  printf 'include skjegg/skjegg.mk\nbuild:\n\tmkdir -p build\nall: $(SKJ_ALL)\n' > Makefile
+  make all >hv-build.log 2>&1 ) \
+  && echo "PASS: emulated+HV vendored tree builds (EMU_HV=1)" \
+  || { echo "FAIL: emulated+HV vendored build"; cat "$work/hv/hv-build.log"; fail=1; }
+
 [ "$fail" = 0 ] || { echo "vendor-smoke: FAILED"; exit 1; }
 echo "vendor-smoke: a vendored sandbox tree builds and confines, end to end"
 exit 0

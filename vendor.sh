@@ -35,12 +35,18 @@ Selection axes (comma- or space-separated; repeatable).  Each expands into
 the flat component tokens listed further down, so pick a target and the
 features you want and the right tools come along:
 
-  --arch LIST       target architectures:  coldfire  riscv  mips
+  --arch LIST       target architectures:  coldfire  riscv  mips  x86-64  aarch64
+                      (x86-64 and aarch64 are the hardware-virtualization
+                      targets: with --with emulator they build the HV core, run
+                      natively under the host hypervisor, not an emulated CPU)
   --frontend LIST   language front ends:   tinc  scheme  moo  pascal  cc  kobold
   --with LIST       per-target or standalone features:
                       toolchain   in-tree assembler + linker (+ ar) for each
                                   selected --arch
                       emulator    the skj-run CPU core for each selected --arch
+                                  (an emulated core for coldfire/riscv/mips; the
+                                  KVM hardware-virtualization core for x86-64/
+                                  aarch64)
                       runtime     the hosted libc + crt (needs cc and toolchain)
                       sandbox     build the hosted libc confined: its fd I/O
                                   (open/read/write/lseek/close) routes through
@@ -113,10 +119,12 @@ done
 # Expand the architecture axis into backend tokens.
 for _a in $_archs; do
     case "$_a" in
-        cf|coldfire|m68k) COMPONENTS="$COMPONENTS coldfire" ;;
-        rv|rv32|riscv)    COMPONENTS="$COMPONENTS riscv" ;;
-        mips|mipsel)      COMPONENTS="$COMPONENTS mips" ;;
-        *) die "unknown --arch: $_a (coldfire riscv mips)" ;;
+        cf|coldfire|m68k)   COMPONENTS="$COMPONENTS coldfire" ;;
+        rv|rv32|riscv)      COMPONENTS="$COMPONENTS riscv" ;;
+        mips|mipsel)        COMPONENTS="$COMPONENTS mips" ;;
+        x86-64|x86_64|amd64) COMPONENTS="$COMPONENTS hv-x86" ;;
+        aarch64|arm64)      COMPONENTS="$COMPONENTS hv-arm64" ;;
+        *) die "unknown --arch: $_a (coldfire riscv mips x86-64 aarch64)" ;;
     esac
 done
 
@@ -142,7 +150,8 @@ for _w in $_features; do
         emulator|emu)
             _sel coldfire && COMPONENTS="$COMPONENTS emu-cf"
             _sel riscv    && COMPONENTS="$COMPONENTS emu-rv"
-            _sel mips     && COMPONENTS="$COMPONENTS emu-mips" ;;
+            _sel mips     && COMPONENTS="$COMPONENTS emu-mips"
+            { _sel hv-x86 || _sel hv-arm64; } && COMPONENTS="$COMPONENTS emu-hv" ;;
         runtime)  COMPONENTS="$COMPONENTS ar" ;;
         sandbox)  COMPONENTS="$COMPONENTS ar sandbox" ;;   # the confined libc needs ar
         cpp)      COMPONENTS="$COMPONENTS cpp" ;;
@@ -174,7 +183,8 @@ has_tinc=0 has_scheme=0 has_moo=0 has_pascal=0 has_cc=0
 has_as=0 has_ld=0 has_cpp=0
 has_as_rv=0 has_ld_rv=0
 has_as_mips=0 has_ld_mips=0 has_ar=0
-has_emu_cf=0 has_emu_rv=0 has_emu_mips=0
+has_emu_cf=0 has_emu_rv=0 has_emu_mips=0 has_emu_hv=0
+has_hv_x86=0 has_hv_arm64=0
 has_kp=0 has_sandbox=0
 
 for comp in $COMPONENTS; do
@@ -198,6 +208,9 @@ for comp in $COMPONENTS; do
         emu-cf)   has_emu_cf=1 ;;
         emu-rv)   has_emu_rv=1 ;;
         emu-mips) has_emu_mips=1 ;;
+        hv-x86)   has_hv_x86=1 ;;
+        hv-arm64) has_hv_arm64=1 ;;
+        emu-hv)   has_emu_hv=1 ;;
         kp|kobold) has_kp=1 ;;
         sandbox)  has_sandbox=1 ;;
         *)        die "unknown component: $comp" ;;
@@ -385,7 +398,11 @@ if [ "$has_sandbox" -eq 1 ]; then
     cp "$S/fs/fs.c" "$S/fs/fs.h" "$S/fs/fs_internal.h" \
        "$S/fs/ramfs.c" "$S/fs/ramfs.h" \
        "$S/fs/ambientfs.c" "$S/fs/ambientfs.h" \
-       "$S/fs/hostcap.c" "$S/fs/hostcap.h" "$DEST/fs/"
+       "$S/fs/hostcap.c" "$S/fs/hostcap.h" \
+       "$S/fs/devfs.c" "$S/fs/devfs.h" \
+       "$S/fs/romfs.c" "$S/fs/romfs.h" \
+       "$S/fs/ninefs.c" "$S/fs/ninefs.h" \
+       "$S/fs/p9_guest.c" "$S/fs/p9_guest.h" "$S/fs/p9_wire.h" "$DEST/fs/"
 fi
 
 # cpp library (needed by cc and cpp tool)
@@ -457,16 +474,19 @@ fi
 # emulator (skj-run).  The CPU cores are independent: a project that
 # runs only ColdFire guests takes emu-cf and never carries the RV32 or
 # MIPS cores.
-if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || [ "$has_emu_mips" -eq 1 ]; then
+if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || \
+   [ "$has_emu_mips" -eq 1 ] || [ "$has_emu_hv" -eq 1 ]; then
     mkdir -p "$DEST/emu" "$DEST/fs"
     cp "$S/emu/main.c" "$S/emu/guest.c" "$S/emu/guest.h" \
-       "$S/emu/elf32.c" "$S/emu/elf32.h" "$S/emu/run_reason.h" \
+       "$S/emu/elf32.c" "$S/emu/elf32.h" \
+       "$S/emu/elf64.c" "$S/emu/elf64.h" "$S/emu/run_reason.h" \
        "$S/emu/sched.c" "$S/emu/sched.h" \
        "$S/emu/hostplat.c" "$S/emu/hostplat.h" "$DEST/emu/"
-    # guest.c reads the fs/ mount-table layout (header only; no fs/*.c is
-    # compiled into skj-run) and reaches host facilities through hostplat.
+    # guest.c reads the fs/ mount-table layout and, for the --9p doorbell, drives
+    # the host-side 9P2000 server; reaches host facilities through hostplat.
     # sched.c is the arch-neutral process sandbox every core's *_user.c binds to.
-    cp "$S/fs/fs.h" "$DEST/fs/"
+    cp "$S/fs/fs.h" "$S/fs/ninefs.h" "$S/fs/p9_wire.h" \
+       "$S/fs/p9_server.c" "$S/fs/p9_server.h" "$DEST/fs/"
 fi
 if [ "$has_emu_cf" -eq 1 ]; then
     cp "$S/emu/coldfire.c" "$S/emu/coldfire.h" "$S/emu/cf_user.c" "$DEST/emu/"
@@ -476,6 +496,17 @@ if [ "$has_emu_rv" -eq 1 ]; then
 fi
 if [ "$has_emu_mips" -eq 1 ]; then
     cp "$S/emu/mips32.c" "$S/emu/mips32.h" "$S/emu/mips_user.c" "$DEST/emu/"
+fi
+# The hardware-virtualization core: one body (hvcore.c) serves both x86-64 and
+# aarch64 guests, over the backend-neutral VMM seam (vmm.h) whose Linux KVM
+# backend is vmm_kvm.c; hv_gdb.c is its --gdb stub.  The guest arch equals the
+# host's, so a given host exercises one arch; both are shipped since the sources
+# are shared.  skj_hv_abi.h is the guest/host doorbell contract.
+if [ "$has_emu_hv" -eq 1 ]; then
+    cp "$S/emu/hvcore.c" "$S/emu/hvcore.h" \
+       "$S/emu/vmm.h" "$S/emu/vmm_kvm.c" \
+       "$S/emu/hv_gdb.c" "$S/emu/hv_gdb.h" \
+       "$S/emu/skj_hv_abi.h" "$DEST/emu/"
 fi
 
 # Kobold-Pascal AOT path (kobold).  The front end kpcom is in-tree Pascal source
@@ -938,8 +969,8 @@ if [ "$has_driver" -eq 1 ]; then
             # fdio.c is the libc fd-I/O seam (guarded by SKJ_FS_INTERPOSE); the
             # fs/ sources are the capability backend it routes to.
             _libc_srcs="$_libc_srcs fdio"
-            _fs_srcs="fs ramfs ambientfs hostcap"
-            _libc_fsflags='-DSKJ_FS_INTERPOSE -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -I$(SKJEGG)fs'
+            _fs_srcs="fs ramfs ambientfs hostcap devfs romfs ninefs p9_guest"
+            _libc_fsflags='-DSKJ_FS_INTERPOSE -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_WITH_DEV -DFS_WITH_ROM -DFS_WITH_9P -I$(SKJEGG)fs'
         fi
         {
             printf '\nLIBC_SRCS := %s\n' "$_libc_srcs"
@@ -1056,8 +1087,9 @@ MK
 fi
 
 # emulator driver
-if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || [ "$has_emu_mips" -eq 1 ]; then
-    _emu_src='$(SKJEGG)emu/main.c $(SKJEGG)emu/guest.c $(SKJEGG)emu/elf32.c $(SKJEGG)emu/hostplat.c $(SKJEGG)emu/sched.c'
+if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || \
+   [ "$has_emu_mips" -eq 1 ] || [ "$has_emu_hv" -eq 1 ]; then
+    _emu_src='$(SKJEGG)emu/main.c $(SKJEGG)emu/guest.c $(SKJEGG)emu/elf32.c $(SKJEGG)emu/elf64.c $(SKJEGG)emu/hostplat.c $(SKJEGG)emu/sched.c $(SKJEGG)fs/p9_server.c'
     if [ "$has_emu_cf" -eq 1 ]; then
         _emu_src="$_emu_src \$(SKJEGG)emu/coldfire.c \$(SKJEGG)emu/cf_user.c"
     fi
@@ -1067,6 +1099,12 @@ if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || [ "$has_emu_mips" -eq 1
     if [ "$has_emu_mips" -eq 1 ]; then
         _emu_src="$_emu_src \$(SKJEGG)emu/mips32.c \$(SKJEGG)emu/mips_user.c"
     fi
+    # The HV core is one shared body plus the KVM backend and the gdb stub.
+    _emu_hv_flags=""
+    if [ "$has_emu_hv" -eq 1 ]; then
+        _emu_src="$_emu_src \$(SKJEGG)emu/hvcore.c \$(SKJEGG)emu/vmm_kvm.c \$(SKJEGG)emu/hv_gdb.c"
+        _emu_hv_flags=" -DSKJ_HV_GDB"
+    fi
     {
         printf '\n# skj-run: the guest runner.  The architectures compiled in\n'
         printf '# are fixed at vendoring time; skj-run reads the ELF header to\n'
@@ -1074,8 +1112,8 @@ if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || [ "$has_emu_mips" -eq 1
         printf 'SKJ_EMU := %s\n' "$_emu_src"
         printf 'SKJ_ALL += $(BUILD)/skj-run\n'
         printf '$(BUILD)/skj-run: $(SKJ_EMU) | $(BUILD)\n'
-        printf '\t$(CC) $(CFLAGS) -DEMU_COLDFIRE=%s -DEMU_RV32=%s -DEMU_MIPS32=%s -I$(SKJEGG)emu -I$(SKJEGG)fs -o $@ $(SKJ_EMU) -lm\n' \
-            "$has_emu_cf" "$has_emu_rv" "$has_emu_mips"
+        printf '\t$(CC) $(CFLAGS) -DEMU_COLDFIRE=%s -DEMU_RV32=%s -DEMU_MIPS32=%s -DEMU_HV=%s%s -I$(SKJEGG)emu -I$(SKJEGG)fs -o $@ $(SKJ_EMU) -lm\n' \
+            "$has_emu_cf" "$has_emu_rv" "$has_emu_mips" "$has_emu_hv" "$_emu_hv_flags"
     } >> "$MK"
 fi
 

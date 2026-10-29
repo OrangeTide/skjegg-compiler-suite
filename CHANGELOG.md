@@ -6,6 +6,47 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.28.0
+
+#### Added
+- A hardware-virtualization tier in `skj-run`: x86-64 and AArch64 guests run
+  natively under the host hypervisor (Linux KVM today) instead of being
+  interpreted, driven through the same process sandbox and scheduler as the
+  emulated cores. The guest architecture equals the host's, so an x86-64 host
+  runs x86-64 guests and an AArch64 host AArch64 guests; off a supported host
+  the tier reports the VMM unavailable and fails cleanly. The VMM abstraction is
+  backend-neutral, with the Linux KVM backend in place and a macOS
+  Hypervisor.framework backend planned as a peer.
+- The guest reaches the host through a syscall doorbell (one unbacked MMIO read
+  carrying a Linux syscall in the platform's argument registers), so the whole
+  freestanding C libc, string, formatted I/O, `malloc`, stdio, the math helpers,
+  delimited continuations, cooperative threads, and file and directory I/O over
+  the `fs/` layer, runs under the VMM, built by `skj-cc-x86-64` or
+  `skj-cc-arm64` and linked with the hardware crt and the doorbell seam.
+- A compute-bound guest under the VMM is preemptible. The hypervisor cannot
+  count retired instructions, so the slice currency is wall-clock time: a
+  periodic timer breaks into the guest every 10 ms, which keeps the round-robin
+  scheduler fair and makes `--max-insns` bound a runaway guest.
+- A GDB remote-protocol stub for the hardware-virtualization cores, served by
+  `skj-run --gdb`: breakpoints, single-step, register and memory access over the
+  same scheduler hook as the RISC-V and MIPS stubs, with the vcpu single-stepped
+  through the hypervisor so guest memory is never patched.
+- The `fs/` sandbox mount table is complete. A devfs backend (`null`, `zero`,
+  `full`), a romfs backend (a read-only packed image), and a 9pfs backend (a
+  9P2000 client over a transport) join ramfs and the confined host backend, each
+  wired into the guest libc and the launcher through `--dev`, `--rom` and
+  `--9p`.
+- `std.threads`, a Kobold cooperative-thread unit that parallels C
+  `<threads.h>`, over the shared runtime.
+- `skj-as-x86-64` folds constant and label-difference expressions (for example
+  `(end - start) * 4 + 1`), matching the GNU assembler byte for byte.
+
+#### Fixed
+- The guest `sched_yield` is routed through the host-platform seam. Its
+  `#include <sched.h>` had resolved to the emulator's own scheduler header on
+  the include path, so the C library prototype was never seen and the call
+  compiled with an implicit declaration.
+
 ### 0.27.0
 
 #### Added

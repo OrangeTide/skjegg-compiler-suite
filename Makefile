@@ -900,6 +900,9 @@ build/kp-stdlib/core/strings.kpm: kobold/lib/core/strings.pas build/skj-kpc-rv |
 build/kp-stdlib/core/convert.kpm: kobold/lib/core/convert.pas build/skj-kpc-rv | build
 	@mkdir -p build/kp-stdlib/core
 	./build/skj-kpc-rv --emit-kpm $< > $@
+build/kp-stdlib/std/threads.kpm: kobold/lib/std/threads.pas build/skj-kpc-rv | build
+	@mkdir -p build/kp-stdlib/std
+	./build/skj-kpc-rv --emit-kpm $< > $@
 
 ## The ColdFire sibling units: the same sources emitted by the ColdFire front end,
 ## so they carry `.target cf` and the ColdFire backend accepts them.  A unit is
@@ -916,13 +919,16 @@ build/kp-stdlib-cf/std/random.kpm: kobold/lib/std/random.pas build/skj-kpc-cf | 
 build/kp-stdlib-cf/core/convert.kpm: kobold/lib/core/convert.pas build/skj-kpc-cf | build
 	@mkdir -p build/kp-stdlib-cf/core
 	./build/skj-kpc-cf --emit-kpm $< > $@
+build/kp-stdlib-cf/std/threads.kpm: kobold/lib/std/threads.pas build/skj-kpc-cf | build
+	@mkdir -p build/kp-stdlib-cf/std
+	./build/skj-kpc-cf --emit-kpm $< > $@
 
 check-kp-stdlib-free: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
                       build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a \
                       build/kp-stdlib/io/console.kpm build/kp-stdlib/io/buffered.kpm \
                       build/kp-stdlib/std/time.kpm \
                       build/kp-stdlib/std/random.kpm build/kp-stdlib/core/strings.kpm \
-                      build/kp-stdlib/core/convert.kpm
+                      build/kp-stdlib/core/convert.kpm build/kp-stdlib/std/threads.kpm
 	@cp tests/kp-stdlib/stddemo.pas build/kp-stdlib/stddemo.pas
 	@E=build/kp-stdlib/build.err; : > $$E; \
 	 ./build/skj-kpc-rv --emit-kpm build/kp-stdlib/stddemo.pas > build/kp-stdlib/stddemo.kpm 2>>$$E; \
@@ -1029,7 +1035,23 @@ check-kp-stdlib-free: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv build/skj
 	 $(QEMU_RV) build/kp-stdlib/convertnum.elf </dev/null > build/kp-stdlib/convout 2>>$$E; \
 	 cmp -s build/kp-stdlib/convout tests/kp-stdlib/convertnum.expected \
 	   || { echo "FAIL kp-stdlib (convertnum)"; cat $$E build/kp-stdlib/convout; exit 1; }
-	@echo "kp-stdlib: 7 passed (free-rv): std.random (+ real/secure), std.time, io.console (+ read/write, real), io.buffered, realunit, uses ns.*, core.strings, core.convert"
+	@cp tests/kp-stdlib/threaddemo.pas build/kp-stdlib/threaddemo.pas
+	@E=build/kp-stdlib/build.err; : > $$E; \
+	 ./build/skj-kpc-rv --emit-kpm build/kp-stdlib/threaddemo.pas > build/kp-stdlib/threaddemo.kpm 2>>$$E || \
+	   { echo "FAIL kp-stdlib (compile threaddemo: std.threads)"; cat $$E; exit 1; }; \
+	 ./build/skj-kp-rv build/kp-stdlib/threaddemo.kpm -o build/kp-stdlib/threaddemo.s 2>>$$E && \
+	 ./build/skj-as-rv -o build/kp-stdlib/threaddemo.o build/kp-stdlib/threaddemo.s 2>>$$E || \
+	   { echo "FAIL kp-stdlib (assemble threaddemo)"; cat $$E; exit 1; }; \
+	 ./build/skj-kp-rv build/kp-stdlib/std/threads.kpm -o build/kp-stdlib/threads.s 2>>$$E && \
+	 ./build/skj-as-rv -o build/kp-stdlib/threads.o build/kp-stdlib/threads.s 2>>$$E || \
+	   { echo "FAIL kp-stdlib (assemble std.threads)"; cat $$E; exit 1; }; \
+	 ./build/skj-ld-rv -o build/kp-stdlib/threaddemo.elf build/kpfree-rv/kp_crt_rv.o \
+	   build/kp-stdlib/threaddemo.o build/kp-stdlib/threads.o build/libkpaot-rv-free.a 2>>$$E || \
+	     { echo "FAIL kp-stdlib (link threaddemo)"; cat $$E; exit 1; }; \
+	 $(QEMU_RV) build/kp-stdlib/threaddemo.elf </dev/null > build/kp-stdlib/threadout 2>>$$E; \
+	 cmp -s build/kp-stdlib/threadout tests/kp-stdlib/threaddemo.expected \
+	   || { echo "FAIL kp-stdlib (threaddemo)"; cat $$E build/kp-stdlib/threadout; exit 1; }
+	@echo "kp-stdlib: 8 passed (free-rv): std.random (+ real/secure), std.time, io.console (+ read/write, real), io.buffered, realunit, uses ns.*, core.strings, core.convert, std.threads"
 
 ## The ColdFire sibling of check-kp-stdlib-free: the same stddemo (std.random,
 ## std.time, io.console) over the cf freestanding tier under skj-run, proving the
@@ -1042,7 +1064,8 @@ check-kp-stdlib-free: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv build/skj
 check-kp-stdlib-free-cf: build/skj-kpc-cf build/skj-kp-cf build/skj-as build/skj-ld \
                          build/skj-run build/kpfree-cf/kp_crt_cf.o build/libkpaot-cf-free.a \
                          build/kp-stdlib-cf/io/console.kpm build/kp-stdlib-cf/std/time.kpm \
-                         build/kp-stdlib-cf/std/random.kpm build/kp-stdlib-cf/core/convert.kpm
+                         build/kp-stdlib-cf/std/random.kpm build/kp-stdlib-cf/core/convert.kpm \
+                         build/kp-stdlib-cf/std/threads.kpm
 	@mkdir -p build/kp-stdlib-cf
 	@cp tests/kp-stdlib/stddemo.pas build/kp-stdlib-cf/stddemo.pas
 	@E=build/kp-stdlib-cf/build.err; : > $$E; \
@@ -1080,7 +1103,23 @@ check-kp-stdlib-free-cf: build/skj-kpc-cf build/skj-kp-cf build/skj-as build/skj
 	 build/skj-run build/kp-stdlib-cf/convertnum.elf </dev/null > build/kp-stdlib-cf/convout 2>>$$E; \
 	 cmp -s build/kp-stdlib-cf/convout tests/kp-stdlib/convertnum.expected \
 	   || { echo "FAIL kp-stdlib-cf (convertnum)"; cat $$E build/kp-stdlib-cf/convout; exit 1; }
-	@echo "kp-stdlib-cf: 2 passed (free-cf): std.random/std.time/io.console over the ColdFire time/rng seam, core.convert"
+	@cp tests/kp-stdlib/threaddemo.pas build/kp-stdlib-cf/threaddemo.pas
+	@E=build/kp-stdlib-cf/build.err; : > $$E; \
+	 ./build/skj-kpc-cf -U build/kp-stdlib-cf --emit-kpm build/kp-stdlib-cf/threaddemo.pas > build/kp-stdlib-cf/threaddemo.kpm 2>>$$E || \
+	   { echo "FAIL kp-stdlib-cf (compile threaddemo: std.threads)"; cat $$E; exit 1; }; \
+	 ./build/skj-kp-cf build/kp-stdlib-cf/threaddemo.kpm -o build/kp-stdlib-cf/threaddemo.s 2>>$$E && \
+	 ./build/skj-as -o build/kp-stdlib-cf/threaddemo.o build/kp-stdlib-cf/threaddemo.s 2>>$$E || \
+	   { echo "FAIL kp-stdlib-cf (assemble threaddemo)"; cat $$E; exit 1; }; \
+	 ./build/skj-kp-cf build/kp-stdlib-cf/std/threads.kpm -o build/kp-stdlib-cf/threads.s 2>>$$E && \
+	 ./build/skj-as -o build/kp-stdlib-cf/threads.o build/kp-stdlib-cf/threads.s 2>>$$E || \
+	   { echo "FAIL kp-stdlib-cf (assemble std.threads)"; cat $$E; exit 1; }; \
+	 ./build/skj-ld -T kobold/kp_cf.ld -o build/kp-stdlib-cf/threaddemo.elf build/kpfree-cf/kp_crt_cf.o \
+	   build/kp-stdlib-cf/threaddemo.o build/kp-stdlib-cf/threads.o build/libkpaot-cf-free.a 2>>$$E || \
+	     { echo "FAIL kp-stdlib-cf (link threaddemo)"; cat $$E; exit 1; }; \
+	 build/skj-run build/kp-stdlib-cf/threaddemo.elf </dev/null > build/kp-stdlib-cf/threadout 2>>$$E; \
+	 cmp -s build/kp-stdlib-cf/threadout tests/kp-stdlib/threaddemo.expected \
+	   || { echo "FAIL kp-stdlib-cf (threaddemo)"; cat $$E build/kp-stdlib-cf/threadout; exit 1; }
+	@echo "kp-stdlib-cf: 3 passed (free-cf): std.random/std.time/io.console over the ColdFire time/rng seam, core.convert, std.threads"
 
 ## ---- the input-dependent corpus (tests/kp-io) ----
 ## Programs that read stdin or take arguments: a .input file is the program's
@@ -1274,6 +1313,8 @@ build/kpfree-rv/sbrk.o: libc/sbrk.c $(wildcard include/*.h) build/skj-cc-rv buil
 KPFREE_RV_ARCHIVE := build/kpfree-rv/rt_free.o build/kpfree-rv/io_free.o build/kpfree-rv/kp_io.o \
                      build/kpfree-rv/io_free_rv.o build/kpfree-rv/sbrk.o \
                      build/kpfree-rv/fs.o build/kpfree-rv/ramfs.o build/kpfree-rv/ambientfs.o build/kpfree-rv/hostcap.o \
+                     build/kpfree-rv/devfs.o build/kpfree-rv/romfs.o \
+                     build/kpfree-rv/ninefs.o build/kpfree-rv/p9_guest.o \
                      build/kpfree-rv/numfmt.o build/kpfree-rv/stat.o build/kpfree-rv/fileops.o \
                      build/kpfree-rv/strtod.o build/kpfree-rv/ctype.o \
                      build/kpfree-rv/str_core.o build/kpfree-rv/dynarr.o \
@@ -1366,7 +1407,7 @@ build/kpfree-cf/numfmt.o: libc/numfmt.c libc/fmt.h $(wildcard include/*.h) build
 ## the rv rules): the Kobold-side io_free.c shim plus the shared stat.c/fileops.c
 ## path ops, built with SKJ_FS_INTERPOSE and the temporary ambient host backend.
 KPFREE_CF_FS := -DSKJ_FS_INTERPOSE -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -Ifs
-FS_FREE_CC_CF := ./build/skj-cc -Iinclude -Ilibc -Ifs -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_AMBIENT_DEFAULT
+FS_FREE_CC_CF := ./build/skj-cc -Iinclude -Ilibc -Ifs -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_AMBIENT_DEFAULT -DFS_WITH_DEV -DFS_WITH_ROM -DFS_WITH_9P
 build/kpfree-cf/io_free.o: kobold/io_free.c $(KP_HDRS_CF) $(FS_HDR) $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
 	./build/skj-cc $(KPFREE_CF_SKJFLAGS) -Iinclude -Ilibc $(KPFREE_CF_FS) -o $(@:.o=.s) kobold/io_free.c
 	./build/skj-as -o $@ $(@:.o=.s)
@@ -1384,6 +1425,18 @@ build/kpfree-cf/ramfs.o: fs/ramfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-
 	./build/skj-as -o $@ $(@:.o=.s)
 build/kpfree-cf/ambientfs.o: fs/ambientfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
 	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/ambientfs.c
+	./build/skj-as -o $@ $(@:.o=.s)
+build/kpfree-cf/devfs.o: fs/devfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/devfs.c
+	./build/skj-as -o $@ $(@:.o=.s)
+build/kpfree-cf/romfs.o: fs/romfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/romfs.c
+	./build/skj-as -o $@ $(@:.o=.s)
+build/kpfree-cf/ninefs.o: fs/ninefs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/ninefs.c
+	./build/skj-as -o $@ $(@:.o=.s)
+build/kpfree-cf/p9_guest.o: fs/p9_guest.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/p9_guest.c
 	./build/skj-as -o $@ $(@:.o=.s)
 build/kpfree-cf/hostcap.o: fs/hostcap.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
 	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/hostcap.c
@@ -1411,6 +1464,8 @@ build/kpfree-cf/sched_glue.o: runtime/sched_glue.c build/skj-cc build/skj-as Mak
 KPFREE_CF_ARCHIVE := build/kpfree-cf/rt_free.o build/kpfree-cf/io_free.o build/kpfree-cf/kp_io.o \
                      build/kpfree-cf/io_free_cf.o build/kpfree-cf/sbrk.o \
                      build/kpfree-cf/fs.o build/kpfree-cf/ramfs.o build/kpfree-cf/ambientfs.o build/kpfree-cf/hostcap.o \
+                     build/kpfree-cf/devfs.o build/kpfree-cf/romfs.o \
+                     build/kpfree-cf/ninefs.o build/kpfree-cf/p9_guest.o \
                      build/kpfree-cf/numfmt.o build/kpfree-cf/stat.o build/kpfree-cf/fileops.o \
                      build/kpfree-cf/strtod.o build/kpfree-cf/ctype.o \
                      build/kpfree-cf/str_core.o build/kpfree-cf/dynarr.o \
@@ -1561,11 +1616,13 @@ build/skj-cc-mips-sf: $(CC_SRC_MIPS) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | 
 EMU_COLDFIRE ?= 1
 EMU_RV32     ?= 1
 EMU_MIPS32   ?= 1
+EMU_HV       ?= 1
+EMU_HV_GDB   ?= 1
 
-EMU_SRC   := emu/main.c emu/guest.c emu/hostplat.c emu/elf32.c
-EMU_HDR   := emu/guest.h emu/hostplat.h emu/elf32.h fs/fs.h
+EMU_SRC   := emu/main.c emu/guest.c emu/hostplat.c emu/elf32.c emu/elf64.c
+EMU_HDR   := emu/guest.h emu/hostplat.h emu/elf32.h emu/elf64.h fs/fs.h
 EMU_FLAGS := -DEMU_COLDFIRE=$(EMU_COLDFIRE) -DEMU_RV32=$(EMU_RV32) \
-             -DEMU_MIPS32=$(EMU_MIPS32) -Ifs
+             -DEMU_MIPS32=$(EMU_MIPS32) -DEMU_HV=$(EMU_HV) -Ifs
 ifeq ($(EMU_COLDFIRE),1)
 EMU_SRC += emu/coldfire.c emu/cf_user.c
 EMU_HDR += emu/coldfire.h
@@ -1588,12 +1645,31 @@ EMU_SRC += emu/mips_gdb.c
 EMU_HDR += emu/mips_gdb.h
 EMU_FLAGS += -DSKJ_MIPS_GDB
 endif
+## The hardware-virtualization core (x86-64 and aarch64): the guest runs
+## natively under the host hypervisor.  The VMM seam (emu/vmm.h) has one backend
+## per hypervisor: Linux KVM (emu/vmm_kvm.c) today, macOS Hypervisor.framework
+## (emu/vmm_hvf.c) to come.  The backend carries a stub fallback on an
+## unsupported host, so this builds everywhere and reports the VMM unavailable
+## at run time.
+ifeq ($(EMU_HV),1)
+EMU_SRC += emu/hvcore.c emu/vmm_kvm.c
+EMU_HDR += emu/vmm.h emu/hvcore.h emu/skj_hv_abi.h
+ifeq ($(EMU_HV_GDB),1)
+EMU_SRC += emu/hv_gdb.c
+EMU_HDR += emu/hv_gdb.h
+EMU_FLAGS += -DSKJ_HV_GDB
+endif
+endif
 ## The arch-neutral process sandbox + scheduler links whenever any core is
 ## present; each core's *_user.c is a thin binding (a skj_cpu_ops vtable over a
 ## void* CPU handle) that drives it.
-ifneq (,$(filter 1,$(EMU_COLDFIRE) $(EMU_RV32) $(EMU_MIPS32)))
+ifneq (,$(filter 1,$(EMU_COLDFIRE) $(EMU_RV32) $(EMU_MIPS32) $(EMU_HV)))
 EMU_SRC += emu/sched.c
 EMU_HDR += emu/sched.h emu/run_reason.h
+## The host-side 9P2000 file server the --9p doorbell drives (guest.c includes
+## its header for P9_MSIZE and the server API).
+EMU_SRC += fs/p9_server.c
+EMU_HDR += fs/p9_server.h fs/p9_wire.h fs/ninefs.h
 endif
 ## The shared DWARF reader links whenever any core is present, so a guest
 ## fault prints a symbolized backtrace (debugger item 5).  SKJ_DWARF_BACKTRACE
@@ -1627,6 +1703,152 @@ macos: build/skj-run
 ## this is how CI compiles and exercises the path every non-Linux host relies on.
 build/skj-run-posix: $(EMU_SRC) $(EMU_HDR) dwarf/dwread.h build/version.h | build
 	$(CC) $(CFLAGS) $(EMU_FLAGS) -DHP_FORCE_POSIX -Iemu -o $@ $(EMU_SRC) -lm
+
+## VMM mechanism self-test: builds a tiny guest blob and drives it through the
+## VMM backend (emu/vmm_kvm.c: long-mode bring-up plus the syscall doorbell).
+## Host-native, so it runs only where the hypervisor is present; it skips
+## cleanly otherwise.
+build/vmm_selftest_guest.bin: emu/vmm_selftest_guest.S | build
+	$(CC) -c -o build/vmm_selftest_guest.o $<
+	objcopy -O binary -j .text build/vmm_selftest_guest.o $@
+
+build/vmm_selftest: emu/vmm_selftest.c emu/vmm_kvm.c emu/vmm.h emu/skj_hv_abi.h | build
+	$(CC) $(CFLAGS) -Iemu -o $@ emu/vmm_selftest.c emu/vmm_kvm.c
+
+test-vmm: build/vmm_selftest build/vmm_selftest_guest.bin
+	@./build/vmm_selftest build/vmm_selftest_guest.bin; ec=$$?; \
+	 if [ $$ec -eq 42 ]; then echo "PASS: vmm selftest"; \
+	 elif [ $$ec -eq 0 ]; then echo "SKIP: vmm selftest (no hypervisor)"; \
+	 else echo "FAIL: vmm selftest (exit $$ec)"; exit 1; fi
+
+## The x86-64 hardware-virtualization guest tier: a bare-asm guest and a C guest
+## (skj-cc-x86-64) that both reach the host through the doorbell syscall seam
+## (runtime/syscall_x86_64_hv.S) and run under skj-run on real KVM.  The guest
+## links at 1 MiB, above the long-mode page tables; linking stays external GNU
+## ld, since the in-tree linker is ELF32.  Skips cleanly without /dev/kvm.
+build/hv-x86_64:
+	mkdir -p $@
+
+build/hv-x86_64/start.o: runtime/start_x86_64_hv.S $(X64_ASM_DEP) | build/hv-x86_64
+	$(X64_ASM) $(X64_ASMFLAGS) -o $@ $<
+
+build/hv-x86_64/syscall.o: runtime/syscall_x86_64_hv.S $(X64_ASM_DEP) | build/hv-x86_64
+	$(X64_ASM) $(X64_ASMFLAGS) -o $@ $<
+
+build/hv-x86_64/hello.elf: tests/hv/hello_x86_64.S $(X64_ASM_DEP) | build/hv-x86_64
+	$(X64_ASM) $(X64_ASMFLAGS) -o build/hv-x86_64/hello.o $<
+	$(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none \
+	    -o $@ build/hv-x86_64/hello.o
+
+build/hv-x86_64/hello_c.elf: tests/hv/hello_c.c build/skj-cc-x86-64 \
+                             build/hv-x86_64/start.o build/hv-x86_64/syscall.o \
+                             $(X64_ASM_DEP) | build/hv-x86_64
+	./build/skj-cc-x86-64 -o build/hv-x86_64/hello_c.s $<
+	$(X64_ASM) $(X64_ASMFLAGS) -o build/hv-x86_64/hello_c.o build/hv-x86_64/hello_c.s
+	$(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none -o $@ \
+	    build/hv-x86_64/start.o build/hv-x86_64/hello_c.o build/hv-x86_64/syscall.o
+
+test-hv-x86-64: build/skj-run build/hv-x86_64/hello.elf build/hv-x86_64/hello_c.elf
+	@if [ ! -e /dev/kvm ]; then echo "SKIP: hv x86-64 (no /dev/kvm)"; exit 0; fi; \
+	 out=$$(./build/skj-run build/hv-x86_64/hello.elf 2>/dev/null); ec=$$?; \
+	 if [ "$$out" != "hello hv x86" ] || [ $$ec -ne 42 ]; then \
+	    echo "FAIL: hv x86-64 asm guest (out='$$out' exit=$$ec)"; exit 1; fi; \
+	 out=$$(./build/skj-run build/hv-x86_64/hello_c.elf 2>/dev/null); ec=$$?; \
+	 if [ "$$out" != "hello from C under HV" ] || [ $$ec -ne 7 ]; then \
+	    echo "FAIL: hv x86-64 C guest (out='$$out' exit=$$ec)"; exit 1; fi; \
+	 echo "PASS: hv x86-64 (asm + C guest via doorbell)"
+
+## The aarch64 hardware-virtualization guest tier, the sibling of the x86-64
+## one: the arm64 crt and the doorbell syscall seam, a C guest built by
+## skj-cc-arm64.  It can only run on an aarch64 KVM host, so this verifies the
+## build on any host and runs the guest only where KVM can.
+build/hv-arm64:
+	mkdir -p $@
+
+build/hv-arm64/start.o: runtime/start_arm64_hv.S $(A64_ASM_DEP) | build/hv-arm64
+	$(A64_AS) -o $@ $<
+
+build/hv-arm64/syscall.o: runtime/syscall_arm64_hv.S $(A64_ASM_DEP) | build/hv-arm64
+	$(A64_AS) -o $@ $<
+
+build/hv-arm64/hello_c.elf: tests/hv/hello_c.c build/skj-cc-arm64 \
+                            build/hv-arm64/start.o build/hv-arm64/syscall.o \
+                            $(A64_ASM_DEP) | build/hv-arm64
+	./build/skj-cc-arm64 -o build/hv-arm64/hello_c.s $<
+	$(A64_AS) -o build/hv-arm64/hello_c.o build/hv-arm64/hello_c.s
+	$(A64_LD) -e _start -Ttext=0x100000 --build-id=none -o $@ \
+	    build/hv-arm64/start.o build/hv-arm64/hello_c.o build/hv-arm64/syscall.o
+
+## The guest builds on any host; it runs only on an aarch64 host with KVM (the
+## guest arch must equal the host's), so elsewhere this reports a build pass.
+test-hv-arm64: build/skj-run build/hv-arm64/hello_c.elf
+	@if [ "$$(uname -m)" = "aarch64" ] && [ -e /dev/kvm ]; then \
+	    out=$$(./build/skj-run build/hv-arm64/hello_c.elf 2>/dev/null); ec=$$?; \
+	    if [ "$$out" != "hello from C under HV" ] || [ $$ec -ne 7 ]; then \
+	       echo "FAIL: hv arm64 C guest (out='$$out' exit=$$ec)"; exit 1; fi; \
+	    echo "PASS: hv arm64 (C guest via doorbell)"; \
+	 else echo "PASS: hv arm64 (build only; no aarch64 KVM host)"; fi
+
+## HV preemption (item 11): a compute-bound guest that never traps to the
+## doorbell is still preemptible.  A periodic timer breaks into KVM_RUN, so the
+## round-robin scheduler keeps its turn and --max-insns bounds the run.  Without
+## the timer this spin guest would hold the vcpu forever and ignore the limit;
+## with it, skj-run stops at the instruction cap within a few 10 ms slices.  The
+## `timeout` guard turns a regression (lost preemption) into a clean failure
+## instead of a hang.  Needs /dev/kvm (an x86-64 host); skips otherwise.
+test-hv-preempt: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
+                 build/hv-x86_64/start.o build/hv-x86_64/syscall.o
+	@if [ ! -e /dev/kvm ]; then echo "SKIP: test-hv-preempt (no /dev/kvm)"; exit 0; fi; \
+	 ./build/skj-cc-x86-64 -o build/hv-x86_64/spin.s tests/hv/spin.c; \
+	 ./build/skj-as-x86-64 -o build/hv-x86_64/spin.o build/hv-x86_64/spin.s; \
+	 $(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none \
+	     -o build/hv-x86_64/spin.elf build/hv-x86_64/start.o \
+	     build/hv-x86_64/spin.o build/hv-x86_64/syscall.o; \
+	 out=$$(timeout 10 ./build/skj-run --max-insns 40000 build/hv-x86_64/spin.elf 2>&1); ec=$$?; \
+	 if [ $$ec -eq 124 ]; then \
+	     echo "FAIL: hv preempt (compute-bound guest ran away; the timer did not preempt it)"; exit 1; fi; \
+	 echo "$$out" | grep -q "instruction limit" || { \
+	     echo "FAIL: hv preempt (no instruction-limit stop: out='$$out' ec=$$ec)"; exit 1; }; \
+	 echo "PASS: hv preempt (the timer bounds a compute-bound guest; --max-insns stops it)"
+
+## The HV GDB stub (item 10): a debugger drives one x86-64 HV guest over the
+## RSP.  gdb learns the architecture from the ELF (no target.xml), so the host's
+## native gdb debugs the x86-64 guest.  It exercises the whole stub subset: the
+## host-side breakpoint table (`break main`), the register packet (`print $pc`),
+## the memory packet (reading the guest's code bytes) and single-step `continue`
+## through the doorbell MMIO to the guest's exit.  A null-deref guest triple-
+## faults into a KVM shutdown (the long-mode guest installs no IDT), so there is
+## no debuggable fault frame to check, unlike the emulated cores.  Needs
+## /dev/kvm (so an x86-64 host) and gdb; skips cleanly otherwise.
+HV_GDB ?= gdb
+test-hv-gdb: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
+             build/hv-x86_64/start.o build/hv-x86_64/syscall.o
+	@if [ ! -e /dev/kvm ]; then echo "SKIP: test-hv-gdb (no /dev/kvm)"; exit 0; fi; \
+	 if ! command -v $(HV_GDB) >/dev/null 2>&1; then \
+	     echo "SKIP: test-hv-gdb ($(HV_GDB) not found)"; exit 0; fi; \
+	 mkdir -p build/debug; \
+	 ./build/skj-cc-x86-64 -g -o build/debug/xloc.s tests/debug/loc.c; \
+	 ./build/skj-as-x86-64 -o build/debug/xloc.o build/debug/xloc.s; \
+	 $(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none \
+	     -o build/debug/xloc.elf build/hv-x86_64/start.o build/debug/xloc.o \
+	     build/hv-x86_64/syscall.o; \
+	 port=$$((20000 + $$$$ % 20000)); \
+	 ./build/skj-run --gdb $$port build/debug/xloc.elf >/dev/null 2>build/debug/xg.err & rp=$$!; \
+	 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+	     grep -q listening build/debug/xg.err 2>/dev/null && break; sleep 0.2; done; \
+	 $(HV_GDB) -q -nx -batch -ex "set pagination off" \
+	     -ex "target remote 127.0.0.1:$$port" -ex "break main" \
+	     -ex "continue" -ex "print \$$pc" -ex "x/2xb \$$pc" \
+	     -ex "continue" build/debug/xloc.elf >build/debug/xg.out 2>&1; \
+	 wait $$rp 2>/dev/null; \
+	 ok=1; \
+	 grep -q "Breakpoint 1, 0x0000000000100060 in main" build/debug/xg.out || { echo "FAIL: no break at main"; ok=0; }; \
+	 grep -q "<main+4>" build/debug/xg.out || { echo "FAIL: register packet wrong pc"; ok=0; }; \
+	 grep -q "0x100060.*0x53" build/debug/xg.out || { echo "FAIL: memory packet did not read guest code"; ok=0; }; \
+	 grep -q "exited with code 05" build/debug/xg.out || { echo "FAIL: loc did not exit 05"; ok=0; }; \
+	 if [ $$ok = 1 ]; then \
+	     echo "PASS: gdb drives the skj-run HV x86-64 RSP stub (break, regs, mem, exit)"; \
+	 else cat build/debug/xg.out; exit 1; fi
 
 ## ColdFire assembler
 AS_SRC := as/main.c as/asm_lex.c as/asm_obj.c as/parse.c as/encode.c as/elf.c \
@@ -2027,14 +2249,20 @@ test-jit-arena: build/test_jit_arena
 ## The shared fs/ mount-table + namespace layer (host-only, no qemu): path
 ## resolution, DOS current-mount + per-mount-cwd state, the ramfs and hostfs
 ## backends, and hostfs confinement.  Driven directly from C.
-FS_SRC := fs/fs.c fs/ramfs.c fs/hostfs.c
-FS_HDR := fs/fs.h fs/fs_internal.h fs/ramfs.h fs/hostfs.h fs/ambientfs.h fs/hostcap.h
+FS_SRC := fs/fs.c fs/ramfs.c fs/hostfs.c fs/devfs.c fs/romfs.c fs/romfs_build.c \
+          fs/ninefs.c fs/p9_server.c
+FS_HDR := fs/fs.h fs/fs_internal.h fs/ramfs.h fs/hostfs.h fs/ambientfs.h \
+          fs/hostcap.h fs/devfs.h fs/romfs.h fs/ninefs.h fs/p9_server.h fs/p9_wire.h
 
 build/test_fs: tests/fs_test.c $(FS_SRC) $(FS_HDR) | build
-	$(CC) $(CFLAGS) -DFS_WITH_HOSTFS -Ifs -o $@ tests/fs_test.c $(FS_SRC)
+	$(CC) $(CFLAGS) -DFS_WITH_HOSTFS -DFS_WITH_DEV -DFS_WITH_ROM -DFS_WITH_9P -Ifs -o $@ tests/fs_test.c $(FS_SRC)
 
 test-fs: build/test_fs
 	@./build/test_fs
+
+## skj-mkromfs: the host packer that turns a directory into a romfs image.
+build/skj-mkromfs: fs/mkromfs.c fs/romfs_build.c fs/romfs.h fs/fs.h | build
+	$(CC) $(CFLAGS) -Ifs -o $@ fs/mkromfs.c fs/romfs_build.c
 
 ## The freestanding (guest) build of the fs/ layer: fs.c + ramfs.c + ambientfs.c.
 ## hostfs is the hosted/dev backend (host libc DIR*/fstatat); the guest's host
@@ -2046,7 +2274,7 @@ test-fs: build/test_fs
 ## FS_AMBIENT_DEFAULT is the documented temporary override that lands a no-mount
 ## guest on the ambient host instead, kept while the freestanding test harnesses
 ## still open host files by bare path under qemu.
-FS_FREE_CC := ./build/skj-cc-rv -Iinclude -Ilibc -Ifs -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_AMBIENT_DEFAULT
+FS_FREE_CC := ./build/skj-cc-rv -Iinclude -Ilibc -Ifs -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_AMBIENT_DEFAULT -DFS_WITH_DEV -DFS_WITH_ROM -DFS_WITH_9P
 build/kpfree-rv/fs.o: fs/fs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
 	$(FS_FREE_CC) -o $(@:.o=.s) fs/fs.c
 	./build/skj-as-rv -o $@ $(@:.o=.s)
@@ -2059,9 +2287,21 @@ build/kpfree-rv/ambientfs.o: fs/ambientfs.c $(FS_HDR) $(wildcard include/*.h) bu
 build/kpfree-rv/hostcap.o: fs/hostcap.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
 	$(FS_FREE_CC) -o $(@:.o=.s) fs/hostcap.c
 	./build/skj-as-rv -o $@ $(@:.o=.s)
+build/kpfree-rv/devfs.o: fs/devfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	$(FS_FREE_CC) -o $(@:.o=.s) fs/devfs.c
+	./build/skj-as-rv -o $@ $(@:.o=.s)
+build/kpfree-rv/romfs.o: fs/romfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	$(FS_FREE_CC) -o $(@:.o=.s) fs/romfs.c
+	./build/skj-as-rv -o $@ $(@:.o=.s)
+build/kpfree-rv/ninefs.o: fs/ninefs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	$(FS_FREE_CC) -o $(@:.o=.s) fs/ninefs.c
+	./build/skj-as-rv -o $@ $(@:.o=.s)
+build/kpfree-rv/p9_guest.o: fs/p9_guest.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	$(FS_FREE_CC) -o $(@:.o=.s) fs/p9_guest.c
+	./build/skj-as-rv -o $@ $(@:.o=.s)
 
-check-fs-free: build/kpfree-rv/fs.o build/kpfree-rv/ramfs.o build/kpfree-rv/ambientfs.o build/kpfree-rv/hostcap.o
-	@echo "PASS: fs/ (fs.c + ramfs.c + ambientfs.c + hostcap.c) builds freestanding for rv32"
+check-fs-free: build/kpfree-rv/fs.o build/kpfree-rv/ramfs.o build/kpfree-rv/ambientfs.o build/kpfree-rv/hostcap.o build/kpfree-rv/devfs.o build/kpfree-rv/romfs.o build/kpfree-rv/ninefs.o build/kpfree-rv/p9_guest.o
+	@echo "PASS: fs/ (fs.c + ramfs.c + ambientfs.c + hostcap.c + devfs.c + romfs.c + ninefs.c + p9_guest.c) builds freestanding for rv32"
 
 ## Regenerate the committed golden master and the index (run after editing
 ## tests/f32_vectors.h, then commit tests/f32_golden.inc).
@@ -2322,9 +2562,10 @@ build/san/test_rv_run: tests/test_rv_run.c emu/rv32.c emu/rv32.h | build build/s
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Iemu -o $@ tests/test_rv_run.c emu/rv32.c -lm
 
 build/san/test_guest_mmap: tests/test_guest_mmap.c emu/guest.c emu/guest.h \
-                           emu/hostplat.c emu/hostplat.h emu/elf32.c emu/elf32.h | build build/san
+                           emu/hostplat.c emu/hostplat.h emu/elf32.c emu/elf32.h \
+                           fs/p9_server.c fs/p9_server.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Iemu -Ifs -o $@ tests/test_guest_mmap.c \
-	    emu/guest.c emu/hostplat.c emu/elf32.c -lm
+	    emu/guest.c emu/hostplat.c emu/elf32.c fs/p9_server.c -lm
 
 build/san/test_rv_decode_cache: tests/test_rv_decode_cache.c emu/rv32.c emu/rv32.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Iemu -o $@ tests/test_rv_decode_cache.c emu/rv32.c -lm
@@ -2939,9 +3180,10 @@ test-rv-run: build/test_rv_run
 ## must fault), gm_munmap release, the gm_pool aggregate budget, and
 ## gm_read_out.  Drives emu/guest.c directly, no CPU core.  Host-only.
 build/test_guest_mmap: tests/test_guest_mmap.c emu/guest.c emu/guest.h \
-                       emu/hostplat.c emu/hostplat.h emu/elf32.c emu/elf32.h | build
+                       emu/hostplat.c emu/hostplat.h emu/elf32.c emu/elf32.h \
+                       fs/p9_server.c fs/p9_server.h | build
 	$(CC) $(CFLAGS) -Iemu -Ifs -o $@ tests/test_guest_mmap.c \
-	    emu/guest.c emu/hostplat.c emu/elf32.c -lm
+	    emu/guest.c emu/hostplat.c emu/elf32.c fs/p9_server.c -lm
 
 test-guest-mmap: build/test_guest_mmap
 	@./build/test_guest_mmap
@@ -3023,7 +3265,7 @@ RV32_UNIT := test_mem test_fp test_fp_d test_atomic test_zcmp test_zcb \
              test_bitmanip test_irq
 RV32_INC  := -Iemu -Ifs -Itests/rv32
 RV32_CORE := emu/rv32.c tests/rv32/machine.c
-RV32_LOAD := emu/elf32.c emu/guest.c emu/hostplat.c
+RV32_LOAD := emu/elf32.c emu/guest.c emu/hostplat.c fs/p9_server.c
 
 ## gdbclient speaks the GDB remote protocol over a socket, and the POSIX
 ## headers for that are hidden by -std=c99.
@@ -4427,6 +4669,97 @@ test-mips-fs-cap: build/skj-cc-mips build/mips/start.o build/mips/half.o build/m
 	 FS_INTERPOSE=1 EXPECT=42 \
 	 sh tests/run-libc-tests.sh
 
+## devfs over the launcher --dev grant: a guest reaches the in-guest device
+## backend (null/zero/full) through a "dev:" mount the launcher installs, with
+## no host resource.  Same freestanding fs/-interpose libc and skj-run driver as
+## the fs-cap test; the guest self-checks and exits 42.
+test-rv-fs-dev: build/skj-cc-rv build/rv/start.o build/rv/va_rv.o build/rv/soft64_div.o build/rv/co_switch.o $(FS_CAP_RUN)
+	@rm -rf build/fs-dev-rv
+	@mkdir -p build/fs-dev-rv
+	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
+	 ASM="$(RV_AS) -march=rv32imfd_zfh -mabi=ilp32 -o" \
+	 LD="$(RV_LD) -m elf32lriscv -o" \
+	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --dev dev" \
+	 START="$(CURDIR)/build/rv/start.o" \
+	 HALF="$(CURDIR)/build/rv/va_rv.o $(CURDIR)/build/rv/soft64_div.o $(CURDIR)/build/rv/co_switch.o" \
+	 OUTDIR="$(CURDIR)/build/fs-dev-rv" \
+	 TEST="$(CURDIR)/tests/fs-dev/devguest.c" \
+	 FS_INTERPOSE=1 FS_DEV=1 EXPECT=42 \
+	 sh tests/run-libc-tests.sh
+
+test-cf-fs-dev: build/skj-cc build/skj-as build/start.o build/half.o build/va_cf.o build/co_switch_cf.o $(FS_CAP_RUN)
+	@rm -rf build/fs-dev-cf
+	@mkdir -p build/fs-dev-cf
+	@OUTDIR="$(CURDIR)/build/fs-dev-cf" \
+	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --dev dev" \
+	 HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o $(CURDIR)/build/co_switch_cf.o" \
+	 TEST="$(CURDIR)/tests/fs-dev/devguest.c" \
+	 FS_INTERPOSE=1 FS_DEV=1 EXPECT=42 \
+	 sh tests/run-libc-tests.sh
+
+## romfs over the launcher --rom grant: skj-mkromfs packs a seed directory into
+## an image, the launcher loads it into guest memory and records its address in
+## fs_mount_aux, and the guest reads it back read-only through a "rom:" mount.
+test-rv-fs-rom: build/skj-cc-rv build/rv/start.o build/rv/va_rv.o build/rv/soft64_div.o build/rv/co_switch.o build/skj-mkromfs $(FS_CAP_RUN)
+	@rm -rf build/fs-rom-rv
+	@mkdir -p build/fs-rom-rv/seed/sub
+	@printf 'hello romfs' > build/fs-rom-rv/seed/greet
+	@printf 'nested' > build/fs-rom-rv/seed/sub/inner
+	@./build/skj-mkromfs build/fs-rom-rv/seed build/fs-rom-rv/rom.img
+	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
+	 ASM="$(RV_AS) -march=rv32imfd_zfh -mabi=ilp32 -o" \
+	 LD="$(RV_LD) -m elf32lriscv -o" \
+	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --rom rom:$(CURDIR)/build/fs-rom-rv/rom.img" \
+	 START="$(CURDIR)/build/rv/start.o" \
+	 HALF="$(CURDIR)/build/rv/va_rv.o $(CURDIR)/build/rv/soft64_div.o $(CURDIR)/build/rv/co_switch.o" \
+	 OUTDIR="$(CURDIR)/build/fs-rom-rv" \
+	 TEST="$(CURDIR)/tests/fs-rom/romguest.c" \
+	 FS_INTERPOSE=1 FS_ROM=1 EXPECT=42 \
+	 sh tests/run-libc-tests.sh
+
+test-cf-fs-rom: build/skj-cc build/skj-as build/start.o build/half.o build/va_cf.o build/co_switch_cf.o build/skj-mkromfs $(FS_CAP_RUN)
+	@rm -rf build/fs-rom-cf
+	@mkdir -p build/fs-rom-cf/seed/sub
+	@printf 'hello romfs' > build/fs-rom-cf/seed/greet
+	@printf 'nested' > build/fs-rom-cf/seed/sub/inner
+	@./build/skj-mkromfs build/fs-rom-cf/seed build/fs-rom-cf/rom.img
+	@OUTDIR="$(CURDIR)/build/fs-rom-cf" \
+	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --rom rom:$(CURDIR)/build/fs-rom-cf/rom.img" \
+	 HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o $(CURDIR)/build/co_switch_cf.o" \
+	 TEST="$(CURDIR)/tests/fs-rom/romguest.c" \
+	 FS_INTERPOSE=1 FS_ROM=1 EXPECT=42 \
+	 sh tests/run-libc-tests.sh
+
+## 9pfs over the launcher --9p grant: skj-run serves a host directory with its
+## in-process 9P2000 server behind a shared doorbell channel, and the guest 9p
+## client reaches it through a "data:" mount.  This is the one place the launcher
+## 9p server, the doorbell hostcall and the guest client meet end to end.
+test-rv-fs-9p: build/skj-cc-rv build/rv/start.o build/rv/va_rv.o build/rv/soft64_div.o build/rv/co_switch.o $(FS_CAP_RUN)
+	@rm -rf build/fs-9p-rv
+	@mkdir -p build/fs-9p-rv/data
+	@printf '9p-seed\n' > build/fs-9p-rv/data/seed.txt
+	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
+	 ASM="$(RV_AS) -march=rv32imfd_zfh -mabi=ilp32 -o" \
+	 LD="$(RV_LD) -m elf32lriscv -o" \
+	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --9p data:$(CURDIR)/build/fs-9p-rv/data" \
+	 START="$(CURDIR)/build/rv/start.o" \
+	 HALF="$(CURDIR)/build/rv/va_rv.o $(CURDIR)/build/rv/soft64_div.o $(CURDIR)/build/rv/co_switch.o" \
+	 OUTDIR="$(CURDIR)/build/fs-9p-rv" \
+	 TEST="$(CURDIR)/tests/fs-9p/p9guest.c" \
+	 FS_INTERPOSE=1 FS_9P=1 EXPECT=42 \
+	 sh tests/run-libc-tests.sh
+
+test-cf-fs-9p: build/skj-cc build/skj-as build/start.o build/half.o build/va_cf.o build/co_switch_cf.o $(FS_CAP_RUN)
+	@rm -rf build/fs-9p-cf
+	@mkdir -p build/fs-9p-cf/data
+	@printf '9p-seed\n' > build/fs-9p-cf/data/seed.txt
+	@OUTDIR="$(CURDIR)/build/fs-9p-cf" \
+	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --9p data:$(CURDIR)/build/fs-9p-cf/data" \
+	 HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o $(CURDIR)/build/co_switch_cf.o" \
+	 TEST="$(CURDIR)/tests/fs-9p/p9guest.c" \
+	 FS_INTERPOSE=1 FS_9P=1 EXPECT=42 \
+	 sh tests/run-libc-tests.sh
+
 ## Run the fs-cap confinement end to end against build/skj-run-posix, so the
 ## cap_walk component walk (the portable confinement floor every non-Linux host
 ## uses) is compiled and exercised on Linux too, where openat2 is the default.
@@ -5617,6 +5950,47 @@ check-libc-x86-64: build/skj-cc-x86-64 build/x86_64/start_sysv.o build/x86_64/ha
 	 OUTDIR="$(CURDIR)/build/libc-x86_64" \
 	 sh tests/run-libc-tests.sh
 
+## The freestanding C libc running under the VMM: the same libc sources, built
+## by skj-cc-x86-64 and linked with the HV crt and the doorbell syscall seam,
+## run natively under KVM through skj-run.  The full phase set, including the
+## file-I/O phases (statx, pathops, readdir): FS_INTERPOSE routes the libc fd
+## model through the shared fs/ layer, and the ambient backend reaches the host
+## by bare path (FS_AMBIENT_DEFAULT), the same way the rv and cf freestanding
+## tiers run it.  This is VMM parity with the emulated sandboxes.  Skips cleanly
+## without /dev/kvm.  The arm64 sibling has no host here to run on.
+check-libc-hv-x86-64: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
+                      build/hv-x86_64/start.o build/hv-x86_64/syscall.o \
+                      build/x86_64/half.o build/x86_64/va.o build/x86_64/soft64.o build/x86_64/co_switch.o
+	@if [ ! -e /dev/kvm ]; then echo "SKIP: libc hv x86-64 (no /dev/kvm)"; exit 0; fi; \
+	 CCBIN="$(CURDIR)/build/skj-cc-x86-64" \
+	 ASM="$(CURDIR)/build/skj-as-x86-64 -o" \
+	 LD="$(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none -o" \
+	 QEMU="$(CURDIR)/build/skj-run" \
+	 START="$(CURDIR)/build/hv-x86_64/start.o" \
+	 HALF="$(CURDIR)/build/hv-x86_64/syscall.o $(CURDIR)/build/x86_64/va.o $(CURDIR)/build/x86_64/half.o $(CURDIR)/build/x86_64/soft64.o $(CURDIR)/build/x86_64/co_switch.o" \
+	 OUTDIR="$(CURDIR)/build/libc-hv-x86_64" \
+	 FS_INTERPOSE=1 FS_AMBIENT_DEFAULT=1 \
+	 sh tests/run-libc-tests.sh
+
+## The aarch64 sibling: the same libc built by skj-cc-arm64 and linked with the
+## arm64 HV crt and seam, the full set with FS_INTERPOSE.  It runs only on an
+## aarch64 KVM host, so on any other host BUILD_ONLY verifies the
+## compile/assemble/link path (full parity with the x86-64 tier, which runs here).
+check-libc-hv-arm64: build/skj-cc-arm64 build/skj-as-aarch64 \
+                     build/hv-arm64/start.o build/hv-arm64/syscall.o \
+                     build/arm64/va.o build/arm64/soft64.o build/arm64/co_switch.o
+	@if [ "$$(uname -m)" = "aarch64" ] && [ -e /dev/kvm ]; then B=; else B=1; fi; \
+	 CCBIN="$(CURDIR)/build/skj-cc-arm64" \
+	 ASM="$(CURDIR)/build/skj-as-aarch64 -o" \
+	 LD="$(A64_LD) -e _start -Ttext=0x100000 --build-id=none -o" \
+	 QEMU="$(CURDIR)/build/skj-run" \
+	 START="$(CURDIR)/build/hv-arm64/start.o" \
+	 HALF="$(CURDIR)/build/hv-arm64/syscall.o $(CURDIR)/build/arm64/va.o $(CURDIR)/build/arm64/soft64.o $(CURDIR)/build/arm64/co_switch.o" \
+	 OUTDIR="$(CURDIR)/build/libc-hv-arm64" \
+	 FS_INTERPOSE=1 FS_AMBIENT_DEFAULT=1 \
+	 BUILD_ONLY="$$B" \
+	 sh tests/run-libc-tests.sh
+
 check-libc-arm64: build/skj-cc-arm64 build/arm64/start_aapcs.o build/arm64/va.o build/arm64/soft64.o build/arm64/co_switch.o
 	@CCBIN="$(CURDIR)/build/skj-cc-arm64" \
 	 ASM="$(A64_AS) -o" \
@@ -6045,7 +6419,7 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            test-cf-addr2line test-mips-addr2line test-mips-backtrace \
            test-cf-wild-backtrace test-cf-abort-backtrace \
            test-kp-cf-dwarf test-kp-cf-trap-backtrace \
-           test-rv-dbg test-rv-gdb test-mips-gdb test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-cf-selfhost test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc check-selfhost-all test-help \
+           test-rv-dbg test-rv-gdb test-mips-gdb test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-cf-selfhost test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc check-selfhost-all test-help \
            check-cc-rv-psabi test-cc-rv-psabi-interop \
            test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive \
            test-cc-rv-psabi-struct test-cc-driver check-libc \
@@ -6069,4 +6443,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue check-vendor coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-preempt check-libc-hv-x86-64 check-libc-hv-arm64 check-vendor coverage-codegen clean FORCE

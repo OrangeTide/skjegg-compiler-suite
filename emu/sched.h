@@ -38,6 +38,7 @@
 #define SKJ_SYS_MUNMAP  0x000f0002u
 #define SKJ_SYS_SPAWN   0x000f0003u
 #define SKJ_SYS_YIELD   0x000f0004u
+#define SKJ_SYS_P9      0x000f0005u     /* arg0 = 9p channel addr -> 0, or -1 */
 
 #define SKJ_MAX_PROC    64
 #define SKJ_QUANTUM     8192            /* instructions per scheduling slice */
@@ -113,9 +114,17 @@ typedef struct skj_cpu_ops {
     uint32_t machine;           /* EM_RISCV / EM_MIPS / EM_68K (image check) */
     int arch;                   /* GUEST_ARCH_* for guest.arch */
     int big_endian;             /* image endianness; also the bus `be` */
+    int word64;                 /* the image is ELF64 (the HV cores); else ELF32 */
 
     void *(*alloc)(void);                   /* allocate a zeroed CPU struct */
     void  (*free)(void *cpu);               /* release it (rv also frees its dec cache) */
+
+    /* Optional: lay out this process's guest memory for a core that cannot use
+     * the sparse page-committed layout (the hardware-virtualization cores back
+     * their RAM with one contiguous buffer shared with a vcpu).  Called after
+     * gm_init, before the image loads.  Returns 0 on success, -1 on failure.
+     * NULL leaves the default sparse memory in place. */
+    int   (*mem_init)(proc *p, const run_opts *o);
 
     /* Make a fresh process runnable: bind the shared bus (ctx=p), configure
      * features, install the core's syscall shim, reset to `entry`, and set the

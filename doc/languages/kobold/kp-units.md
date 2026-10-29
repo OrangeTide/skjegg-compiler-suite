@@ -590,8 +590,20 @@ The units, by tier:
   batching, and a general ungetc live, as the design intends (a stream owns its descriptor, so a
   program does not mix it with the console builtins or a second stream on the same fd).
 - `std.time` — `Now` (monotonic milliseconds) and `Sleep(ms)`, over the host clock and the
-  park seam. A give-up-the-turn yield is `Sleep(0)` for now; a dedicated procedure waits on
-  coroutine scheduling landing as its own namespaced unit (`yield` is the coroutine keyword).
+  park seam. A give-up-the-turn yield is `Pause` in `std.threads`; `Sleep(0)` also parks the
+  turn at the host.
+- `std.threads` — cooperative threads, the Kobold parallel of the C `<threads.h>` subset
+  (`include/threads.h`). It is pure Kobold with no runtime glue: it rides the language's own
+  `start` / `yield` / `process` / `release` coroutine primitive, so it works on every tier that
+  has coroutines. `Ready(start worker(a, b))` enqueues a started task, `RunAll` round-robins the
+  queue until every task finishes. Inside a task, `Pause` gives up the turn (the C `thrd_yield`)
+  and `Finish` is the task's final act (the C thread return): a Kobold coroutine cannot report
+  its own completion, and resuming one that has run off its end traps, so `Finish` yields the
+  stable done marker `RunAll` stops on. A task that returns without `Finish` is a usage error.
+  `Mutex` and `Condition` are the cooperative forms: with no preemption a critical section is
+  uncontended unless it spans a `Pause`, so `Lock` spins on `Pause` until free and `Wait` pauses
+  until the next `Signal` (a broadcast). The caller hands the unit a `process` value, since a
+  yielding routine cannot be passed as a value and so cannot be spawned from inside the unit.
 - `std.random` — `SeedRandom`, `Randomize` (seed from host entropy), `RandomBelow` and
   `RandomReal` (a uniform real in [0, 1)) over the fast generator, and `SecureRandom(bound)`
   over the ChaCha20 CSPRNG (seeded once from host entropy, rejection-sampled to stay unbiased).

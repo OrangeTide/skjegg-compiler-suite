@@ -275,6 +275,17 @@ hp_sleep(uint32_t sec, uint32_t nsec)
     return 0;
 }
 
+/* sched_yield is POSIX, but <sched.h> is shadowed by the emulator's own
+ * scheduler header on the -Iemu include path, so declare the prototype here
+ * rather than include it. */
+extern int sched_yield(void);
+
+void
+hp_yield(void)
+{
+    sched_yield();
+}
+
 /* Random bytes come from /dev/urandom: a plain open and read, so one pure-POSIX
  * path serves every host.  getrandom (Linux) and getentropy (macOS/BSD) would
  * each be a separate non-POSIX call for no gain here; the device is the kernel

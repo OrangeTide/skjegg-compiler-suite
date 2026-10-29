@@ -57,6 +57,9 @@ int hp_clock(int realtime, uint32_t *sec, uint32_t *nsec);
 /* Sleep for sec + nsec, resuming across a host signal.  0 or -1. */
 int hp_sleep(uint32_t sec, uint32_t nsec);
 
+/* Yield the processor: the cooperative hint the guest's sched_yield lowers to. */
+void hp_yield(void);
+
 /* Fill buf with len random bytes; returns the count, or -1. */
 int hp_random(void *buf, int len);
 

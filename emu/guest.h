@@ -57,6 +57,12 @@ typedef struct guest_mem {
     uint64_t limit;                     /* cap on this guest's committed */
     struct gm_pool *pool;               /* shared aggregate budget, or NULL */
     int loading;                        /* loader writes ignore GM_W */
+    uint8_t *extern_base;               /* a contiguous host buffer backing
+                                           [0, extern_size), used by the
+                                           hardware-virtualization guest whose RAM
+                                           is one buffer mapped into its vcpu;
+                                           NULL for a sparse (page-committed) guest */
+    uint32_t extern_size;
     int fault;                          /* set on the first bad access */
     uint32_t fault_addr;
     int fault_write;
@@ -66,6 +72,13 @@ typedef struct guest_mem {
 
 void gm_init(guest_mem *m, uint64_t limit);
 void gm_free(guest_mem *m);
+
+/* Back [0, size) with a single contiguous host buffer rather than committed
+ * pages, and map it read/write/execute.  The buffer is the guest's whole RAM,
+ * shared with a vcpu (the hardware-virtualization cores); its lifetime is the
+ * caller's.  Every gm_* access in range then reads or writes this buffer, so
+ * the shared syscall layer reaches guest memory unchanged. */
+void gm_set_extern(guest_mem *m, uint8_t *base, uint32_t size);
 
 /* Declare an accessible range.  Returns 0 on success, -1 if the region
  * table is full. */
@@ -122,6 +135,8 @@ enum guest_arch {
     GUEST_ARCH_COLDFIRE,
     GUEST_ARCH_RV32,
     GUEST_ARCH_MIPS32,
+    GUEST_ARCH_X86_64,          /* hardware-virtualization (KVM) */
+    GUEST_ARCH_AARCH64,         /* hardware-virtualization (KVM) */
 };
 
 /* Arch-neutral syscall selectors.  The per-arch tables map Linux numbers
@@ -172,6 +187,14 @@ struct gfd {
                                  * getdents64, opened on first use; NULL until then */
 };
 
+/* A 9p channel the launcher bound: a doorbell names its channel's guest address,
+ * which this maps to the host-side p9 server serving it. */
+#define GUEST_MAX_P9 16
+struct guest_p9bind {
+    uint32_t chan;              /* channel region's guest address */
+    void    *srv;              /* struct p9_server * serving it */
+};
+
 typedef struct guest {
     guest_mem mem;
     int arch;
@@ -186,7 +209,17 @@ typedef struct guest {
     int big_endian;
     int fds_inited;
     struct gfd fdtab[GUEST_MAX_FDS];
+    int np9;                    /* bound 9p channels */
+    struct guest_p9bind p9[GUEST_MAX_P9];
 } guest;
+
+/* Service a 9p doorbell: find the server bound to channel `chan`, read the
+ * T-message out of guest memory, dispatch it, and write the R-message back.
+ * Returns 0, or -1 if no server is bound to that channel. */
+int guest_p9_doorbell(guest *g, uint32_t chan);
+
+/* Release the 9p servers bound to this guest (called at process teardown). */
+void guest_p9_free(guest *g);
 
 /* Service one syscall.  args are already in host order; the return value
  * is the Linux return convention (negative errno on failure). */
@@ -205,6 +238,12 @@ typedef struct run_opts {
     int argc;
     const char *mounts[RUN_MAX_MOUNTS]; /* --mount name:hostdir grants */
     int nmounts;
+    const char *devs[RUN_MAX_MOUNTS];   /* --dev name grants (devfs)        */
+    int ndevs;
+    const char *roms[RUN_MAX_MOUNTS];   /* --rom name:image.img grants      */
+    int nroms;
+    const char *p9s[RUN_MAX_MOUNTS];    /* --9p name:hostdir grants         */
+    int np9s;
     uint64_t mem_limit;
     uint32_t stack_size;
     uint32_t heap_size;
@@ -228,9 +267,13 @@ void guest_install_mounts(guest *g, const char *elf_path, const run_opts *o);
 int run_coldfire(const run_opts *o, int *status);
 int run_rv32(const run_opts *o, int *status);
 int run_mips32(const run_opts *o, int *status);
+int run_x86_64hv(const run_opts *o, int *status);
+int run_arm64hv(const run_opts *o, int *status);
 
 /* Shared stack image: writes argc/argv/envp/auxv and returns the stack
- * pointer the guest should start with. */
+ * pointer the guest should start with.  The _64 variant uses 8-byte slots for
+ * the LP64 hardware-virtualization guests. */
 uint32_t guest_build_stack(guest *g, const run_opts *o);
+uint32_t guest_build_stack64(guest *g, const run_opts *o);
 
 #endif /* GUEST_H */

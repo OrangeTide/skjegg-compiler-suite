@@ -274,3 +274,15 @@ __skj_trap_backtrace:
     move.l  #0x000f0000, %d0   | CF_SYS_FATAL
     trap    #0
     rts
+
+| long __skj_p9_doorbell(void *chan);
+| The 9p channel doorbell, the ColdFire twin of the RISC-V ecall: hand the
+| launcher the framed T-message in the channel at the first argument and get the
+| R-message back in the same channel.  SKJ_SYS_P9 (0x000f0005) sits above the
+| m68k syscall range, so off a sandbox it degrades to a failing rpc.
+    .globl __skj_p9_doorbell
+__skj_p9_doorbell:
+    move.l  4(%sp), %d1        | chan
+    move.l  #0x000f0005, %d0   | SKJ_SYS_P9
+    trap    #0
+    rts

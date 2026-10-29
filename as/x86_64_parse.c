@@ -250,6 +250,197 @@ parse_mem(struct x86_64_asm *a, struct x64_operand *op)
     lex_next(l);                            /* consume ']' */
 }
 
+/****************************************************************
+ * Assembler expressions
+ *
+ * `+ - *` and parentheses over integer literals and symbols.  An expression
+ * classifies by its structure, which is identical in both passes, so an
+ * immediate's encoded width never changes between them:
+ *   EXPR_CONST  no symbols: a pure integer, known in both passes.
+ *   EXPR_RELOC  one symbol with coefficient +1 plus a constant addend: a
+ *               relocation, the symbol resolved at link (a branch target,
+ *               `sym`, `sym + N`).
+ *   EXPR_ABS    any other symbol arithmetic (a label difference, a negated or
+ *               scaled symbol): it must fold to a constant, which it does in
+ *               pass 2 once every label is placed.
+ ****************************************************************/
+
+enum expr_class { EXPR_CONST, EXPR_RELOC, EXPR_ABS };
+
+#define EXPR_MAXSYM 8
+struct expr_acc {
+    long k;                             /* the constant part */
+    const char *sym[EXPR_MAXSYM];
+    long coef[EXPR_MAXSYM];             /* each symbol's integer coefficient */
+    int nsym;
+};
+
+struct expr_val {
+    enum expr_class cls;
+    long value;                         /* EXPR_CONST / EXPR_ABS */
+    const char *sym;                    /* EXPR_RELOC */
+    int32_t add;                        /* EXPR_RELOC addend */
+};
+
+static void parse_expr_sum(struct x86_64_asm *a, struct expr_acc *out);
+
+static void
+acc_add_sym(struct x86_64_asm *a, struct expr_acc *acc, const char *name, long coef)
+{
+    if (acc->nsym >= EXPR_MAXSYM)
+        die("line %d: expression too complex", a->lex.tok.line);
+    acc->sym[acc->nsym] = name;
+    acc->coef[acc->nsym] = coef;
+    acc->nsym++;
+}
+
+static void
+acc_negate(struct expr_acc *x)
+{
+    int i;
+    x->k = -x->k;
+    for (i = 0; i < x->nsym; i++)
+        x->coef[i] = -x->coef[i];
+}
+
+static void
+parse_expr_primary(struct x86_64_asm *a, struct expr_acc *out)
+{
+    struct lexer *l = &a->lex;
+
+    memset(out, 0, sizeof(*out));
+    if (l->tok.type == T_LPAREN) {
+        lex_next(l);
+        parse_expr_sum(a, out);
+        if (l->tok.type != T_RPAREN)
+            die("line %d: missing ')' in expression", l->tok.line);
+        lex_next(l);
+        return;
+    }
+    if (l->tok.type == T_INT) {
+        out->k = l->tok.ival;
+        lex_next(l);
+        return;
+    }
+    if (l->tok.type == T_IDENT || l->tok.type == T_DOT_IDENT) {
+        int num;
+        char dir;
+        const char *name;
+        if (numeric_ref(l->tok.str, &num, &dir))
+            name = numeric_ref_name(a, num, dir);
+        else
+            name = arena_strdup(&a->arena, l->tok.str);
+        acc_add_sym(a, out, name, +1);
+        lex_next(l);
+        return;
+    }
+    die("line %d: bad expression", l->tok.line);
+}
+
+static void
+parse_expr_unary(struct x86_64_asm *a, struct expr_acc *out)
+{
+    struct lexer *l = &a->lex;
+    int neg = 0;
+
+    while (l->tok.type == T_PLUS || l->tok.type == T_MINUS) {
+        if (l->tok.type == T_MINUS)
+            neg = !neg;
+        lex_next(l);
+    }
+    parse_expr_primary(a, out);
+    if (neg)
+        acc_negate(out);
+}
+
+static void
+parse_expr_product(struct x86_64_asm *a, struct expr_acc *out)
+{
+    struct lexer *l = &a->lex;
+
+    parse_expr_unary(a, out);
+    while (l->tok.type == T_STAR) {
+        struct expr_acc rhs;
+        int i;
+        lex_next(l);
+        parse_expr_unary(a, &rhs);
+        if (out->nsym == 0) {           /* constant * (anything): scale rhs */
+            long c = out->k;
+            *out = rhs;
+            out->k *= c;
+            for (i = 0; i < out->nsym; i++)
+                out->coef[i] *= c;
+        } else if (rhs.nsym == 0) {     /* (symbol expr) * constant: scale out */
+            out->k *= rhs.k;
+            for (i = 0; i < out->nsym; i++)
+                out->coef[i] *= rhs.k;
+        } else {
+            die("line %d: cannot multiply two symbols", l->tok.line);
+        }
+    }
+}
+
+static void
+parse_expr_sum(struct x86_64_asm *a, struct expr_acc *out)
+{
+    struct lexer *l = &a->lex;
+
+    parse_expr_product(a, out);
+    for (;;) {
+        struct expr_acc rhs;
+        int sub, i;
+
+        if (l->tok.type == T_PLUS)
+            sub = 0;
+        else if (l->tok.type == T_MINUS)
+            sub = 1;
+        else
+            break;
+        lex_next(l);
+        parse_expr_product(a, &rhs);
+        if (sub)
+            acc_negate(&rhs);
+        out->k += rhs.k;
+        for (i = 0; i < rhs.nsym; i++)
+            acc_add_sym(a, out, rhs.sym[i], rhs.coef[i]);
+    }
+}
+
+/* Parse and classify an expression.  EXPR_ABS folds its symbols by value (every
+   label is placed by pass 2; an undefined one is an error there). */
+static void
+eval_expr(struct x86_64_asm *a, struct expr_val *ev)
+{
+    struct expr_acc acc;
+    long v;
+    int i;
+
+    parse_expr_sum(a, &acc);
+
+    if (acc.nsym == 0) {
+        ev->cls = EXPR_CONST;
+        ev->value = acc.k;
+        return;
+    }
+    if (acc.nsym == 1 && acc.coef[0] == 1) {
+        ev->cls = EXPR_RELOC;
+        ev->sym = acc.sym[0];
+        ev->add = (int32_t)acc.k;
+        return;
+    }
+    v = acc.k;
+    for (i = 0; i < acc.nsym; i++) {
+        int idx = sym_lookup(&a->st, acc.sym[i]);
+        if (idx >= 0 && a->st.syms[idx].defined)
+            v += acc.coef[i] * (long)a->st.syms[idx].value;
+        else if (a->pass == 2)
+            die("line %d: undefined symbol '%s' in expression",
+                a->lex.tok.line, acc.sym[i]);
+    }
+    ev->cls = EXPR_ABS;
+    ev->value = v;
+}
+
 /* Parse one operand.  Memory size qualifiers (`qword ptr [...]`) set mem_size. */
 static void
 parse_operand(struct x86_64_asm *a, struct x64_operand *op)
@@ -312,34 +503,25 @@ parse_operand(struct x86_64_asm *a, struct x64_operand *op)
         }
     }
 
-    if (l->tok.type == T_INT || l->tok.type == T_MINUS) {
-        long v;
-        if (l->tok.type == T_MINUS) {
-            lex_next(l);
-            if (l->tok.type != T_INT)
-                die("line %d: expected integer", l->tok.line);
-            v = -l->tok.ival;
-        } else {
-            v = l->tok.ival;
-        }
-        op->kind = XO_IMM;
-        op->disp = v;
-        lex_next(l);
-        return;
-    }
+    /* An integer or symbol expression: a literal, a branch target (call/jmp/
+       jCC), `offset`-free symbol references, and folded arithmetic such as a
+       label difference `end - start`. */
+    if (l->tok.type == T_INT || l->tok.type == T_MINUS || l->tok.type == T_PLUS
+        || l->tok.type == T_LPAREN || l->tok.type == T_IDENT
+        || l->tok.type == T_DOT_IDENT) {
+        struct expr_val ev;
 
-    /* a bare symbol: a branch target (call/jmp/jCC) or numeric local ref. */
-    if (l->tok.type == T_IDENT || l->tok.type == T_DOT_IDENT) {
-        int num;
-        char dir;
+        eval_expr(a, &ev);
         op->kind = XO_IMM;
-        op->is_sym = 1;
-        if (numeric_ref(l->tok.str, &num, &dir))
-            op->sym = numeric_ref_name(a, num, dir);
-        else
-            op->sym = arena_strdup(&a->arena, l->tok.str);
-        lex_next(l);
-        op->add += (int32_t)parse_addend(l);
+        if (ev.cls == EXPR_RELOC) {
+            op->is_sym = 1;
+            op->sym = ev.sym;
+            op->add = ev.add;
+        } else {
+            op->disp = ev.value;
+            if (ev.cls == EXPR_ABS)
+                op->wide_imm = 1;
+        }
         return;
     }
 
@@ -382,41 +564,34 @@ emit_int_list(struct x86_64_asm *a, int width)
     struct lexer *l = &a->lex;
 
     for (;;) {
-        lex_next(l);
-        if (l->tok.type == T_INT) {
-            long v = l->tok.ival;
-            if (width == 1) sec_emit8(s, (uint8_t)v);
-            else if (width == 2) sec_emit16(s, (uint16_t)v);
-            else if (width == 4) sec_emit32(s, (uint32_t)v);
-            else { sec_emit32(s, (uint32_t)v); sec_emit32(s, (uint32_t)(v >> 32)); }
-            lex_next(l);
-        } else if (l->tok.type == T_MINUS) {
-            lex_next(l);
-            if (l->tok.type == T_INT) {
-                long v = -l->tok.ival;
-                if (width == 1) sec_emit8(s, (uint8_t)v);
-                else if (width == 2) sec_emit16(s, (uint16_t)v);
-                else if (width == 4) sec_emit32(s, (uint32_t)v);
-                else { sec_emit32(s, (uint32_t)v); sec_emit32(s, (uint32_t)(v >> 32)); }
-                lex_next(l);
-            }
-        } else if ((l->tok.type == T_IDENT || l->tok.type == T_DOT_IDENT)
-                   && (width == 4 || width == 8)) {
+        struct expr_val ev;
+        uint32_t off;
+
+        lex_next(l);                    /* the directive keyword, then each comma */
+        if (l->tok.type == T_NEWLINE || l->tok.type == T_EOF)
+            break;
+        off = (uint32_t)s->len;
+        eval_expr(a, &ev);
+        if (ev.cls == EXPR_RELOC) {
             int idx = -1;
-            uint32_t off = (uint32_t)s->len;
+            if (width != 4 && width != 8)
+                die("line %d: a symbol needs a 4- or 8-byte data element",
+                    l->tok.line);
             if (a->pass == 2) {
-                idx = sym_lookup(&a->st, l->tok.str);
-                if (idx < 0) idx = sym_add(&a->st, l->tok.str);
-            }
-            lex_next(l);
-            int32_t addend = (int32_t)parse_addend(l);
-            if (a->pass == 2)
-                sec_add_reloc_t(s, off, idx, addend,
+                idx = sym_lookup(&a->st, ev.sym);
+                if (idx < 0) idx = sym_add(&a->st, ev.sym);
+                sec_add_reloc_t(s, off, idx, ev.add,
                                 width == 8 ? R_X86_64_64 : R_X86_64_32);
+            }
             if (width == 8) { sec_emit32(s, 0); sec_emit32(s, 0); }
             else sec_emit32(s, 0);
         } else {
-            break;
+            long v = ev.value;          /* EXPR_CONST, or EXPR_ABS folded */
+            if (width == 1) sec_emit8(s, (uint8_t)v);
+            else if (width == 2) sec_emit16(s, (uint16_t)v);
+            else if (width == 4) sec_emit32(s, (uint32_t)v);
+            else { sec_emit32(s, (uint32_t)v);
+                   sec_emit32(s, (uint32_t)((uint64_t)v >> 32)); }
         }
         if (l->tok.type != T_COMMA) break;
     }

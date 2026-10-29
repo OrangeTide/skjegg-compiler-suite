@@ -2,6 +2,7 @@
 
 #include "sched.h"
 #include "elf32.h"
+#include "elf64.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -141,6 +142,9 @@ sched_private(proc *p, uint32_t nr, uint32_t arg0, uint32_t arg1,
         return SKJ_PRIV_FATAL;
     case SKJ_SYS_YIELD:
         return SKJ_PRIV_YIELD;
+    case SKJ_SYS_P9:
+        *result = (uint32_t)guest_p9_doorbell(&p->g, arg0);
+        return SKJ_PRIV_OK;
     default:
         return SKJ_PRIV_NO;
     }
@@ -186,6 +190,12 @@ proc_alloc(sched *S)
     p->sched = S;
     p->slot = slot;
     p->gen = S->slot_gen[slot];
+    if (S->ops->mem_init && S->ops->mem_init(p, S->o) != 0) {
+        S->ops->free(p->cpu);
+        gm_free(&p->g.mem);
+        free(p);
+        return NULL;
+    }
     S->procs[slot] = p;
     return p;
 }
@@ -198,6 +208,7 @@ proc_discard(sched *S, proc *p)
 {
     S->procs[p->slot] = NULL;
     S->ops->free(p->cpu);
+    guest_p9_free(&p->g);
     gm_free(&p->g.mem);
     free(p);
 }
@@ -223,7 +234,8 @@ proc_finish(sched *S, proc *p, const elf32_info *info, char **argv, int argc)
     so = *S->o;                 /* the child keeps the driver's sizes, its own argv */
     so.argv = argv;
     so.argc = argc;
-    sp = guest_build_stack(&p->g, &so);
+    sp = S->ops->word64 ? guest_build_stack64(&p->g, &so)
+                        : guest_build_stack(&p->g, &so);
 
     p->ops->ready(p, info->entry, sp);
 
@@ -261,7 +273,8 @@ proc_new_file(sched *S, const char *path)
 
     if (!p)
         return 0;
-    if (elf32_load(&p->g, path, &info) != 0) {
+    if ((S->ops->word64 ? elf64_load(&p->g, path, &info)
+                        : elf32_load(&p->g, path, &info)) != 0) {
         proc_discard(S, p);
         return 0;
     }
@@ -279,7 +292,8 @@ proc_new_mem(sched *S, const uint8_t *img, long len, const char *what)
     if (!p)
         return 0;
     p->insn_budget = S->o->child_max_insns;     /* a spawned child is budgeted */
-    if (elf32_load_mem(&p->g, img, len, &info, what) != 0) {
+    if ((S->ops->word64 ? elf64_load_mem(&p->g, img, len, &info, what)
+                        : elf32_load_mem(&p->g, img, len, &info, what)) != 0) {
         proc_discard(S, p);
         return 0;
     }
@@ -502,6 +516,7 @@ retire_child(sched *S, int slot)
     proc *p = S->procs[slot];
 
     S->ops->free(p->cpu);
+    guest_p9_free(&p->g);
     gm_free(&p->g.mem);
     free(p);
     S->procs[slot] = NULL;
@@ -589,6 +604,7 @@ run_sandbox(const run_opts *o, const skj_cpu_ops *ops, int *status)
         if (!S.procs[i])
             continue;
         ops->free(S.procs[i]->cpu);
+        guest_p9_free(&S.procs[i]->g);
         gm_free(&S.procs[i]->g.mem);
         free(S.procs[i]);
     }

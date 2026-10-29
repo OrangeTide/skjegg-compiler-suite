@@ -10,8 +10,12 @@ model.
 skj-run hello.elf                  # architecture from the ELF header
 skj-run --arch rv32 prog.elf a b   # override, and pass guest arguments
 skj-run --arch mips32 prog.elf     # little-endian MIPS I (o32)
+skj-run --arch x86-64 prog.elf     # x86-64 guest run natively under KVM
 skj-run --trace --stats prog.elf   # CPU event ring on a fault, counters
 ```
+
+The emulated cores run 32-bit ELF32 guests. The x86-64 core runs a 64-bit
+ELF64 guest, and runs it natively under KVM rather than interpreting it.
 
 The exit status is the guest's own. A guest killed by a fault reports
 128 plus the signal a host kernel would have raised (139 for a bad
@@ -56,9 +60,16 @@ emu/mips32.c     MIPS I (R3000-class) integer core, little-endian  \  a third
 emu/mips_user.c  Linux/MIPS o32 user mode: syscall         |
 emu/mips_gdb.c   the --gdb remote stub (MIPS)             /
 
+emu/hvcore.c     x86-64 and aarch64 under a VMM: a guest run natively \  a fourth
+emu/vmm_kvm.c    the Linux KVM backend (long mode, syscall doorbell) |
+emu/hv_gdb.c     the --gdb remote stub (x86-64 and aarch64)        /
+emu/vmm.h        the backend-neutral VMM seam (KVM today, HVF to come)
+emu/skj_hv_abi.h the guest/host contract (doorbell, page tables)
+
 emu/sched.c      the arch-neutral process sandbox + scheduler (all cores)
 emu/guest.c      sparse memory, the syscall layer, the initial stack
 emu/elf32.c      ELF32 loader, either endianness
+emu/elf64.c      ELF64 loader (the hardware-virtualization guests)
 emu/main.c       the driver
 ```
 
@@ -770,6 +781,89 @@ backend, and this test already carry a proven single-precision path, so
 a language whose `float` is `IR_F32` would land inside the determinism
 the games need, with no new emulator work.
 
+## Hardware virtualization (x86-64 and aarch64)
+
+The HV core does not interpret the guest. It runs it natively in 64-bit
+supervisor mode under Linux KVM, through the same `skj_cpu_ops` vtable and the
+same scheduler as the emulated cores (`emu/hvcore.c` is the binding, the sibling
+of `rv_user.c`, serving both x86-64 and aarch64). The guest architecture must
+equal the host's, since cross-architecture virtualization is not possible: an
+x86-64 host runs an x86-64 guest, an aarch64 host an aarch64 guest.
+
+The guest reaches the sandbox syscall layer through one trap: an eight-byte
+load from `SKJ_HV_DOORBELL` (`0x30000000`), an address that is mapped but
+unbacked, so it faults out as an MMIO read. The syscall number is in the number
+register and the arguments in the argument registers, in the platform's Linux
+syscall ABI (on x86-64, `rax` and `rdi,rsi,rdx,r10,r8,r9`). The host reads the
+registers, services the call through the same arch-neutral `guest.c` layer the
+emulated cores use, and returns the result as the load's data, which the kernel
+places in the return register. The emulator-private `MAP`/`MUNMAP`/`SPAWN`/
+`FATAL`/`YIELD` selectors work the same way. `emu/skj_hv_abi.h` is the contract.
+
+Guest RAM is one contiguous host buffer (256 MiB) mapped as the vcpu's physical
+memory at guest-physical 0, with a long-mode identity map so a guest virtual
+address equals its physical address. The ELF64 loader writes the image into that
+buffer, and `guest.c`'s syscall layer reaches it through an extern-backed
+`guest_mem` region (`gm_set_extern`), so the whole arch-neutral memory and
+stack machinery works unchanged. The guest image, heap and stack live under
+4 GiB, so the 32-bit guest-memory index addresses them. Linking stays external
+GNU `ld`, since the in-tree linker is ELF32.
+
+The guest runtime is a crt (`runtime/start_<arch>_hv.S`, the ELF entry) and the
+Linux syscall seam issuing the doorbell load (`runtime/syscall_<arch>_hv.S`).
+The seam exports the same symbols as `syscall_rv.S`, so the freestanding C libc
+and the Kobold runtime link against it unchanged. The whole freestanding C libc
+(string, printf and scanf, malloc over `brk`, stdio, the math helpers, delimited
+continuations and the cooperative threads) runs under the VMM this way:
+`make check-libc-hv-x86-64` builds the libc with `skj-cc-x86-64`, links it with
+the HV crt and seam, and runs the self-checking phase programs under `skj-run`
+on real KVM. `make test-hv-x86-64` runs a bare-asm guest and a C guest. Both
+skip cleanly when `/dev/kvm` is absent.
+
+aarch64 is at parity in the tree: the same `hvcore.c` binding, the arm64 crt and
+seam (`runtime/start_arm64_hv.S`, `runtime/syscall_arm64_hv.S`), and the same
+libc tier (`make check-libc-hv-arm64`, `make test-hv-arm64`). Since a guest runs
+only on a host of its own architecture, these build on any host and run only on
+an aarch64 KVM host; off one they report a build pass.
+
+The VMM seam (`emu/vmm.h`) is backend-neutral: it names its own `vmm_*` types
+and keeps clear of the kernel's `kvm_*` API, which the Linux backend
+(`emu/vmm_kvm.c`) uses internally. A macOS Hypervisor.framework backend
+(`emu/vmm_hvf.c`) is a planned peer under the same seam.
+
+`--gdb` serves this tier too. `emu/hv_gdb.c` is the HV sibling of the rv32 and
+MIPS stubs, plugged into the scheduler through the same `ops->gdb` hook. It
+keeps a host-side breakpoint table and single-steps the vcpu through the VMM, so
+guest memory is never patched and the doorbell MMIO is serviced transparently
+while the guest's syscalls still run. gdb learns the architecture from the ELF,
+so the stub sends no target description, and the host's native gdb debugs an
+x86-64 guest. A null-deref guest triple-faults into a KVM shutdown (the
+long-mode guest installs no interrupt table), so there is no debuggable fault
+frame as on the emulated cores. `make test-hv-gdb` drives it end to end (break,
+registers, memory, exit) and skips when `/dev/kvm` or gdb is absent.
+
+The tier is at parity with the emulated sandboxes. File I/O works the same way:
+the libc fd model routes through the shared `fs/` layer, and the ambient backend
+reaches the host by bare path (or a `--mount` grant confines it), exactly as on
+the rv and cf freestanding tiers. `make check-libc-hv-x86-64` runs the full phase
+set under KVM, the file phases (statx, pathops, readdir) included. Preemption
+works the same way too: a compute-bound guest that never traps to a doorbell is
+still interruptible. KVM cannot count retired instructions, so the slice currency
+is wall-clock time. A periodic timer breaks into `KVM_RUN` every 10 ms (its
+signal is blocked everywhere but inside the guest run, so host work and a future
+guest-side fault handler are never charged), and the core treats that interrupt
+as a full slice spent, which keeps the round-robin scheduler fair and makes
+`--max-insns` bound a runaway guest. `make test-hv-preempt` proves it: a spin
+guest is stopped at the instruction cap rather than holding the vcpu forever.
+
+Current limits of this tier:
+
+- KVM is required. Without `/dev/kvm` the core reports it is unavailable and the
+  run fails cleanly.
+- The slice currency is time, not retired instructions, so `--max-insns` counts
+  10 ms slices rather than exact instructions. It bounds a runaway guest, but it
+  is a coarser unit than on the emulated cores.
+
 ## Limits
 
 - The RV32 core has F and D (D in host double, on by default; see
@@ -782,7 +876,8 @@ the games need, with no new emulator work.
   devices, the shape the VM hosts use) is not exposed as a flag,
   though `tests/archtest.c` now shows the shape of one for RV32 and
   both cores support it.
-- The `--gdb` remote stub covers rv32 and MIPS, not ColdFire yet.
+- The `--gdb` remote stub covers rv32, MIPS and the HV cores (x86-64
+  and aarch64), not ColdFire yet.
   gdb's prologue-only MIPS unwind of CFI-less skj-cc code stops short
   of the full call chain (skj-run's own DWARF backtrace walks it).
 - `skj-as` has no `rems`/`remu` mnemonic, so a front end cannot ask for

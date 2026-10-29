@@ -1,6 +1,7 @@
 /* main.c : skj-run driver — run a guest ELF on an in-tree emulator */
 
 #include "elf32.h"
+#include "elf64.h"
 #include "guest.h"
 #include "version.h"
 
@@ -18,6 +19,9 @@
 #endif
 #ifndef EMU_MIPS32
 #define EMU_MIPS32 1
+#endif
+#ifndef EMU_HV
+#define EMU_HV 1
 #endif
 
 #define DEFAULT_MEM     (256u * 1024u * 1024u)
@@ -44,12 +48,19 @@ usage(FILE *out)
 #if EMU_MIPS32
         " mips32"
 #endif
+#if EMU_HV
+        " x86-64 arm64"
+#endif
         "\n"
         "  --mem BYTES     cap on guest memory (default 256M)\n"
         "  --stack BYTES   guest stack size (default 1M)\n"
         "  --heap BYTES    guest heap size for brk (default 16M)\n"
         "  --max-insns N   stop after N instructions (default unlimited)\n"
-        "  --gdb PORT      serve the GDB remote protocol on PORT (rv32, mips)\n"
+        "  --gdb PORT      serve the GDB remote protocol on PORT\n"
+        "  --mount NAME:DIR  grant the guest a confined host directory\n"
+        "  --dev NAME      grant the guest a devfs mount (null/zero/full)\n"
+        "  --rom NAME:IMG  grant the guest a read-only romfs image\n"
+        "  --9p NAME:DIR   serve a host directory to the guest over 9P2000\n"
         "  --total-mem BYTES  aggregate memory cap across all processes\n"
         "  --child-max-insns N  per-spawned-child instruction budget\n"
         "  --trace         dump the CPU event ring on a fault\n"
@@ -95,7 +106,30 @@ arch_of_name(const char *name)
     if (strcmp(name, "mips32") == 0 || strcmp(name, "mipsel") == 0 ||
         strcmp(name, "mips") == 0)
         return GUEST_ARCH_MIPS32;
+    if (strcmp(name, "x86-64") == 0 || strcmp(name, "x86_64") == 0 ||
+        strcmp(name, "x86-64hv") == 0 || strcmp(name, "amd64") == 0)
+        return GUEST_ARCH_X86_64;
+    if (strcmp(name, "arm64") == 0 || strcmp(name, "aarch64") == 0 ||
+        strcmp(name, "arm64hv") == 0)
+        return GUEST_ARCH_AARCH64;
     return GUEST_ARCH_NONE;
+}
+
+/* The ELF class byte (EI_CLASS): 1 = ELF32, 2 = ELF64, 0 if unreadable. */
+static int
+elf_class(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    unsigned char id[6];
+    size_t n;
+
+    if (!f)
+        return 0;
+    n = fread(id, 1, sizeof id, f);
+    fclose(f);
+    if (n < sizeof id || memcmp(id, "\177ELF", 4) != 0)
+        return 0;
+    return id[4];
 }
 
 static int
@@ -213,6 +247,30 @@ main(int argc, char **argv)
             o.mounts[o.nmounts++] = argv[++i];
             continue;
         }
+        if (strcmp(a, "--dev") == 0 && i + 1 < argc) {
+            if (o.ndevs >= RUN_MAX_MOUNTS) {
+                fprintf(stderr, "skj-run: too many --dev options\n");
+                return 2;
+            }
+            o.devs[o.ndevs++] = argv[++i];
+            continue;
+        }
+        if (strcmp(a, "--rom") == 0 && i + 1 < argc) {
+            if (o.nroms >= RUN_MAX_MOUNTS) {
+                fprintf(stderr, "skj-run: too many --rom options\n");
+                return 2;
+            }
+            o.roms[o.nroms++] = argv[++i];
+            continue;
+        }
+        if (strcmp(a, "--9p") == 0 && i + 1 < argc) {
+            if (o.np9s >= RUN_MAX_MOUNTS) {
+                fprintf(stderr, "skj-run: too many --9p options\n");
+                return 2;
+            }
+            o.p9s[o.np9s++] = argv[++i];
+            continue;
+        }
         fprintf(stderr, "skj-run: unknown option '%s'\n", a);
         usage(stderr);
         return 2;
@@ -228,9 +286,22 @@ main(int argc, char **argv)
     o.argc = argc - i;
 
     if (arch == GUEST_ARCH_NONE) {
-        if (elf32_probe(o.path, &info) != 0)
-            return 2;
-        arch = arch_of_machine(info.machine);
+        /* Pick the loader by ELF class: ELF32 for the emulated 32-bit cores,
+         * ELF64 for the hardware-virtualization guests. */
+        int cls = elf_class(o.path);
+
+        if (cls == 2) {
+            if (elf64_probe(o.path, &info) != 0)
+                return 2;
+            if (info.machine == EM_X86_64)
+                arch = GUEST_ARCH_X86_64;
+            else if (info.machine == EM_AARCH64)
+                arch = GUEST_ARCH_AARCH64;
+        } else {
+            if (elf32_probe(o.path, &info) != 0)
+                return 2;
+            arch = arch_of_machine(info.machine);
+        }
         if (arch == GUEST_ARCH_NONE) {
             fprintf(stderr, "skj-run: %s targets an unsupported machine "
                     "(e_machine %u)\n", o.path, info.machine);
@@ -254,6 +325,16 @@ main(int argc, char **argv)
 #if EMU_MIPS32
     case GUEST_ARCH_MIPS32:
         if (run_mips32(&o, &status) != 0)
+            return 2;
+        break;
+#endif
+#if EMU_HV
+    case GUEST_ARCH_X86_64:
+        if (run_x86_64hv(&o, &status) != 0)
+            return 2;
+        break;
+    case GUEST_ARCH_AARCH64:
+        if (run_arm64hv(&o, &status) != 0)
             return 2;
         break;
 #endif

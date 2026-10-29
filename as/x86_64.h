@@ -68,6 +68,9 @@ struct x64_operand {
     const char *sym;
     int32_t add;
     int is_sym;
+    int wide_imm;               /* XO_IMM: a constant folded from symbol arithmetic
+                                   (a label difference); force the imm32 form so the
+                                   encoded width does not depend on the value */
     int mem_size;               /* XO_MEM: byte/word/dword/qword ptr width, or 0 */
 };
 

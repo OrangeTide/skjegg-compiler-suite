@@ -138,6 +138,18 @@ extern struct fs_mount fs_mounts[FS_MAX_MOUNTS];
 extern int             fs_mount_count;   /* entries in use at the low end     */
 extern int             fs_cur_mount;     /* the current/default mount index   */
 
+/* Per-mount parameters a backend root needs but the 16-byte fs_mount entry
+ * cannot hold.  The launcher resolves this symbol and fills it before the guest
+ * runs; fs_init reads it during adoption.  Meaning is per backend kind: romfs
+ * uses p0 = the image's guest address, p1 = its length; 9pfs uses p0 = the
+ * guest address of its transport channel.  Unused for ram/host/dev.  The two
+ * words are guest addresses, so ILP32 on the freestanding guest tiers. */
+struct fs_mount_aux {
+    uint32_t p0;
+    uint32_t p1;
+};
+extern struct fs_mount_aux fs_mount_aux[FS_MAX_MOUNTS];
+
 /* A backend's operation table: one shared instance per backend kind.
  *
  * fs.c owns the one shared fd space and all per-fd state; a backend handle is

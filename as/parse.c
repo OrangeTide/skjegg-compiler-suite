@@ -841,28 +841,25 @@ run_pass(struct assembler *a)
 
         if (a->lex.tok.type == T_DOT_IDENT) {
             const char *dir = a->lex.tok.str;
+            struct lexer saved = a->lex;
 
-            if (dir[1] == 'L' || (dir[1] >= '0' && dir[1] <= '9')) {
-                const char *label = dir;
+            /* A dotted token is either a directive (.text, .type) or a dotted
+               label (.L1:, .coentry.1:).  Peek one token for a ':' to tell them
+               apart, restoring the lexer to the name when it is a directive
+               (handle_directive expects the name to be the current token). */
+            lex_next(&a->lex);
+            if (a->lex.tok.type == T_COLON) {
                 lex_next(&a->lex);
-                if (a->lex.tok.type == T_COLON) {
-                    lex_next(&a->lex);
-                    if (a->pass == 1) {
-                        int idx = sym_lookup(&a->st, label);
-                        if (idx < 0)
-                            idx = sym_add(&a->st, label);
-                        sym_define(&a->st, idx, a->cur_section,
-                                   a->sections[a->cur_section].len);
-                    }
-                    continue;
+                if (a->pass == 1) {
+                    int idx = sym_lookup(&a->st, dir);
+                    if (idx < 0)
+                        idx = sym_add(&a->st, dir);
+                    sym_define(&a->st, idx, a->cur_section,
+                               a->sections[a->cur_section].len);
                 }
-                handle_directive(a, dir);
-                skip_to_eol(&a->lex);
-                if (a->lex.tok.type == T_NEWLINE)
-                    lex_next(&a->lex);
                 continue;
             }
-
+            lex_restore(&a->lex, &saved);
             handle_directive(a, dir);
             skip_to_eol(&a->lex);
             if (a->lex.tok.type == T_NEWLINE)

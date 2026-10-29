@@ -6645,6 +6645,7 @@ begin
   else if nm = 'string' then RefToType := tyStr
   else if (nm = 'real') or (nm = 'float') then RefToType := tyReal
   else if nm = 'single' then RefToType := tySingle
+  else if nm = 'process' then RefToType := tyProcess
   else if nm = 'void' then RefToType := -1
   else begin
     s := FindLocal(nm, uscope);
@@ -8454,6 +8455,7 @@ begin
   else if ty = tyStr then TypeRef := 'string'
   else if ty = tySingle then TypeRef := 'single'
   else if IsRealType(ty) then TypeRef := 'real'
+  else if (ty < SemCount) and (SemTypes[ty].Kind = skProcess) then TypeRef := 'process'
   else if (ty < SemCount) and (SemTypes[ty].Name <> '') and
           ((SemTypes[ty].Kind = skEnum) or (SemTypes[ty].Kind = skRecord) or
            (SemTypes[ty].Kind = skInterface)) then
@@ -13562,7 +13564,10 @@ begin
       line := '.global ' + IrGlobals[i].Name + ' ' + IrGlobals[i].BaseType;
       if IrGlobals[i].ArrSize > 0 then
         line := line + ' array ' + IntToStr(IrGlobals[i].ArrSize);
-      if IrGlobals[i].Exported then line := line + ' export';
+      if IrGlobals[i].Exported then line := line + ' export'
+      else line := line + ' local';   { module-private: local linkage so two modules'
+                                         auto-named globals (_const<n>, _str<n>) do not
+                                         collide at link }
       if IrGlobals[i].ReadOnly then line := line + ' rodata';
       if IrGlobals[i].IsStrObj then line := line + ' strobj';
       EmitLine(line);

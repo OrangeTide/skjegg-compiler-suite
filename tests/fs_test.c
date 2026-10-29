@@ -8,6 +8,10 @@
 #include "fs.h"
 #include "ramfs.h"
 #include "hostfs.h"
+#include "devfs.h"
+#include "romfs.h"
+#include "ninefs.h"
+#include "p9_server.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,7 +63,7 @@ main(void)
     char tmpl[] = "/tmp/fs_test.XXXXXX";
     char *hostdir = mkdtemp(tmpl);
     char buf[128], cwd[128];
-    int rc, t, h, dfd, saw_a, saw_b, count;
+    int rc, t, h, d, dfd, saw_a, saw_b, count;
 
     if (!hostdir) {
         perror("mkdtemp");
@@ -69,8 +73,10 @@ main(void)
     /* Launcher-style table setup: scratch ramfs at index 0, host at index 1. */
     t = ramfs_mount("tmp", 0);
     h = hostfs_mount("host", hostdir, 0);
+    d = devfs_mount("dev", 0);
     CHECK(t == 0, "ramfs scratch is mount index 0");
     CHECK(h == 1, "hostfs is mount index 1");
+    CHECK(d == 2, "devfs is mount index 2");
 
     /* Lookup and the default current mount. */
     CHECK(fs_mount_find("tmp") == 0, "find tmp -> 0");
@@ -185,6 +191,188 @@ main(void)
         snprintf(p, sizeof p, "%s/hfile", hostdir);
         unlink(p);
         rmdir(hostdir);
+    }
+
+    /* devfs: the fixed character devices. */
+    {
+        int fd, n;
+        struct fs_stat st;
+        char zbuf[8];
+
+        CHECK(fs_isdir("dev:") == 1, "dev: root is a directory");
+        CHECK(fs_exists("dev:null") == 1, "dev:null exists");
+        CHECK(fs_exists("dev:zero") == 1, "dev:zero exists");
+        CHECK(fs_exists("dev:full") == 1, "dev:full exists");
+        CHECK(fs_exists("dev:nope") == 0, "dev:nope does not exist");
+
+        /* null: writes vanish, reads hit EOF. */
+        fd = fs_open("dev:null", FS_O_WRONLY, 0);
+        CHECK(fd >= 0, "open dev:null");
+        CHECK(fs_write(fd, "discard me", 10) == 10, "write to dev:null is swallowed");
+        fs_close(fd);
+        fd = fs_open("dev:null", FS_O_RDONLY, 0);
+        CHECK(fs_read(fd, buf, sizeof buf) == 0, "read dev:null is EOF");
+        fs_close(fd);
+
+        /* zero: an endless run of zero bytes. */
+        fd = fs_open("dev:zero", FS_O_RDONLY, 0);
+        memset(zbuf, 0xAA, sizeof zbuf);
+        n = fs_read(fd, zbuf, sizeof zbuf);
+        CHECK(n == (int)sizeof zbuf, "read dev:zero fills the buffer");
+        CHECK(zbuf[0] == 0 && zbuf[7] == 0, "dev:zero yields zero bytes");
+        fs_close(fd);
+
+        /* full: reads as zero, writes fail with ENOSPC. */
+        fd = fs_open("dev:full", FS_O_RDWR, 0);
+        CHECK(fs_read(fd, zbuf, 4) == 4, "read dev:full yields zeros");
+        CHECK(fs_write(fd, "x", 1) < 0, "write to dev:full fails (ENOSPC)");
+        fs_close(fd);
+
+        /* a device is a regular file; the mount is immutable. */
+        CHECK(fs_stat("dev:zero", &st) == 0 && (st.mode & FS_S_IFMT) == FS_S_IFREG,
+              "dev:zero stats as a regular file");
+        CHECK(fs_mkdir("dev:sub") < 0, "mkdir on devfs is rejected");
+        CHECK(fs_unlink("dev:null") < 0, "unlink on devfs is rejected");
+
+        /* the directory enumerates exactly the three devices. */
+        dfd = fs_open("dev:", FS_O_DIRECTORY, 0);
+        CHECK(dfd >= 0, "open dev: as a directory");
+        count = 0;
+        {
+            struct fs_dirent de;
+            while (fs_read(dfd, &de, (int)sizeof de) == (int)sizeof de)
+                count++;
+        }
+        CHECK(count == 3, "devfs lists three devices");
+        fs_close(dfd);
+    }
+
+    /* romfs: pack a temp directory tree into an image, mount it read-only. */
+    {
+        char romtmpl[] = "/tmp/skjromsrcXXXXXX";
+        char *romsrc = mkdtemp(romtmpl);
+        char sub[128];
+        void *img = 0;
+        size_t imglen = 0;
+        int rm, fd;
+        FILE *wf;
+
+        CHECK(romsrc != 0, "romfs: made a source dir");
+        if (romsrc) {
+            snprintf(sub, sizeof sub, "%s/sub", romsrc);
+            mkdir(sub, 0755);
+            snprintf(buf, sizeof buf, "%s/greet", romsrc);
+            wf = fopen(buf, "wb"); fputs("hello romfs", wf); fclose(wf);
+            snprintf(buf, sizeof buf, "%s/sub/inner", romsrc);
+            wf = fopen(buf, "wb"); fputs("nested", wf); fclose(wf);
+
+            rc = romfs_build_dir(romsrc, &img, &imglen);
+            CHECK(rc == 0 && img && imglen > 0, "romfs: built an image");
+            rm = romfs_mount("rom", img, imglen, 0);
+            CHECK(rm == 3, "romfs is mount index 3");
+
+            CHECK(fs_exists("rom:greet") == 1, "rom:greet exists");
+            CHECK(fs_isdir("rom:sub") == 1, "rom:sub is a directory");
+            CHECK(fs_exists("rom:sub/inner") == 1, "rom:sub/inner exists");
+            CHECK(read_file("rom:greet", buf, sizeof buf) == 11
+                  && strcmp(buf, "hello romfs") == 0, "read rom:greet back");
+            CHECK(read_file("rom:sub/inner", buf, sizeof buf) == 6
+                  && strcmp(buf, "nested") == 0, "read rom:sub/inner back");
+            CHECK(fs_size("rom:greet") == 11, "rom:greet size is 11");
+
+            /* read-only: no write open, no create, no mutation. */
+            fd = fs_open("rom:greet", FS_O_WRONLY, 0);
+            CHECK(fd < 0, "write-open rom:greet is rejected (EROFS)");
+            CHECK(fs_open("rom:new", FS_O_WRONLY | FS_O_CREAT, 0644) < 0,
+                  "create on romfs is rejected");
+            CHECK(fs_mkdir("rom:d2") < 0, "mkdir on romfs is rejected");
+            CHECK(fs_unlink("rom:greet") < 0, "unlink on romfs is rejected");
+
+            /* the root directory lists greet and sub. */
+            dfd = fs_open("rom:", FS_O_DIRECTORY, 0);
+            CHECK(dfd >= 0, "open rom: as a directory");
+            saw_a = saw_b = count = 0;
+            {
+                struct fs_dirent de;
+                while (fs_read(dfd, &de, (int)sizeof de) == (int)sizeof de) {
+                    if (strcmp(de.name, "greet") == 0) saw_a = 1;
+                    if (strcmp(de.name, "sub") == 0) saw_b = 1;
+                    count++;
+                }
+            }
+            CHECK(saw_a && saw_b && count == 2, "romfs root lists greet and sub");
+            fs_close(dfd);
+            free(img);
+
+            snprintf(buf, sizeof buf, "%s/sub/inner", romsrc); unlink(buf);
+            snprintf(buf, sizeof buf, "%s/greet", romsrc); unlink(buf);
+            rmdir(sub);
+            rmdir(romsrc);
+        }
+    }
+
+    /* 9pfs: an in-process 9P2000 server over a temp host dir, reached by the
+     * ninefs client through the server transport. */
+    {
+        char nptmpl[] = "/tmp/skjp9srvXXXXXX";
+        char *nproot = mkdtemp(nptmpl);
+        struct p9_transport tr;
+        int np, nfd;
+
+        CHECK(nproot != 0, "9pfs: made a server root dir");
+        if (nproot && p9_server_open(nproot, &tr) == 0) {
+            np = ninefs_mount("9p", &tr, 0);
+            CHECK(np == 4, "9pfs is mount index 4 (version+attach ok)");
+
+            /* Create and read back through the client. */
+            CHECK(write_file("9p:hello.txt", "hi 9p") == 5, "9pfs: wrote hello.txt");
+            CHECK(fs_exists("9p:hello.txt") == 1, "9p:hello.txt exists");
+            CHECK(read_file("9p:hello.txt", buf, sizeof buf) == 5
+                  && strcmp(buf, "hi 9p") == 0, "9pfs: read hello.txt back");
+            CHECK(fs_size("9p:hello.txt") == 5, "9p:hello.txt size is 5");
+
+            /* A subdirectory and a nested file. */
+            CHECK(fs_mkdir("9p:docs") == 0, "9pfs: mkdir docs");
+            CHECK(fs_isdir("9p:docs") == 1, "9p:docs is a directory");
+            CHECK(write_file("9p:docs/note", "inner") == 5, "9pfs: wrote docs/note");
+            CHECK(read_file("9p:docs/note", buf, sizeof buf) == 5
+                  && strcmp(buf, "inner") == 0, "9pfs: read docs/note back");
+
+            /* Stat reports a regular file with the right mode class. */
+            {
+                struct fs_stat st;
+                CHECK(fs_stat("9p:hello.txt", &st) == 0
+                      && (st.mode & FS_S_IFMT) == FS_S_IFREG && st.size == 5,
+                      "9pfs: stat hello.txt is a 5-byte regular file");
+            }
+
+            /* The root directory lists hello.txt and docs. */
+            nfd = fs_open("9p:", FS_O_DIRECTORY, 0);
+            CHECK(nfd >= 0, "9pfs: open root as a directory");
+            saw_a = saw_b = count = 0;
+            {
+                struct fs_dirent de;
+                while (fs_read(nfd, &de, (int)sizeof de) == (int)sizeof de) {
+                    if (strcmp(de.name, "hello.txt") == 0) saw_a = 1;
+                    if (strcmp(de.name, "docs") == 0) saw_b = 1;
+                    count++;
+                }
+            }
+            CHECK(saw_a && saw_b && count == 2, "9pfs root lists hello.txt and docs");
+            fs_close(nfd);
+
+            /* Rename within a directory, then remove. */
+            CHECK(fs_rename("9p:hello.txt", "9p:greeting") == 0, "9pfs: rename hello.txt");
+            CHECK(fs_exists("9p:hello.txt") == 0, "9p:hello.txt is gone after rename");
+            CHECK(fs_exists("9p:greeting") == 1, "9p:greeting exists after rename");
+            CHECK(fs_unlink("9p:greeting") == 0, "9pfs: unlink greeting");
+            CHECK(fs_exists("9p:greeting") == 0, "9p:greeting is gone after unlink");
+            CHECK(fs_unlink("9p:docs/note") == 0, "9pfs: unlink docs/note");
+            CHECK(fs_rmdir("9p:docs") == 0, "9pfs: rmdir docs");
+
+            p9_server_close(&tr);
+            rmdir(nproot);
+        }
     }
 
     printf("\n%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);

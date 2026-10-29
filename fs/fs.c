@@ -16,6 +16,18 @@
 #ifdef FS_WITH_HOSTCAP
 #include "hostcap.h"      /* freestanding guest: a launcher-granted capability  */
 #endif
+#ifdef FS_WITH_DEV
+#include "devfs.h"        /* null/zero/full character devices                   */
+#endif
+#ifdef FS_WITH_ROM
+#include "romfs.h"        /* read-only packed image                             */
+#endif
+#ifdef FS_WITH_9P
+#include "ninefs.h"       /* 9P2000 client over the launcher channel            */
+#endif
+#if defined(FS_WITH_9P) && defined(FS_WITH_HOSTCAP)
+#include "p9_guest.h"     /* guest transport over the launcher doorbell channel */
+#endif
 
 #include <string.h>
 #include <errno.h>
@@ -45,6 +57,7 @@ fs_strrchr(char *s, int c)
 struct fs_mount fs_mounts[FS_MAX_MOUNTS];
 int             fs_mount_count = 0;
 int             fs_cur_mount = 0;
+struct fs_mount_aux fs_mount_aux[FS_MAX_MOUNTS];
 
 /* The one fd space.  A slot is a file, a directory, or a mount root; `h` is the
  * owning backend's opaque handle and `pos` is the file offset / dir cursor that
@@ -75,6 +88,18 @@ backend_for(const struct fs_mount *mt)
     switch (kind) {
     case FS_KIND_RAM:
         return &ramfs_backend;
+#ifdef FS_WITH_DEV
+    case FS_KIND_DEV:
+        return &dev_backend;
+#endif
+#ifdef FS_WITH_ROM
+    case FS_KIND_ROM:
+        return &romfs_backend;
+#endif
+#ifdef FS_WITH_9P
+    case FS_KIND_9P:
+        return &ninefs_backend;
+#endif
     case FS_KIND_HOST:
 #if defined(FS_WITH_HOSTFS)
         return &hostfs_backend;
@@ -623,11 +648,50 @@ fs_init(void)
         int ngrants = fs_mount_count, i, scratch;
         for (i = 0; i < ngrants; i++) {
             struct fs_mount *mt = &fs_mounts[i];
-            int capfd, slot;
-            if (mt->fd < 0)
+            enum fs_kind kind = (enum fs_kind)(mt->flags & FS_KIND_MASK);
+            intptr_t root;
+            int slot;
+            switch (kind) {
+            case FS_KIND_HOST:
+                /* The launcher wrote a raw capability fd in `fd`: a directory
+                 * fd its kernel resolves paths against, the hostcap backend's
+                 * root handle. */
+                if (mt->fd < 0)
+                    continue;
+                root = (intptr_t)mt->fd;
+                break;
+#ifdef FS_WITH_DEV
+            case FS_KIND_DEV:
+                /* devfs has no backing fd; its root is a fixed sentinel. */
+                root = (intptr_t)DEVFS_ROOT;
+                break;
+#endif
+#ifdef FS_WITH_ROM
+            case FS_KIND_ROM:
+                /* The launcher loaded the image into guest memory; the aux
+                 * entry carries its address and length.  romfs_adopt parses it
+                 * and registers it for this mount, returning the root handle. */
+                root = romfs_adopt(i, (const void *)(uintptr_t)fs_mount_aux[i].p0,
+                                   (size_t)fs_mount_aux[i].p1);
+                break;
+#endif
+#ifdef FS_WITH_9P
+            case FS_KIND_9P: {
+                /* The launcher bound a doorbell channel; aux p0 is its guest
+                 * address.  Build the channel transport and hand it to the 9p
+                 * client, which does the version+attach handshake. */
+                struct p9_transport t9;
+                p9_guest_transport(fs_mount_aux[i].p0, &t9);
+                root = ninefs_adopt(i, &t9);
+                break;
+            }
+#endif
+            default:
                 continue;
-            capfd = mt->fd;
-            slot = fd_alloc(FD_ROOT, i, (intptr_t)capfd);
+            }
+            if (root < 0)
+                continue;               /* the backend rejected this grant */
+            slot = fd_alloc(FD_ROOT, i, root);
             if (slot < 0)
                 break;                  /* fd space full: leave the rest unusable */
             mt->fd = (int16_t)slot;

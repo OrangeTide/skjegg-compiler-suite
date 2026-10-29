@@ -270,3 +270,16 @@ __skj_trap_backtrace:
 	ecall
 	ret
 	.size	__skj_trap_backtrace,.-__skj_trap_backtrace
+
+/* long __skj_p9_doorbell(void *chan);
+   The 9p channel doorbell: hand the launcher the framed T-message in the
+   channel at a0 and get the R-message back in the same channel.  SKJ_SYS_P9
+   (0x000f0005) sits above the Linux range, so off a sandbox (bare qemu) it
+   returns -ENOSYS and the caller's 9p rpc fails cleanly. */
+	.globl	__skj_p9_doorbell
+	.type	__skj_p9_doorbell,@function
+__skj_p9_doorbell:
+	li	a7, 0x000f0005		/* SKJ_SYS_P9 */
+	ecall
+	ret
+	.size	__skj_p9_doorbell,.-__skj_p9_doorbell

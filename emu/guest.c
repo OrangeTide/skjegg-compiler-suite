@@ -14,6 +14,8 @@
 #include "guest.h"
 #include "elf32.h"
 #include "fs.h"             /* the guest fs/ mount-table layout the launcher fills */
+#include "ninefs.h"         /* P9_MSIZE: the 9p channel buffer size               */
+#include "p9_server.h"      /* the host-side 9p file server the doorbell drives   */
 #include "hostplat.h"       /* the host facilities that service the guest ABI     */
 
 #include <stdio.h>
@@ -22,7 +24,6 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <sched.h>
 #include <errno.h>
 
 /****************************************************************
@@ -204,6 +205,14 @@ gm_fault(guest_mem *m, uint32_t addr, int is_write, const char *why)
     m->fault_why = why;
 }
 
+void
+gm_set_extern(guest_mem *m, uint8_t *base, uint32_t size)
+{
+    m->extern_base = base;
+    m->extern_size = size;
+    gm_map(m, 0, size, GM_R | GM_W | GM_X, "ram");
+}
+
 uint8_t *
 gm_page(guest_mem *m, uint32_t addr, int want_write)
 {
@@ -211,6 +220,31 @@ gm_page(guest_mem *m, uint32_t addr, int want_write)
     uint32_t l2 = (addr >> GM_PAGE_SHIFT) & (GM_L2_ENTRIES - 1);
     struct gm_region *r;
     uint8_t *page;
+
+    /* Extern-backed guest: the whole range is one host buffer.  Honour the
+     * region protection (guard pages, read-only during loading) but return the
+     * arithmetic page pointer rather than a committed one. */
+    if (m->extern_base) {
+        if (addr >= m->extern_size) {
+            gm_fault(m, addr, want_write, "unmapped");
+            return NULL;
+        }
+        r = region_of(m, addr);
+        if (!r) {
+            gm_fault(m, addr, want_write, "unmapped");
+            return NULL;
+        }
+        if (r->prot == 0) {
+            gm_fault(m, addr, want_write, "stack overflow");
+            m->fault_guard = 1;
+            return NULL;
+        }
+        if (want_write && !(r->prot & GM_W) && !m->loading) {
+            gm_fault(m, addr, 1, "read-only");
+            return NULL;
+        }
+        return m->extern_base + (addr & ~(GM_PAGE_SIZE - 1));
+    }
 
     /* A committed page satisfies a read outright. A write to a committed page
      * in a writable region is recorded in wdir, so it too returns without the
@@ -510,17 +544,86 @@ gfd_close(guest *g, uint32_t gfd)
     return 0;
 }
 
-/* The launcher: turn each --mount grant into a hostfs capability fd and write
- * the fs/ mount table into guest memory.  The guest never mounts; it reads this
- * pre-populated table.  A guest that links no fs_mounts symbol just runs with no
- * mounts (a warning if --mount was nonetheless given). */
+/* Write one 16-byte fs_mount entry at table slot `slot`:
+ *   struct fs_mount { char name[8]; int16 fd; int16 cwd; u32 flags }
+ * `fd` is the guest mount fd (a capability fd index, or 0 for a backend with no
+ * backing fd); `kind` goes in the low byte of flags. */
+static void
+write_mount_entry(guest *g, uint32_t tbl, int slot, const char *name,
+                  int namelen, int fd, uint32_t kind)
+{
+    uint32_t ent = tbl + (uint32_t)slot * 16u;
+    int k;
+    for (k = 0; k < FS_NAME_MAX; k++)
+        gm_store(&g->mem, ent + (uint32_t)k, 1, 0,
+                 (uint32_t)(k < namelen ? (unsigned char)name[k] : 0));
+    gm_store(&g->mem, ent + 8, 2, g->big_endian, (uint32_t)(uint16_t)fd);
+    gm_store(&g->mem, ent + 10, 2, g->big_endian, 0xffffu);    /* cwd = root */
+    gm_store(&g->mem, ent + 12, 4, g->big_endian, kind);
+}
+
+/* Load a host romfs image file into a fresh guest memory region (the "host-
+ * shared buffer" use gm_mmap exists for).  On success writes the region base
+ * and byte length; returns -1 on any error. */
+static int
+load_rom_image(guest *g, const char *path, uint32_t *base_out, uint32_t *len_out)
+{
+    FILE *f = fopen(path, "rb");
+    long sz;
+    uint32_t base;
+    uint8_t *buf;
+    size_t got;
+
+    if (!f) {
+        fprintf(stderr, "skj-run: cannot open rom image '%s': %s\n", path,
+                strerror(errno));
+        return -1;
+    }
+    if (fseek(f, 0, SEEK_END) != 0 || (sz = ftell(f)) < 0) {
+        fclose(f);
+        return -1;
+    }
+    rewind(f);
+    if (sz == 0 || sz > 0x40000000L) {  /* refuse empty or absurd sizes */
+        fprintf(stderr, "skj-run: rom image '%s' has a bad size\n", path);
+        fclose(f);
+        return -1;
+    }
+    buf = malloc((size_t)sz);
+    if (!buf) { fclose(f); return -1; }
+    got = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    if (got != (size_t)sz) { free(buf); return -1; }
+    base = gm_mmap(&g->mem, (uint32_t)sz, 0);
+    if (!base) {
+        fprintf(stderr, "skj-run: no guest memory for rom image '%s'\n", path);
+        free(buf);
+        return -1;
+    }
+    gm_write(&g->mem, base, buf, (uint32_t)sz);
+    free(buf);
+    if (g->mem.fault)
+        return -1;
+    *base_out = base;
+    *len_out = (uint32_t)sz;
+    return 0;
+}
+
+/* The launcher: turn each grant into a guest fs_mount entry.  A --mount opens a
+ * confined host directory as a hostfs capability fd; a --dev grants a devfs
+ * mount with no backing fd; a --rom loads a read-only image into guest memory;
+ * a --9p serves a host directory over a shared doorbell channel.  The guest
+ * never mounts; it reads this pre-populated table (and fs_mount_aux for the
+ * extra romfs/9pfs parameters).  A guest that links no fs_mounts symbol just
+ * runs with no mounts (a warning if a grant was nonetheless given). */
 void
 guest_install_mounts(guest *g, const char *elf_path, const run_opts *o)
 {
-    uint32_t tbl, cnt_sym, cur_sym;
+    uint32_t tbl, cnt_sym, cur_sym, aux_sym;
     int i, installed = 0;
+    int ngrants = o->nmounts + o->ndevs + o->nroms + o->np9s;
 
-    if (o->nmounts == 0)
+    if (ngrants == 0)
         return;
 
     gfd_init(g);                        /* reserve 0/1/2 before any grant fd */
@@ -528,9 +631,10 @@ guest_install_mounts(guest *g, const char *elf_path, const run_opts *o)
     tbl = elf32_symbol(elf_path, "fs_mounts");
     cnt_sym = elf32_symbol(elf_path, "fs_mount_count");
     cur_sym = elf32_symbol(elf_path, "fs_cur_mount");
+    aux_sym = elf32_symbol(elf_path, "fs_mount_aux");
     if (!tbl || !cnt_sym) {
-        fprintf(stderr, "skj-run: --mount given but %s links no fs_mounts "
-                "table; ignoring %d mount(s)\n", elf_path, o->nmounts);
+        fprintf(stderr, "skj-run: a mount was given but %s links no fs_mounts "
+                "table; ignoring %d grant(s)\n", elf_path, ngrants);
         return;
     }
 
@@ -538,8 +642,7 @@ guest_install_mounts(guest *g, const char *elf_path, const run_opts *o)
         const char *spec = o->mounts[i];
         const char *colon = strchr(spec, ':');
         const char *dir;
-        int hostfd, idx, nl, k;
-        uint32_t ent;
+        int hostfd, idx, nl;
 
         if (!colon) {
             fprintf(stderr, "skj-run: bad --mount '%s' (want name:hostdir)\n",
@@ -565,15 +668,108 @@ guest_install_mounts(guest *g, const char *elf_path, const run_opts *o)
             close(hostfd);
             continue;
         }
+        write_mount_entry(g, tbl, installed, spec, nl, idx, (uint32_t)FS_KIND_HOST);
+        installed++;
+    }
 
-        /* struct fs_mount { char name[8]; int16 fd; int16 cwd; u32 flags } */
-        ent = tbl + (uint32_t)installed * 16u;
-        for (k = 0; k < FS_NAME_MAX; k++)
-            gm_store(&g->mem, ent + (uint32_t)k, 1, 0,
-                     (uint32_t)(k < nl ? (unsigned char)spec[k] : 0));
-        gm_store(&g->mem, ent + 8, 2, g->big_endian, (uint32_t)(uint16_t)idx);
-        gm_store(&g->mem, ent + 10, 2, g->big_endian, 0xffffu); /* cwd = root */
-        gm_store(&g->mem, ent + 12, 4, g->big_endian, (uint32_t)FS_KIND_HOST);
+    for (i = 0; i < o->ndevs && installed < FS_MAX_MOUNTS; i++) {
+        const char *name = o->devs[i];
+        int nl = (int)strlen(name);
+        if (nl <= 0 || nl > FS_NAME_MAX) {
+            fprintf(stderr, "skj-run: --dev name '%s' must be 1..%d bytes\n",
+                    name, FS_NAME_MAX);
+            continue;
+        }
+        write_mount_entry(g, tbl, installed, name, nl, 0, (uint32_t)FS_KIND_DEV);
+        installed++;
+    }
+
+    for (i = 0; i < o->nroms && installed < FS_MAX_MOUNTS; i++) {
+        const char *spec = o->roms[i];
+        const char *colon = strchr(spec, ':');
+        uint32_t base, len;
+        int nl;
+
+        if (!colon) {
+            fprintf(stderr, "skj-run: bad --rom '%s' (want name:image)\n", spec);
+            continue;
+        }
+        nl = (int)(colon - spec);
+        if (nl <= 0 || nl > FS_NAME_MAX) {
+            fprintf(stderr, "skj-run: rom name in '%s' must be 1..%d bytes\n",
+                    spec, FS_NAME_MAX);
+            continue;
+        }
+        if (!aux_sym) {
+            fprintf(stderr, "skj-run: --rom given but %s links no fs_mount_aux; "
+                    "ignoring '%s'\n", elf_path, spec);
+            continue;
+        }
+        if (load_rom_image(g, colon + 1, &base, &len) != 0)
+            continue;
+        write_mount_entry(g, tbl, installed, spec, nl, 0, (uint32_t)FS_KIND_ROM);
+        gm_store(&g->mem, aux_sym + (uint32_t)installed * 8u, 4,
+                 g->big_endian, base);
+        gm_store(&g->mem, aux_sym + (uint32_t)installed * 8u + 4u, 4,
+                 g->big_endian, len);
+        installed++;
+    }
+
+    for (i = 0; i < o->np9s && installed < FS_MAX_MOUNTS; i++) {
+        const char *spec = o->p9s[i];
+        const char *colon = strchr(spec, ':');
+        const char *dir;
+        struct p9_server *srv;
+        uint32_t chan, chansz = 8u + 2u * (uint32_t)P9_MSIZE;
+        int hostfd, nl;
+
+        if (!colon) {
+            fprintf(stderr, "skj-run: bad --9p '%s' (want name:hostdir)\n", spec);
+            continue;
+        }
+        nl = (int)(colon - spec);
+        if (nl <= 0 || nl > FS_NAME_MAX) {
+            fprintf(stderr, "skj-run: 9p name in '%s' must be 1..%d bytes\n",
+                    spec, FS_NAME_MAX);
+            continue;
+        }
+        if (!aux_sym) {
+            fprintf(stderr, "skj-run: --9p given but %s links no fs_mount_aux; "
+                    "ignoring '%s'\n", elf_path, spec);
+            continue;
+        }
+        if (g->np9 >= GUEST_MAX_P9) {
+            fprintf(stderr, "skj-run: too many 9p channels for '%s'\n", spec);
+            continue;
+        }
+        dir = colon + 1;
+        hostfd = open(dir, O_RDONLY | O_DIRECTORY);  /* a clear error if missing */
+        if (hostfd < 0) {
+            fprintf(stderr, "skj-run: cannot serve 9p '%s': %s\n", dir,
+                    strerror(errno));
+            continue;
+        }
+        close(hostfd);
+        srv = p9_server_create(dir);
+        if (!srv) {
+            fprintf(stderr, "skj-run: no memory for 9p server '%s'\n", dir);
+            continue;
+        }
+        chan = gm_mmap(&g->mem, chansz, 0);
+        if (!chan) {
+            fprintf(stderr, "skj-run: no guest memory for 9p channel '%s'\n", dir);
+            p9_server_destroy(srv);
+            continue;
+        }
+        gm_zero(&g->mem, chan, chansz);              /* req_len/rsp_len start 0 */
+        write_mount_entry(g, tbl, installed, spec, nl, 0, (uint32_t)FS_KIND_9P);
+        gm_store(&g->mem, aux_sym + (uint32_t)installed * 8u, 4,
+                 g->big_endian, chan);
+        gm_store(&g->mem, aux_sym + (uint32_t)installed * 8u + 4u, 4,
+                 g->big_endian, 0);
+        g->p9[g->np9].chan = chan;
+        g->p9[g->np9].srv = srv;
+        g->np9++;
         installed++;
     }
 
@@ -583,6 +779,44 @@ guest_install_mounts(guest *g, const char *elf_path, const run_opts *o)
     if (g->mem.fault)
         fprintf(stderr, "skj-run: fault writing the mount table into %s\n",
                 elf_path);
+}
+
+int
+guest_p9_doorbell(guest *g, uint32_t chan)
+{
+    struct p9_server *srv = 0;
+    uint8_t req[P9_MSIZE], rsp[P9_MSIZE];
+    uint32_t reqlen, rsplen;
+    int i, n;
+
+    for (i = 0; i < g->np9; i++)
+        if (g->p9[i].chan == chan) {
+            srv = (struct p9_server *)g->p9[i].srv;
+            break;
+        }
+    if (!srv)
+        return -1;                      /* no channel bound here */
+
+    reqlen = gm_load(&g->mem, chan + 0, 4, g->big_endian);
+    if (reqlen > P9_MSIZE)
+        reqlen = P9_MSIZE;
+    gm_read_out(&g->mem, chan + 8u, req, reqlen);
+    n = p9_server_handle(srv, req, reqlen, rsp, sizeof rsp);
+    rsplen = n < 0 ? 0 : (uint32_t)n;
+    gm_write(&g->mem, chan + 8u + (uint32_t)P9_MSIZE, rsp, rsplen);
+    gm_store(&g->mem, chan + 4u, 4, g->big_endian, rsplen);
+    return 0;
+}
+
+void
+guest_p9_free(guest *g)
+{
+    int i;
+    for (i = 0; i < g->np9; i++) {
+        p9_server_destroy((struct p9_server *)g->p9[i].srv);
+        g->p9[i].srv = 0;
+    }
+    g->np9 = 0;
 }
 
 static int32_t
@@ -1200,7 +1434,7 @@ guest_syscall(guest *g, int sys, uint32_t a0, uint32_t a1, uint32_t a2,
         return sys_nanosleep(g, a0, a1);
 
     case GSYS_SCHED_YIELD:
-        sched_yield();
+        hp_yield();
         return 0;
 
     case GSYS_EXIT:
@@ -1284,6 +1518,67 @@ guest_build_stack(guest *g, const run_opts *o)
         poke32(g, p, AT_NULL);
         p += 4;
         poke32(g, p, 0);
+    }
+    return sp;
+}
+
+static void
+poke64(guest *g, uint32_t addr, uint64_t val)
+{
+    int i;
+
+    for (i = 0; i < 8; i++)             /* the HV guests are little-endian */
+        gm_write8(&g->mem, addr + (uint32_t)i, (uint8_t)(val >> (8 * i)));
+}
+
+/* The LP64 initial stack for the hardware-virtualization guests: the System V
+ * layout with 8-byte slots (argc, argv[], NULL, envp NULL, auxv, AT_NULL).  The
+ * returned pointer is 16-byte aligned, which is what the amd64 and aarch64 entry
+ * conventions expect at _start. */
+uint32_t
+guest_build_stack64(guest *g, const run_opts *o)
+{
+    uint32_t sp = g->stack_top;
+    uint32_t str[64] = { 0 };
+    int argc = o->argc;
+    int i;
+
+    if (argc > (int)(sizeof(str) / sizeof(str[0])))
+        argc = (int)(sizeof(str) / sizeof(str[0]));
+
+    for (i = argc - 1; i >= 0; i--) {   /* strings, top down */
+        uint32_t len = (uint32_t)strlen(o->argv[i]) + 1;
+        sp -= len;
+        gm_write(&g->mem, sp, o->argv[i], len);
+        str[i] = sp;
+    }
+    sp &= ~15u;
+
+    /* argc + argv + NULL + envp NULL + two auxv words, 8 bytes each.  Keep the
+     * final sp 16-byte aligned by padding the slot count to an even number. */
+    {
+        uint32_t slots = 1 + (uint32_t)argc + 1 + 1 + 2 + 1;
+        sp -= 8 * (slots + (slots & 1));
+        sp &= ~15u;
+    }
+
+    {
+        uint32_t p = sp;
+        poke64(g, p, (uint64_t)(uint32_t)argc);
+        p += 8;
+        for (i = 0; i < argc; i++, p += 8)
+            poke64(g, p, str[i]);
+        poke64(g, p, 0);                /* argv terminator */
+        p += 8;
+        poke64(g, p, 0);                /* envp terminator */
+        p += 8;
+        poke64(g, p, AT_PAGESZ);
+        p += 8;
+        poke64(g, p, GM_PAGE_SIZE);
+        p += 8;
+        poke64(g, p, AT_NULL);
+        p += 8;
+        poke64(g, p, 0);
     }
     return sp;
 }

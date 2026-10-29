@@ -201,7 +201,7 @@ enc_alu(struct x86_64_asm *a, struct section *s, uint8_t op_mr, int ext,
         w = size == 8;
         if (size == 2) e8(s, 0x66);
         force = byte_needs_rex(d);
-        if (!srco->is_sym && v >= -128 && v <= 127 && size != 1) {
+        if (!srco->is_sym && !srco->wide_imm && v >= -128 && v <= 127 && size != 1) {
             rex(s, w, 0, 0, d->reg, force);     /* group-1 r/m, imm8 */
             e8(s, 0x83);
             modrm_rr(s, ext, d->reg);
@@ -277,7 +277,14 @@ enc_mov(struct x86_64_asm *a, struct section *s,
         }
         if (size == 8) {
             long v = srco->disp;
-            if (v >= -2147483647L - 1 && v <= 2147483647L) { /* fits imm32: C7 /0 */
+            if (srco->wide_imm) {                           /* folded label diff */
+                if (v < -2147483647L - 1 || v > 2147483647L)
+                    die("x86-64: expression does not fit a 32-bit immediate");
+                rex(s, 1, 0, 0, d->reg, 0);
+                e8(s, 0xC7);
+                modrm_rr(s, 0, d->reg);
+                e32(s, (uint32_t)(int32_t)v);
+            } else if (v >= -2147483647L - 1 && v <= 2147483647L) { /* imm32: C7 /0 */
                 rex(s, 1, 0, 0, d->reg, 0);
                 e8(s, 0xC7);
                 modrm_rr(s, 0, d->reg);

@@ -26,5 +26,7 @@ extern int errno;
 #define EROFS   18      /* read-only file system */
 #define ESPIPE  19      /* illegal seek */
 #define ENODEV  20      /* no such device (no backend for the mount) */
+#define EPERM   21      /* operation not permitted (an immutable namespace) */
+#define EPROTO  22      /* protocol error (a malformed 9p reply) */
 
 #endif

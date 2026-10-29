@@ -45,11 +45,19 @@ fi
 # ambient host backend.  Selected on the freestanding VM tiers (rv, cf).
 if [ -n "${FS_INTERPOSE:-}" ]; then
     LIBC_DEFAULT="$LIBC_DEFAULT $ROOT/libc/fdio.c $ROOT/fs/fs.c $ROOT/fs/ramfs.c $ROOT/fs/ambientfs.c $ROOT/fs/hostcap.c"
+    # Optional extra backends, each selected by its own knob (devfs needs no
+    # host resource; romfs/9pfs add their guest-side pieces).
+    [ -n "${FS_DEV:-}" ] && LIBC_DEFAULT="$LIBC_DEFAULT $ROOT/fs/devfs.c"
+    [ -n "${FS_ROM:-}" ] && LIBC_DEFAULT="$LIBC_DEFAULT $ROOT/fs/romfs.c"
+    [ -n "${FS_9P:-}" ] && LIBC_DEFAULT="$LIBC_DEFAULT $ROOT/fs/ninefs.c $ROOT/fs/p9_guest.c"
 fi
 LIBC="${LIBC:-$LIBC_DEFAULT}"
 CFLAGS="${CFLAGS--DSKJ_LIBC_FLOAT}"
 if [ -n "${FS_INTERPOSE:-}" ]; then
     CFLAGS="$CFLAGS -DSKJ_FS_INTERPOSE -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -I$ROOT/fs"
+    [ -n "${FS_DEV:-}" ] && CFLAGS="$CFLAGS -DFS_WITH_DEV"
+    [ -n "${FS_ROM:-}" ] && CFLAGS="$CFLAGS -DFS_WITH_ROM"
+    [ -n "${FS_9P:-}" ] && CFLAGS="$CFLAGS -DFS_WITH_9P"
 fi
 # FS_AMBIENT_DEFAULT makes fs_init land a no-mount guest on the unconfined
 # ambient host mount (the pre-fs bare-path-reaches-host behaviour), rather than
@@ -107,6 +115,14 @@ for test in $TEST; do
     $ASM "$obj" "$asm"
     # shellcheck disable=SC2086
     $LD "$bin" "$START" "$obj" $libc_objs $HALF
+
+    # BUILD_ONLY proves the compile/assemble/link path on a host that cannot run
+    # the result (the aarch64 HV guest needs an aarch64 KVM host).
+    if [ -n "${BUILD_ONLY:-}" ]; then
+        printf 'PASS  libc %s (%s, build)\n' \
+            "$(echo "$name" | sed 's/^libc_//')" "$(basename "$CCBIN")"
+        continue
+    fi
 
     # A sibling .input is fed as stdin; a sibling .expected is diffed against
     # stdout.  Both are optional, so a self-checking exit-code test needs
