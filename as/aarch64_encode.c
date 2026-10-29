@@ -484,6 +484,18 @@ a64_encode(struct a64_asm *a, const char *mnem,
     if (!strcmp(mnem, "add") || !strcmp(mnem, "sub")) {
         int op = mnem[0] == 's';
         int sf = gsf(&ops[0]);
+        if (!op && ops[2].kind == AO_SYM) {     /* add Xd, Xn, _sym@PAGEOFF */
+            uint32_t off = (uint32_t)s->len;
+            addsub_imm(s, sf, 0, ops[0].reg, ops[1].reg, 0, 0);
+            if (emit) {
+                int idx = sym_lookup(&a->st, ops[2].sym);
+                if (idx < 0)
+                    idx = sym_add(&a->st, ops[2].sym);
+                sec_add_reloc_t(s, off, idx, ops[2].add,
+                                R_AARCH64_ADD_ABS_LO12_NC);
+            }
+            return;
+        }
         if (ops[2].kind == AO_IMM) {
             int lsl12 = ops[2].lsl12 || (nops > 3 && ops[3].kind == AO_SHIFT);
             addsub_imm(s, sf, op, ops[0].reg, ops[1].reg,
@@ -635,6 +647,17 @@ a64_encode(struct a64_asm *a, const char *mnem,
         w(s, 0x10000000u | (uint32_t)(ops[0].reg & 31));
         branch_fixup(a, s, off, FIX_ADR, R_AARCH64_ADR_PREL_LO21,
                      ops[1].sym, ops[1].add, emit);
+        return;
+    }
+    if (!strcmp(mnem, "adrp")) {         /* adrp Xd, _sym@PAGE (always relocated) */
+        uint32_t off = (uint32_t)s->len;
+        w(s, 0x90000000u | (uint32_t)(ops[0].reg & 31));
+        if (emit) {
+            int idx = sym_lookup(&a->st, ops[1].sym);
+            if (idx < 0)
+                idx = sym_add(&a->st, ops[1].sym);
+            sec_add_reloc_t(s, off, idx, ops[1].add, R_AARCH64_ADR_PREL_PG_HI21);
+        }
         return;
     }
 

@@ -28,11 +28,17 @@
 #include "asm_obj.h"
 #include "arena.h"
 
-/* ELF relocation types (AArch64) and machine id. */
+/* ELF relocation types (AArch64) and machine id.  The assembler records the
+   ELF code as the neutral reloc->type; the ELF writer emits it directly and the
+   Mach-O writer maps it to an ARM64_RELOC_* kind.  ADR_PREL_PG_HI21 and
+   ADD_ABS_LO12_NC are recorded for the Mach-O adrp/add @PAGE/@PAGEOFF pair; the
+   ELF backend never emits adrp, so the ELF writer never sees them. */
 #define R_AARCH64_ABS64        257
 #define R_AARCH64_ABS32        258
 #define R_AARCH64_PREL32       261
 #define R_AARCH64_ADR_PREL_LO21 274
+#define R_AARCH64_ADR_PREL_PG_HI21 275
+#define R_AARCH64_ADD_ABS_LO12_NC  277
 #define R_AARCH64_CONDBR19     280
 #define R_AARCH64_JUMP26       282
 #define R_AARCH64_CALL26       283
@@ -80,6 +86,7 @@ struct a64_operand {
     const char *sym;
     int32_t add;
     int is_sym;
+    int pageref;                /* Mach-O relocation suffix: 1 = @PAGE, 2 = @PAGEOFF */
 };
 
 #define A64_MAXOPS 4
@@ -147,6 +154,9 @@ void a64_ref_lit(struct a64_asm *a, int size, int is_sym, long value,
 
 /* The ELF64 writer (as/aarch64_elf.c). */
 void a64_elf_write(struct a64_asm *a, FILE *out);
+
+/* The Mach-O (MH_OBJECT) writer (as/aarch64_macho.c), for the Darwin target. */
+void a64_macho_write(struct a64_asm *a, FILE *out);
 
 /* Name lookups (as/aarch64_parse.c), shared with the encoder.  a64_reg returns
    the class (A_RC_*), sets num/size/is_sp, or A_RC_NONE.  a64_cond returns a

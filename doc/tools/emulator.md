@@ -62,8 +62,9 @@ emu/mips_gdb.c   the --gdb remote stub (MIPS)             /
 
 emu/hvcore.c     x86-64 and aarch64 under a VMM: a guest run natively \  a fourth
 emu/vmm_kvm.c    the Linux KVM backend (long mode, syscall doorbell) |
+emu/vmm_hvf.c    the macOS Hypervisor.framework backend (arm64)     |
 emu/hv_gdb.c     the --gdb remote stub (x86-64 and aarch64)        /
-emu/vmm.h        the backend-neutral VMM seam (KVM today, HVF to come)
+emu/vmm.h        the backend-neutral VMM seam (KVM and HVF)
 emu/skj_hv_abi.h the guest/host contract (doorbell, page tables)
 
 emu/sched.c      the arch-neutral process sandbox + scheduler (all cores)
@@ -784,11 +785,14 @@ the games need, with no new emulator work.
 ## Hardware virtualization (x86-64 and aarch64)
 
 The HV core does not interpret the guest. It runs it natively in 64-bit
-supervisor mode under Linux KVM, through the same `skj_cpu_ops` vtable and the
-same scheduler as the emulated cores (`emu/hvcore.c` is the binding, the sibling
-of `rv_user.c`, serving both x86-64 and aarch64). The guest architecture must
-equal the host's, since cross-architecture virtualization is not possible: an
-x86-64 host runs an x86-64 guest, an aarch64 host an aarch64 guest.
+supervisor mode under the host's hypervisor, through the same `skj_cpu_ops`
+vtable and the same scheduler as the emulated cores (`emu/hvcore.c` is the
+binding, the sibling of `rv_user.c`, serving both x86-64 and aarch64). The
+hypervisor is Linux KVM (`emu/vmm_kvm.c`) or macOS Hypervisor.framework
+(`emu/vmm_hvf.c`), chosen by the build host. The guest architecture must equal
+the host's, since cross-architecture virtualization is not possible: an x86-64
+host runs an x86-64 guest, an aarch64 host an aarch64 guest. See the
+prerequisites table below for what each platform needs.
 
 The guest reaches the sandbox syscall layer through one trap: an eight-byte
 load from `SKJ_HV_DOORBELL` (`0x30000000`), an address that is mapped but
@@ -801,13 +805,20 @@ places in the return register. The emulator-private `MAP`/`MUNMAP`/`SPAWN`/
 `FATAL`/`YIELD` selectors work the same way. `emu/skj_hv_abi.h` is the contract.
 
 Guest RAM is one contiguous host buffer (256 MiB) mapped as the vcpu's physical
-memory at guest-physical 0, with a long-mode identity map so a guest virtual
-address equals its physical address. The ELF64 loader writes the image into that
-buffer, and `guest.c`'s syscall layer reaches it through an extern-backed
-`guest_mem` region (`gm_set_extern`), so the whole arch-neutral memory and
-stack machinery works unchanged. The guest image, heap and stack live under
-4 GiB, so the 32-bit guest-memory index addresses them. Linking stays external
-GNU `ld`, since the in-tree linker is ELF32.
+memory at guest-physical 0, with an identity map so a guest virtual address
+equals its physical address. On x86-64 the host writes long-mode page tables
+into guest RAM and points CR3 at them. On aarch64 the host lays a flat level-1
+block table into guest RAM and programs `TTBR0_EL1`/`TCR_EL1`/`MAIR_EL1`/
+`SCTLR_EL1` to turn the MMU on before the first run; this is required, not an
+optimization, because with the MMU off every access is Device memory, where the
+compiler's unaligned loads fault. The page-table layout and the aarch64 register
+values are shared by both backends in `emu/skj_hv_abi.h`. The ELF64 loader
+writes the image into the buffer, and `guest.c`'s syscall layer reaches it
+through an extern-backed `guest_mem` region (`gm_set_extern`), so the whole
+arch-neutral memory and stack machinery works unchanged. The guest image, heap
+and stack live under 4 GiB, so the 32-bit guest-memory index addresses them.
+Linking stays external (GNU `ld` for the ELF64 guests), since the in-tree linker
+is ELF32.
 
 The guest runtime is a crt (`runtime/start_<arch>_hv.S`, the ELF entry) and the
 Linux syscall seam issuing the doorbell load (`runtime/syscall_<arch>_hv.S`).
@@ -818,18 +829,52 @@ continuations and the cooperative threads) runs under the VMM this way:
 `make check-libc-hv-x86-64` builds the libc with `skj-cc-x86-64`, links it with
 the HV crt and seam, and runs the self-checking phase programs under `skj-run`
 on real KVM. `make test-hv-x86-64` runs a bare-asm guest and a C guest. Both
-skip cleanly when `/dev/kvm` is absent.
+skip cleanly when `/dev/kvm` is absent or inaccessible.
 
 aarch64 is at parity in the tree: the same `hvcore.c` binding, the arm64 crt and
 seam (`runtime/start_arm64_hv.S`, `runtime/syscall_arm64_hv.S`), and the same
 libc tier (`make check-libc-hv-arm64`, `make test-hv-arm64`). Since a guest runs
 only on a host of its own architecture, these build on any host and run only on
-an aarch64 KVM host; off one they report a build pass.
+an aarch64 hypervisor host (a Linux aarch64 KVM box, or Apple Silicon under HVF);
+off one they report a build pass.
 
 The VMM seam (`emu/vmm.h`) is backend-neutral: it names its own `vmm_*` types
-and keeps clear of the kernel's `kvm_*` API, which the Linux backend
-(`emu/vmm_kvm.c`) uses internally. A macOS Hypervisor.framework backend
-(`emu/vmm_hvf.c`) is a planned peer under the same seam.
+and keeps clear of the host APIs (`kvm_*` on Linux, `hv_*` on macOS) that each
+backend uses internally. The two backends are peers under the same seam: the
+Linux KVM backend (`emu/vmm_kvm.c`) and the macOS Hypervisor.framework backend
+(`emu/vmm_hvf.c`, Apple Silicon). Each carries a stub fallback for a host without
+its hypervisor, so `skj-run` builds everywhere and reports the VMM unavailable at
+run time where it cannot virtualize. The build picks the backend by host OS; a
+vendored sandbox resolves it the same way, with an `ifeq ($(shell uname -s),
+Darwin)` in the generated `skjegg.mk`.
+
+### Prerequisites and setup per platform
+
+| Host | Backend | Guest arch | Prerequisites | Setup to run a guest |
+|------|---------|-----------|---------------|----------------------|
+| Linux x86-64 | KVM | x86-64 | `/dev/kvm` present and read/write accessible | add the user to the `kvm` group (`sudo usermod -aG kvm $USER`, then re-login), or run as root |
+| Linux aarch64 | KVM | aarch64 | `/dev/kvm` present and read/write accessible | same as above |
+| macOS Apple Silicon | HVF | aarch64 | macOS on Apple Silicon (`sysctl kern.hv_support` reports 1); the Hypervisor framework is linked by the build (`-framework Hypervisor`) | code-sign `skj-run` with the `com.apple.security.hypervisor` entitlement, for example `codesign -s - --entitlements hv.entitlements --force build/skj-run` where the plist sets that key true. Ad-hoc signing is enough for local development |
+| macOS Intel | none (stub) | n/a | not supported in this tree (the HVF backend is Apple Silicon only) | the VMM reports unavailable |
+| any other host | none (stub) | n/a | no supported hypervisor | the VMM reports unavailable |
+
+A few platform notes:
+
+- **Access, not just presence.** `skj-run` opens `/dev/kvm` read/write, so a host
+  where the node exists but the user lacks `kvm`-group access cannot virtualize.
+  The `make test-hv-*` targets probe that access and skip cleanly (the arm64 one
+  reports a build pass) rather than failing.
+- **Building the guest ELF on macOS.** The mac has no ELF linker, so the arm64
+  HV guest (an ELF64) is cross-linked elsewhere (an aarch64 Linux `ld`, or a
+  cross `aarch64-linux-gnu-ld`) and copied over. The host tools and `skj-run`
+  itself build natively with the stock Apple clang.
+- **The entitlement gates running, not building.** `skj-run` links the framework
+  and builds without special privilege; only launching a guest needs the signed
+  entitlement. Without it `hv_vm_create` fails and the VMM reports unavailable.
+- **One backend per build.** Because the guest arch equals the host arch, a given
+  build has exactly one usable backend. The other architectures still compile in
+  (the ELF header picks the core at run time), but only a guest of the host's own
+  architecture can run under the VMM.
 
 `--gdb` serves this tier too. `emu/hv_gdb.c` is the HV sibling of the rv32 and
 MIPS stubs, plugged into the scheduler through the same `ops->gdb` hook. It
@@ -840,7 +885,8 @@ so the stub sends no target description, and the host's native gdb debugs an
 x86-64 guest. A null-deref guest triple-faults into a KVM shutdown (the
 long-mode guest installs no interrupt table), so there is no debuggable fault
 frame as on the emulated cores. `make test-hv-gdb` drives it end to end (break,
-registers, memory, exit) and skips when `/dev/kvm` or gdb is absent.
+registers, memory, exit) and skips when `/dev/kvm` is absent or inaccessible, or
+gdb is not installed.
 
 The tier is at parity with the emulated sandboxes. File I/O works the same way:
 the libc fd model routes through the shared `fs/` layer, and the ambient backend
@@ -848,21 +894,24 @@ reaches the host by bare path (or a `--mount` grant confines it), exactly as on
 the rv and cf freestanding tiers. `make check-libc-hv-x86-64` runs the full phase
 set under KVM, the file phases (statx, pathops, readdir) included. Preemption
 works the same way too: a compute-bound guest that never traps to a doorbell is
-still interruptible. KVM cannot count retired instructions, so the slice currency
-is wall-clock time. A periodic timer breaks into `KVM_RUN` every 10 ms (its
-signal is blocked everywhere but inside the guest run, so host work and a future
-guest-side fault handler are never charged), and the core treats that interrupt
+still interruptible. A hypervisor cannot count retired instructions, so the slice
+currency is wall-clock time. A periodic 10 ms timer breaks the guest run out
+(on KVM the timer signal is blocked everywhere but inside `KVM_RUN`, so host work
+and a future guest-side fault handler are never charged; on HVF the timer handler
+calls `hv_vcpus_exit` to force the vcpu out), and the core treats that interrupt
 as a full slice spent, which keeps the round-robin scheduler fair and makes
 `--max-insns` bound a runaway guest. `make test-hv-preempt` proves it: a spin
 guest is stopped at the instruction cap rather than holding the vcpu forever.
 
 Current limits of this tier:
 
-- KVM is required. Without `/dev/kvm` the core reports it is unavailable and the
-  run fails cleanly.
+- A supported hypervisor is required: Linux KVM, or Hypervisor.framework on
+  Apple Silicon. Without one (no accessible `/dev/kvm`, or an unsigned or Intel
+  macOS binary) the core reports the VMM unavailable and the run fails cleanly.
 - The slice currency is time, not retired instructions, so `--max-insns` counts
   10 ms slices rather than exact instructions. It bounds a runaway guest, but it
   is a coarser unit than on the emulated cores.
+- The HVF backend is Apple Silicon only; there is no x86-64 macOS VMM.
 
 ## Limits
 

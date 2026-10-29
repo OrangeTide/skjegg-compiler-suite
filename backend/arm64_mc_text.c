@@ -80,6 +80,14 @@ static const char *ccname[16] = {
     "eq","ne","cs","cc","mi","pl","vs","vc","hi","ls","ge","lt","gt","le","al","nv",
 };
 
+/* Output flavor, fixed at build time by SKJ_ARM64_DARWIN (see arm64_mc.h).  The
+   Mach-O flavor prefixes C symbols with '_', local labels with 'L' (not '.L'),
+   spells its sections differently, treats '.word' as two bytes (so a four-byte
+   datum is '.long'), and has no ELF .note.GNU-stack. */
+static const char *sympfx(void) { return SKJ_ARM64_DARWIN ? "_" : ""; }
+static const char *locpfx(void) { return SKJ_ARM64_DARWIN ? "L" : ".L"; }
+static const char *w4(void)     { return SKJ_ARM64_DARWIN ? ".long" : ".word"; }
+
 struct mc64 *
 mct64_new(FILE *out)
 {
@@ -148,17 +156,17 @@ memop(struct mc64 *m, const char *mnem, int scale, const char *reg, int base, in
  ****************************************************************/
 
 int mc64_new_label(struct mc64 *m) { return m->nlab++; }
-void mc64_label(struct mc64 *m, int id) { fprintf(m->out, ".L%d_%d:\n", m->serial, id); }
-void mc64_b(struct mc64 *m, int id) { fprintf(m->out, "\tb .L%d_%d\n", m->serial, id); }
+void mc64_label(struct mc64 *m, int id) { fprintf(m->out, "%s%d_%d:\n", locpfx(), m->serial, id); }
+void mc64_b(struct mc64 *m, int id) { fprintf(m->out, "\tb %s%d_%d\n", locpfx(), m->serial, id); }
 void mc64_cbz(struct mc64 *m, int sf, int Rt, int id)
-{ fprintf(m->out, "\tcbz %s, .L%d_%d\n", gn(sf, Rt), m->serial, id); }
+{ fprintf(m->out, "\tcbz %s, %s%d_%d\n", gn(sf, Rt), locpfx(), m->serial, id); }
 void mc64_cbnz(struct mc64 *m, int sf, int Rt, int id)
-{ fprintf(m->out, "\tcbnz %s, .L%d_%d\n", gn(sf, Rt), m->serial, id); }
+{ fprintf(m->out, "\tcbnz %s, %s%d_%d\n", gn(sf, Rt), locpfx(), m->serial, id); }
 void mc64_ret(struct mc64 *m) { fprintf(m->out, "\tret\n"); }
 void mc64_blr(struct mc64 *m, int Rn) { fprintf(m->out, "\tblr %s\n", xn(Rn)); }
 void mc64_br(struct mc64 *m, int Rn) { fprintf(m->out, "\tbr %s\n", xn(Rn)); }
 void mc64_lea_label(struct mc64 *m, int Rd, int id)
-{ fprintf(m->out, "\tadr %s, .L%d_%d\n", xn(Rd), m->serial, id); }
+{ fprintf(m->out, "\tadr %s, %s%d_%d\n", xn(Rd), locpfx(), m->serial, id); }
 
 /****************************************************************
  * Moves / immediates / addresses
@@ -169,7 +177,19 @@ void mc64_mov(struct mc64 *m, int sf, int Rd, int Rn)
 void mc64_movimm(struct mc64 *m, int sf, int Rd, uint64_t v)
 { fprintf(m->out, "\tldr %s, =%" PRIu64 "\n", gn(sf, Rd), v); }
 void mc64_lea_sym(struct mc64 *m, int sf, int Rd, const char *name)
-{ fprintf(m->out, "\tldr %s, =%s\n", gn(sf, Rd), name); }
+{
+    if (SKJ_ARM64_DARWIN) {
+        /* A Mach-O executable is position-independent, so a symbol's address is
+           formed PC-relative with adrp/add.  Loading it from a literal pool (the
+           ELF form) would plant an absolute address in __text, a text relocation
+           the macOS linker rejects.  The address is 64-bit (LP64), so the full
+           x-register is written whatever sf requests. */
+        fprintf(m->out, "\tadrp %s, %s%s@PAGE\n", xn(Rd), sympfx(), name);
+        fprintf(m->out, "\tadd %s, %s, %s%s@PAGEOFF\n", xn(Rd), xn(Rd), sympfx(), name);
+    } else {
+        fprintf(m->out, "\tldr %s, =%s%s\n", gn(sf, Rd), sympfx(), name);
+    }
+}
 void mc64_addimm(struct mc64 *m, int Rd, int Rn, long imm)
 { addimm(m, xn(Rd), xn(Rn), imm); }
 
@@ -254,9 +274,9 @@ void mc64_fcvtns(struct mc64 *m, int sz, int Rd, int Rn) { fprintf(m->out, "\tfc
  * Calls, traps, markers, inline asm
  ****************************************************************/
 
-void mc64_call_sym(struct mc64 *m, const char *name) { fprintf(m->out, "\tbl %s\n", name); }
-void mc64_trap_div_zero(struct mc64 *m) { fprintf(m->out, "\tbl kp_trap_div_zero\n"); }
-void mc64_trap_overflow(struct mc64 *m) { fprintf(m->out, "\tbl kp_trap_overflow\n"); }
+void mc64_call_sym(struct mc64 *m, const char *name) { fprintf(m->out, "\tbl %s%s\n", sympfx(), name); }
+void mc64_trap_div_zero(struct mc64 *m) { fprintf(m->out, "\tbl %skp_trap_div_zero\n", sympfx()); }
+void mc64_trap_overflow(struct mc64 *m) { fprintf(m->out, "\tbl %skp_trap_overflow\n", sympfx()); }
 void mc64_loc(struct mc64 *m, int line) { (void)m; (void)line; }   /* AOT ignores -g markers */
 void mc64_asm(struct mc64 *m, const char *text) { fprintf(m->out, "%s\n", text); }
 
@@ -288,11 +308,11 @@ static const char *
 sym_ref(char *buf, size_t n, const char *sym, int64_t addend)
 {
     if (addend > 0)
-        snprintf(buf, n, "%s + %lld", sym, (long long)addend);
+        snprintf(buf, n, "%s%s + %lld", sympfx(), sym, (long long)addend);
     else if (addend < 0)
-        snprintf(buf, n, "%s - %lld", sym, (long long)-addend);
+        snprintf(buf, n, "%s%s - %lld", sympfx(), sym, (long long)-addend);
     else
-        snprintf(buf, n, "%s", sym);
+        snprintf(buf, n, "%s%s", sympfx(), sym);
     return buf;
 }
 
@@ -309,7 +329,7 @@ emit_init_image(FILE *out, struct ir_global *g)
         }
         if (it->sym) {
             char ref[160];
-            fprintf(out, "\t%s %s\n", it->size == 8 ? ".quad" : ".word",
+            fprintf(out, "\t%s %s\n", it->size == 8 ? ".quad" : w4(),
                 sym_ref(ref, sizeof ref, it->sym, it->ival));
         } else if (it->size == 8)
             fprintf(out, "\t.quad 0x%016llx\n", (unsigned long long)(uint64_t)it->ival);
@@ -318,7 +338,7 @@ emit_init_image(FILE *out, struct ir_global *g)
         else if (it->size == 1)
             fprintf(out, "\t.byte 0x%02x\n", (unsigned)(it->ival & 0xFF));
         else
-            fprintf(out, "\t.word 0x%08x\n", (unsigned)it->ival);
+            fprintf(out, "\t%s 0x%08x\n", w4(), (unsigned)it->ival);
         cur += it->size;
     }
     if (g->arr_size > cur)
@@ -356,8 +376,8 @@ emit_global_head(FILE *out, struct ir_global *g)
         e++;
     fprintf(out, "\t.align %d\n", e);
     if (!g->is_local)
-        fprintf(out, "\t.globl %s\n", g->name);
-    fprintf(out, "%s:\n", g->name);
+        fprintf(out, "\t.globl %s%s\n", sympfx(), g->name);
+    fprintf(out, "%s%s:\n", sympfx(), g->name);
 }
 
 /* emit one initialized global's bytes (what follows its label) */
@@ -372,10 +392,10 @@ emit_global_def(FILE *out, struct ir_global *g)
            a static string carries no spare capacity.  The header words assemble
            per-target (little-endian here), where str_core.c reads them with
            native loads. */
-        fprintf(out, "\t.word 0x%08x\n", 0xffffffffu);  /* KP_RC_STATIC */
-        fprintf(out, "\t.word 0x%08x\n", 1u);           /* KP_OBJ_STRING */
-        fprintf(out, "\t.word %d\n", g->init_strlen);   /* byte length */
-        fprintf(out, "\t.word %d\n", g->init_strlen);   /* capacity (== length) */
+        fprintf(out, "\t%s 0x%08x\n", w4(), 0xffffffffu);  /* KP_RC_STATIC */
+        fprintf(out, "\t%s 0x%08x\n", w4(), 1u);           /* KP_OBJ_STRING */
+        fprintf(out, "\t%s %d\n", w4(), g->init_strlen);   /* byte length */
+        fprintf(out, "\t%s %d\n", w4(), g->init_strlen);   /* capacity (== length) */
         if (g->init_strlen > 0)
             emit_string_bytes(out, g->init_string, g->init_strlen);
         fprintf(out, "\t.byte 0\n");                    /* trailing NUL */
@@ -388,7 +408,7 @@ emit_global_def(FILE *out, struct ir_global *g)
         for (k = 0; k < g->init_count; k++) {
             if (g->init_syms && g->init_syms[k]) {
                 char ref[160];
-                fprintf(out, "\t%s %s\n", elsz == 8 ? ".quad" : ".word",
+                fprintf(out, "\t%s %s\n", elsz == 8 ? ".quad" : w4(),
                     sym_ref(ref, sizeof ref, g->init_syms[k], g->init_ivals[k]));
             } else if (g->base_type == IR_I64 || g->base_type == IR_F64)
                 fprintf(out, "\t.quad %" PRId64 "\n", g->init_ivals[k]);
@@ -397,7 +417,7 @@ emit_global_def(FILE *out, struct ir_global *g)
             else if (elsz == 2)
                 fprintf(out, "\t.short %" PRId64 "\n", g->init_ivals[k]);
             else
-                fprintf(out, "\t.word %" PRId64 "\n", g->init_ivals[k]);
+                fprintf(out, "\t%s %" PRId64 "\n", w4(), g->init_ivals[k]);
         }
         if (g->arr_size > g->init_count)
             fprintf(out, "\t.space %d\n", (g->arr_size - g->init_count) * elsz);
@@ -425,9 +445,12 @@ emit_globals(FILE *out, struct ir_program *prog)
         emit_global_def(out, g);
     }
 
-    /* initialized, read-only globals (const): same bytes, .rodata section */
+    /* initialized, read-only globals (const): same bytes, read-only section.
+       Mach-O uses __DATA,__const (read-only after the dynamic linker protects
+       it), not __TEXT,__const: a const that holds pointers carries relocations,
+       which __TEXT forbids, and pure-byte const data is equally at home here. */
     if (any_ro) {
-        fputs("\n\t.section .rodata\n", out);
+        fputs(SKJ_ARM64_DARWIN ? "\n\t.section __DATA,__const\n" : "\n\t.section .rodata\n", out);
         for (g = prog->globals; g; g = g->next) {
             if (global_is_bss(g) || !g->is_rodata)
                 continue;
@@ -439,17 +462,33 @@ emit_globals(FILE *out, struct ir_program *prog)
     if (!any_bss)
         return;
 
-    /* Zero-filled globals: .bss (NOBITS), no file space for their zeros. */
-    fputs("\n\t.bss\n", out);
+    /* Zero-filled globals: no file space for their zeros.  ELF puts them in .bss
+       (NOBITS) with a labeled .space; Mach-O's __bss is a virtual (zerofill)
+       section that cannot hold emitted bytes, so each symbol is declared with
+       .zerofill __DATA,__bss,<name>,<size>,<align-exponent> instead. */
+    if (!SKJ_ARM64_DARWIN)
+        fputs("\n\t.bss\n", out);
     for (g = prog->globals; g; g = g->next) {
         int elsz = global_elsz(g);
         int sz;
 
         if (!global_is_bss(g))
             continue;
-        emit_global_head(out, g);
         sz = (g->arr_size > 0) ? g->arr_size * elsz : elsz;
-        fprintf(out, "\t.space %d\n", sz);
+        if (SKJ_ARM64_DARWIN) {
+            int alb = 8, e = 0;
+            if (g->align > alb)
+                alb = g->align;
+            while ((1 << e) < alb)
+                e++;
+            if (!g->is_local)
+                fprintf(out, "\t.globl %s%s\n", sympfx(), g->name);
+            fprintf(out, "\t.zerofill __DATA,__bss,%s%s,%d,%d\n",
+                sympfx(), g->name, sz, e);
+        } else {
+            emit_global_head(out, g);
+            fprintf(out, "\t.space %d\n", sz);
+        }
     }
 }
 
@@ -476,8 +515,8 @@ target_emit(FILE *out, struct ir_program *prog)
 
         fputs("\n\t.text\n\t.align 2\n", out);
         if (!fn->is_local)
-            fprintf(out, "\t.globl %s\n", fn->name);
-        fprintf(out, "%s:\n", fn->name);
+            fprintf(out, "\t.globl %s%s\n", sympfx(), fn->name);
+        fprintf(out, "%s%s:\n", sympfx(), fn->name);
 
         mct64_begin_func(m, ++serial);
         if (arm64_select_func(m, fn,
@@ -493,5 +532,7 @@ target_emit(FILE *out, struct ir_program *prog)
     mct64_free(m);
 
     emit_globals(out, prog);
-    fputs("\n\t.section .note.GNU-stack,\"\",%progbits\n", out);
+    /* Mark the stack non-executable (ELF only; Mach-O has no such directive). */
+    if (!SKJ_ARM64_DARWIN)
+        fputs("\n\t.section .note.GNU-stack,\"\",%progbits\n", out);
 }

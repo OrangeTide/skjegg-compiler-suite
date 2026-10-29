@@ -152,6 +152,14 @@ vmm_map(vmm *vm, void *host, uint64_t gpa, size_t size)
         for (i = 0; i < 512; i++)
             pd[i] = ((uint64_t)i << 21) | PTE_P | PTE_RW | PTE_PS;
     }
+#elif defined(__aarch64__)
+    /* The guest must run with its MMU on, or every access is Device memory
+       where the compiler's unaligned loads fault.  Lay the flat identity map
+       into guest RAM; vmm_vcpu_new programs the translation registers to point
+       at it.  The doorbell above RAM is mapped at stage 1 but unbacked, so it
+       still faults out as MMIO. */
+    if (gpa == 0)
+        skj_hv_a64_identity_pt(host);
 #endif
     return 0;
 }
@@ -204,10 +212,21 @@ vmm_vcpu_new(vmm *vm)
 #elif defined(__aarch64__)
     {
         struct kvm_vcpu_init init;
+        uint64_t sctlr;
         if (ioctl(vm->vm_fd, KVM_ARM_PREFERRED_TARGET, &init) < 0)
             goto fail;
         if (ioctl(vcpu->vcpu_fd, KVM_ARM_VCPU_INIT, &init) < 0)
             goto fail;
+        /* Turn the MMU on with the flat identity map built in vmm_map, so guest
+           RAM is Normal memory.  Program the translation registers with the
+           shared SKJ_HV_A64_* values; the sysreg ids are ARM64_SYS_REG(op0, op1,
+           crn, crm, op2) as the psABI encodes them. */
+        a64_set(vcpu->vcpu_fd, ARM64_SYS_REG(3, 0, 10, 2, 0), SKJ_HV_A64_MAIR);
+        a64_set(vcpu->vcpu_fd, ARM64_SYS_REG(3, 0, 2, 0, 2), SKJ_HV_A64_TCR);
+        a64_set(vcpu->vcpu_fd, ARM64_SYS_REG(3, 0, 2, 0, 0), SKJ_HV_A64_TTBR0);
+        sctlr = a64_get(vcpu->vcpu_fd, ARM64_SYS_REG(3, 0, 1, 0, 0));
+        a64_set(vcpu->vcpu_fd, ARM64_SYS_REG(3, 0, 1, 0, 0),
+                sctlr | SKJ_HV_A64_SCTLR_ON);
     }
 #endif
 

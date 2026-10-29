@@ -498,13 +498,15 @@ if [ "$has_emu_mips" -eq 1 ]; then
     cp "$S/emu/mips32.c" "$S/emu/mips32.h" "$S/emu/mips_user.c" "$DEST/emu/"
 fi
 # The hardware-virtualization core: one body (hvcore.c) serves both x86-64 and
-# aarch64 guests, over the backend-neutral VMM seam (vmm.h) whose Linux KVM
-# backend is vmm_kvm.c; hv_gdb.c is its --gdb stub.  The guest arch equals the
-# host's, so a given host exercises one arch; both are shipped since the sources
-# are shared.  skj_hv_abi.h is the guest/host doorbell contract.
+# aarch64 guests, over the backend-neutral VMM seam (vmm.h) with one backend per
+# host hypervisor: Linux KVM (vmm_kvm.c) and macOS Hypervisor.framework
+# (vmm_hvf.c); hv_gdb.c is its --gdb stub.  The guest arch equals the host's, so
+# a given host exercises one arch and one backend; all sources are shipped since
+# they are shared and the consumer's Makefile fragment picks the backend by host
+# OS.  skj_hv_abi.h is the guest/host doorbell contract.
 if [ "$has_emu_hv" -eq 1 ]; then
     cp "$S/emu/hvcore.c" "$S/emu/hvcore.h" \
-       "$S/emu/vmm.h" "$S/emu/vmm_kvm.c" \
+       "$S/emu/vmm.h" "$S/emu/vmm_kvm.c" "$S/emu/vmm_hvf.c" \
        "$S/emu/hv_gdb.c" "$S/emu/hv_gdb.h" \
        "$S/emu/skj_hv_abi.h" "$DEST/emu/"
 fi
@@ -1099,10 +1101,11 @@ if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || \
     if [ "$has_emu_mips" -eq 1 ]; then
         _emu_src="$_emu_src \$(SKJEGG)emu/mips32.c \$(SKJEGG)emu/mips_user.c"
     fi
-    # The HV core is one shared body plus the KVM backend and the gdb stub.
+    # The HV core is one shared body plus the gdb stub; the VMM backend itself
+    # is picked by host OS below, since it cannot be chosen at vendoring time.
     _emu_hv_flags=""
     if [ "$has_emu_hv" -eq 1 ]; then
-        _emu_src="$_emu_src \$(SKJEGG)emu/hvcore.c \$(SKJEGG)emu/vmm_kvm.c \$(SKJEGG)emu/hv_gdb.c"
+        _emu_src="$_emu_src \$(SKJEGG)emu/hvcore.c \$(SKJEGG)emu/hv_gdb.c"
         _emu_hv_flags=" -DSKJ_HV_GDB"
     fi
     {
@@ -1110,9 +1113,21 @@ if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || \
         printf '# are fixed at vendoring time; skj-run reads the ELF header to\n'
         printf '# pick between them.\n'
         printf 'SKJ_EMU := %s\n' "$_emu_src"
+        printf 'SKJ_EMU_LDLIBS :=\n'
+        if [ "$has_emu_hv" -eq 1 ]; then
+            printf '# The VMM backend is picked by host OS, not at vendoring time:\n'
+            printf '# macOS uses Hypervisor.framework, every other host Linux KVM.\n'
+            printf '# Each carries a stub for a host without its hypervisor.\n'
+            printf 'ifeq ($(shell uname -s),Darwin)\n'
+            printf 'SKJ_EMU += $(SKJEGG)emu/vmm_hvf.c\n'
+            printf 'SKJ_EMU_LDLIBS := -framework Hypervisor\n'
+            printf 'else\n'
+            printf 'SKJ_EMU += $(SKJEGG)emu/vmm_kvm.c\n'
+            printf 'endif\n'
+        fi
         printf 'SKJ_ALL += $(BUILD)/skj-run\n'
         printf '$(BUILD)/skj-run: $(SKJ_EMU) | $(BUILD)\n'
-        printf '\t$(CC) $(CFLAGS) -DEMU_COLDFIRE=%s -DEMU_RV32=%s -DEMU_MIPS32=%s -DEMU_HV=%s%s -I$(SKJEGG)emu -I$(SKJEGG)fs -o $@ $(SKJ_EMU) -lm\n' \
+        printf '\t$(CC) $(CFLAGS) -DEMU_COLDFIRE=%s -DEMU_RV32=%s -DEMU_MIPS32=%s -DEMU_HV=%s%s -I$(SKJEGG)emu -I$(SKJEGG)fs -o $@ $(SKJ_EMU) -lm $(SKJ_EMU_LDLIBS)\n' \
             "$has_emu_cf" "$has_emu_rv" "$has_emu_mips" "$has_emu_hv" "$_emu_hv_flags"
     } >> "$MK"
 fi

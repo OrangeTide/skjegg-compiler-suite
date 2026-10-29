@@ -409,5 +409,12 @@ kp_jit_call(struct kp_jit *j, void *entry)
         : "r"(top), "r"(entry)
         : "x19", "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",
           "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
-          "x16", "x17", "x18", "x30", "memory", "cc");
+          "x16", "x17",
+#if !defined(__APPLE__)
+          /* x18 is a reserved platform register on Darwin; clang rejects it in
+             a clobber list.  The guest never uses it (regalloc allocates
+             x19-x28), so there is nothing to declare clobbered there. */
+          "x18",
+#endif
+          "x30", "memory", "cc");
 }

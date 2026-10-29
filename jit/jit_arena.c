@@ -1,7 +1,12 @@
 /* jit_arena.c : the low-memory mapping primitive and the guest bump arena
    (see jit_arena.h). */
 
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE                /* expose MAP_ANON under the Darwin API */
+#else
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE                 /* glibc gates MAP_ANONYMOUS behind this */
+#endif
 
 #include "jit_arena.h"
 #include "target.h"
@@ -12,6 +17,12 @@
 
 #ifndef MAP_FIXED_NOREPLACE
 #define MAP_FIXED_NOREPLACE 0x100000
+#endif
+
+/* macOS spells the anonymous-mapping flag MAP_ANON and gates the MAP_ANONYMOUS
+   alias behind _DARWIN_C_SOURCE, which strict _POSIX_C_SOURCE turns off. */
+#if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
+#define MAP_ANONYMOUS MAP_ANON
 #endif
 
 /* The runtime arena's size.  Excelsior test programs bump-allocate strings,

@@ -257,6 +257,19 @@ parse_operand(struct a64_asm *a, struct a64_operand *op)
                 op->sym = arena_strdup(&a->arena, l->tok.str);
             lex_next(l);
             op->add = (int32_t)parse_addend(l);
+            if (l->tok.type == T_AT) {      /* Mach-O `_sym@PAGE` / `@PAGEOFF` */
+                lex_next(l);
+                if (l->tok.type != T_IDENT)
+                    die("line %d: expected PAGE/PAGEOFF after '@'", l->tok.line);
+                if (strcmp(l->tok.str, "PAGE") == 0)
+                    op->pageref = 1;
+                else if (strcmp(l->tok.str, "PAGEOFF") == 0)
+                    op->pageref = 2;
+                else
+                    die("line %d: unknown relocation suffix @%s",
+                        l->tok.line, l->tok.str);
+                lex_next(l);
+            }
             return;
         }
     }
@@ -376,11 +389,56 @@ handle_directive(struct a64_asm *a, const char *dir)
         lex_next(l);
         if (l->tok.type == T_DOT_IDENT || l->tok.type == T_IDENT) {
             const char *n = l->tok.str;
-            if (strncmp(n, ".text", 5) == 0)        set_section(a, ASEC_TEXT);
-            else if (strncmp(n, ".rodata", 7) == 0) set_section(a, ASEC_RODATA);
-            else if (strncmp(n, ".data", 5) == 0)   set_section(a, ASEC_DATA);
-            else if (strncmp(n, ".bss", 4) == 0)    set_section(a, ASEC_BSS);
+            if (n[0] == '.') {              /* ELF section name */
+                if (strncmp(n, ".text", 5) == 0)        set_section(a, ASEC_TEXT);
+                else if (strncmp(n, ".rodata", 7) == 0) set_section(a, ASEC_RODATA);
+                else if (strncmp(n, ".data", 5) == 0)   set_section(a, ASEC_DATA);
+                else if (strncmp(n, ".bss", 4) == 0)    set_section(a, ASEC_BSS);
+            } else {                        /* Mach-O `__SEG,__sect` */
+                lex_next(l);
+                if (l->tok.type == T_COMMA)
+                    lex_next(l);
+                if (l->tok.type == T_IDENT) {
+                    const char *sn = l->tok.str;
+                    if (strcmp(sn, "__text") == 0)         set_section(a, ASEC_TEXT);
+                    else if (strcmp(sn, "__const") == 0)   set_section(a, ASEC_RODATA);
+                    else if (strcmp(sn, "__cstring") == 0) set_section(a, ASEC_RODATA);
+                    else if (strcmp(sn, "__data") == 0)    set_section(a, ASEC_DATA);
+                    else if (strcmp(sn, "__bss") == 0)     set_section(a, ASEC_BSS);
+                }
+            }
         }
+        skip_to_eol(l);
+        return;
+    }
+
+    if (strcmp(dir, ".zerofill") == 0) {
+        /* Mach-O bss declaration: .zerofill __DATA,__bss,symbol,size[,align] */
+        const char *name;
+        long size = 0, align = 0;
+        int idx;
+        lex_next(l);                            /* segment name */
+        if (l->tok.type == T_IDENT) lex_next(l);
+        if (l->tok.type == T_COMMA)  lex_next(l);
+        if (l->tok.type == T_IDENT) lex_next(l);    /* section name */
+        if (l->tok.type == T_COMMA)  lex_next(l);
+        if (l->tok.type != T_IDENT)
+            die("line %d: .zerofill expects a symbol", l->tok.line);
+        name = arena_strdup(&a->arena, l->tok.str);
+        lex_next(l);
+        if (l->tok.type == T_COMMA)  lex_next(l);
+        if (l->tok.type == T_INT) { size = l->tok.ival; lex_next(l); }
+        if (l->tok.type == T_COMMA) {
+            lex_next(l);
+            if (l->tok.type == T_INT) { align = l->tok.ival; lex_next(l); }
+        }
+        set_section(a, ASEC_BSS);
+        if (align > 0)
+            sec_align(&a->sections[ASEC_BSS], 1 << align);
+        idx = sym_lookup(&a->st, name);
+        if (idx < 0) idx = sym_add(&a->st, name);
+        sym_define(&a->st, idx, ASEC_BSS, (uint32_t)a->sections[ASEC_BSS].len);
+        sec_space(&a->sections[ASEC_BSS], (int)size);
         skip_to_eol(l);
         return;
     }

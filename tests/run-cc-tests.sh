@@ -26,7 +26,7 @@ ASM="${ASM:-$ROOT/build/skj-as -o}"
 LD="${LD:-m68k-linux-gnu-ld -o}"
 # An explicitly empty QEMU means "run natively"; only an unset QEMU defaults.
 QEMU="${QEMU-qemu-m68k}"
-START="${START:-$ROOT/build/start.o}"
+START="${START-$ROOT/build/start.o}"
 # no colon: an explicitly-empty HALF (e.g. arm64, native fcvt) stays empty
 HALF="${HALF-$ROOT/build/half.o}"
 OUTDIR="${OUTDIR:-$ROOT/build}"
@@ -109,7 +109,13 @@ for src in "$HERE"/cc_*.c; do
         set -e
         continue
     fi
-    $LD "$bin" "$START" "$obj" $HALF 2>/dev/null
+    # START empty (e.g. the macOS/libSystem lane, where the system crt supplies
+    # the entry) is omitted rather than passed as an empty argument.
+    if [ -n "$START" ]; then
+        $LD "$bin" "$START" "$obj" $HALF 2>/dev/null
+    else
+        $LD "$bin" "$obj" $HALF 2>/dev/null
+    fi
     if [ $? -ne 0 ]; then
         printf 'FAIL  %s (link error)\n' "$name"
         fail=$((fail + 1))

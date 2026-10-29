@@ -73,9 +73,31 @@ SPIM ?= spim
 # syntax the arm64 backends emit and writes ELF64 EM_AARCH64 objects.  Override
 # to the host cross assembler with A64_AS=aarch64-linux-gnu-as.  Linking stays
 # external (A64_LD).
+# Host architecture, for choosing native over cross tools.  On an arm64 host
+# (e.g. an Apple Silicon Mac or an arm64 Linux box) the AArch64 target is native,
+# so its C compiler is the host cc, not a cross gcc, and the native in-process
+# JIT is the arm64 one (jit_arm64 + call_guest_arm64), never the x86 one.
+HOST_ARCH := $(shell uname -m)
+HOST_IS_ARM64 := $(filter arm64 aarch64,$(HOST_ARCH))
+# The host OS, to pick OS-specific backends (e.g. the VMM: Darwin uses
+# Hypervisor.framework, Linux uses KVM).
+HOST_OS := $(shell uname -s)
+HOST_IS_DARWIN := $(filter Darwin,$(HOST_OS))
+# The in-process JIT that is native to this host: the arm64 one on an arm64 host,
+# the x86 one otherwise.  Building the x86 JIT on an arm64 host (or vice versa)
+# cannot work, its byte sink and call trampoline are for the other ISA.
+NATIVE_JIT := $(if $(HOST_IS_ARM64),build/skj-jit-arm64,build/skj-jit)
+# The in-process Kobold JIT native to this host, same reasoning as NATIVE_JIT.
+NATIVE_KP_JIT := $(if $(HOST_IS_ARM64),build/skj-kp-jit-arm64,build/skj-kp-jit)
+# The ahead-of-time Kobold compiler and its runtime archive native to this host.
+# The runtime bundles host-arch assembly (co_switch/call_guest), so the pair is
+# host-arch-bound exactly like the JIT.
+NATIVE_KP       := $(if $(HOST_IS_ARM64),build/skj-kp-arm64,build/skj-kp)
+NATIVE_LIBKPAOT := $(if $(HOST_IS_ARM64),build/libkpaot-arm64.a,build/libkpaot.a)
+
 A64_AS  ?= build/skj-as-aarch64
 A64_LD  ?= aarch64-linux-gnu-ld
-A64_CC  ?= aarch64-linux-gnu-gcc
+A64_CC  ?= $(if $(HOST_IS_ARM64),cc,aarch64-linux-gnu-gcc)
 # Rules that run $(A64_AS) depend on $(A64_ASM_DEP) so the in-tree assembler is
 # built first and dependents re-assemble when it changes; an override to the
 # host as clears the dependency.
@@ -157,12 +179,12 @@ TOOLS := build/skj-tinc build/skj-tinc-rv build/skj-tinc-mips build/skj-tinc-arm
          build/skj-sc build/skj-sc-rv build/skj-sc-mips build/skj-sc-arm64 \
          build/skj-mooc build/skj-pc build/skj-as build/skj-ld \
          build/skj-as-rv build/skj-ld-rv build/skj-as-mips build/skj-ld-mips build/skj-ar \
-         build/skj-as-x86-64 build/skj-as-aarch64 \
+         build/skj-as-x86-64 build/skj-as-aarch64 build/skj-ld-aarch64 \
          build/skj-cpp build/skj-cc build/skj-cc-x86-64 build/skj-cc-arm64 \
          build/skj-cc-rv build/skjcc build/skj-run \
          build/skj-addr2line build/skj-dbg \
-         build/skj-jit build/skj-kp-jit build/skj-kp-patrol \
-         build/skj-kp build/libkpaot.a build/skj-kpc \
+         $(NATIVE_JIT) $(NATIVE_KP_JIT) $(if $(HOST_IS_ARM64),,build/skj-kp-patrol) \
+         $(NATIVE_KP) $(NATIVE_LIBKPAOT) build/skj-kpc \
          build/skj-kpc-rv build/skj-kpc-cf build/skj-kpc-arm64
 
 all: $(TOOLS)
@@ -223,6 +245,13 @@ build/skj-cc-x86-64: $(CC_SRC_X64) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h back
 
 build/skj-cc-arm64: $(CC_SRC_A64) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h backend/arm64_mc.h backend/arm64_select.h backend/arm64_mc_text.h | build
 	$(CC) $(CFLAGS) -DSKJ_LP64=1 -DCC_PSABI -DCC_ARM64 $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_A64)
+
+# The same arm64 cc configured for the Darwin (Mach-O) target, for generating and
+# checking Mach-O output on a non-Darwin host.  The target is fixed at compile
+# time by -DSKJ_DARWIN; there is no run-time flavor flag (a native macOS build of
+# skj-cc-arm64 selects Darwin automatically).
+build/skj-cc-arm64-macho: $(CC_SRC_A64) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h backend/arm64_mc.h backend/arm64_select.h backend/arm64_mc_text.h | build
+	$(CC) $(CFLAGS) -DSKJ_LP64=1 -DCC_PSABI -DCC_ARM64 -DSKJ_DARWIN $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_A64)
 
 build/skj-cc-rv: $(CC_SRC_RV) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | build
 	$(CC) $(CFLAGS) -DCC_RISCV $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_RV)
@@ -346,6 +375,24 @@ build/skj-kp-jit: kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $
 build/kp_co_lp64.o: kobold/co.c kobold/co.h kobold/handle.h kobold/lowmem.h kobold/obj.h Makefile | build
 	$(CC) -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter -DX86_BITS=64 -Iir -Ijit -Ibackend -Ikobold -c kobold/co.c -o $@
 
+## Host-native codegen for building the host front-end tools (skj-kpc*).  These
+## tools embed the kpcom front end as native machine code, so they must be built
+## for THIS host's architecture to run, exactly like the native JIT.  HOST_PC is
+## the Pascal compiler that emits host-native assembly and host_assemble runs the
+## matching in-tree assembler; the x86-64 (X64) and AArch64 (A64) assemblers take
+## their operands in different orders, so the call is wrapped.  The TARGET each
+## tool emits modules for is set by its -d KP_TARGET_* flag and is independent of
+## the host.
+ifeq ($(HOST_IS_ARM64),)
+HOST_PC      := build/skj-pc-x86-64
+HOST_ASM_DEP := $(X64_ASM_DEP)
+host_assemble = $(X64_ASM) $(X64_ASMFLAGS) $(1) -o $(2)
+else
+HOST_PC      := build/skj-pc-arm64
+HOST_ASM_DEP := $(A64_ASM_DEP)
+host_assemble = $(A64_AS) -o $(2) $(1)
+endif
+
 ## skj-kpc: the native Kobold front end, the host compiler for the x86-64 target.
 ## Plan 9 style, the target baked at build: skj-pc compiles kpcom.pas with
 ## -d KP_TARGET_X64, so CurTarget is x86-64 (8-byte pointers, width derived from
@@ -353,19 +400,20 @@ build/kp_co_lp64.o: kobold/co.c kobold/co.h kobold/handle.h kobold/lowmem.h kobo
 ## no libkpaot; it links
 ## the host-import shim (ReadFileStr, WriteFileStr, kpd_*) and skj-pc's Pascal
 ## runtime, the same ones check-pc-kpcom uses.  skj-kpc-x86-64 is the explicit arch
-## name for the same binary.
-build/skj-kpc: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(X64_ASM_DEP) | build
-	build/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_X64 -o build/kpcom-x86-64-fe.s $(KPCOM_SRC_PAS)
-	$(X64_ASM) $(X64_ASMFLAGS) build/kpcom-x86-64-fe.s -o build/kpcom-x86-64-fe.o
+## name for the same binary.  Built host-native (HOST_PC/host_assemble) so it runs
+## on this host whatever its architecture.
+build/skj-kpc: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(HOST_ASM_DEP) | build
+	$(HOST_PC) -d KOBOLD -d KP_TARGET_X64 -o build/kpcom-x86-64-fe.s $(KPCOM_SRC_PAS)
+	$(call host_assemble,build/kpcom-x86-64-fe.s,build/kpcom-x86-64-fe.o)
 	$(CC) -no-pie build/kpcom-x86-64-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
 
 ## skj-kpc-arm64: the host front end for the AArch64 target.  Same LP64 width as
 ## skj-kpc, but KP_TARGET_ARM64 stamps `.target arm64`, so the arm64 backend accepts
-## its modules and rejects the x86-64 ones.  It runs on the x86-64 host (skj-pc
-## output); the arch it names is the target it emits for, not where it runs.
-build/skj-kpc-arm64: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(X64_ASM_DEP) | build
-	build/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_ARM64 -o build/kpcom-arm64-fe.s $(KPCOM_SRC_PAS)
-	$(X64_ASM) $(X64_ASMFLAGS) build/kpcom-arm64-fe.s -o build/kpcom-arm64-fe.o
+## its modules and rejects the x86-64 ones.  The arch it names is the target it
+## emits for, not where it runs; it is built host-native like skj-kpc.
+build/skj-kpc-arm64: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(HOST_ASM_DEP) | build
+	$(HOST_PC) -d KOBOLD -d KP_TARGET_ARM64 -o build/kpcom-arm64-fe.s $(KPCOM_SRC_PAS)
+	$(call host_assemble,build/kpcom-arm64-fe.s,build/kpcom-arm64-fe.o)
 	$(CC) -no-pie build/kpcom-arm64-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
 
 build/skj-kpc-x86-64: build/skj-kpc | build
@@ -379,14 +427,14 @@ build/skj-kpc-x86-64: build/skj-kpc | build
 ## the cc model: a unit built for rv32 is not a unit for ColdFire, so there is no
 ## shared "ilp32" front end.  (The architecture decides the pointer width; both
 ## happen to be 4 bytes, but that is a consequence, not a shared category.)
-build/skj-kpc-rv: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(X64_ASM_DEP) | build
-	build/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_RV -o build/kpcom-rv-fe.s $(KPCOM_SRC_PAS)
-	$(X64_ASM) $(X64_ASMFLAGS) build/kpcom-rv-fe.s -o build/kpcom-rv-fe.o
+build/skj-kpc-rv: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(HOST_ASM_DEP) | build
+	$(HOST_PC) -d KOBOLD -d KP_TARGET_RV -o build/kpcom-rv-fe.s $(KPCOM_SRC_PAS)
+	$(call host_assemble,build/kpcom-rv-fe.s,build/kpcom-rv-fe.o)
 	$(CC) -no-pie build/kpcom-rv-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
 
-build/skj-kpc-cf: build/skj-pc-x86-64 tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(X64_ASM_DEP) | build
-	build/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_CF -o build/kpcom-cf-fe.s $(KPCOM_SRC_PAS)
-	$(X64_ASM) $(X64_ASMFLAGS) build/kpcom-cf-fe.s -o build/kpcom-cf-fe.o
+build/skj-kpc-cf: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(HOST_ASM_DEP) | build
+	$(HOST_PC) -d KOBOLD -d KP_TARGET_CF -o build/kpcom-cf-fe.s $(KPCOM_SRC_PAS)
+	$(call host_assemble,build/kpcom-cf-fe.s,build/kpcom-cf-fe.o)
 	$(CC) -no-pie build/kpcom-cf-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
 
 ## skj-kp-jit-san: build/skj-kp-jit with the guest-heap write-after-free instrument
@@ -1623,6 +1671,9 @@ EMU_SRC   := emu/main.c emu/guest.c emu/hostplat.c emu/elf32.c emu/elf64.c
 EMU_HDR   := emu/guest.h emu/hostplat.h emu/elf32.h emu/elf64.h fs/fs.h
 EMU_FLAGS := -DEMU_COLDFIRE=$(EMU_COLDFIRE) -DEMU_RV32=$(EMU_RV32) \
              -DEMU_MIPS32=$(EMU_MIPS32) -DEMU_HV=$(EMU_HV) -Ifs
+## Extra link libraries an EMU backend needs (e.g. -framework Hypervisor for the
+## macOS VMM).  Empty on hosts whose backends are self-contained.
+EMU_LDLIBS :=
 ifeq ($(EMU_COLDFIRE),1)
 EMU_SRC += emu/coldfire.c emu/cf_user.c
 EMU_HDR += emu/coldfire.h
@@ -1647,12 +1698,20 @@ EMU_FLAGS += -DSKJ_MIPS_GDB
 endif
 ## The hardware-virtualization core (x86-64 and aarch64): the guest runs
 ## natively under the host hypervisor.  The VMM seam (emu/vmm.h) has one backend
-## per hypervisor: Linux KVM (emu/vmm_kvm.c) today, macOS Hypervisor.framework
-## (emu/vmm_hvf.c) to come.  The backend carries a stub fallback on an
-## unsupported host, so this builds everywhere and reports the VMM unavailable
-## at run time.
+## per hypervisor: Linux KVM (emu/vmm_kvm.c) and macOS Hypervisor.framework
+## (emu/vmm_hvf.c), picked by the host OS.  Each backend carries a stub fallback
+## on an unsupported host, so this builds everywhere and reports the VMM
+## unavailable at run time.
 ifeq ($(EMU_HV),1)
-EMU_SRC += emu/hvcore.c emu/vmm_kvm.c
+EMU_SRC += emu/hvcore.c
+ifeq ($(HOST_IS_DARWIN),Darwin)
+EMU_SRC += emu/vmm_hvf.c
+## The guest runs under Hypervisor.framework; the entitlement to actually launch
+## one is applied at codesign time, not here.
+EMU_LDLIBS += -framework Hypervisor
+else
+EMU_SRC += emu/vmm_kvm.c
+endif
 EMU_HDR += emu/vmm.h emu/hvcore.h emu/skj_hv_abi.h
 ifeq ($(EMU_HV_GDB),1)
 EMU_SRC += emu/hv_gdb.c
@@ -1682,7 +1741,7 @@ EMU_FLAGS += -DSKJ_DWARF_BACKTRACE -Idwarf -Iir
 endif
 
 build/skj-run: $(EMU_SRC) $(EMU_HDR) dwarf/dwread.h build/version.h | build
-	$(CC) $(CFLAGS) $(EMU_FLAGS) -Iemu -o $@ $(EMU_SRC) -lm
+	$(CC) $(CFLAGS) $(EMU_FLAGS) -Iemu -o $@ $(EMU_SRC) -lm $(EMU_LDLIBS)
 
 ## macOS (and other non-Linux hosts): skj-run is portable C.  The host-varying
 ## facilities (confined opens, directory enumeration, clock, sleep, random) sit
@@ -1693,16 +1752,27 @@ build/skj-run: $(EMU_SRC) $(EMU_HDR) dwarf/dwread.h build/version.h | build
 ## assembler, linker) is host-native too and builds the same way with `make all`.
 ## The one path this exercises that is still UNTESTED on a real Darwin machine is
 ## the cap_walk confined open (see TODO.md); everything else is shared POSIX.
+## The host-native tool set that builds on macOS with the stock clang and no
+## cross toolchain or qemu: the front ends, the native-ISA code generator, the
+## in-tree assemblers, the native in-process JIT, and the emulator.  The cross
+## targets in `all` (the rv/cf/mips front ends, guest runtimes and AOT archives)
+## need cross compilers macOS lacks, so they are out of this set.  The JIT and
+## the AArch64 C compiler follow the host arch (NATIVE_JIT, A64_CC), so an Apple
+## Silicon Mac builds the arm64 JIT, never the x86 one.
+MACOS_TOOLS := build/skj-cpp build/skj-cc build/skj-cc-arm64 build/skj-pc \
+               build/skj-tinc build/skj-sc build/skj-mooc \
+               build/skj-as-aarch64 build/skj-as-x86-64 \
+               $(NATIVE_JIT) build/skj-run
 .PHONY: macos
-macos: build/skj-run
-	@echo "built build/skj-run for $$(uname -s)"
+macos: $(MACOS_TOOLS)
+	@echo "built the macOS host tool set for $$(uname -s) ($(HOST_ARCH))"
 
 ## CI coverage for the portable confinement path: the same emulator with
 ## -DHP_FORCE_POSIX, which selects the cap_walk component walk in place of the
 ## Linux openat2 accelerator.  On Linux openat2 would otherwise hide cap_walk, so
 ## this is how CI compiles and exercises the path every non-Linux host relies on.
 build/skj-run-posix: $(EMU_SRC) $(EMU_HDR) dwarf/dwread.h build/version.h | build
-	$(CC) $(CFLAGS) $(EMU_FLAGS) -DHP_FORCE_POSIX -Iemu -o $@ $(EMU_SRC) -lm
+	$(CC) $(CFLAGS) $(EMU_FLAGS) -DHP_FORCE_POSIX -Iemu -o $@ $(EMU_SRC) -lm $(EMU_LDLIBS)
 
 ## VMM mechanism self-test: builds a tiny guest blob and drives it through the
 ## VMM backend (emu/vmm_kvm.c: long-mode bring-up plus the syscall doorbell).
@@ -1749,7 +1819,7 @@ build/hv-x86_64/hello_c.elf: tests/hv/hello_c.c build/skj-cc-x86-64 \
 	    build/hv-x86_64/start.o build/hv-x86_64/hello_c.o build/hv-x86_64/syscall.o
 
 test-hv-x86-64: build/skj-run build/hv-x86_64/hello.elf build/hv-x86_64/hello_c.elf
-	@if [ ! -e /dev/kvm ]; then echo "SKIP: hv x86-64 (no /dev/kvm)"; exit 0; fi; \
+	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: hv x86-64 (no accessible /dev/kvm)"; exit 0; fi; \
 	 out=$$(./build/skj-run build/hv-x86_64/hello.elf 2>/dev/null); ec=$$?; \
 	 if [ "$$out" != "hello hv x86" ] || [ $$ec -ne 42 ]; then \
 	    echo "FAIL: hv x86-64 asm guest (out='$$out' exit=$$ec)"; exit 1; fi; \
@@ -1779,15 +1849,16 @@ build/hv-arm64/hello_c.elf: tests/hv/hello_c.c build/skj-cc-arm64 \
 	$(A64_LD) -e _start -Ttext=0x100000 --build-id=none -o $@ \
 	    build/hv-arm64/start.o build/hv-arm64/hello_c.o build/hv-arm64/syscall.o
 
-## The guest builds on any host; it runs only on an aarch64 host with KVM (the
-## guest arch must equal the host's), so elsewhere this reports a build pass.
+## The guest builds on any host; it runs only on an aarch64 host with an
+## accessible /dev/kvm (the guest arch must equal the host's), so elsewhere this
+## reports a build pass.
 test-hv-arm64: build/skj-run build/hv-arm64/hello_c.elf
-	@if [ "$$(uname -m)" = "aarch64" ] && [ -e /dev/kvm ]; then \
+	@if [ "$$(uname -m)" = "aarch64" ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then \
 	    out=$$(./build/skj-run build/hv-arm64/hello_c.elf 2>/dev/null); ec=$$?; \
 	    if [ "$$out" != "hello from C under HV" ] || [ $$ec -ne 7 ]; then \
 	       echo "FAIL: hv arm64 C guest (out='$$out' exit=$$ec)"; exit 1; fi; \
 	    echo "PASS: hv arm64 (C guest via doorbell)"; \
-	 else echo "PASS: hv arm64 (build only; no aarch64 KVM host)"; fi
+	 else echo "PASS: hv arm64 (build only; no accessible aarch64 KVM)"; fi
 
 ## HV preemption (item 11): a compute-bound guest that never traps to the
 ## doorbell is still preemptible.  A periodic timer breaks into KVM_RUN, so the
@@ -1798,7 +1869,7 @@ test-hv-arm64: build/skj-run build/hv-arm64/hello_c.elf
 ## instead of a hang.  Needs /dev/kvm (an x86-64 host); skips otherwise.
 test-hv-preempt: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
                  build/hv-x86_64/start.o build/hv-x86_64/syscall.o
-	@if [ ! -e /dev/kvm ]; then echo "SKIP: test-hv-preempt (no /dev/kvm)"; exit 0; fi; \
+	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: test-hv-preempt (no accessible /dev/kvm)"; exit 0; fi; \
 	 ./build/skj-cc-x86-64 -o build/hv-x86_64/spin.s tests/hv/spin.c; \
 	 ./build/skj-as-x86-64 -o build/hv-x86_64/spin.o build/hv-x86_64/spin.s; \
 	 $(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none \
@@ -1823,7 +1894,7 @@ test-hv-preempt: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
 HV_GDB ?= gdb
 test-hv-gdb: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
              build/hv-x86_64/start.o build/hv-x86_64/syscall.o
-	@if [ ! -e /dev/kvm ]; then echo "SKIP: test-hv-gdb (no /dev/kvm)"; exit 0; fi; \
+	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: test-hv-gdb (no accessible /dev/kvm)"; exit 0; fi; \
 	 if ! command -v $(HV_GDB) >/dev/null 2>&1; then \
 	     echo "SKIP: test-hv-gdb ($(HV_GDB) not found)"; exit 0; fi; \
 	 mkdir -p build/debug; \
@@ -1849,6 +1920,86 @@ test-hv-gdb: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
 	 if [ $$ok = 1 ]; then \
 	     echo "PASS: gdb drives the skj-run HV x86-64 RSP stub (break, regs, mem, exit)"; \
 	 else cat build/debug/xg.out; exit 1; fi
+
+## Native macOS (Mach-O) target smoke (0.29.0 strand 3, Phase 1).  skj-cc-arm64
+## emits Mach-O-assemblable AArch64 (the Darwin flavor: _-prefixed symbols, Mach-O
+## sections, PC-relative symbol addresses, stack-passed variadic arguments), and
+## Apple clang assembles and links it against libSystem into a native executable.
+## On a Darwin arm64 host it builds and runs the program; elsewhere (CI runs on
+## Linux) it forces the Mach-O flavor with -mmacho and checks the framing, so the
+## emitter path is exercised without a mac.  MACHO_CC is the host C toolchain that
+## drives the assembler and linker (clang).
+MACHO_CC ?= clang
+test-macho-arm64: build/skj-cc-arm64 build/skj-cc-arm64-macho build/skj-as-aarch64 build/skj-ld-aarch64 tests/macho/hello.c | build
+	@if [ "$$(uname -s)" = "Darwin" ] && [ "$$(uname -m)" = "arm64" ]; then \
+	    ./build/skj-cc-arm64 -o build/hello_macho.s tests/macho/hello.c; \
+	    ./build/skj-as-aarch64 -o build/hello_macho.o build/hello_macho.s; \
+	    ./build/skj-ld-aarch64 -o build/hello_macho build/hello_macho.o; \
+	    out=$$(./build/hello_macho); ec=$$?; \
+	    if [ "$$out" != "hello macho 42" ] || [ $$ec -ne 0 ]; then \
+	       echo "FAIL: macho arm64 (out='$$out' exit=$$ec)"; exit 1; fi; \
+	    echo "PASS: macho arm64 (skj-cc-arm64 -> skj-as-aarch64 -> skj-ld-aarch64 -> native run)"; \
+	 else \
+	    ./build/skj-cc-arm64-macho -o build/hello_macho.s tests/macho/hello.c; \
+	    if grep -q '^_main:' build/hello_macho.s && \
+	       grep -q '@PAGE' build/hello_macho.s && \
+	       ! grep -q 'note.GNU-stack' build/hello_macho.s; then \
+	        echo "PASS: macho arm64 (Mach-O generation only; not a Darwin arm64 host)"; \
+	    else echo "FAIL: macho arm64 generation framing wrong"; exit 1; fi; \
+	 fi
+
+## The native macOS (Mach-O) corpus lanes: compile each cc/libc test with
+## skj-cc-arm64 (Mach-O), assemble and link with Apple clang against libSystem,
+## and run natively.  These exercise the Mach-O code generation across the whole
+## corpus (the compiler, not the in-tree libc, which is not ported to Darwin
+## syscalls; libSystem is the C library).  They run only on a Darwin arm64 host;
+## a Mach-O binary cannot run elsewhere, so off a mac they skip.
+##
+## MACHO_CC_EXCLUDE / MACHO_LIBC_TESTS carry the corpus tailoring: a few programs
+## depend on a C-library detail that differs from libSystem (a struct layout such
+## as FILE, or an in-tree-libc or Darwin-unsupported feature) and are named here.
+## The libc lane links libSystem for the C library, not the in-tree libc, so it
+## runs only the few phase programs that assert standard C behavior and reference
+## no in-tree internals (see MACHO_LIBC_TESTS below for the selection rationale).
+# The Darwin variadic ABI is implemented on both sides: the caller passes the
+# variadic arguments on the stack, and a variadic callee's va_start walks that
+# stack through the va_list.  So the whole cc corpus runs, including the programs
+# that define variadic functions.  The lane links runtime/va_aarch64.c, whose
+# __va_arg those programs call (its stack path serves the Darwin walk).
+MACHO_CC_EXCLUDE ?=
+# The libc corpus is written against the in-tree libc, so most of it is not
+# portable to libSystem and only the phases that assert standard C behavior and
+# reference no in-tree internals run here.  Phase e covers the snprintf float
+# conversions (%f/%e/%g) and phase g covers atexit ordering and exit-time flush;
+# both call libSystem through the Darwin variadic ABI and produce output a
+# standard C library matches.  The rest are excluded on purpose: phases a and b
+# assert implementation-defined choices the in-tree libc makes but libSystem does
+# not (malloc(0)/realloc(p,0) return NULL, %p prints "(nil)"); phase f pins the
+# in-tree rand sequence and strerror strings; phases c and h reference in-tree
+# symbols absent from libSystem (__libc_stdin/__libc_stdout, __libc_malloc_live);
+# and the FILE/fs/threads/coroutine phases are in-tree-only as well.
+MACHO_LIBC_TESTS ?= tests/libc_phase_e.c tests/libc_phase_g.c
+check-cc-macho-arm64: build/skj-cc-arm64 build/skj-as-aarch64 build/skj-ld-aarch64 runtime/va_aarch64.c | build
+	@if [ "$$(uname -s)" != "Darwin" ] || [ "$$(uname -m)" != "arm64" ]; then \
+	    echo "SKIP: check-cc-macho-arm64 (not a Darwin arm64 host)"; exit 0; fi; \
+	 mkdir -p "$(CURDIR)/build/macho-cc"; \
+	 ./build/skj-cc-arm64 -o "$(CURDIR)/build/macho-cc/va.s" runtime/va_aarch64.c; \
+	 ./build/skj-as-aarch64 -o "$(CURDIR)/build/macho-cc/va.o" \
+	    "$(CURDIR)/build/macho-cc/va.s"; \
+	 CCBIN="$(CURDIR)/build/skj-cc-arm64" \
+	 ASM="$(CURDIR)/build/skj-as-aarch64 -o" LD="$(CURDIR)/build/skj-ld-aarch64 -o" \
+	 START="" HALF="$(CURDIR)/build/macho-cc/va.o" QEMU="" \
+	 OUTDIR="$(CURDIR)/build/macho-cc" \
+	 EXCLUDE="$(MACHO_CC_EXCLUDE)" sh tests/run-cc-tests.sh
+
+check-libc-macho-arm64: build/skj-cc-arm64 build/skj-as-aarch64 build/skj-ld-aarch64 | build
+	@if [ "$$(uname -s)" != "Darwin" ] || [ "$$(uname -m)" != "arm64" ]; then \
+	    echo "SKIP: check-libc-macho-arm64 (not a Darwin arm64 host)"; exit 0; fi; \
+	 CCBIN="$(CURDIR)/build/skj-cc-arm64" \
+	 ASM="$(CURDIR)/build/skj-as-aarch64 -o" LD="$(CURDIR)/build/skj-ld-aarch64 -o" \
+	 START="" HALF="" QEMU="" LIBC=" " CFLAGS="-DSKJ_LIBC_FLOAT" \
+	 TEST="$(addprefix $(CURDIR)/,$(MACHO_LIBC_TESTS))" \
+	 OUTDIR="$(CURDIR)/build/macho-libc" sh tests/run-libc-tests.sh
 
 ## ColdFire assembler
 AS_SRC := as/main.c as/asm_lex.c as/asm_obj.c as/parse.c as/encode.c as/elf.c \
@@ -1887,11 +2038,17 @@ build/skj-as-x86-64: $(AS_X64_SRC) as/x86_64.h as/asm_lex.h as/asm_obj.h | build
 ## AArch64 assembler (shares the lexer + object helpers with skj-as).  Reads the
 ## native GNU as syntax the arm64 backends emit; no DWARF (bounded input).
 AS_A64_SRC := as/aarch64_main.c as/asm_lex.c as/asm_obj.c as/aarch64_parse.c \
-              as/aarch64_encode.c as/aarch64_elf.c \
+              as/aarch64_encode.c as/aarch64_elf.c as/aarch64_macho.c \
               ir/util.c ir/arena.c
 
 build/skj-as-aarch64: $(AS_A64_SRC) as/aarch64.h as/asm_lex.h as/asm_obj.h | build
 	$(CC) $(CFLAGS) -Ias -Iir -o $@ $(AS_A64_SRC)
+
+# The same assembler configured for the Darwin (Mach-O) target, for cross use on
+# a non-Darwin host.  The output format is fixed at compile time by -DSKJ_DARWIN;
+# a native macOS build of skj-as-aarch64 selects Mach-O automatically.
+build/skj-as-aarch64-macho: $(AS_A64_SRC) as/aarch64.h as/asm_lex.h as/asm_obj.h | build
+	$(CC) $(CFLAGS) -DSKJ_DARWIN -Ias -Iir -o $@ $(AS_A64_SRC)
 
 ## skj-ld linker
 LD_SRC := ld/main.c ld/elf_read.c ld/script.c ld/link.c ld/elf_write.c ld/mapfile.c ld/archive.c ir/util.c ir/arena.c
@@ -1915,6 +2072,15 @@ LD_MIPS_SRC := ld/mips_main.c ld/mips_elf_read.c ld/mips_link.c \
 
 build/skj-ld-mips: $(LD_MIPS_SRC) ld/ld.h ld/mips_ld.h ld/mapfile.h | build
 	$(CC) $(CFLAGS) -Ild -Iir -o $@ $(LD_MIPS_SRC)
+
+## Mach-O linker for the Darwin arm64 target: reads the MH_OBJECT relocatables
+## skj-as-aarch64 writes, binds libSystem imports through stubs and a __got, and
+## self-signs ad-hoc.  A fresh codebase (the ELF linkers share nothing with it).
+LD_MACHO_SRC := ld/macho_main.c ld/macho_read.c ld/macho_link.c \
+                ld/macho_sha256.c ir/util.c ir/arena.c
+
+build/skj-ld-aarch64: $(LD_MACHO_SRC) ld/macho_ld.h | build
+	$(CC) $(CFLAGS) -Ild -Iir -o $@ $(LD_MACHO_SRC)
 
 ## skj-ar: a minimal ar(1) archive tool (create with symbol index, list,
 ## extract).  Generic over the object machine and byte order, so one tool
@@ -2589,7 +2755,7 @@ build/san/test_rv_fp: tests/test_rv_fp.c emu/rv32.c emu/rv32.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Iemu -o $@ tests/test_rv_fp.c emu/rv32.c -lm
 
 build/san/skj-run: $(EMU_SRC) $(EMU_HDR) build/version.h | build build/san
-	$(CC) $(CFLAGS) $(SAN_CFLAGS) $(EMU_FLAGS) -Iemu -o $@ $(EMU_SRC) -lm
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) $(EMU_FLAGS) -Iemu -o $@ $(EMU_SRC) -lm $(EMU_LDLIBS)
 
 check-emu-san: build/san/test_rv_run build/san/test_guest_mmap \
                build/san/test_rv_decode_cache build/san/test_rv_irq \
@@ -6443,4 +6609,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-preempt check-libc-hv-x86-64 check-libc-hv-arm64 check-vendor coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-preempt check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE

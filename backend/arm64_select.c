@@ -18,6 +18,14 @@
 #define NSAVED 10               /* callee-saved x19..x28 */
 #define ARM64_MAX_ARGS 32
 
+/* Darwin (Apple) AArch64 ABI differs from AAPCS64 in two ways this selector
+   handles, both keyed off the build-time SKJ_ARM64_DARWIN constant (arm64_mc.h):
+   the arguments of a variadic call that correspond to the `...` are passed on
+   the stack, not in x0-x7/d0-d7 (the cc front end tags those IR_ARG nodes with
+   ->vararg, as the RISC-V backend reads), and a variadic callee walks that stack
+   through its va_list with no register save area.  A native macOS build selects
+   this; a cross build selects it with -DSKJ_DARWIN. */
+
 /****************************************************************
  * Register model
  *
@@ -132,7 +140,10 @@ aapcs_nreg_params(struct ir_func *fn)
 }
 
 static int param_home(struct ir_func *fn) { return aapcs_nreg_params(fn) * 8; }
-static int va_save(struct ir_func *fn) { return fn->is_variadic ? 192 : 0; }
+/* The AAPCS64 variadic callee saves x0-x7 and q0-q7 into a 192-byte register
+   save area so va_arg can walk the register-passed arguments.  Darwin passes
+   every variadic argument on the stack, so it needs no save area. */
+static int va_save(struct ir_func *fn) { return (fn->is_variadic && !SKJ_ARM64_DARWIN) ? 192 : 0; }
 static int frame_reserve(struct ir_func *fn) { return param_home(fn) + va_save(fn); }
 
 static int
@@ -367,8 +378,9 @@ prologue(struct mc64 *m, struct ir_func *fn)
     }
 
     /* Variadic: save all argument registers to the register save area (base at
-       x29 - frame_reserve) so va_arg can walk them. */
-    if (fn->is_variadic) {
+       x29 - frame_reserve) so va_arg can walk them.  Darwin has no save area
+       (its varargs are all on the stack), so there is nothing to save there. */
+    if (fn->is_variadic && !SKJ_ARM64_DARWIN) {
         int base = -frame_reserve(fn);
         for (k = 0; k < 8; k++)
             mc64_strx(m, k, MC64_FP, base + 8 * k);
@@ -418,8 +430,8 @@ enum { RET_I32, RET_I64, RET_FLOAT, RET_FAIL };
    its target with no parallel-move hazard. */
 static void
 emit_call(struct mc64 *m, struct ir_func *fn, struct ir_insn *in,
-          int *at, char *aisf, char *ai64, char *af32, int *amem, int narg,
-          int x8_temp, int indirect, int retkind)
+          int *at, char *aisf, char *ai64, char *af32, int *amem, char *avar,
+          int narg, int x8_temp, int indirect, int retkind)
 {
     int treg[ARM64_MAX_ARGS], onstk[ARM64_MAX_ARGS], ssize[ARM64_MAX_ARGS];
     int iu = 0, du = 0, stack_bytes = 0, stkb, off, k;
@@ -430,6 +442,11 @@ emit_call(struct mc64 *m, struct ir_func *fn, struct ir_insn *in,
         if (amem[k] > 0) {
             onstk[k] = 1;
             ssize[k] = (amem[k] + 7) & ~7;
+        } else if (SKJ_ARM64_DARWIN && avar[k]) {
+            /* Darwin passes the variadic (`...`) arguments on the stack, each in
+               an eight-byte slot, whatever register files are still free. */
+            onstk[k] = 1;
+            ssize[k] = 8;
         } else if (aisf[k]) {
             if (du < 8) treg[k] = du++; else { onstk[k] = 1; ssize[k] = 8; }
         } else {
@@ -835,6 +852,7 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
     int *lbl;
     int at[ARM64_MAX_ARGS], amem[ARM64_MAX_ARGS], narg = 0, x8_temp = -1;
     char aisf[ARM64_MAX_ARGS], ai64[ARM64_MAX_ARGS], af32[ARM64_MAX_ARGS];
+    char avar[ARM64_MAX_ARGS];      /* 1 = unnamed arg of a variadic call */
     char *is_float;
     unsigned char *f32fmt;
     int rc = 0;
@@ -1142,6 +1160,7 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
                 ai64[narg] = (char)(in->op == IR_ARG64);
                 af32[narg] = (char)(in->op == IR_FARG && in->imm == FWIDTH_F32);
                 amem[narg] = in->op == IR_ARG_MEM ? (int)in->imm : 0;
+                avar[narg] = (char)in->vararg;
                 narg++;
             }
             break;
@@ -1149,42 +1168,42 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
             x8_temp = in->a;
             break;
         case IR_CALL:
-            emit_call(m, fn, in, at, aisf, ai64, af32, amem, narg, x8_temp, 0, RET_I32);
+            emit_call(m, fn, in, at, aisf, ai64, af32, amem, avar, narg, x8_temp, 0, RET_I32);
             narg = 0; x8_temp = -1;
             break;
         case IR_CALL64:
-            emit_call(m, fn, in, at, aisf, ai64, af32, amem, narg, x8_temp, 0, RET_I64);
+            emit_call(m, fn, in, at, aisf, ai64, af32, amem, avar, narg, x8_temp, 0, RET_I64);
             narg = 0; x8_temp = -1;
             break;
         case IR_FCALL:
-            emit_call(m, fn, in, at, aisf, ai64, af32, amem, narg, x8_temp, 0, RET_FLOAT);
+            emit_call(m, fn, in, at, aisf, ai64, af32, amem, avar, narg, x8_temp, 0, RET_FLOAT);
             narg = 0; x8_temp = -1;
             break;
         case IR_CALLI:
-            emit_call(m, fn, in, at, aisf, ai64, af32, amem, narg, x8_temp, 1, RET_I32);
+            emit_call(m, fn, in, at, aisf, ai64, af32, amem, avar, narg, x8_temp, 1, RET_I32);
             narg = 0; x8_temp = -1;
             break;
         case IR_CALL2:
-            emit_call(m, fn, in, at, aisf, ai64, af32, amem, narg, x8_temp, 0, RET_FAIL);
+            emit_call(m, fn, in, at, aisf, ai64, af32, amem, avar, narg, x8_temp, 0, RET_FAIL);
             narg = 0; x8_temp = -1;
             break;
         case IR_CALLI2:
-            emit_call(m, fn, in, at, aisf, ai64, af32, amem, narg, x8_temp, 1, RET_FAIL);
+            emit_call(m, fn, in, at, aisf, ai64, af32, amem, avar, narg, x8_temp, 1, RET_FAIL);
             narg = 0; x8_temp = -1;
             break;
         case IR_CALLI64:
-            emit_call(m, fn, in, at, aisf, ai64, af32, amem, narg, x8_temp, 1, RET_I64);
+            emit_call(m, fn, in, at, aisf, ai64, af32, amem, avar, narg, x8_temp, 1, RET_I64);
             narg = 0; x8_temp = -1;
             break;
         case IR_FCALLI:
-            emit_call(m, fn, in, at, aisf, ai64, af32, amem, narg, x8_temp, 1, RET_FLOAT);
+            emit_call(m, fn, in, at, aisf, ai64, af32, amem, avar, narg, x8_temp, 1, RET_FLOAT);
             narg = 0; x8_temp = -1;
             break;
         case IR_CALL_AGG: case IR_CALLI_AGG: {
             int neb = (int)(in->imm & 7);
             int stride = (((int)(in->imm >> 3) & 3) == 2) ? 4 : 8;
             int j, ii = 0, ff = 0, base;
-            emit_call(m, fn, in, at, aisf, ai64, af32, amem, narg, x8_temp,
+            emit_call(m, fn, in, at, aisf, ai64, af32, amem, avar, narg, x8_temp,
                       in->op == IR_CALLI_AGG, RET_I64);
             narg = 0; x8_temp = -1;
             base = slot_offset(fn, in->slot);
@@ -1404,6 +1423,19 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
             }
             fr = frame_reserve(fn);
             ap = ra(m, fn, in->a, SC1);          /* va_list address in x10 or reg */
+            if (SKJ_ARM64_DARWIN) {
+                /* Darwin passes every variadic argument on the stack, so the
+                   va_list is a plain cursor: point __stack past the named stack
+                   arguments and leave both register-save offsets at zero, so
+                   __va_arg always takes the stack path (runtime/va_aarch64.c).
+                   __gr_top/__vr_top are unused on that path. */
+                mc64_addimm(m, SC0, MC64_FP, 16 + 8 * ns);   /* __stack */
+                mc64_strx(m, SC0, ap, 0);
+                mc64_movimm(m, 0, SC0, 0);
+                mc64_strw(m, SC0, ap, 24);            /* __gr_offs = 0 */
+                mc64_strw(m, SC0, ap, 28);            /* __vr_offs = 0 */
+                break;
+            }
             mc64_addimm(m, SC0, MC64_FP, 16 + 8 * ns);   /* __stack */
             mc64_strx(m, SC0, ap, 0);
             mc64_addimm(m, SC0, MC64_FP, -fr + 64);       /* __gr_top */

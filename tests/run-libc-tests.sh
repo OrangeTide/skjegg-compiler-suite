@@ -28,7 +28,7 @@ ASM="${ASM:-$ROOT/build/skj-as -o}"
 LD="${LD:-m68k-linux-gnu-ld -o}"
 # An explicitly empty QEMU means "run natively"; only an unset QEMU defaults.
 QEMU="${QEMU-qemu-m68k}"
-START="${START:-$ROOT/build/start.o}"
+START="${START-$ROOT/build/start.o}"
 HALF="${HALF-$ROOT/build/half.o}"
 OUTDIR="${OUTDIR:-$ROOT/build}"
 TEST="${TEST:-$ROOT/tests/libc_phase_a.c $ROOT/tests/libc_phase_b.c $ROOT/tests/libc_phase_c.c $ROOT/tests/libc_phase_e.c $ROOT/tests/libc_phase_f.c $ROOT/tests/libc_phase_g.c $ROOT/tests/libc_phase_h.c $ROOT/tests/libc_coroutine.c $ROOT/tests/libc_threads_stress.c $ROOT/tests/libc_statx.c $ROOT/tests/libc_pathops.c $ROOT/tests/libc_readdir.c}"
@@ -113,8 +113,15 @@ for test in $TEST; do
         continue
     fi
     $ASM "$obj" "$asm"
+    # START empty (the macOS/libSystem lane: the system crt supplies the entry
+    # and libSystem the C library, so no in-tree crt or libc objects are linked)
+    # is omitted rather than passed as an empty argument.
     # shellcheck disable=SC2086
-    $LD "$bin" "$START" "$obj" $libc_objs $HALF
+    if [ -n "$START" ]; then
+        $LD "$bin" "$START" "$obj" $libc_objs $HALF
+    else
+        $LD "$bin" "$obj" $libc_objs $HALF
+    fi
 
     # BUILD_ONLY proves the compile/assemble/link path on a host that cannot run
     # the result (the aarch64 HV guest needs an aarch64 KVM host).

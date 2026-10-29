@@ -23,6 +23,18 @@
 #ifndef ARM64_MC_H
 #define ARM64_MC_H
 
+/* The AArch64 target's object format and ABI are fixed when the tool is built
+   (one binary per target, Plan 9 style), never selected at run time.  A native
+   macOS build turns the Darwin flavor on automatically; a cross build turns it
+   on with -DSKJ_DARWIN.  The text sink (Mach-O vs ELF framing), the selector
+   (Darwin vs AAPCS64 variadic ABI), and the in-tree assembler and linker all key
+   off this one constant, so the compiler folds the unused path away. */
+#if defined(__APPLE__) || defined(SKJ_DARWIN)
+#define SKJ_ARM64_DARWIN 1
+#else
+#define SKJ_ARM64_DARWIN 0
+#endif
+
 #include <stddef.h>
 #include <stdint.h>
 

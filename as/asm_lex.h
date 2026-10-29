@@ -43,6 +43,9 @@ enum token_type {
        operand.  Previously skipped by the default arm, so this is a pure
        superset that leaves the other assemblers' token streams unchanged. */
     T_EQUAL,
+    /* AArch64 Mach-O relocation suffix sigil, `_sym@PAGE` / `_sym@PAGEOFF`.
+       Previously skipped by the default arm, so this too is a pure superset. */
+    T_AT,
 };
 
 struct token {

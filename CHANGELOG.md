@@ -6,6 +6,48 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.29.0
+
+#### Added
+- A macOS Hypervisor.framework backend for the `skj-run` VMM, the peer of the
+  Linux KVM backend. On an Apple Silicon host an arm64 guest runs natively under
+  Hypervisor.framework, driven through the same backend-neutral VMM seam, syscall
+  doorbell, and scheduler as the KVM path; the backend is chosen by the host OS.
+- Native macOS (Mach-O) code generation and a complete in-tree Mach-O toolchain
+  for arm64. `skj-cc-arm64` emits Mach-O-assemblable AArch64, `skj-as-aarch64`
+  writes Mach-O `MH_OBJECT` relocatables, and `skj-ld-aarch64`, a new in-tree
+  Mach-O static linker, lays out a PIE `MH_EXECUTE`: it resolves symbols, binds
+  libSystem imports through arm64 stubs and a `__got` with dyld bind opcodes,
+  applies the arm64 relocations, and self-signs with an ad-hoc SHA-256 code
+  signature. The whole cc corpus and the computational libc phases compile and
+  run natively on Apple Silicon through the fully in-tree pipeline (`skj-cc-arm64`
+  then `skj-as-aarch64` then `skj-ld-aarch64`), with no Apple assembler or linker.
+  Linking is hosted on libSystem.
+- The Darwin AArch64 variadic ABI, on both the caller and the callee side: the
+  variadic arguments of a call go on the stack, and a variadic function walks
+  them there with no register save area, so C programs that call or define
+  variadic functions build and run on macOS.
+- macOS cc and libc test lanes, `check-cc-macho-arm64` and
+  `check-libc-macho-arm64`, that compile, link, and run natively on a Darwin
+  arm64 host through the in-tree toolchain and skip elsewhere.
+- Host-architecture detection in the build, so a plain `make` on a non-x86_64
+  host (arm64 Linux or macOS) builds the native in-process JITs and host tools
+  for that architecture instead of the x86-64 ones.
+- Documentation of the VMM sandbox prerequisites and setup for each platform and
+  architecture.
+
+#### Changed
+- The AArch64 object format and ABI are fixed when a tool is built, not selected
+  at run time (one binary per target): a native macOS build targets Mach-O and
+  the Darwin ABI automatically, a cross build selects them with `-DSKJ_DARWIN`.
+- The arm64 identity-MMU bring-up for the KVM backend brings the Linux x86-64 and
+  AArch64 hardware-virtualization backends to full parity, so an AArch64 guest
+  runs correctly under KVM on an AArch64 host.
+
+#### Fixed
+- The hardware-virtualization test targets skip cleanly, rather than failing,
+  when `/dev/kvm` exists but is not accessible to the user.
+
 ### 0.28.0
 
 #### Added

@@ -97,7 +97,14 @@ main(int argc, char **argv)
         out = stdout;
     }
 
+    /* The object format is fixed at build time (Plan 9 style): a native macOS
+       build emits Mach-O, a cross build emits it with -DSKJ_DARWIN, otherwise
+       ELF.  There is no run-time flag. */
+#if defined(__APPLE__) || defined(SKJ_DARWIN)
+    a64_macho_write(&a, out);
+#else
     a64_elf_write(&a, out);
+#endif
 
     if (outpath)
         fclose(out);

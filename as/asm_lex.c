@@ -412,6 +412,7 @@ lex_next(struct lexer *l)
         case ']': l->pos++; l->tok.type = T_RBRACKET; return;
         case '*': l->pos++; l->tok.type = T_STAR; return;
         case '=': l->pos++; l->tok.type = T_EQUAL; return;
+        case '@': l->pos++; l->tok.type = T_AT; return;
         case '-': l->pos++; l->tok.type = T_MINUS; return;
         case '+': l->pos++; l->tok.type = T_PLUS; return;
         case '%':

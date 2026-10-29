@@ -9,10 +9,20 @@
  * registers d8-d15 are saved too, since a suspended coroutine may hold live
  * floats. */
 
+/* Mach-O (macOS) prefixes C symbols with an underscore and rejects the ELF-only
+   .type/.size/.note.GNU-stack directives; ELF uses the bare name and wants them. */
+#if defined(__APPLE__)
+# define GSYM(n) _##n
+#else
+# define GSYM(n) n
+#endif
+
     .text
-    .globl co_switch
+    .globl GSYM(co_switch)
+#if !defined(__APPLE__)
     .type co_switch, %function
-co_switch:
+#endif
+GSYM(co_switch):
     stp x19, x20, [sp, #-16]!
     stp x21, x22, [sp, #-16]!
     stp x23, x24, [sp, #-16]!
@@ -40,6 +50,8 @@ co_switch:
     ldp x21, x22, [sp], #16
     ldp x19, x20, [sp], #16
     ret
+#if !defined(__APPLE__)
     .size co_switch, .-co_switch
 
     .section .note.GNU-stack,"",%progbits
+#endif

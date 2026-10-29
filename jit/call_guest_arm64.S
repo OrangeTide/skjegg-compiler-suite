@@ -12,10 +12,20 @@
  * the guest reads only the ones its signature declares and ignores the rest.
  * The integer result comes back in x0; the float result is stored through fret. */
 
+/* Mach-O (macOS) prefixes C symbols with an underscore and rejects the ELF-only
+   .type/.size/.note.GNU-stack directives; ELF uses the bare name and wants them. */
+#if defined(__APPLE__)
+# define GSYM(n) _##n
+#else
+# define GSYM(n) n
+#endif
+
     .text
-    .globl kp_call_guest
+    .globl GSYM(kp_call_guest)
+#if !defined(__APPLE__)
     .type kp_call_guest, %function
-kp_call_guest:
+#endif
+GSYM(kp_call_guest):
     stp x29, x30, [sp, #-16]!
     stp x19, x20, [sp, #-16]!
     stp x21, x22, [sp, #-16]!
@@ -50,7 +60,9 @@ kp_call_guest:
     ldp x19, x20, [sp], #16
     ldp x29, x30, [sp], #16
     ret                     /* integer result already in x0 */
+#if !defined(__APPLE__)
     .size kp_call_guest, .-kp_call_guest
 
     /* Mark the stack non-executable so the linker does not warn. */
     .section .note.GNU-stack,"",%progbits
+#endif

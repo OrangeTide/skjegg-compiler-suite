@@ -15,6 +15,10 @@
    kp_call_guest, exactly as the JIT driver does.  The program is linked -no-pie so
    its code and data also sit below 4GB. */
 
+#if !defined(_DARWIN_C_SOURCE)
+#define _DEFAULT_SOURCE                 /* glibc gates MAP_ANONYMOUS behind this */
+#endif
+
 #include "str.h"
 #include "target.h"
 
