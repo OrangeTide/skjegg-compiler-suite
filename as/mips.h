@@ -89,6 +89,17 @@ struct mips_asm {
     int pass;
 
     const char *sched_src;  /* the source after delay-slot scheduling */
+
+    /* Numeric local labels (GAS 1: / 1f / 1b): a redefinition counter per
+     * label number, grown as new numbers appear so any non-negative label
+     * works, not just a single digit. */
+    struct mips_numlabel {
+        int num;
+        int count;
+    } *numlabels;
+    int n_numlabels;
+    int numlabel_cap;
+
     const char *debug_file; /* DWARF source name from .file (-g), or NULL */
     struct mips_locrow {
         uint32_t offset;    /* .text byte offset of a .loc */

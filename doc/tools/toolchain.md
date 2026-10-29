@@ -78,26 +78,46 @@ the Tools Directly" section shows the full sequence.
 
 ## Assembler, linker, and archiver
 
-The in-tree assembler and linker target ColdFire/m68k. They read the backend's
-GNU-assembler syntax and produce big-endian ELF32, and they replace the external
-`m68k-linux-gnu` tools for that target.
+The toolkit ships an in-tree assembler for every target, so a build needs no
+external assembler. Each reads the GNU-assembler-syntax text the backend emits
+and writes a relocatable object:
 
-- **`skj-as`** is the ColdFire assembler. It reads the GAS-syntax subset the
-  backends emit and produces ELF32 big-endian relocatable objects. A two-pass
-  design collects labels and sizes first, then emits bytes and resolves
-  branches. The companion assemblers `skj-as-rv` and `skj-as-mips` serve the
-  RISC-V and MIPS targets.
-- **`skj-ld`** is the ColdFire linker. It reads relocatable objects, parses a
-  subset of GNU linker-script syntax (`MEMORY`, `PHDRS`, `SECTIONS`, symbol
-  assignments, `/DISCARD/`), and writes executable ELF32. The default built-in
-  script targets the emulator's user-mode layout. `skj-ld-rv` and `skj-ld-mips`
-  serve the other targets.
-- **`skj-ar`** is the archiver that builds the `libc.a` and runtime archives.
+- **`skj-as`** (ColdFire/m68k) writes big-endian ELF32.
+- **`skj-as-rv`** (RISC-V RV32) writes little-endian ELF32.
+- **`skj-as-mips`** (MIPS I) writes little-endian ELF32, and also the
+  PlayStation PS-EXE executable format.
+- **`skj-as-x86-64`** reads GNU `.intel_syntax noprefix` and writes
+  little-endian ELF64. It replaced `nasm` in 0.26.0.
+- **`skj-as-aarch64`** reads the native GNU AArch64 syntax and writes
+  little-endian ELF64. It forms addresses through literal pools
+  (`ldr Rt, =sym` with `.ltorg`) rather than `adrp`/`:lo12:`.
 
-For the x86-64 and AArch64 targets the toolchain uses the platform's own
-assembler and linker; for MIPS and RISC-V the `skj-as-*`/`skj-ld-*` tools and the
-external toolchains are both available. The assembler's instruction coverage for
-ColdFire is inventoried in `as/INSTRUCTIONS.md`.
+All five share a two-pass design: pass one lays out labels and sizes, pass two
+emits bytes and resolves branches. x86-64 and AArch64 are the default assemblers
+for their targets as of 0.26.0 (`X64_ASM` / `A64_AS`). ColdFire, RISC-V, and
+MIPS default to their external cross-assemblers, with the in-tree assembler
+validated byte-for-byte against the external one (`make check-as`,
+`check-rvas`, `check-mipsas`) and usable in its place; for ColdFire that gives a
+fully binutils-free path together with `skj-ld`.
+
+Each assembler is a bounded subset that covers exactly what the backends and
+runtime emit, not a general-purpose assembler. What each one supports, and the
+notable instructions it does not, is inventoried per architecture:
+
+- ColdFire: `as/INSTRUCTIONS.md`
+- RISC-V: `as/INSTRUCTIONS-rv.md`
+- MIPS: `as/INSTRUCTIONS-mips.md`
+- x86-64: `as/INSTRUCTIONS-x86-64.md`
+- AArch64: `as/INSTRUCTIONS-aarch64.md`
+
+The in-tree linkers target the 32-bit platforms. **`skj-ld`** (ColdFire),
+**`skj-ld-rv`** (RISC-V), and **`skj-ld-mips`** (MIPS) read relocatable objects,
+parse a subset of GNU linker-script syntax (`MEMORY`, `PHDRS`, `SECTIONS`,
+symbol assignments, `/DISCARD/`), and write executable ELF32; the default
+built-in script targets the emulator's user-mode layout. The x86-64 and AArch64
+targets link with the platform's own linker, since there is no in-tree 64-bit
+linker. **`skj-ar`** is the archiver that builds the `libc.a` and runtime
+archives.
 
 ## Running and debugging
 
@@ -166,10 +186,12 @@ test runner only runs a `build/<name>` that has a matching source or fixture, so
 a stray build is skipped rather than reported.
 
 The cross toolchain the build expects is `m68k-linux-gnu-gcc`,
-`riscv64-linux-gnu-{as,ld}`, a host `as`/`ld` (GNU binutils, for x86-64), and the
-matching `qemu-*` runners. The
-ColdFire `m68k-linux-gnu-as` and `-ld` are optional, since `skj-as` and `skj-ld`
-replace them.
+`riscv64-linux-gnu-{as,ld}`, the `aarch64-linux-gnu` tools, a host `ld` (GNU
+binutils), and the matching `qemu-*` runners. The x86-64 and AArch64 output is
+assembled in-tree (`skj-as-x86-64` / `skj-as-aarch64`), so only a linker is
+needed for those targets, not an external assembler. The ColdFire
+`m68k-linux-gnu-as` and `-ld` are optional, since `skj-as` and `skj-ld` replace
+them.
 
 ## Vendoring and versioning
 

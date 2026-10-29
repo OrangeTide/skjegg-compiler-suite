@@ -154,6 +154,16 @@ jobs:
   emulator:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    # check-emu-all now spans the MIPS tier (check-mips-emu, test-mips-sandbox),
+    # which assembles the MIPS runtime with MIPS_AS/MIPS_LD. Override the
+    # Makefile's bare-metal mipsel-none-elf default to the Debian mipsel-linux-gnu
+    # binutils, the same way the build and mips jobs do.
+    env:
+      MIPS_AS: mipsel-linux-gnu-as
+      MIPS_LD: mipsel-linux-gnu-ld
+      MIPS_OBJCOPY: mipsel-linux-gnu-objcopy
+      MIPS_OBJDUMP: mipsel-linux-gnu-objdump
+      MIPS_CC: mipsel-linux-gnu-gcc
     steps:
       - uses: actions/checkout@v6
       - name: Install cross toolchains and QEMU
@@ -163,6 +173,7 @@ jobs:
             gcc-m68k-linux-gnu binutils-m68k-linux-gnu \
             gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-mipsel-linux-gnu binutils-mipsel-linux-gnu \
             qemu-user
       # check-emu-all builds skj-jit-rv (hosted rv32, run under qemu-riscv32)
       # for the Kobold RV JIT tier, so zig is needed here too.
@@ -172,6 +183,17 @@ jobs:
           version: 0.14.0
       - name: Emulator test matrix
         run: make check-emu-all QEMU_A64="qemu-aarch64 -L /usr/aarch64-linux-gnu"
+
+      # The only test that exercises vendor.sh: vendor this checkout (riscv cc
+      # toolchain,runtime,sandbox,emulator), build the result with the generated
+      # skjegg.mk, then compile and run a confined guest under the vendored
+      # skj-run.  Catches vendor staging/wiring regressions (an unstaged file, a
+      # missing -I, a stale source list) that no other job would see.  Uses the
+      # riscv cross tools and qemu-riscv32 already installed above.  The checkout
+      # is detached HEAD; the smoke script makes a throwaway branch for vendor.sh
+      # to clone.
+      - name: Vendored sandbox tree builds and confines
+        run: make check-vendor
 
   # The RV32 core against qemu-riscv32 as a reference model: instruction-by-
   # instruction lockstep and randomized-encoding fuzzing, plus the self-checking

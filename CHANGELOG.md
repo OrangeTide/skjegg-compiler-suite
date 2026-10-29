@@ -6,6 +6,42 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.27.0
+
+#### Added
+- An in-tree MIPS I (R3000-class) user-mode core in `skj-run`, little-endian
+  o32. It runs MIPS guests at parity with the RISC-V and ColdFire cores: the
+  integer core, the Linux syscall surface, fault reporting with a symbolized
+  DWARF backtrace, and the COP1 floating-point unit (single and double
+  precision, the condition flag and rounding modes) that the hardware-float
+  MIPS backend targets. The MIPS toolchain now self-hosts under `skj-run`, not
+  only under qemu: the in-guest compiler builds a program through the sandbox
+  syscalls and emits assembly byte-identical to a qemu run.
+- The MIPS process sandbox: guarded `mmap`, `munmap` and `spawn`, a round-robin
+  scheduler and a shared memory budget, at RISC-V parity.
+- A confined `fs/` capability filesystem libc for MIPS: named mounts, the
+  `hostcap` backend and `--mount` grants, matching RISC-V and ColdFire.
+- A GDB remote stub for MIPS (`skj-run --gdb PORT`), the sibling of the RV32
+  stub: registers, memory, breakpoints, continue, step and the fault signal
+  over the remote-serial protocol.
+- Numeric local labels (`1:` with `1f` and `1b` references) in `skj-as-mips`,
+  and a wider encoding golden corpus checked against GNU `as`.
+- Selection axes for `vendor.sh` (`--arch`, `--frontend`, `--with`) and a
+  packaged `sandbox` component that builds a confined hosted libc. A vendored
+  tree now builds the crt, driver and confined libc and runs a confined guest
+  end to end. `make check-vendor` vendors the checkout and proves it, as a CI
+  smoke test.
+
+#### Changed
+- The process sandbox and scheduler are one arch-neutral implementation
+  (`emu/sched.c`) driven through a CPU-handle vtable, shared by the ColdFire,
+  RISC-V and MIPS cores, in place of the earlier per-core copies.
+- The ColdFire and MIPS cores use a standardized batched run-with-reason loop
+  and a reserved host-call selector for cooperative yield, matching RISC-V.
+
+#### Fixed
+- `skj-as-mips` encodes the REGIMM `bgez` and `bltz` branches.
+
 ### 0.26.0
 
 #### Added

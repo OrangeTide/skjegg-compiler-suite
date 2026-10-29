@@ -7,6 +7,7 @@
 #include "guest.h"
 
 #define EM_68K      4
+#define EM_MIPS     8
 #define EM_RISCV    243
 
 typedef struct elf32_info {

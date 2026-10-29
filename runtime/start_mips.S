@@ -31,11 +31,21 @@
 	   symbol; alias it to _start so the entry is correct no matter how
 	   the objects' .text is ordered. */
 	.globl __start
-	.globl write
-	.globl read
-	.globl open
-	.globl close
-	.globl lseek
+	/* The public fd wrappers are weak: the confined fs/ libc (fdio.c, built
+	   with SKJ_FS_INTERPOSE) provides strong definitions that take over the
+	   fd model, while the plain libc still resolves the crt's versions.  The
+	   raw __sys_* seam the fs/ layer calls stays strong-global. */
+	.weak write
+	.globl __sys_write
+	.weak read
+	.globl __sys_read
+	.weak open
+	.globl __sys_open
+	.globl openat
+	.weak close
+	.globl __sys_close
+	.weak lseek
+	.globl __sys_lseek
 	.globl statx
 	.globl mkdirat
 	.globl unlinkat
@@ -86,26 +96,40 @@ _start:
 	jr	$ra
 	.endm
 
-/* int write(int fd, const char *buf, int n); */
+/* int write(int fd, const char *buf, int n);
+   __sys_write is the same wrapper under the name the fs/ layer and libc fdio
+   expect (the sibling of the rv/cf syscall seam). */
 write:
+__sys_write:
 	li	$v0, 4004		/* __NR_write */
 	syscall
 	SYSRET
 
 /* int read(int fd, char *buf, int n); */
 read:
+__sys_read:
 	li	$v0, 4003		/* __NR_read */
 	syscall
 	SYSRET
 
 /* int open(const char *path, int flags, int mode); args pass through $a0..$a2 */
 open:
+__sys_open:
 	li	$v0, 4005		/* __NR_open */
+	syscall
+	SYSRET
+
+/* int openat(int dirfd, const char *path, int flags, int mode); the confined
+   fs/ hostcap backend opens every path relative to a capability dirfd.  Args
+   pass through $a0..$a3. */
+openat:
+	li	$v0, 4288		/* __NR_openat (__NR_Linux + 288) */
 	syscall
 	SYSRET
 
 /* int close(int fd); */
 close:
+__sys_close:
 	li	$v0, 4006		/* __NR_close */
 	syscall
 	SYSRET
@@ -121,6 +145,7 @@ __sys_brk:
 
 /* long lseek(int fd, long offset, int whence); o32 has a simple 3-arg lseek */
 lseek:
+__sys_lseek:
 	li	$v0, 4019		/* __NR_lseek */
 	syscall
 	SYSRET

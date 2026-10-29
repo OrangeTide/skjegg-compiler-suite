@@ -94,7 +94,8 @@ The original v0.8.0 handoff listed eight gaps. All were closed by v0.11.0, and
 the follow-on `tail`-pseudo gap by v0.12.0:
 
 - **R1** a buildable Kobold front end (source to KPM1), without an existing
-  Kobold: the in-process kpcom seed path (`skj-kpc` JITs the committed seed).
+  Kobold: the in-process kpcom seed path (the JIT runs a kpcom seed built from
+  source; since 0.24.0 no seed is committed, see `kobold.md`).
 - **R2 to R7** the shipped freestanding runtime: the platform layer (heap over
   `brk`, retain/release, trap over `_exit`, mem routines), the no-libc Str/Val,
   the freestanding console I/O, the crt and `kp_guest_entry` contract, ParamStr

@@ -121,6 +121,7 @@ enum guest_arch {
     GUEST_ARCH_NONE = 0,
     GUEST_ARCH_COLDFIRE,
     GUEST_ARCH_RV32,
+    GUEST_ARCH_MIPS32,
 };
 
 /* Arch-neutral syscall selectors.  The per-arch tables map Linux numbers
@@ -226,6 +227,7 @@ void guest_install_mounts(guest *g, const char *elf_path, const run_opts *o);
  * the process exit status the driver should adopt. */
 int run_coldfire(const run_opts *o, int *status);
 int run_rv32(const run_opts *o, int *status);
+int run_mips32(const run_opts *o, int *status);
 
 /* Shared stack image: writes argc/argv/envp/auxv and returns the stack
  * pointer the guest should start with. */

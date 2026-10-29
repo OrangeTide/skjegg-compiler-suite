@@ -10,10 +10,13 @@
 #                          the parent, isolated from it, still finishes and the
 #                          run exits cleanly
 #
-# Usage: run-sandbox-test.sh <skj-run> <parent.elf>
+# Usage: run-sandbox-test.sh <skj-run> <parent.elf> [test-name]
+# The same demo serves every CPU core (the parent/child C is arch-neutral); the
+# optional third argument names the test in the result line.
 
 RUN="$1"
 PARENT="$2"
+NAME="${3:-test-rv-sandbox}"
 fail=0
 tmp=$(mktemp -d)
 
@@ -39,8 +42,8 @@ fi
 
 rm -rf "$tmp"
 if [ "$fail" -ne 0 ]; then
-    echo "test-rv-sandbox: FAILED"
+    echo "$NAME: FAILED"
     exit 1
 fi
-echo "test-rv-sandbox: scheduler, spawn, and the shared memory budget all passed"
+echo "$NAME: scheduler, spawn, and the shared memory budget all passed"
 exit 0

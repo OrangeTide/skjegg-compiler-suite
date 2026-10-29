@@ -15,6 +15,69 @@
 #include <string.h>
 
 /****************************************************************
+ * Numeric local labels (GAS 1: / 1f / 1b)
+ *
+ * A digit label may be redefined; a forward reference (1f) binds to the next
+ * definition, a backward reference (1b) to the most recent one.  Each
+ * definition is given a unique internal name .Lnum_<d>_<k>, so references
+ * resolve through the ordinary symbol table (and the same local-label branch
+ * resolution as a .L name).
+ ****************************************************************/
+
+/* If str is a numeric reference like "1f", "2b" or "42f", return its label
+ * number and direction; else return 0. */
+static int
+numeric_ref(const char *str, int *num, char *dir)
+{
+    size_t n = strlen(str);
+    if (n < 2)
+        return 0;
+    if (str[n - 1] != 'f' && str[n - 1] != 'b')
+        return 0;
+    for (size_t i = 0; i < n - 1; i++)
+        if (str[i] < '0' || str[i] > '9')
+            return 0;
+    *num = atoi(str);                   /* the leading digits */
+    *dir = str[n - 1];
+    return 1;
+}
+
+/* The redefinition counter for a label number, created at 0 the first time a
+ * number is seen (as a definition or a reference). */
+static int *
+numlabel_count(struct mips_asm *a, int num)
+{
+    for (int i = 0; i < a->n_numlabels; i++)
+        if (a->numlabels[i].num == num)
+            return &a->numlabels[i].count;
+
+    if (a->n_numlabels >= a->numlabel_cap) {
+        a->numlabel_cap = a->numlabel_cap ? a->numlabel_cap * 2 : 16;
+        a->numlabels = realloc(a->numlabels,
+            (size_t)a->numlabel_cap * sizeof(*a->numlabels));
+        if (!a->numlabels)
+            die("mips_parse: out of memory");
+    }
+    a->numlabels[a->n_numlabels].num = num;
+    a->numlabels[a->n_numlabels].count = 0;
+    return &a->numlabels[a->n_numlabels++].count;
+}
+
+/* Resolve "1f"/"1b" (or "42f"/"42b") to the internal name of the matching
+ * definition. */
+static const char *
+numeric_ref_name(struct mips_asm *a, int num, char dir)
+{
+    char buf[32];
+    int k = *numlabel_count(a, num);
+    if (dir == 'b')
+        k -= 1;                         /* most recent definition */
+    /* dir == 'f' -> next definition (index k, not yet defined) */
+    snprintf(buf, sizeof(buf), ".Lnum_%d_%d", num, k < 0 ? 0 : k);
+    return arena_strdup(&a->arena, buf);
+}
+
+/****************************************************************
  * Operand parsing
  ****************************************************************/
 
@@ -134,8 +197,16 @@ parse_operand(struct mips_asm *a, struct mips_operand *op)
         return 1;
     }
 
-    /* identifier: a register, or a symbol */
+    /* identifier: a numeric local-label reference, a register, or a symbol */
     if (l->tok.type == T_IDENT) {
+        int num;
+        char dir;
+        if (numeric_ref(l->tok.str, &num, &dir)) {
+            op->kind = MO_SYM;
+            op->sym = numeric_ref_name(a, num, dir);
+            lex_next(l);
+            return 1;
+        }
         reg = mips_ireg(l->tok.str);
         if (reg >= 0) {
             op->kind = MO_REG;
@@ -538,13 +609,42 @@ static void
 run_pass(struct mips_asm *a)
 {
     struct lexer *l = &a->lex;
+    int k;
 
     a->cur_section = MSEC_TEXT;
+    for (k = 0; k < a->n_numlabels; k++)
+        a->numlabels[k].count = 0;      /* same numbers each pass, recount */
     lex_next(l);
 
     while (l->tok.type != T_EOF) {
         if (l->tok.type == T_NEWLINE) {
             lex_next(l);
+            continue;
+        }
+
+        /* numeric local label: N:  (the rest of the line still parses) */
+        if (l->tok.type == T_INT) {
+            int num = (int)l->tok.ival;
+            struct lexer saved = *l;
+            lex_next(l);
+            if (l->tok.type == T_COLON && num >= 0) {
+                char buf[32];
+                int *cnt = numlabel_count(a, num);
+                lex_next(l);
+                if (a->pass == 1) {
+                    int idx;
+                    snprintf(buf, sizeof(buf), ".Lnum_%d_%d", num, *cnt);
+                    idx = sym_lookup(&a->st, buf);
+                    if (idx < 0) idx = sym_add(&a->st, buf);
+                    sym_define(&a->st, idx, a->cur_section,
+                               (uint32_t)a->sections[a->cur_section].len);
+                }
+                (*cnt)++;
+                continue;
+            }
+            lex_restore(l, &saved);
+            skip_to_eol(l);
+            if (l->tok.type == T_NEWLINE) lex_next(l);
             continue;
         }
 
@@ -628,6 +728,7 @@ mips_free(struct mips_asm *a)
     free(a->st.syms);
     free(a->lex.str_buf);
     free(a->locrows);
+    free(a->numlabels);
     arena_free(&a->arena);
 }
 

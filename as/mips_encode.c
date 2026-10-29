@@ -360,12 +360,16 @@ static int
 enc_branch(struct mips_asm *a, const char *m, struct mips_operand *ops,
            int nops, int emit)
 {
-    int op = -1, two_reg = 0;
+    int op = -1, two_reg = 0, regimm_rt = -1;
 
     if (strcmp(m, "beq") == 0) { op = 0x04; two_reg = 1; }
     else if (strcmp(m, "bne") == 0) { op = 0x05; two_reg = 1; }
     else if (strcmp(m, "blez") == 0) op = 0x06;
     else if (strcmp(m, "bgtz") == 0) op = 0x07;
+    /* REGIMM (opcode 1): the condition is the rt field, bltz = 0, bgez = 1.
+     * The backend emits these for the signed overflow-check branch. */
+    else if (strcmp(m, "bltz") == 0) { op = 0x01; regimm_rt = 0x00; }
+    else if (strcmp(m, "bgez") == 0) { op = 0x01; regimm_rt = 0x01; }
     else return -1;
 
     if (two_reg) {
@@ -377,7 +381,7 @@ enc_branch(struct mips_asm *a, const char *m, struct mips_operand *ops,
     if (emit) {
         struct mips_operand *t = two_reg ? &ops[2] : &ops[1];
         const char *target = sym_target(t);
-        int rt = two_reg ? ops[1].reg : 0;
+        int rt = two_reg ? ops[1].reg : (regimm_rt >= 0 ? regimm_rt : 0);
         int disp;
         NEED(target != NULL);
         disp = branch_disp(a, target, (uint32_t)cur(a)->len);

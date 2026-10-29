@@ -16,6 +16,9 @@
 #ifndef EMU_RV32
 #define EMU_RV32 1
 #endif
+#ifndef EMU_MIPS32
+#define EMU_MIPS32 1
+#endif
 
 #define DEFAULT_MEM     (256u * 1024u * 1024u)
 #define DEFAULT_STACK   (1u * 1024u * 1024u)
@@ -38,12 +41,15 @@ usage(FILE *out)
 #if EMU_RV32
         " rv32"
 #endif
+#if EMU_MIPS32
+        " mips32"
+#endif
         "\n"
         "  --mem BYTES     cap on guest memory (default 256M)\n"
         "  --stack BYTES   guest stack size (default 1M)\n"
         "  --heap BYTES    guest heap size for brk (default 16M)\n"
         "  --max-insns N   stop after N instructions (default unlimited)\n"
-        "  --gdb PORT      serve the GDB remote protocol on PORT (rv32)\n"
+        "  --gdb PORT      serve the GDB remote protocol on PORT (rv32, mips)\n"
         "  --total-mem BYTES  aggregate memory cap across all processes\n"
         "  --child-max-insns N  per-spawned-child instruction budget\n"
         "  --trace         dump the CPU event ring on a fault\n"
@@ -86,6 +92,9 @@ arch_of_name(const char *name)
     if (strcmp(name, "rv32") == 0 || strcmp(name, "riscv32") == 0 ||
         strcmp(name, "riscv") == 0)
         return GUEST_ARCH_RV32;
+    if (strcmp(name, "mips32") == 0 || strcmp(name, "mipsel") == 0 ||
+        strcmp(name, "mips") == 0)
+        return GUEST_ARCH_MIPS32;
     return GUEST_ARCH_NONE;
 }
 
@@ -94,6 +103,7 @@ arch_of_machine(uint32_t machine)
 {
     switch (machine) {
     case EM_68K:    return GUEST_ARCH_COLDFIRE;
+    case EM_MIPS:   return GUEST_ARCH_MIPS32;
     case EM_RISCV:  return GUEST_ARCH_RV32;
     default:        return GUEST_ARCH_NONE;
     }
@@ -238,6 +248,12 @@ main(int argc, char **argv)
 #if EMU_RV32
     case GUEST_ARCH_RV32:
         if (run_rv32(&o, &status) != 0)
+            return 2;
+        break;
+#endif
+#if EMU_MIPS32
+    case GUEST_ARCH_MIPS32:
+        if (run_mips32(&o, &status) != 0)
             return 2;
         break;
 #endif

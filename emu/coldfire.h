@@ -7,6 +7,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "run_reason.h"
+
 /****************************************************************
  * Trace event types
  ****************************************************************/
@@ -158,11 +160,17 @@ typedef struct cf_cpu {
 
     /* Emulator state */
     int      halted;        /* HALT/STOP flag */
+    int      yielding;      /* voluntarily parked: the host-call yield set it,
+                             * so the batched run reports SKJ_RUN_YIELD and the
+                             * scheduler clears it before the next slice (the
+                             * twin of the RV32 core's `waiting`) */
     uint64_t cycles;        /* instruction counter */
     int      fault;         /* set on bus/address error */
     uint8_t  fault_status;  /* FS bits for access error frame */
     int      in_exception;  /* double-fault detection */
     uint32_t except_pc;     /* faulting pc, saved when an exception vectors */
+    uint32_t trap_window_base; /* host-reserved pc window: cf_run() stops before */
+    uint32_t trap_window_end;  /* executing in [base,end); 0 disables the check */
     cf_trace_t trace;       /* diagnostic event ring buffer */
 
     /* Memory bus callbacks */
@@ -229,8 +237,10 @@ void cf_set_hypercall(cf_cpu *cpu, cf_hypercall_fn fn, void *ctx);
 /* Execute one instruction. Returns 0 on success, -1 on halt/stop. */
 int cf_step(cf_cpu *cpu);
 
-/* Execute up to count instructions. Returns number executed. */
-int cf_run(cf_cpu *cpu, int count);
+/* Execute up to count instructions, stopping the moment the machine halts,
+ * faults, or reaches the host-reserved trap window; returns why (see
+ * run_reason.h) and, via retired when non-NULL, the number executed. */
+enum skj_run_reason cf_run(cf_cpu *cpu, int count, int *retired);
 
 /* Register access */
 uint32_t cf_get_d(cf_cpu *cpu, int n);

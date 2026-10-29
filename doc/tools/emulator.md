@@ -2,12 +2,14 @@
 
 `skj-run` runs a compiled 32-bit guest program on an emulator built into
 this tree, the way `qemu-user` or `wasmtime` runs one. It replaces
-`qemu-m68k` and `qemu-riscv32` for the targets it covers, and it is the
-only runner for strict ColdFire code, which qemu does not model.
+`qemu-m68k`, `qemu-riscv32` and `qemu-mipsel` for the targets it covers,
+and it is the only runner for strict ColdFire code, which qemu does not
+model.
 
 ```sh
 skj-run hello.elf                  # architecture from the ELF header
 skj-run --arch rv32 prog.elf a b   # override, and pass guest arguments
+skj-run --arch mips32 prog.elf     # little-endian MIPS I (o32)
 skj-run --trace --stats prog.elf   # CPU event ring on a fault, counters
 ```
 
@@ -46,19 +48,31 @@ which real hardware reads as a remainder instruction).
 emu/coldfire.c   ColdFire V4e core (integer, FPU, EMAC)   \  one component
 emu/cf_user.c    Linux/m68k user mode: vectors, syscalls  /
 
-emu/rv32.c       RV32IMAFC + Zicsr, Zifencei, Zba/Zbb/Zbs, Zcb  \  the other
-emu/rv_user.c    Linux/RISC-V user mode: ecall            /
+emu/rv32.c       RV32IMAFC + Zicsr, Zifencei, Zba/Zbb/Zbs, Zcb  \  another
+emu/rv_user.c    Linux/RISC-V user mode: ecall             |
+emu/rv_gdb.c     the --gdb remote stub (RV32)             /
 
+emu/mips32.c     MIPS I (R3000-class) integer core, little-endian  \  a third
+emu/mips_user.c  Linux/MIPS o32 user mode: syscall         |
+emu/mips_gdb.c   the --gdb remote stub (MIPS)             /
+
+emu/sched.c      the arch-neutral process sandbox + scheduler (all cores)
 emu/guest.c      sparse memory, the syscall layer, the initial stack
 emu/elf32.c      ELF32 loader, either endianness
 emu/main.c       the driver
 ```
 
-The two cores are independent components. A project vendoring skjegg
-takes `emu-cf`, `emu-rv`, or both; `EMU_COLDFIRE=0` / `EMU_RV32=0` drop
-the other core out of the build entirely. This matters because the
-target hosts differ: smolmoo is ColdFire, and a host that moved to RV32
-would carry only the RISC-V core.
+The three cores are independent components. A project vendoring skjegg
+takes `emu-cf`, `emu-rv`, `emu-mips`, or any mix; `EMU_COLDFIRE=0` /
+`EMU_RV32=0` / `EMU_MIPS32=0` drop a core out of the build entirely. This
+matters because the target hosts differ: smolmoo is ColdFire, and a host
+that moved to RV32 would carry only the RISC-V core.
+
+The MIPS core is the user-visible architecture only: the general
+registers, HI/LO, the branch and load delay slots, and the `SYSCALL` and
+`BREAK` traps. It has no CP0, cache or MMIO, and no COP1; floating point
+is the backend's softfloat path, so a hardware-COP1 binary faults with an
+illegal instruction here.
 
 ## The machine
 
@@ -71,10 +85,10 @@ address and the reason, rather than a silent read of zero.
 
 Syscalls are the handful a freestanding guest reaches: `read`, `write`,
 `writev`, `brk`, `close`, `exit`, `exit_group`. The per-architecture
-number spaces (Linux/m68k and the RISC-V generic table) map onto one
-arch-neutral set, so a call added once reaches both targets. Anything
-else answers `-ENOSYS`, the way Linux would, so an unexpected call
-surfaces as a guest-visible error.
+number spaces (Linux/m68k, the RISC-V generic table, and the MIPS o32
+table) map onto one arch-neutral set, so a call added once reaches every
+target. Anything else answers `-ENOSYS`, the way Linux would, so an
+unexpected call surfaces as a guest-visible error.
 
 ColdFire has no syscall hook in the core, and it does not need one:
 user mode is built out of the hardware behavior. The vector table lives
@@ -82,7 +96,11 @@ in a page of guest memory with every entry pointing at a distinct
 address in an unmapped magic window, so when the PC lands there the
 driver knows which vector fired. `TRAP #0` is serviced and returns
 through the exception frame; anything else is reported as the signal a
-kernel would have raised. RV32 uses the core's `ecall` callback.
+kernel would have raised. RV32 uses the core's `ecall` callback. MIPS
+uses the core's `SYSCALL` callback: the number is in `$v0`, the args in
+`$a0-$a3` (the fifth and sixth on the stack), and the o32 return pair
+`$v0`/`$a3` (result or positive errno, plus the error flag) is written
+back from the arch-neutral negative-errno result.
 
 The ELF loader has an in-memory form beside the path form. `elf32_load`
 now slurps the file and delegates to `elf32_load_mem`, which walks the
@@ -160,15 +178,89 @@ target; qemu stays as an independent oracle for the generic-m68k build.
 Note that qemu cannot run the ColdFire tier at all, `-cpu cfv4e`
 included: it rejects `mov3q` and the remainder instructions.
 
-| Target             | Runner    | Runtime built for |
-|--------------------|-----------|-------------------|
-| `make check`       | qemu-m68k | generic m68k      |
-| `make check-emu`   | skj-run   | ColdFire (5475)   |
-| `make check-rv`    | qemu-riscv32 | RV32IM         |
-| `make check-rv-emu`| skj-run   | RV32IM (same binaries) |
+| Target               | Runner       | Runtime built for      |
+|----------------------|--------------|------------------------|
+| `make check`         | qemu-m68k    | generic m68k           |
+| `make check-emu`     | skj-run      | ColdFire (5475)        |
+| `make check-rv`      | qemu-riscv32 | RV32IM                 |
+| `make check-rv-emu`  | skj-run      | RV32IM (same binaries) |
+| `make check-mips`    | qemu-mipsel  | MIPS I                 |
+| `make check-mips-emu`| skj-run      | MIPS I (same binaries) |
+
+Like RISC-V, the MIPS tests link no cross-compiled C, so `check-mips-emu`
+runs the same binaries `check-mips` builds straight on the in-tree core.
 
 `make check-emu-all` runs every suite the emulator covers, with no qemu
 involved.
+
+## Architecture parity
+
+The long-term goal is for the three targets to behave the same under skj-run
+wherever that is possible, and to document the cases where it is not. There are
+two separable sandbox layers, and the targets sit at different points on each.
+
+| Capability                                   | rv32 | ColdFire | MIPS |
+|----------------------------------------------|------|----------|------|
+| User-mode CPU core + Linux syscalls          | yes  | yes      | yes  |
+| Hardware FPU (double, single, condition flag) | yes  | yes      | yes (COP1) |
+| Guest fault report + DWARF/trap backtrace    | yes  | yes      | yes  |
+| Hosted driver libc (the C toolchain target)  | yes  | yes      | yes  |
+| In-guest self-hosting of the toolchain       | yes  | yes      | yes  |
+| Capability filesystem: confined `fs/` libc, `--mount`, hostcap, RESOLVE_BENEATH | yes | yes | yes |
+| Process sandbox: guarded `mmap`, `spawn`, the round-robin scheduler, the aggregate memory pool | yes | yes | yes |
+| GDB remote stub (`--gdb`)                     | yes  | no       | yes  |
+
+The **basic machine** (the CPU core, the Linux syscall surface, fault reporting
+and the symbolized backtrace) is at full parity: every target runs the same
+freestanding guests under skj-run the same way.
+
+The **capability filesystem** sandbox is the confined `fs/` layer: a guest links
+a freestanding `fs/` libc (named mounts, the `hostcap` backend, the host side
+enforcing `openat2(RESOLVE_BENEATH)`), and the launcher grants host directories
+with `--mount`. All three targets have it, exercised by `test-rv-fs-cap`,
+`test-cf-fs-cap` and `test-mips-fs-cap` (and by `check-emu-posix`, which reruns
+them through the portable `cap_walk` confinement floor). The `fs/` sources are
+portable C compiled into the guest, and the host side
+(`guest_install_mounts`) is arch-neutral, so the per-target work is only in the
+runtime seam. Bringing MIPS up to this level needed two runtime fixes worth
+noting as the kind of ABI divergence a new target surfaces: the MIPS crt gained
+the `__sys_*` syscall-seam aliases and `openat` the `fs/` layer calls (with the
+public fd wrappers made weak so the confined libc's `fdio.c` can take them
+over), and skj-run's MIPS front end now translates the o32 `open()` flag bits
+(`O_CREAT` is `0x100` on MIPS, `0x40` on the asm-generic ABI the host uses) to
+the host ABI, the way qemu-mipsel does.
+
+The **process sandbox** (guarded `mmap` through the `MAP`/`MUNMAP` host calls,
+`spawn`, the round-robin scheduler, and the shared memory-commit pool) runs on
+all three cores through one arch-neutral scheduler. `emu/sched.c` owns the
+process table, the slices, spawn, the shared `gm_pool` budget, the handle
+generations, the fault backtrace cache, and the `MAP`/`MUNMAP`/`SPAWN`/`FATAL`/
+`YIELD` selectors.  It never names a concrete CPU type: it holds a `void *cpu`
+handle and reaches the core only through a `struct skj_cpu_ops` vtable (alloc,
+ready, run, halt, the fault/trap diagnostics, the backtrace frame pointer).
+Each `*_user.c` is now a thin binding that fills in that vtable and a per-core
+syscall shim; `run_rv32` / `run_mips32` / `run_coldfire` each just call
+`run_sandbox(o, &<core>_ops, status)`.
+
+Every core exposes the same batched run,
+`enum skj_run_reason <arch>_run(cpu, count, *retired)` (see `run_reason.h`), the
+boundary the scheduler drives tasks on.  rv and MIPS service their syscalls in a
+step callback, so their `run` returns to the scheduler only on a terminal event;
+ColdFire takes its syscalls as a `TRAP #0` that vectors into a reserved window,
+so its binding wraps `cf_run` in a loop that services the `TRAP #0` in place and
+presents the scheduler the same callback contract.  The cooperative yield is
+part of that contract: rv parks on `wfi` (`cpu->waiting`), while MIPS and
+ColdFire use a reserved host-call selector `0x000f0004` (in `$v0` on MIPS, in
+`%d0` at `TRAP #0` on ColdFire) that the emulator picks up and never forwards to
+the host, so it is a yield under skj-run and a harmless unknown syscall
+(`-ENOSYS`) on a real host.  The scheduler clears the park flag (`ops->clear_yield`)
+at the start of each slice.  The GDB stub stays a per-core piece plugged into the
+same scheduler through an optional `ops->gdb` hook; `rv_gdb.c` and `mips_gdb.c`
+provide it for rv32 and MIPS, ColdFire not yet.  The MIPS stub derives its o32
+register layout from the ELF (it advertises no target description, since gdb's
+MIPS tdesc validator rejects a supplied one, matching qemu-mipsel's stub), and
+gdb's prologue-only MIPS unwind of CFI-less skj-cc code stops short of the full
+call chain that skj-run's own DWARF backtrace walks.
 
 ## The instruction-count benchmark
 
@@ -363,7 +455,8 @@ produced it is defined, an axis the value methods have no view of.
 ## Verification gaps and future work
 
 The peripheral layers added since the core, the guest allocator
-(`emu/guest.c`) and the process scheduler (`emu/rv_user.c`), do not have
+(`emu/guest.c`) and the process scheduler (`emu/sched.c`, split out of
+`rv_user.c` when it became arch-neutral), do not have
 the core's verification depth, and a run of reviews found several bugs in
 them: `fence.i` not flushing the decode cache, a 32-bit wrap in
 `gm_mmap`/`gm_munmap`, `do_spawn` leaving the parent's `mem.fault` set,
@@ -393,11 +486,11 @@ sensitivity, not reach.
    rather than the specific overflow cases now sitting in
    `tests/test_guest_mmap.c` that were added once the bug was known.
 
-3. **Scheduler state invariants and a stress guest.** Both `rv_user.c`
+3. **Scheduler state invariants and a stress guest.** Both scheduler
    bugs were shared state left set across a lifecycle boundary. A
    debug-build invariant checked between quanta (a runnable process has
-   `mem.fault == 0`, and `cpu->waiting` matches the reason its last
-   `rv_run` returned) would turn that class into an immediate abort
+   `mem.fault == 0`, and its park flag matches the reason its last
+   slice returned) would turn that class into an immediate abort
    instead of a misbehavior found by reading. The one sandbox demo is a
    happy path; a stress guest that spawns many children, exhausts the
    per-child and aggregate memory budgets, and mixes `wfi` park and wake
@@ -500,9 +593,9 @@ stack, returns the base, and with `GM_MAP_GUARD_LO` places an unmapped
 guard page just below it. A guard page is simply a region with
 protection 0, so any access to it faults with the reason "stack
 overflow" and sets `fault_guard`. `gm_munmap(m, base, size)` releases
-the region and its guard. There is also an aggregate commit budget
-(`struct gm_pool`, shared across guests), though nothing wires it up
-yet.
+the region and its guard. An aggregate commit budget (`struct gm_pool`,
+shared across every process in a run) is wired up by the scheduler from
+`--total-mem`.
 
 `gm_mmap` computes the whole extent (an optional guard page, the
 mapping, and a trailing gap) in 64-bit and refuses anything that would
@@ -515,16 +608,18 @@ walking a bad page count. These bounds are guest self-corruption
 concerns, not host escapes: a guest address is never a host address, it
 is translated through the per-process page tables to a host page.
 
-The guest reaches this through an **emulator-private ecall**, not a
-Linux syscall: `a7 = 0x000f0001` (`RV_SYS_MAP`, `a0` size, `a1` flags,
-returns base in `a0`), `a7 = 0x000f0002` (`RV_SYS_MUNMAP`), and `a7 =
-0x000f0003` (`RV_SYS_SPAWN`, below). Those numbers sit far above the
-Linux RISC-V syscall space, so a real kernel or `qemu-user` answers
-`-ENOSYS` and a guest that wanted a guarded region falls back to
-whatever it does without one.
+The guest reaches this through an **emulator-private host call**, not a
+Linux syscall: on RV32, `a7 = 0x000f0001` (`SKJ_SYS_MAP`, `a0` size, `a1`
+flags, returns base in `a0`), `a7 = 0x000f0002` (`SKJ_SYS_MUNMAP`), and
+`a7 = 0x000f0003` (`SKJ_SYS_SPAWN`, below). The same selector values are
+shared by every core (`emu/sched.h`); each puts the number in its own
+syscall register (`$v0` on MIPS, `%d0` at `TRAP #0` on ColdFire). Those
+numbers sit far above the Linux syscall space, so a real kernel or
+`qemu-user` answers `-ENOSYS` and a guest that wanted a guarded region
+falls back to whatever it does without one.
 
 A guest that wants a guarded region can install a stack provider that
-issues the `RV_SYS_MAP` ecall with the guard flag. On `skj-run` that
+issues the `MAP` host call with the guard flag. On `skj-run` that
 returns a guarded region, so a stack overrun faults on the guard page
 instead of silently corrupting the arena; on `qemu-user` the ecall
 returns `-ENOSYS` and the guest falls back to an arena block.
@@ -539,23 +634,27 @@ a no-op). `make test-rv-run` pins the
 `rv_run` batch contract (the reason it returns and the early stop on a
 trap, a park, or a halt).
 
-## The RV32 process sandbox
+## The process sandbox (one scheduler, every core)
 
 `skj-run` runs one root process, and a guest may spawn children. Each
 process has its own CPU, guest memory, and heap and stack, so a child
-shares no memory with its parent. A round-robin scheduler runs the live
-processes a `QUANTUM` of instructions at a time; the batched `rv_run`
-returns after each slice with the reason it stopped, so the scheduler
-reaps a process that exited, halted, or faulted, and reschedules one that
-merely spent its slice. This is the consumer the `rv_run` reason contract
-was built for.
+shares no memory with its parent. A round-robin scheduler (`emu/sched.c`)
+runs the live processes a `SKJ_QUANTUM` of instructions at a time; the
+batched `ops->run` returns after each slice with the reason it stopped, so
+the scheduler reaps a process that exited, halted, or faulted, and
+reschedules one that merely spent its slice. This is the consumer the
+batched-run reason contract was built for, and one copy serves all three
+cores through the `skj_cpu_ops` vtable over a `void *cpu` handle.
 
-`RV_SYS_SPAWN` (a7 `0x000f0003`, `a0` an image pointer, `a1` its length,
-returns a handle) loads a child from an image the guest holds in its own
-memory: the host reads the bytes out with `gm_read_out` and loads them
-with the in-memory ELF loader into a fresh process. A returned handle is
-a slot plus a generation, so a handle held past a child's death does not
-match a later child that reuses the slot.
+`SPAWN` (`0x000f0003`, arg0 an image pointer, arg1 its length, returns a
+handle) loads a child from an image the guest holds in its own memory: the
+host reads the bytes out with `gm_read_out` and loads them with the
+in-memory ELF loader into a fresh process. A returned handle is a slot plus
+a generation, so a handle held past a child's death does not match a later
+child that reuses the slot. The selectors sit in the register the core's
+ABI uses for a syscall number (a7 on rv, `$v0` on MIPS, `%d0` at `TRAP #0`
+on ColdFire) with the two arguments in that ABI's first two argument
+registers; the shared handler (`sched_private`) is the same for all three.
 
 The `--total-mem` cap is an aggregate `gm_pool` budget shared across every
 process, so many children cannot together exhaust host memory even though
@@ -563,15 +662,17 @@ each keeps its own per-process `--mem` limit. `--child-max-insns` budgets
 a spawned child so a runaway child is killed alone rather than stalling
 the run.
 
-`make test-rv-sandbox` is the end-to-end demo. A parent guest, built by
-the in-tree skj toolchain (`skj-cc-rv` + `skj-as-rv` + `skj-ld-rv`), spawns
-a child embedded in its own data and does a guarded map and release; the
+`make test-rv-sandbox` is the end-to-end demo, with `test-mips-sandbox` and
+`test-cf-sandbox` the MIPS and ColdFire twins. One arch-neutral parent/child
+C (`tests/sandbox/{parent,child}.c`) is built by each target's in-tree
+toolchain over a small per-core `sys.S` of selector stubs; the parent spawns
+a child embedded in its own data and does a guarded map and release, and the
 child maps a large region and touches every page. Under a generous
 `--total-mem` both finish; under a tight one the child exhausts the shared
 pool and faults while the parent, isolated from it, still finishes and the
-run exits on the root's status. That one demo exercises spawn, the guarded
-map and release, the shared budget, and the scheduler resuming a child
-across many slices.
+run exits on the root's status. Each demo exercises spawn, the guarded map
+and release, the shared budget, and the scheduler resuming a child across
+many slices, on its own CPU core.
 
 ## Double precision (host double, on by default; revised 2026-10-07)
 
@@ -681,7 +782,8 @@ the games need, with no new emulator work.
   devices, the shape the VM hosts use) is not exposed as a flag,
   though `tests/archtest.c` now shows the shape of one for RV32 and
   both cores support it.
-- No debugger. The RV32 article has a GDB stub that has not been
-  adopted yet.
+- The `--gdb` remote stub covers rv32 and MIPS, not ColdFire yet.
+  gdb's prologue-only MIPS unwind of CFI-less skj-cc code stops short
+  of the full call chain (skj-run's own DWARF backtrace walks it).
 - `skj-as` has no `rems`/`remu` mnemonic, so a front end cannot ask for
   the remainder instruction directly. The emulator implements it.

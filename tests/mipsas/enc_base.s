@@ -66,3 +66,12 @@ f:
 	c.eq.d $f20, $f22
 	c.lt.d $f24, $f26
 	c.le.d $f28, $f30
+	# conditional branches, incl. the REGIMM bltz/bgez the overflow check uses;
+	# the target is a defined local label, so both assemblers resolve it direct.
+bt:
+	beq $t0, $t1, bt
+	bne $t2, $t3, bt
+	blez $a0, bt
+	bgtz $a1, bt
+	bltz $s0, bt
+	bgez $s1, bt

@@ -1560,10 +1560,12 @@ build/skj-cc-mips-sf: $(CC_SRC_MIPS) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | 
 # sources drop out of the link.
 EMU_COLDFIRE ?= 1
 EMU_RV32     ?= 1
+EMU_MIPS32   ?= 1
 
 EMU_SRC   := emu/main.c emu/guest.c emu/hostplat.c emu/elf32.c
 EMU_HDR   := emu/guest.h emu/hostplat.h emu/elf32.h fs/fs.h
-EMU_FLAGS := -DEMU_COLDFIRE=$(EMU_COLDFIRE) -DEMU_RV32=$(EMU_RV32) -Ifs
+EMU_FLAGS := -DEMU_COLDFIRE=$(EMU_COLDFIRE) -DEMU_RV32=$(EMU_RV32) \
+             -DEMU_MIPS32=$(EMU_MIPS32) -Ifs
 ifeq ($(EMU_COLDFIRE),1)
 EMU_SRC += emu/coldfire.c emu/cf_user.c
 EMU_HDR += emu/coldfire.h
@@ -1577,11 +1579,28 @@ EMU_SRC += emu/rv_gdb.c
 EMU_HDR += emu/rv_gdb.h
 EMU_FLAGS += -DSKJ_RV_GDB
 endif
-## The shared DWARF reader links whenever either core is present, so a guest
+ifeq ($(EMU_MIPS32),1)
+EMU_SRC += emu/mips32.c emu/mips_user.c
+EMU_HDR += emu/mips32.h
+## The GDB remote-protocol stub for MIPS (--gdb PORT), gated by SKJ_MIPS_GDB;
+## the sibling of the RV32 stub.  A bare emu-mips vendoring omits it.
+EMU_SRC += emu/mips_gdb.c
+EMU_HDR += emu/mips_gdb.h
+EMU_FLAGS += -DSKJ_MIPS_GDB
+endif
+## The arch-neutral process sandbox + scheduler links whenever any core is
+## present; each core's *_user.c is a thin binding (a skj_cpu_ops vtable over a
+## void* CPU handle) that drives it.
+ifneq (,$(filter 1,$(EMU_COLDFIRE) $(EMU_RV32) $(EMU_MIPS32)))
+EMU_SRC += emu/sched.c
+EMU_HDR += emu/sched.h emu/run_reason.h
+endif
+## The shared DWARF reader links whenever any core is present, so a guest
 ## fault prints a symbolized backtrace (debugger item 5).  SKJ_DWARF_BACKTRACE
-## gates the code in rv_user.c and cf_user.c; a bare vendoring without dwarf/
-## leaves it undefined and still builds, reporting the fault pc alone.
-ifneq (,$(filter 1,$(EMU_COLDFIRE) $(EMU_RV32)))
+## gates the code in rv_user.c, cf_user.c and mips_user.c; a bare vendoring
+## without dwarf/ leaves it undefined and still builds, reporting the fault pc
+## alone.
+ifneq (,$(filter 1,$(EMU_COLDFIRE) $(EMU_RV32) $(EMU_MIPS32)))
 EMU_SRC += dwarf/dwread.c ir/arena.c
 EMU_FLAGS += -DSKJ_DWARF_BACKTRACE -Idwarf -Iir
 endif
@@ -2194,6 +2213,12 @@ check-rv-emu: build/skj-run build/skj-tinc-rv build/skj-sc-rv \
               $(RV_TESTS:tests/%.tc=build/rv/%) $(RV_SCM_TESTS:tests/%.scm=build/rv/%)
 	@sh tests/run-tests.sh ./build/skj-run build/rv
 
+## The MIPS tests link no cross-compiled C, so the same binaries the qemu tier
+## runs go straight to the in-tree emulator (the mips32 user-mode core).
+check-mips-emu: build/skj-run build/skj-tinc-mips build/skj-sc-mips \
+                $(MIPS_TESTS:tests/%.tc=build/mips/%) $(MIPS_SCM_TESTS:tests/%.scm=build/mips/%)
+	@sh tests/run-tests.sh ./build/skj-run build/mips
+
 ## ---------------------------------------------------------------
 ## Instruction-count benchmark
 ##
@@ -2270,9 +2295,10 @@ test-ops-emu: build/skj-run build/ops_test_cf
 		|| (echo "FAIL: ops_test (skj-run)"; exit 1)
 
 ## Every suite the in-tree emulator can run, no qemu involved.
-check-emu-all: check-emu check-rv-emu \
+check-emu-all: check-emu check-rv-emu check-mips-emu \
                test-rv-irq test-rv-run test-guest-mmap \
-               test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache \
+               test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox \
+               test-cf-sandbox test-rv-decode-cache \
                test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp \
                check-rv32 \
                test-fpu-emu test-i64-emu test-ops-emu bench \
@@ -3929,6 +3955,25 @@ test-mips-addr2line: build/skj-cc-mips build/skj-as-mips build/skj-ld-mips build
 	     echo "PASS: skj-addr2line matches GNU addr2line on $$n MIPS statements (function + line)"; \
 	 else exit 1; fi
 
+## The MIPS twin of test-rv-backtrace: a nested null-read fault, and skj-run
+## walks the $fp (s8) chain and symbolizes it through the shared DWARF reader.
+## The frames must name the functions in call order (level3 inner -> main
+## outer); the crt _start frame is NOTYPE and prints ??.
+test-mips-backtrace: build/skj-cc-mips build/skj-as-mips build/skj-ld-mips build/skj-run build/mips/start.o
+	@mkdir -p build/debug
+	@./build/skj-cc-mips -g -o build/debug/mcrash.s tests/debug/crash.c
+	@./build/skj-as-mips -o build/debug/mcrash.o build/debug/mcrash.s
+	@./build/skj-ld-mips -o build/debug/mcrash.elf build/mips/start.o build/debug/mcrash.o
+	@./build/skj-run build/debug/mcrash.elf 2>build/debug/mcrash.err; \
+	 bt=`grep '^#' build/debug/mcrash.err | sed 's/.*0x[0-9a-f]* *//; s/ at .*//'`; \
+	 order=`echo "$$bt" | grep -E 'level3|level2|level1|main' | tr '\n' ' '`; \
+	 if [ "$$order" = "level3 level2 level1 main " ]; then \
+	     echo "PASS: skj-run MIPS backtrace walks level3 -> level2 -> level1 -> main"; \
+	 else \
+	     echo "FAIL: backtrace order was [$$order]"; \
+	     cat build/debug/mcrash.err; exit 1; \
+	 fi
+
 ## skj-run fault backtrace (item 5): a nested call chain faults through a null
 ## read, and skj-run walks the frame-pointer chain and symbolizes it with the
 ## shared DWARF reader.  Check the frames name the functions in call order
@@ -4051,6 +4096,52 @@ test-rv-gdb: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-run build
 	 if [ $$ok = 1 ]; then \
 	     echo "PASS: gdb-multiarch drives the skj-run RSP stub (break, fault backtrace, exit)"; \
 	 else cat build/debug/g1.out build/debug/g2.out; exit 1; fi
+
+## The MIPS twin of test-rv-gdb, driven through the MIPS stub (emu/mips_gdb.c)
+## with gdb-multiarch as the oracle: a break at main, the clean exit code, and a
+## SIGSEGV whose faulting frame (level3) and its caller (level2) symbolize.  gdb
+## stops the MIPS unwind there: skj-cc emits .debug_line but no CFI, so gdb falls
+## back to prologue analysis, which truncates this call chain at two frames.
+## That is a gdb MIPS-unwinder limit, not a stub one; qemu-mipsel's own gdbstub
+## truncates the same binary identically, and skj-run's native DWARF backtrace
+## (test-mips-addr2line path) walks all four frames.  Skips if gdb is absent.
+MIPS_GDB ?= gdb-multiarch
+test-mips-gdb: build/skj-cc-mips build/skj-as-mips build/skj-ld-mips build/skj-run build/mips/start.o
+	@if ! command -v $(MIPS_GDB) >/dev/null 2>&1; then \
+	     echo "SKIP: test-mips-gdb ($(MIPS_GDB) not found)"; exit 0; fi; \
+	 mkdir -p build/debug; \
+	 ./build/skj-cc-mips -g -o build/debug/mloc.s tests/debug/loc.c; \
+	 ./build/skj-as-mips -o build/debug/mloc.o build/debug/mloc.s; \
+	 ./build/skj-ld-mips -o build/debug/mloc.elf build/mips/start.o build/debug/mloc.o; \
+	 ./build/skj-cc-mips -g -o build/debug/mcrash.s tests/debug/crash.c; \
+	 ./build/skj-as-mips -o build/debug/mcrash.o build/debug/mcrash.s; \
+	 ./build/skj-ld-mips -o build/debug/mcrash.elf build/mips/start.o build/debug/mcrash.o; \
+	 port=$$((20000 + $$$$ % 20000)); \
+	 ./build/skj-run --gdb $$port build/debug/mloc.elf >/dev/null 2>build/debug/mg1.err & rp=$$!; \
+	 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+	     grep -q listening build/debug/mg1.err 2>/dev/null && break; sleep 0.2; done; \
+	 $(MIPS_GDB) -q -nx -batch -ex "set pagination off" \
+	     -ex "target remote 127.0.0.1:$$port" -ex "break main" \
+	     -ex "continue" -ex "continue" build/debug/mloc.elf \
+	     >build/debug/mg1.out 2>&1; \
+	 wait $$rp 2>/dev/null; \
+	 port=$$((20000 + ($$$$ + 1) % 20000)); \
+	 ./build/skj-run --gdb $$port build/debug/mcrash.elf >/dev/null 2>build/debug/mg2.err & rp=$$!; \
+	 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+	     grep -q listening build/debug/mg2.err 2>/dev/null && break; sleep 0.2; done; \
+	 $(MIPS_GDB) -q -nx -batch -ex "set pagination off" \
+	     -ex "target remote 127.0.0.1:$$port" -ex "continue" \
+	     -ex "backtrace" build/debug/mcrash.elf >build/debug/mg2.out 2>&1; \
+	 kill $$rp 2>/dev/null; wait $$rp 2>/dev/null; \
+	 ok=1; \
+	 grep -q "Breakpoint 1, main" build/debug/mg1.out || { echo "FAIL: no break at main"; ok=0; }; \
+	 grep -q "exited with code 05" build/debug/mg1.out || { echo "FAIL: loc did not exit 05"; ok=0; }; \
+	 grep -q "SIGSEGV" build/debug/mg2.out || { echo "FAIL: no SIGSEGV on crash"; ok=0; }; \
+	 for fn in level3 level2; do \
+	     grep -q "in $$fn " build/debug/mg2.out || { echo "FAIL: backtrace missing $$fn"; ok=0; }; done; \
+	 if [ $$ok = 1 ]; then \
+	     echo "PASS: gdb-multiarch drives the skj-run MIPS RSP stub (break, fault frame, exit)"; \
+	 else cat build/debug/mg1.out build/debug/mg2.out; exit 1; fi
 
 ## skj-dbg end to end (item 6b): the in-tree debugger launches skj-run --gdb,
 ## connects over the RSP, and drives break / continue / backtrace, symbolizing
@@ -4320,12 +4411,28 @@ test-cf-fs-cap: build/skj-cc build/skj-as build/start.o build/half.o build/va_cf
 	 FS_INTERPOSE=1 EXPECT=42 \
 	 sh tests/run-libc-tests.sh
 
+test-mips-fs-cap: build/skj-cc-mips build/mips/start.o build/mips/half.o build/mips/va_mips.o build/mips/soft64_div.o build/mips/co_switch.o $(FS_CAP_RUN)
+	@rm -rf build/fs-cap-mips
+	@mkdir -p build/fs-cap-mips/data
+	@printf 'capability-granted\n' > build/fs-cap-mips/data/seed.txt
+	@printf 'ESCAPED\n' > build/fs-cap-mips/escape.txt
+	@CCBIN="$(CURDIR)/build/skj-cc-mips" \
+	 ASM="$(MIPS_AS) -march=mips1 -EL -o" \
+	 LD="$(MIPS_LD) -o" \
+	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --mount data:$(CURDIR)/build/fs-cap-mips/data" \
+	 START="$(CURDIR)/build/mips/start.o" \
+	 HALF="$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/va_mips.o $(CURDIR)/build/mips/soft64_div.o $(CURDIR)/build/mips/co_switch.o" \
+	 OUTDIR="$(CURDIR)/build/fs-cap-mips" \
+	 TEST="$(CURDIR)/tests/fs-cap/capguest.c" \
+	 FS_INTERPOSE=1 EXPECT=42 \
+	 sh tests/run-libc-tests.sh
+
 ## Run the fs-cap confinement end to end against build/skj-run-posix, so the
 ## cap_walk component walk (the portable confinement floor every non-Linux host
 ## uses) is compiled and exercised on Linux too, where openat2 is the default.
 ## A recursive make re-drives the fs-cap targets with the forced-POSIX runner.
 check-emu-posix: build/skj-run-posix
-	@$(MAKE) --no-print-directory test-rv-fs-cap test-cf-fs-cap FS_CAP_RUN=build/skj-run-posix
+	@$(MAKE) --no-print-directory test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap FS_CAP_RUN=build/skj-run-posix
 	@echo "PASS: fs-cap confinement via cap_walk (-DHP_FORCE_POSIX) on $$(uname -s)"
 
 ## The C guest's RNG: libc rand/srand draw from the shared fast generator and
@@ -4640,8 +4747,15 @@ check-slow: test-rv-selfhost-full test-cf-selfhost-full \
 ## compile add.c, then assemble, link and run the result for exit 42.  This is
 ## the one self-host path that pulls open_memstream into the guest libc, since
 ## mips_emit.c references it (the .set noreorder scheduler's buffer).
+## The MIPS counterpart of test-rv-selfhost: skj-cc built as a MIPS guest (its
+## own sources via skjcc -target mips), run under skj-run to compile add.c
+## through the sandbox syscalls.  skj-run's MIPS core models the COP1 FPU the
+## hardware-float backend targets, so the compiler (which spills callee-saved
+## $f20/$f21) runs under the sandbox, not only qemu.  The emitted asm must match
+## a qemu run of the same in-guest compiler byte-for-byte; the final program is
+## assembled, linked and run under skj-run too.
 test-mips-selfhost: build/skjcc build/skj-cc-mips build/skj-as-mips build/skj-ld-mips \
-                    $(DRIVER_LIB_MIPS) tests/selfhost/add.c
+                    $(DRIVER_LIB_MIPS) build/skj-run tests/selfhost/add.c
 	@mkdir -p build/selfhost-mips
 	@set -e; objs=""; for s in $(CC_SRC_MIPS); do \
 	    b=$$(basename $$s .c); \
@@ -4650,15 +4764,20 @@ test-mips-selfhost: build/skjcc build/skj-cc-mips build/skj-as-mips build/skj-ld
 	    objs="$$objs build/selfhost-mips/$$b.o"; \
 	 done; \
 	 ./build/skjcc -target mips $$objs -o build/selfhost-mips/skj-cc-mips.elf
-	@$(QEMU_MIPS) build/selfhost-mips/skj-cc-mips.elf -o build/selfhost-mips/add.s \
-	    tests/selfhost/add.c 2>build/selfhost-mips/err \
-	    || { echo "FAIL: qemu of in-guest skj-cc"; cat build/selfhost-mips/err; exit 1; }
-	@./build/skj-as-mips -o build/selfhost-mips/add.o build/selfhost-mips/add.s
+	@./build/skj-run build/selfhost-mips/skj-cc-mips.elf -o build/selfhost-mips/add.skj.s \
+	    tests/selfhost/add.c 2>build/selfhost-mips/skj.err \
+	    || { echo "FAIL: skj-run of in-guest skj-cc"; cat build/selfhost-mips/skj.err; exit 1; }
+	@$(QEMU_MIPS) build/selfhost-mips/skj-cc-mips.elf -o build/selfhost-mips/add.qemu.s \
+	    tests/selfhost/add.c 2>build/selfhost-mips/qemu.err \
+	    || { echo "FAIL: qemu of in-guest skj-cc"; cat build/selfhost-mips/qemu.err; exit 1; }
+	@cmp -s build/selfhost-mips/add.skj.s build/selfhost-mips/add.qemu.s \
+	    || { echo "FAIL: in-guest asm differs skj-run vs qemu"; exit 1; }
+	@./build/skj-as-mips -o build/selfhost-mips/add.o build/selfhost-mips/add.skj.s
 	@./build/skj-ld-mips -o build/selfhost-mips/add.elf build/lib/mips/crt0.o \
 	    build/selfhost-mips/add.o build/lib/mips/libc.a
-	@$(QEMU_MIPS) build/selfhost-mips/add.elf; rc=$$?; \
+	@./build/skj-run build/selfhost-mips/add.elf; rc=$$?; \
 	 [ $$rc = 42 ] || { echo "FAIL: in-guest-compiled program exit $$rc (want 42)"; exit 1; }
-	@echo "PASS: skj-cc self-hosts under qemu-mipsel (compiled add.c in-guest -> 42, MIPS)"
+	@echo "PASS: skj-cc self-hosts under skj-run (compiled add.c in-guest -> 42, MIPS)"
 
 ## I64 integration test (IR builder → arm64 asm → qemu-aarch64)
 I64_TEST_A64_SRC := tests/test_i64.c $(IR_SRC) $(BE_A64)
@@ -5139,6 +5258,81 @@ build/xlang-sandbox/parent.elf: build/xlang-sandbox/parent.o build/xlang-sandbox
 
 test-rv-xlang-sandbox: build/xlang-sandbox/parent.elf build/skj-run
 	@sh tests/run-xlang-sandbox.sh "$(CURDIR)/build/skj-run" "$(CURDIR)/build/xlang-sandbox/parent.elf"
+
+## The MIPS twin of test-rv-sandbox: the same arch-neutral parent.c/child.c, a
+## MIPS sys.S of emulator-private syscall stubs, built with the in-tree MIPS
+## toolchain and run under skj-run's MIPS core.  Proves the process sandbox
+## (spawn, the round-robin scheduler, the guarded map/unmap, and the shared
+## memory budget) is at parity with the RISC-V core.  The runner is shared.
+build/sandbox-mips:
+	mkdir -p build/sandbox-mips
+
+build/sandbox-mips/sys.o: tests/sandbox-mips/sys.S build/skj-as-mips | build/sandbox-mips
+	./build/skj-as-mips -o $@ $<
+
+build/sandbox-mips/child.o: tests/sandbox/child.c build/skj-cc-mips build/skj-as-mips | build/sandbox-mips
+	./build/skj-cc-mips -o build/sandbox-mips/child.s $<
+	./build/skj-as-mips -o $@ build/sandbox-mips/child.s
+
+build/sandbox-mips/child.elf: build/sandbox-mips/child.o build/sandbox-mips/sys.o build/mips/start.o build/skj-ld-mips
+	./build/skj-ld-mips -o $@ build/mips/start.o build/sandbox-mips/child.o build/sandbox-mips/sys.o
+
+build/sandbox-mips/child_image.h: build/sandbox-mips/child.elf
+	printf 'static const unsigned char child_img[] = {\n' > $@
+	xxd -i < build/sandbox-mips/child.elf >> $@
+	printf '};\n#define CHILD_IMG_LEN %uu\n' "$$(wc -c < build/sandbox-mips/child.elf)" >> $@
+
+build/sandbox-mips/parent.o: tests/sandbox/parent.c build/sandbox-mips/child_image.h build/skj-cc-mips build/skj-as-mips | build/sandbox-mips
+	./build/skj-cc-mips -Ibuild/sandbox-mips -o build/sandbox-mips/parent.s $<
+	./build/skj-as-mips -o $@ build/sandbox-mips/parent.s
+
+build/sandbox-mips/parent.elf: build/sandbox-mips/parent.o build/sandbox-mips/sys.o build/mips/start.o build/skj-ld-mips
+	./build/skj-ld-mips -o $@ build/mips/start.o build/sandbox-mips/parent.o build/sandbox-mips/sys.o
+
+test-mips-sandbox: build/sandbox-mips/parent.elf build/skj-run
+	@sh tests/run-sandbox-test.sh "$(CURDIR)/build/skj-run" "$(CURDIR)/build/sandbox-mips/parent.elf" test-mips-sandbox
+
+## The ColdFire twin: the same arch-neutral parent.c/child.c, a ColdFire sys.S
+## of TRAP #0 stubs, built with the in-tree m68k toolchain.  The ColdFire core
+## services its TRAP #0 syscalls inside its run wrapper, so it drives the one
+## shared scheduler the same as rv and MIPS; this exercises its half of the
+## process sandbox (spawn, map/unmap, the shared budget).
+build/sandbox-cf:
+	mkdir -p build/sandbox-cf
+
+build/sandbox-cf/sys.o: tests/sandbox-cf/sys.S build/skj-as | build/sandbox-cf
+	./build/skj-as -o $@ $<
+
+build/sandbox-cf/child.o: tests/sandbox/child.c build/skj-cc build/skj-as | build/sandbox-cf
+	./build/skj-cc -o build/sandbox-cf/child.s $<
+	./build/skj-as -o $@ build/sandbox-cf/child.s
+
+build/sandbox-cf/child.elf: build/sandbox-cf/child.o build/sandbox-cf/sys.o build/start.o build/skj-ld
+	./build/skj-ld -o $@ build/start.o build/sandbox-cf/child.o build/sandbox-cf/sys.o
+
+build/sandbox-cf/child_image.h: build/sandbox-cf/child.elf
+	printf 'static const unsigned char child_img[] = {\n' > $@
+	xxd -i < build/sandbox-cf/child.elf >> $@
+	printf '};\n#define CHILD_IMG_LEN %uu\n' "$$(wc -c < build/sandbox-cf/child.elf)" >> $@
+
+build/sandbox-cf/parent.o: tests/sandbox/parent.c build/sandbox-cf/child_image.h build/skj-cc build/skj-as | build/sandbox-cf
+	./build/skj-cc -Ibuild/sandbox-cf -o build/sandbox-cf/parent.s $<
+	./build/skj-as -o $@ build/sandbox-cf/parent.s
+
+build/sandbox-cf/parent.elf: build/sandbox-cf/parent.o build/sandbox-cf/sys.o build/start.o build/skj-ld
+	./build/skj-ld -o $@ build/start.o build/sandbox-cf/parent.o build/sandbox-cf/sys.o
+
+test-cf-sandbox: build/sandbox-cf/parent.elf build/skj-run
+	@sh tests/run-sandbox-test.sh "$(CURDIR)/build/skj-run" "$(CURDIR)/build/sandbox-cf/parent.elf" test-cf-sandbox
+
+## check-vendor: the only test that exercises vendor.sh.  It vendors this very
+## checkout (riscv + cc + toolchain,runtime,sandbox,emulator), builds the result
+## with the generated skjegg.mk, then compiles and runs a confined guest with the
+## vendored driver + skj-run.  A staging or wiring gap in vendor.sh (an unstaged
+## file, a missing -I, a stale source list) fails the vendored build or a case,
+## so these gaps stop reaching consumers unnoticed.  Needs the RV cross tools.
+check-vendor:
+	@sh tests/run-vendor-smoke.sh "$(CURDIR)"
 
 ## The psABI C suite end to end through the in-tree RV32 toolchain:
 ## skj-cc-rv emits the standard RISC-V ILP32 convention, assembled by
@@ -5763,7 +5957,8 @@ check-mips-sf: test-softfloat test-fpu-mips-sf test-f32-mips-sf check-cc-mips-sf
 ## the encoding golden-master, the archive and PS-EXE paths), and the FPU-less
 ## soft-float configuration.  test-mips-psexe-redux is excluded (it needs a
 ## real PlayStation BIOS and is opt-in).
-check-mips-all: check-mips check-mips-noreorder \
+check-mips-all: check-mips check-mips-noreorder check-mips-emu test-mips-fs-cap \
+                test-mips-sandbox test-mips-selfhost test-mips-gdb test-mips-backtrace \
                 test-i64-mips test-ops-mips test-fpu-mips test-f32-mips \
                 check-cc-mips check-cc-mips-noreorder \
                 check-mipsas check-cc-mips-skj test-mips-archive test-mips-psexe \
@@ -5847,10 +6042,10 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            test-dwarf-line test-rv-stt-func test-rv-debug-sections \
            test-rv-debug-link test-rv-addr2line test-rv-backtrace test-rv-abort-backtrace \
            test-bt-loop test-bt-trim test-rv-wild-backtrace \
-           test-cf-addr2line test-mips-addr2line \
+           test-cf-addr2line test-mips-addr2line test-mips-backtrace \
            test-cf-wild-backtrace test-cf-abort-backtrace \
            test-kp-cf-dwarf test-kp-cf-trap-backtrace \
-           test-rv-dbg test-rv-gdb test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-cf-selfhost test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc check-selfhost-all test-help \
+           test-rv-dbg test-rv-gdb test-mips-gdb test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-cf-selfhost test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc check-selfhost-all test-help \
            check-cc-rv-psabi test-cc-rv-psabi-interop \
            test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive \
            test-cc-rv-psabi-struct test-cc-driver check-libc \
@@ -5874,4 +6069,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-rng test-rng-glue test-sched-glue coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue check-vendor coverage-codegen clean FORCE

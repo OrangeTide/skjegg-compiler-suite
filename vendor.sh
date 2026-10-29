@@ -11,7 +11,7 @@
 # Backends:  coldfire  riscv  mips
 # Frontends: tinc  scheme  moo  pascal  cc
 # Tools:     as  ld  cpp
-# Emulators: emu-cf  emu-rv
+# Emulators: emu-cf  emu-rv  emu-mips
 # Kobold:    kp
 
 set -eu
@@ -26,8 +26,32 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'USAGE'
-Usage: vendor-skjegg.sh [-d DIR] [-r REF] [-u DIR] component ...
+Usage: vendor-skjegg.sh [-d DIR] [-r REF] [-u DIR]
+                        [--arch LIST] [--frontend LIST] [--with LIST]
+                        [component ...]
        update-skjegg.sh                      (re-vendor)
+
+Selection axes (comma- or space-separated; repeatable).  Each expands into
+the flat component tokens listed further down, so pick a target and the
+features you want and the right tools come along:
+
+  --arch LIST       target architectures:  coldfire  riscv  mips
+  --frontend LIST   language front ends:   tinc  scheme  moo  pascal  cc  kobold
+  --with LIST       per-target or standalone features:
+                      toolchain   in-tree assembler + linker (+ ar) for each
+                                  selected --arch
+                      emulator    the skj-run CPU core for each selected --arch
+                      runtime     the hosted libc + crt (needs cc and toolchain)
+                      sandbox     build the hosted libc confined: its fd I/O
+                                  (open/read/write/lseek/close) routes through
+                                  the capability fs/ layer (needs runtime)
+                      cpp         the standalone C preprocessor
+
+Example:
+  vendor-skjegg.sh --arch riscv,mips --frontend cc --with toolchain,emulator
+
+Flat components (the axes expand to these; still accepted directly, so an
+older update-skjegg.sh keeps working):
 
 Backends:  coldfire  riscv  mips
 Frontends: tinc  scheme  moo  pascal  cc
@@ -35,7 +59,9 @@ Tools:     as  ld  as-rv  ld-rv  as-mips  ld-mips  ar  cpp
              (as-rv/ld-rv: the RISC-V RV32 toolchain; as-mips/ld-mips: the
               MIPS I toolchain, ld-mips writes ELF and PlayStation PS-EXE;
               ar: a target-neutral archive tool for any of the linkers)
-Emulators: emu-cf  emu-rv    (skj-run; either, both, or neither)
+Emulators: emu-cf  emu-rv  emu-mips
+             (skj-run; any mix, or none.  emu-cf is the ColdFire core,
+              emu-rv the RV32 core, emu-mips the little-endian MIPS I core.)
 Kobold:    kp                (the Kobold-Pascal AOT path: the native front end
              skj-kpc and the KPM1 compiler skj-kp over the bootstrap seed, plus
              the runtime libkpaot.a; add riscv for the KPM1->RV32 compiler)
@@ -54,24 +80,91 @@ USAGE
 }
 
 # ---- option parsing ----
+#
+# Two interfaces, which compose.  The axes (--arch, --frontend, --with) are the
+# documented interface; each expands into the flat component tokens below, which
+# remain accepted as positional arguments so an older update-skjegg.sh keeps
+# working.  update-skjegg.sh re-vendors through the expanded token list.
 
 _u_explicit=0
-while getopts d:r:u:h opt; do
-    case "$opt" in
-        d) DEST="$OPTARG" ;;
-        r) REF="$OPTARG" ;;
-        u) UPDATE_DIR="$OPTARG"; _u_explicit=1 ;;
-        *) usage ;;
+_archs="" _frontends="" _features=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -d) DEST="$2"; shift 2 ;;
+        -d*) DEST="${1#-d}"; shift ;;
+        -r) REF="$2"; shift 2 ;;
+        -r*) REF="${1#-r}"; shift ;;
+        -u) UPDATE_DIR="$2"; _u_explicit=1; shift 2 ;;
+        -u*) UPDATE_DIR="${1#-u}"; _u_explicit=1; shift ;;
+        --arch) _archs="$_archs $(echo "$2" | tr ',' ' ')"; shift 2 ;;
+        --arch=*) _archs="$_archs $(echo "${1#--arch=}" | tr ',' ' ')"; shift ;;
+        --frontend) _frontends="$_frontends $(echo "$2" | tr ',' ' ')"; shift 2 ;;
+        --frontend=*) _frontends="$_frontends $(echo "${1#--frontend=}" | tr ',' ' ')"; shift ;;
+        --with) _features="$_features $(echo "$2" | tr ',' ' ')"; shift 2 ;;
+        --with=*) _features="$_features $(echo "${1#--with=}" | tr ',' ' ')"; shift ;;
+        -h|--help) usage ;;
+        --) shift; while [ $# -gt 0 ]; do COMPONENTS="$COMPONENTS $1"; shift; done ;;
+        -*) die "unknown option: $1 (see -h)" ;;
+        *) COMPONENTS="$COMPONENTS $1"; shift ;;      # legacy positional token
     esac
 done
-shift $((OPTIND - 1))
 
-if [ $# -gt 0 ]; then
-    COMPONENTS="$*"
-fi
+# Expand the architecture axis into backend tokens.
+for _a in $_archs; do
+    case "$_a" in
+        cf|coldfire|m68k) COMPONENTS="$COMPONENTS coldfire" ;;
+        rv|rv32|riscv)    COMPONENTS="$COMPONENTS riscv" ;;
+        mips|mipsel)      COMPONENTS="$COMPONENTS mips" ;;
+        *) die "unknown --arch: $_a (coldfire riscv mips)" ;;
+    esac
+done
+
+# Expand the front-end axis.
+for _f in $_frontends; do
+    case "$_f" in
+        tinc|scheme|moo|pascal|cc) COMPONENTS="$COMPONENTS $_f" ;;
+        kobold|kp)                 COMPONENTS="$COMPONENTS kp" ;;
+        *) die "unknown --frontend: $_f (tinc scheme moo pascal cc kobold)" ;;
+    esac
+done
+
+# Expand the feature axis.  toolchain and emulator are per-architecture, so they
+# read which backends were selected above.
+_sel() { case " $COMPONENTS " in *" $1 "*) return 0 ;; esac; return 1; }
+for _w in $_features; do
+    case "$_w" in
+        toolchain)
+            _sel coldfire && COMPONENTS="$COMPONENTS as ld"
+            _sel riscv    && COMPONENTS="$COMPONENTS as-rv ld-rv"
+            _sel mips     && COMPONENTS="$COMPONENTS as-mips ld-mips"
+            COMPONENTS="$COMPONENTS ar" ;;
+        emulator|emu)
+            _sel coldfire && COMPONENTS="$COMPONENTS emu-cf"
+            _sel riscv    && COMPONENTS="$COMPONENTS emu-rv"
+            _sel mips     && COMPONENTS="$COMPONENTS emu-mips" ;;
+        runtime)  COMPONENTS="$COMPONENTS ar" ;;
+        sandbox)  COMPONENTS="$COMPONENTS ar sandbox" ;;   # the confined libc needs ar
+        cpp)      COMPONENTS="$COMPONENTS cpp" ;;
+        frontend=*)
+            for _f in $(echo "${_w#frontend=}" | tr ',' ' '); do
+                case "$_f" in
+                    tinc|scheme|moo|pascal|cc) COMPONENTS="$COMPONENTS $_f" ;;
+                    kobold|kp)                 COMPONENTS="$COMPONENTS kp" ;;
+                    *) die "unknown frontend: $_f" ;;
+                esac
+            done ;;
+        *) die "unknown --with feature: $_w (toolchain emulator runtime sandbox cpp)" ;;
+    esac
+done
+
+# Collapse duplicate tokens so the baked COMPONENTS (and the skjegg.mk header)
+# read cleanly; the has_* flags are idempotent, so this is only cosmetic.
+COMPONENTS=$(printf '%s\n' $COMPONENTS | awk '!seen[$0]++' | tr '\n' ' ')
+COMPONENTS=${COMPONENTS% }
 
 if [ -z "$COMPONENTS" ]; then
-    die "no components specified (see -h)"
+    die "nothing selected (see -h)"
 fi
 
 # ---- parse and validate components ----
@@ -81,8 +174,8 @@ has_tinc=0 has_scheme=0 has_moo=0 has_pascal=0 has_cc=0
 has_as=0 has_ld=0 has_cpp=0
 has_as_rv=0 has_ld_rv=0
 has_as_mips=0 has_ld_mips=0 has_ar=0
-has_emu_cf=0 has_emu_rv=0
-has_kp=0
+has_emu_cf=0 has_emu_rv=0 has_emu_mips=0
+has_kp=0 has_sandbox=0
 
 for comp in $COMPONENTS; do
     case "$comp" in
@@ -104,7 +197,9 @@ for comp in $COMPONENTS; do
         cpp)      has_cpp=1 ;;
         emu-cf)   has_emu_cf=1 ;;
         emu-rv)   has_emu_rv=1 ;;
+        emu-mips) has_emu_mips=1 ;;
         kp|kobold) has_kp=1 ;;
+        sandbox)  has_sandbox=1 ;;
         *)        die "unknown component: $comp" ;;
     esac
 done
@@ -146,6 +241,13 @@ if [ "$has_driver" -eq 1 ] && [ "$has_ar" -eq 0 ]; then
     printf 'note: add the "ar" component for a hosted libc; the driver is freestanding without it\n' >&2
 fi
 
+# The sandbox feature builds that hosted libc confined (its fd I/O routes through
+# the fs/ capability layer), so it needs the libc: a backend, cc, that backend's
+# in-tree toolchain, and ar.
+if [ "$has_sandbox" -eq 1 ] && [ "$has_libc" -eq 0 ]; then
+    die "the sandbox feature confines the hosted libc, so it needs one: add cc, a backend, that backend's toolchain (as/ld) and ar (e.g. --frontend cc --with toolchain,runtime,sandbox)"
+fi
+
 # ---- fetch ----
 
 command -v git >/dev/null || die "git is required"
@@ -176,22 +278,26 @@ cp "$S/CHANGELOG.md" "$DEST/"
 # IR core (always present)
 mkdir -p "$DEST/ir"
 cp "$S/ir/ir.c" "$S/ir/ir.h" "$S/ir/util.c" "$S/ir/util.h" \
-   "$S/ir/arena.c" "$S/ir/arena.h" "$DEST/ir/"
+   "$S/ir/arena.c" "$S/ir/arena.h" "$S/ir/target.h" "$DEST/ir/"
 
 # backends
 if [ "$has_cf" -eq 1 ]; then
     mkdir -p "$DEST/backend" "$DEST/runtime"
     cp "$S/backend/cf_emit.c" "$S/backend/regalloc_cf.c" "$DEST/backend/"
-    # start.S .includes syscall_cf.S (the shared syscall seam), so both ship.
-    cp "$S/runtime/start.S" "$S/runtime/syscall_cf.S" "$DEST/runtime/"
+    # start.S .includes crt_entry_cf.S (argv/entry) and syscall_cf.S (the shared
+    # syscall seam), so all three ship.
+    cp "$S/runtime/start.S" "$S/runtime/crt_entry_cf.S" \
+       "$S/runtime/syscall_cf.S" "$DEST/runtime/"
 fi
 if [ "$has_rv" -eq 1 ]; then
     mkdir -p "$DEST/backend" "$DEST/runtime"
     cp "$S/backend/rv_select.c" "$S/backend/rv_mc_text.c" \
        "$S/backend/rv_mc.h" "$S/backend/rv_select.h" "$S/backend/rv_mc_text.h" \
        "$S/backend/regalloc_rv.c" "$DEST/backend/"
-    # start_rv.S .includes syscall_rv.S (the shared syscall seam), so both ship.
-    cp "$S/runtime/start_rv.S" "$S/runtime/syscall_rv.S" "$DEST/runtime/"
+    # start_rv.S .includes crt_entry_rv.S (argv/entry), syscall_rv.S (the shared
+    # syscall seam) and i64_rv.S (64-bit integer helpers), so all ship.
+    cp "$S/runtime/start_rv.S" "$S/runtime/crt_entry_rv.S" \
+       "$S/runtime/syscall_rv.S" "$S/runtime/i64_rv.S" "$DEST/runtime/"
 fi
 if [ "$has_mips" -eq 1 ]; then
     # The Linux crt (start_mips.S), plus what MIPS I specifically needs: half.c
@@ -259,13 +365,27 @@ fi
 # the 64-bit divide helpers (soft64.c, divide-only) the rv/mips libc needs for
 # 64-bit printf.  Archived into a per-target libc.a the driver links on demand.
 if [ "$has_libc" -eq 1 ]; then
-    mkdir -p "$DEST/libc" "$DEST/include" "$DEST/runtime"
-    cp "$S"/libc/*.c "$S/libc/fmt.h" "$DEST/libc/"
+    mkdir -p "$DEST/libc" "$DEST/include" "$DEST/include/sys" "$DEST/runtime"
+    cp "$S"/libc/*.c "$S"/libc/*.h "$DEST/libc/"
     cp "$S"/include/*.h "$DEST/include/"
+    cp "$S"/include/sys/*.h "$DEST/include/sys/"
+    # rand.c draws on the shared fast generator in runtime/rng.c.
+    cp "$S/runtime/rng.c" "$S/runtime/rng.h" "$DEST/runtime/"
     [ "$drv_cf" -eq 1 ]   && cp "$S/runtime/co_switch_cf.S" "$DEST/runtime/"
     [ "$drv_rv" -eq 1 ]   && cp "$S/runtime/co_switch_rv.S" "$DEST/runtime/"
     [ "$drv_mips" -eq 1 ] && cp "$S/runtime/co_switch_mips.S" "$DEST/runtime/"
     { [ "$drv_rv" -eq 1 ] || [ "$drv_mips" -eq 1 ]; } && cp "$S/runtime/soft64.c" "$DEST/runtime/"
+fi
+
+# The capability fs/ layer, the guest side of the sandbox: fdio.c (already in
+# libc/, copied above) is the libc interposition seam, and these are the backend
+# it routes to.  hostfs.c is the host-only test backend, not a guest source.
+if [ "$has_sandbox" -eq 1 ]; then
+    mkdir -p "$DEST/fs"
+    cp "$S/fs/fs.c" "$S/fs/fs.h" "$S/fs/fs_internal.h" \
+       "$S/fs/ramfs.c" "$S/fs/ramfs.h" \
+       "$S/fs/ambientfs.c" "$S/fs/ambientfs.h" \
+       "$S/fs/hostcap.c" "$S/fs/hostcap.h" "$DEST/fs/"
 fi
 
 # cpp library (needed by cc and cpp tool)
@@ -283,9 +403,11 @@ fi
 # each front end plus its standalone tool is taken separately, like the two
 # emulator cores.
 if [ "$has_as" -eq 1 ] || [ "$has_as_rv" -eq 1 ] || [ "$has_as_mips" -eq 1 ]; then
-    mkdir -p "$DEST/as"
+    mkdir -p "$DEST/as" "$DEST/dwarf"
     cp "$S/as/asm_lex.c" "$S/as/asm_obj.c" \
        "$S/as/asm_lex.h" "$S/as/asm_obj.h" "$DEST/as/"
+    # every assembler emits DWARF line tables for -g, so the dwarf builder ships.
+    cp "$S/dwarf/dwarf.c" "$S/dwarf/dwarf.h" "$DEST/dwarf/"
 fi
 if [ "$has_as" -eq 1 ]; then                    # ColdFire front end + tool
     cp "$S/as/parse.c" "$S/as/encode.c" "$S/as/elf.c" \
@@ -332,18 +454,28 @@ if [ "$has_ar" -eq 1 ]; then
     cp "$S/ar/main.c" "$DEST/ar/"
 fi
 
-# emulator (skj-run).  The two CPU cores are independent: a project that
-# runs only ColdFire guests takes emu-cf and never carries the RV32 core.
-if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ]; then
-    mkdir -p "$DEST/emu"
+# emulator (skj-run).  The CPU cores are independent: a project that
+# runs only ColdFire guests takes emu-cf and never carries the RV32 or
+# MIPS cores.
+if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || [ "$has_emu_mips" -eq 1 ]; then
+    mkdir -p "$DEST/emu" "$DEST/fs"
     cp "$S/emu/main.c" "$S/emu/guest.c" "$S/emu/guest.h" \
-       "$S/emu/elf32.c" "$S/emu/elf32.h" "$DEST/emu/"
+       "$S/emu/elf32.c" "$S/emu/elf32.h" "$S/emu/run_reason.h" \
+       "$S/emu/sched.c" "$S/emu/sched.h" \
+       "$S/emu/hostplat.c" "$S/emu/hostplat.h" "$DEST/emu/"
+    # guest.c reads the fs/ mount-table layout (header only; no fs/*.c is
+    # compiled into skj-run) and reaches host facilities through hostplat.
+    # sched.c is the arch-neutral process sandbox every core's *_user.c binds to.
+    cp "$S/fs/fs.h" "$DEST/fs/"
 fi
 if [ "$has_emu_cf" -eq 1 ]; then
     cp "$S/emu/coldfire.c" "$S/emu/coldfire.h" "$S/emu/cf_user.c" "$DEST/emu/"
 fi
 if [ "$has_emu_rv" -eq 1 ]; then
     cp "$S/emu/rv32.c" "$S/emu/rv32.h" "$S/emu/rv_user.c" "$DEST/emu/"
+fi
+if [ "$has_emu_mips" -eq 1 ]; then
+    cp "$S/emu/mips32.c" "$S/emu/mips32.h" "$S/emu/mips_user.c" "$DEST/emu/"
 fi
 
 # Kobold-Pascal AOT path (kobold).  The front end kpcom is in-tree Pascal source
@@ -406,7 +538,7 @@ if [ "$has_as" -eq 1 ] || [ "$has_ld" -eq 1 ] || [ "$has_ar" -eq 1 ] \
    || [ "$has_as_mips" -eq 1 ] || [ "$has_ld_mips" -eq 1 ]; then
     cp "$S/doc/tools/toolchain.md" "$DEST/doc/"
 fi
-if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ]; then
+if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || [ "$has_emu_mips" -eq 1 ]; then
     cp "$S/doc/tools/emulator.md" "$DEST/doc/"
 fi
 if [ "$has_libc" -eq 1 ]; then
@@ -443,7 +575,7 @@ fi
 
 tmp_upd=$(mktemp)
 sed -e "s|^ORIGIN=.*|ORIGIN=\"$ORIGIN\"|" \
-    -e "s|^COMPONENTS=.*|COMPONENTS=\"$COMPONENTS\"|" \
+    -e "s|^COMPONENTS=\"\"|COMPONENTS=\"$COMPONENTS\"|" \
     -e "s|^DEST=.*|DEST=\"$DEST\"|" \
     -e "s|^REF=.*|REF=\"$REF\"|" \
     -e "s|^UPDATE_DIR=.*|UPDATE_DIR=\"$_baked_upd\"|" \
@@ -584,7 +716,8 @@ fi
 if [ "$has_as" -eq 1 ]; then
     cat >> "$MK" <<'MK'
 SKJ_AS_LIB := $(SKJEGG)as/asm_lex.c $(SKJEGG)as/asm_obj.c \
-              $(SKJEGG)as/parse.c $(SKJEGG)as/encode.c $(SKJEGG)as/elf.c
+              $(SKJEGG)as/parse.c $(SKJEGG)as/encode.c $(SKJEGG)as/elf.c \
+              $(SKJEGG)dwarf/dwarf.c
 MK
 fi
 if [ "$has_ld" -eq 1 ]; then
@@ -598,7 +731,8 @@ if [ "$has_as_rv" -eq 1 ]; then
     cat >> "$MK" <<'MK'
 SKJ_AS_RV_LIB := $(SKJEGG)as/asm_lex.c $(SKJEGG)as/asm_obj.c \
                  $(SKJEGG)as/rv_parse.c $(SKJEGG)as/rv_encode.c \
-                 $(SKJEGG)as/rv_macro.c $(SKJEGG)as/rv_elf.c
+                 $(SKJEGG)as/rv_macro.c $(SKJEGG)as/rv_elf.c \
+                 $(SKJEGG)dwarf/dwarf.c
 MK
 fi
 if [ "$has_ld_rv" -eq 1 ]; then
@@ -612,7 +746,8 @@ if [ "$has_as_mips" -eq 1 ]; then
     cat >> "$MK" <<'MK'
 SKJ_AS_MIPS_LIB := $(SKJEGG)as/asm_lex.c $(SKJEGG)as/asm_obj.c \
                    $(SKJEGG)as/mips_parse.c $(SKJEGG)as/mips_encode.c \
-                   $(SKJEGG)as/mips_elf.c $(SKJEGG)as/mips_sched.c
+                   $(SKJEGG)as/mips_elf.c $(SKJEGG)as/mips_sched.c \
+                   $(SKJEGG)dwarf/dwarf.c
 MK
 fi
 if [ "$has_ld_mips" -eq 1 ]; then
@@ -700,7 +835,7 @@ if [ "$has_as" -eq 1 ]; then
     {
         printf '\nSKJ_ALL += $(BUILD)/skj-as\n'
         printf '$(BUILD)/skj-as: $(SKJEGG)as/main.c $(SKJ_AS_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c | $(BUILD)\n'
-        printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)as -I$(SKJEGG)ir -o $@ $(SKJEGG)as/main.c $(SKJ_AS_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
+        printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)as -I$(SKJEGG)ir -I$(SKJEGG)dwarf -o $@ $(SKJEGG)as/main.c $(SKJ_AS_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
     } >> "$MK"
 fi
 if [ "$has_ld" -eq 1 ]; then
@@ -714,7 +849,7 @@ if [ "$has_as_rv" -eq 1 ]; then
     {
         printf '\nSKJ_ALL += $(BUILD)/skj-as-rv\n'
         printf '$(BUILD)/skj-as-rv: $(SKJEGG)as/rv_main.c $(SKJ_AS_RV_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c | $(BUILD)\n'
-        printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)as -I$(SKJEGG)ir -o $@ $(SKJEGG)as/rv_main.c $(SKJ_AS_RV_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
+        printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)as -I$(SKJEGG)ir -I$(SKJEGG)dwarf -o $@ $(SKJEGG)as/rv_main.c $(SKJ_AS_RV_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
     } >> "$MK"
 fi
 if [ "$has_ld_rv" -eq 1 ]; then
@@ -728,7 +863,7 @@ if [ "$has_as_mips" -eq 1 ]; then
     {
         printf '\nSKJ_ALL += $(BUILD)/skj-as-mips\n'
         printf '$(BUILD)/skj-as-mips: $(SKJEGG)as/mips_main.c $(SKJ_AS_MIPS_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c | $(BUILD)\n'
-        printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)as -I$(SKJEGG)ir -o $@ $(SKJEGG)as/mips_main.c $(SKJ_AS_MIPS_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
+        printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)as -I$(SKJEGG)ir -I$(SKJEGG)dwarf -o $@ $(SKJEGG)as/mips_main.c $(SKJ_AS_MIPS_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
     } >> "$MK"
 fi
 if [ "$has_ld_mips" -eq 1 ]; then
@@ -764,11 +899,23 @@ emit_libc_rules() {
         printf '$(BUILD)/lib/%s/libc.a: $(BUILD)/%s $(BUILD)/%s $(BUILD)/skj-ar $(BUILD)/lib/%s/obj/co_switch.o | $(BUILD)\n' "$_d" "$_cc" "$_as" "$_d"
         printf '\t@mkdir -p $(BUILD)/lib/%s/obj\n' "$_d"
         printf '\t@for s in $(LIBC_SRCS); do \\\n'
-        printf '\t    $(BUILD)/%s -DSKJ_LIBC_FLOAT -I$(SKJEGG)include -I$(SKJEGG)libc -o $(BUILD)/lib/%s/obj/$$s.s $(SKJEGG)libc/$$s.c && \\\n' "$_cc" "$_d"
+        printf '\t    $(BUILD)/%s -DSKJ_LIBC_FLOAT $(LIBC_FSFLAGS) -I$(SKJEGG)include -I$(SKJEGG)libc -o $(BUILD)/lib/%s/obj/$$s.s $(SKJEGG)libc/$$s.c && \\\n' "$_cc" "$_d"
         printf '\t    $(BUILD)/%s -o $(BUILD)/lib/%s/obj/$$s.o $(BUILD)/lib/%s/obj/$$s.s || exit 1; \\\n' "$_as" "$_d" "$_d"
         printf '\tdone\n'
+        # runtime/ sources that join the archive (rng.c, for rand.c)
+        printf '\t@for s in $(RT_SRCS); do \\\n'
+        printf '\t    $(BUILD)/%s -DSKJ_LIBC_FLOAT $(LIBC_FSFLAGS) -I$(SKJEGG)include -I$(SKJEGG)libc -o $(BUILD)/lib/%s/obj/$$s.s $(SKJEGG)runtime/$$s.c && \\\n' "$_cc" "$_d"
+        printf '\t    $(BUILD)/%s -o $(BUILD)/lib/%s/obj/$$s.o $(BUILD)/lib/%s/obj/$$s.s || exit 1; \\\n' "$_as" "$_d" "$_d"
+        printf '\tdone\n'
+        if [ "$has_sandbox" -eq 1 ]; then
+            # the capability fs/ backend fdio.c routes to, compiled from fs/
+            printf '\t@for s in $(FS_SRCS); do \\\n'
+            printf '\t    $(BUILD)/%s -DSKJ_LIBC_FLOAT $(LIBC_FSFLAGS) -I$(SKJEGG)include -I$(SKJEGG)libc -o $(BUILD)/lib/%s/obj/$$s.s $(SKJEGG)fs/$$s.c && \\\n' "$_cc" "$_d"
+            printf '\t    $(BUILD)/%s -o $(BUILD)/lib/%s/obj/$$s.o $(BUILD)/lib/%s/obj/$$s.s || exit 1; \\\n' "$_as" "$_d" "$_d"
+            printf '\tdone\n'
+        fi
         printf '\t@rm -f $@\n'
-        printf '\t@$(BUILD)/skj-ar rcs $@ $(addprefix $(BUILD)/lib/%s/obj/,$(addsuffix .o,$(LIBC_SRCS))) $(BUILD)/lib/%s/obj/co_switch.o\n' "$_d" "$_d"
+        printf '\t@$(BUILD)/skj-ar rcs $@ $(addprefix $(BUILD)/lib/%s/obj/,$(addsuffix .o,$(LIBC_SRCS) $(RT_SRCS) $(FS_SRCS))) $(BUILD)/lib/%s/obj/co_switch.o\n' "$_d" "$_d"
         printf '$(BUILD)/lib/%s/fini.o: $(BUILD)/%s $(BUILD)/%s | $(BUILD)\n' "$_d" "$_cc" "$_as"
         printf '\t@mkdir -p $(BUILD)/lib/%s\n' "$_d"
         printf '\t@$(BUILD)/%s -I$(SKJEGG)include -o $(BUILD)/lib/%s/fini.s $(SKJEGG)libc/fini.c\n' "$_cc" "$_d"
@@ -779,7 +926,27 @@ emit_libc_rules() {
 if [ "$has_driver" -eq 1 ]; then
     drv_lib=""
     if [ "$has_libc" -eq 1 ]; then
-        printf '\nLIBC_SRCS := string ctype stdlib printf stdio assert malloc sbrk errno strerror rand strtod scanf coro threads\n' >> "$MK"
+        # The implemented hosted-libc set (mirrors tests/run-libc-tests.sh's
+        # LIBC_DEFAULT): printf's float formatter (numfmt), buffered stdio
+        # (stdio_core holds fflush, which the crt's fini.o pulls), and the
+        # file/dir ops (stat/fileops/dirent).  rng is RT_SRCS (runtime/); fini.o
+        # is force-linked by the driver, not archived.
+        _libc_srcs="string ctype stdlib printf numfmt stdio_core stdio assert malloc sbrk errno strerror rand strtod scanf coro threads stat fileops dirent"
+        _fs_srcs=""
+        _libc_fsflags=""
+        if [ "$has_sandbox" -eq 1 ]; then
+            # fdio.c is the libc fd-I/O seam (guarded by SKJ_FS_INTERPOSE); the
+            # fs/ sources are the capability backend it routes to.
+            _libc_srcs="$_libc_srcs fdio"
+            _fs_srcs="fs ramfs ambientfs hostcap"
+            _libc_fsflags='-DSKJ_FS_INTERPOSE -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -I$(SKJEGG)fs'
+        fi
+        {
+            printf '\nLIBC_SRCS := %s\n' "$_libc_srcs"
+            printf 'RT_SRCS := rng\n'           # runtime/rng.c, used by rand.c
+            printf 'FS_SRCS := %s\n' "$_fs_srcs"
+            printf 'LIBC_FSFLAGS := %s\n' "$_libc_fsflags"
+        } >> "$MK"
     fi
     if [ "$drv_cf" -eq 1 ]; then
         {
@@ -889,13 +1056,16 @@ MK
 fi
 
 # emulator driver
-if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ]; then
-    _emu_src='$(SKJEGG)emu/main.c $(SKJEGG)emu/guest.c $(SKJEGG)emu/elf32.c'
+if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || [ "$has_emu_mips" -eq 1 ]; then
+    _emu_src='$(SKJEGG)emu/main.c $(SKJEGG)emu/guest.c $(SKJEGG)emu/elf32.c $(SKJEGG)emu/hostplat.c $(SKJEGG)emu/sched.c'
     if [ "$has_emu_cf" -eq 1 ]; then
         _emu_src="$_emu_src \$(SKJEGG)emu/coldfire.c \$(SKJEGG)emu/cf_user.c"
     fi
     if [ "$has_emu_rv" -eq 1 ]; then
         _emu_src="$_emu_src \$(SKJEGG)emu/rv32.c \$(SKJEGG)emu/rv_user.c"
+    fi
+    if [ "$has_emu_mips" -eq 1 ]; then
+        _emu_src="$_emu_src \$(SKJEGG)emu/mips32.c \$(SKJEGG)emu/mips_user.c"
     fi
     {
         printf '\n# skj-run: the guest runner.  The architectures compiled in\n'
@@ -904,22 +1074,27 @@ if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ]; then
         printf 'SKJ_EMU := %s\n' "$_emu_src"
         printf 'SKJ_ALL += $(BUILD)/skj-run\n'
         printf '$(BUILD)/skj-run: $(SKJ_EMU) | $(BUILD)\n'
-        printf '\t$(CC) $(CFLAGS) -DEMU_COLDFIRE=%s -DEMU_RV32=%s -I$(SKJEGG)emu -o $@ $(SKJ_EMU) -lm\n' \
-            "$has_emu_cf" "$has_emu_rv"
+        printf '\t$(CC) $(CFLAGS) -DEMU_COLDFIRE=%s -DEMU_RV32=%s -DEMU_MIPS32=%s -I$(SKJEGG)emu -I$(SKJEGG)fs -o $@ $(SKJ_EMU) -lm\n' \
+            "$has_emu_cf" "$has_emu_rv" "$has_emu_mips"
     } >> "$MK"
 fi
 
 # cross-compiled runtime objects
 if [ "$has_cf" -eq 1 ]; then
+    # start.S .includes crt_entry_cf.S and syscall_cf.S (bare names), resolved
+    # through -I<staged runtime>.
     {
-        printf '\n$(BUILD)/start.o: $(SKJEGG)runtime/start.S | $(BUILD)\n'
-        printf '\t$(M68K_AS) -o $@ $<\n'
+        printf '\n$(BUILD)/start.o: $(SKJEGG)runtime/start.S $(SKJEGG)runtime/crt_entry_cf.S $(SKJEGG)runtime/syscall_cf.S | $(BUILD)\n'
+        printf '\t$(M68K_AS) -I$(SKJEGG)runtime -o $@ $(SKJEGG)runtime/start.S\n'
     } >> "$MK"
 fi
 if [ "$has_rv" -eq 1 ]; then
+    # start_rv.S .includes crt_entry_rv.S and syscall_rv.S (bare) plus
+    # runtime/i64_rv.S (runtime/-prefixed), so both -I$(SKJEGG) (for the
+    # prefixed form) and -I$(SKJEGG)runtime (for the bare ones) are needed.
     {
-        printf '\n$(BUILD)/start_rv.o: $(SKJEGG)runtime/start_rv.S | $(BUILD)\n'
-        printf '\t$(RV_AS) -march=rv32im -mabi=ilp32 -o $@ $<\n'
+        printf '\n$(BUILD)/start_rv.o: $(SKJEGG)runtime/start_rv.S $(SKJEGG)runtime/crt_entry_rv.S $(SKJEGG)runtime/syscall_rv.S $(SKJEGG)runtime/i64_rv.S | $(BUILD)\n'
+        printf '\t$(RV_AS) -I$(SKJEGG) -I$(SKJEGG)runtime -march=rv32im -mabi=ilp32 -o $@ $(SKJEGG)runtime/start_rv.S\n'
     } >> "$MK"
 fi
 if [ "$has_pascal" -eq 1 ] && [ "$has_cf" -eq 1 ]; then

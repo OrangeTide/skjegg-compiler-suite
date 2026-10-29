@@ -2574,14 +2574,49 @@ int cf_step(cf_cpu *cpu)
     return (cpu->halted || cpu->fault) ? -1 : 0;
 }
 
-int cf_run(cf_cpu *cpu, int count)
+enum skj_run_reason cf_run(cf_cpu *cpu, int count, int *retired)
 {
-    int i;
-    for (i = 0; i < count; i++) {
-        if (cf_step(cpu) < 0)
+    enum skj_run_reason reason = SKJ_RUN_BUDGET;
+    int n = 0;
+
+    while (n < count) {
+        if (cpu->halted) {
+            reason = SKJ_RUN_HALT;
             break;
+        }
+        /* A cooperative yield parks the guest between slices.  ColdFire
+         * services its host calls out in the harness (TRAP #0 vectors into the
+         * reserved trap window), so the yield selector is picked up there and
+         * sets this flag; the next cf_run entry reports it and the scheduler
+         * clears it to resume. */
+        if (cpu->yielding) {
+            reason = SKJ_RUN_YIELD;
+            break;
+        }
+        /* Stop before executing in a host-reserved trap window.  ColdFire
+         * user mode vectors an exception to an address in an unmapped window
+         * the harness installs (the exception-vector magic window); the host
+         * services the vector there and resumes.  trap_window_end == 0 leaves
+         * the check off for a host that does not use the mechanism. */
+        if (cpu->trap_window_end > cpu->trap_window_base &&
+            cpu->pc >= cpu->trap_window_base &&
+            cpu->pc < cpu->trap_window_end) {
+            reason = SKJ_RUN_TRAP;
+            break;
+        }
+        if (cf_step(cpu) < 0) {
+            reason = SKJ_RUN_HALT;
+            break;
+        }
+        n++;
+        if (cpu->fault) {               /* a bus/address error */
+            reason = SKJ_RUN_TRAP;
+            break;
+        }
     }
-    return i;
+    if (retired)
+        *retired = n;
+    return reason;
 }
 
 /****************************************************************
@@ -2613,6 +2648,7 @@ void cf_reset(cf_cpu *cpu)
     cpu->a[7] = bus_read32(cpu, cpu->vbr + 0);
     cpu->pc = bus_read32(cpu, cpu->vbr + 4);
     cpu->halted = 0;
+    cpu->yielding = 0;
     cpu->fault = 0;
     cpu->in_exception = 0;
     cpu->cycles = 0;

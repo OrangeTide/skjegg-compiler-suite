@@ -1,42 +1,27 @@
-/* cf_user.c : Linux user-mode machine for the ColdFire emulator */
+/* cf_user.c : the ColdFire binding for the shared process sandbox (sched.c)
+ *
+ * ColdFire user mode is built rather than special-cased: the CPU takes
+ * exceptions through a vector table in a page of guest memory, and every entry
+ * points into an unmapped "magic window".  When the PC lands there the core's
+ * batched run stops (the host-reserved trap window), and this binding's run
+ * wrapper decodes the vector: a TRAP #0 is a syscall it services in place and
+ * resumes; anything else is a fault it reports to the scheduler.  Servicing the
+ * syscall inside the wrapper is what lets ColdFire present the same contract as
+ * the rv/mips cores, whose syscalls are a step callback.
+ */
 
 #include "coldfire.h"
 #include "elf32.h"
 #include "guest.h"
-
-/* The DWARF backtrace symbolizer is an optional add-on: the in-tree skj-run
- * build defines SKJ_DWARF_BACKTRACE and links dwarf/dwread.c + ir/arena.c, so a
- * guest fault prints a symbolized backtrace.  A bare emu-cf vendoring without
- * dwarf/ leaves it undefined and still builds, reporting the fault pc alone. */
-#ifdef SKJ_DWARF_BACKTRACE
-#include "dwread.h"
-#include "arena.h"
-#endif
+#include "sched.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/****************************************************************
- * Exception interception
- *
- * The CPU core takes exceptions through a vector table the way real
- * hardware does, so user mode is built rather than special-cased: the
- * table lives in a page of guest memory and every entry points at a
- * distinct address in an unmapped magic window.  When the PC lands in
- * that window the driver knows which vector fired and what to do about
- * it: service the call for TRAP #0, report a signal for the rest.
- ****************************************************************/
-
 #define CF_MAGIC_BASE   0xFFFF0000u
 #define CF_MAGIC_END    (CF_MAGIC_BASE + 64 * 4)
 #define CF_VECTOR_PAGE  0x00000000u
-
-/* A reserved TRAP #0 selector (in %d0) for a guest-signalled runtime fault:
- * the crt's __skj_trap_backtrace issues it so the host symbolizes the stack
- * before the guest exits.  Outside the Linux/m68k syscall range, the ColdFire
- * twin of the RISC-V RV_SYS_FATAL ecall (boris VM_SYS_TRAP). */
-#define CF_SYS_FATAL    0x000f0000u
 
 /* Linux/m68k syscall numbers. */
 #define M68K_NR_EXIT        1
@@ -88,44 +73,38 @@ sys_of_m68k(uint32_t nr)
     }
 }
 
-/****************************************************************
- * Memory bus
- ****************************************************************/
-
-static uint32_t
-bus_r8(void *ctx, uint32_t addr)
-{
-    return gm_load(&((guest *)ctx)->mem, addr, 1, 1);
-}
-
-static uint32_t
-bus_r16(void *ctx, uint32_t addr)
-{
-    return gm_load(&((guest *)ctx)->mem, addr, 2, 1);
-}
-
-static uint32_t
-bus_r32(void *ctx, uint32_t addr)
-{
-    return gm_load(&((guest *)ctx)->mem, addr, 4, 1);
-}
-
+/* Service a TRAP #0.  The exception frame (format/vector word, sr, pc) is on
+ * the active stack; pop it, resume at the saved pc, and read the o32-style
+ * ColdFire syscall convention out of d0 (number) / d1-d5 + a0 (args), writing
+ * the result back to d0.  The emulator-private selectors go to the shared
+ * handler; everything else is a Linux syscall. */
 static void
-bus_w8(void *ctx, uint32_t addr, uint32_t val)
+cf_service(proc *p)
 {
-    gm_store(&((guest *)ctx)->mem, addr, 1, 1, val);
-}
+    cf_cpu *cpu = p->cpu;
+    guest *g = &p->g;
+    uint32_t sp = cpu->a[7];
+    uint32_t sr = gm_load(&g->mem, sp + 2, 2, 1);
+    uint32_t ret = gm_load(&g->mem, sp + 4, 4, 1);
+    uint32_t result;
+    int32_t r;
 
-static void
-bus_w16(void *ctx, uint32_t addr, uint32_t val)
-{
-    gm_store(&((guest *)ctx)->mem, addr, 2, 1, val);
-}
+    cpu->a[7] = sp + 8;
+    cpu->sr = (cpu->sr & ~0xFFFFu) | sr;
+    cpu->pc = ret;
 
-static void
-bus_w32(void *ctx, uint32_t addr, uint32_t val)
-{
-    gm_store(&((guest *)ctx)->mem, addr, 4, 1, val);
+    switch (sched_private(p, cpu->d[0], cpu->d[1], cpu->d[2], ret, &result)) {
+    case SKJ_PRIV_OK:    cpu->d[0] = result; return;
+    case SKJ_PRIV_FATAL: cpu->halted = 1; return;   /* exit + code set by the handler */
+    case SKJ_PRIV_YIELD: cpu->yielding = 1; return;
+    case SKJ_PRIV_NO:    break;
+    }
+
+    r = guest_syscall(g, sys_of_m68k(cpu->d[0]), cpu->d[1], cpu->d[2], cpu->d[3],
+                      cpu->d[4], cpu->d[5], cpu->a[0]);
+    cpu->d[0] = (uint32_t)r;
+    if (g->exited)
+        cpu->halted = 1;
 }
 
 /****************************************************************
@@ -151,49 +130,31 @@ trace_name(int type)
 }
 
 static void
-dump_trace(const cf_cpu *cpu)
+cf_dump_trace(FILE *out, void *vcpu)
 {
+    const cf_cpu *cpu = vcpu;
     uint32_t n = cf_trace_count(&cpu->trace);
     uint32_t i;
 
     if (cf_trace_overflowed(&cpu->trace))
-        fprintf(stderr, "  (earlier events dropped)\n");
+        fprintf(out, "  (earlier events dropped)\n");
     for (i = 0; i < n; i++) {
         const cf_trace_event_t *e = cf_trace_peek(&cpu->trace, i);
-        fprintf(stderr, "  pc=0x%08x op=0x%04x %s%s%s\n", e->pc, e->opword,
+        fprintf(out, "  pc=0x%08x op=0x%04x %s%s%s\n", e->pc, e->opword,
                 trace_name(e->type), e->note[0] ? ": " : "", e->note);
     }
 }
 
 static void
-dump_regs(const cf_cpu *cpu)
+cf_dump_regs(FILE *out, int slot, void *vcpu)
 {
+    const cf_cpu *cpu = vcpu;
     int i;
 
+    fprintf(out, "skj-run: [proc %d] registers:\n", slot + 1);
     for (i = 0; i < 8; i++)
-        fprintf(stderr, "  d%d=0x%08x a%d=0x%08x\n", i, cpu->d[i], i,
-                cpu->a[i]);
-    fprintf(stderr, "  pc=0x%08x sr=0x%04x\n", cpu->pc, cpu->sr & 0xFFFF);
-}
-
-/** Signal number a host kernel would raise for this vector. */
-static int
-signal_of_vector(int vec)
-{
-    switch (vec) {
-    case CF_VEC_ACCESS_ERROR:
-    case CF_VEC_ADDRESS_ERROR:
-        return 11;              /* SIGSEGV */
-    case CF_VEC_ZERO_DIVIDE:
-        return 8;               /* SIGFPE */
-    case CF_VEC_ILLEGAL:
-    case CF_VEC_PRIVILEGE:
-    case CF_VEC_LINE_A:
-    case CF_VEC_LINE_F:
-        return 4;               /* SIGILL */
-    default:
-        return 6;               /* SIGABRT */
-    }
+        fprintf(out, "  d%d=0x%08x a%d=0x%08x\n", i, cpu->d[i], i, cpu->a[i]);
+    fprintf(out, "  pc=0x%08x sr=0x%04x\n", cpu->pc, cpu->sr & 0xFFFF);
 }
 
 static const char *
@@ -212,231 +173,149 @@ vector_name(int vec)
     }
 }
 
+static int
+signal_of_vector(int vec)
+{
+    switch (vec) {
+    case CF_VEC_ACCESS_ERROR:
+    case CF_VEC_ADDRESS_ERROR:  return 11;      /* SIGSEGV */
+    case CF_VEC_ZERO_DIVIDE:    return 8;        /* SIGFPE */
+    case CF_VEC_ILLEGAL:
+    case CF_VEC_PRIVILEGE:
+    case CF_VEC_LINE_A:
+    case CF_VEC_LINE_F:         return 4;        /* SIGILL */
+    default:                    return 6;        /* SIGABRT */
+    }
+}
+
+static void
+cf_report_trap(FILE *out, int slot, void *vcpu)
+{
+    const cf_cpu *cpu = vcpu;
+    int vec = (int)((cpu->pc - CF_MAGIC_BASE) / 4);
+
+    fprintf(out, "skj-run: [proc %d] %s (vector %d)\n", slot + 1,
+            vector_name(vec), vec);
+}
+
+static int
+cf_trap_signal(void *vcpu)
+{
+    const cf_cpu *cpu = vcpu;
+
+    return signal_of_vector((int)((cpu->pc - CF_MAGIC_BASE) / 4));
+}
+
 /****************************************************************
- * The run loop
+ * The vtable
  ****************************************************************/
 
-#ifdef SKJ_DWARF_BACKTRACE
-
-#define BT_MAX_FRAMES   32
-
-/* Guest-memory read adapter for dw_backtrace.  gm_read_out never faults (an
- * unmapped byte reads as zero), so a frame pointer off the end of the stack
- * yields a zero return address, which ends the walk.  dw_backtrace reads each
- * saved-fp / return-address slot as a native uint32, but a ColdFire guest is
- * big-endian, so a 4-byte slot is byte-swapped into host order (composed
- * host-endian-agnostically). */
-static int
-bt_read(void *ctx, uint32_t addr, void *dst, uint32_t len)
+static void *
+cf_alloc(void)
 {
-    gm_read_out((guest_mem *)ctx, addr, dst, len);
-    if (len == 4) {
-        uint8_t *b = (uint8_t *)dst;
-        uint32_t v = (uint32_t)b[0] << 24 | (uint32_t)b[1] << 16
-                   | (uint32_t)b[2] << 8 | (uint32_t)b[3];
-        memcpy(dst, &v, 4);
-    }
-    return 1;
+    return calloc(1, sizeof(cf_cpu));
 }
 
-/* Print a symbolized backtrace for a faulting ColdFire guest to stderr.  pc is
- * the faulting instruction (the exception frame's saved pc, or the live pc on a
- * bus fault); the frame pointer is a6, whose link/unlk frame stores the saved
- * fp at [a6] and the return address at [a6+4], the layout dw_backtrace walks.
- * skj-run runs one process, so the root ELF is read fresh from o->path rather
- * than cached. */
 static void
-print_backtrace(const run_opts *o, guest *g, cf_cpu *cpu, uint32_t pc)
+cf_free(void *cpu)
 {
-    struct arena arena;
-    struct dw_reader reader;
-    uint32_t pcs[BT_MAX_FRAMES];
-    char buf[2048];
-    uint8_t *elf;
-    long n;
-    size_t got;
-    int frames;
-    FILE *f;
-
-    f = fopen(o->path, "rb");
-    if (!f)
-        return;
-    if (fseek(f, 0, SEEK_END) != 0 || (n = ftell(f)) <= 0) {
-        fclose(f);
-        return;
-    }
-    rewind(f);
-    elf = malloc((size_t)n);
-    if (!elf) {
-        fclose(f);
-        return;
-    }
-    got = fread(elf, 1, (size_t)n, f);
-    fclose(f);
-    if (got != (size_t)n) {
-        free(elf);
-        return;
-    }
-    arena_init(&arena);
-    if (dw_read_elf(&arena, &reader, elf, (size_t)n) != 0) {
-        arena_free(&arena);
-        free(elf);
-        return;
-    }
-    frames = dw_backtrace(pc, cpu->a[6], bt_read, &g->mem, pcs, BT_MAX_FRAMES);
-    if (frames > 0) {
-        dw_backtrace_format(&reader, pcs, frames, buf, sizeof buf);
-        fprintf(stderr, "skj-run: backtrace:\n%s", buf);
-    }
-    arena_free(&arena);
-    free(elf);
+    free(cpu);
 }
 
-#else
-#define print_backtrace(o, g, cpu, pc)      ((void)0)
-#endif /* SKJ_DWARF_BACKTRACE */
-
-/** Service TRAP #0 and return to the instruction after it. */
 static void
-do_syscall(const run_opts *o, guest *g, cf_cpu *cpu)
+cf_ready(proc *p, uint32_t entry, uint32_t sp)
 {
-    uint32_t sp = cpu->a[7];
-    uint32_t sr = gm_load(&g->mem, sp + 2, 2, 1);
-    uint32_t ret = gm_load(&g->mem, sp + 4, 4, 1);
-    int sys;
-    int32_t r;
+    cf_cpu *cpu = p->cpu;
+    guest *g = &p->g;
+    int i;
 
-    cpu->a[7] = sp + 8;
-    cpu->sr = (cpu->sr & ~0xFFFFu) | sr;
-    cpu->pc = ret;
+    /* Vector table: reset SP and PC, then every exception into the magic window
+     * so the run wrapper sees it.  cf_reset reads the SP and PC back out. */
+    gm_map(&g->mem, CF_VECTOR_PAGE, GM_PAGE_SIZE, GM_R, "vectors");
+    g->mem.loading = 1;
+    gm_store(&g->mem, CF_VECTOR_PAGE + 0, 4, 1, sp);
+    gm_store(&g->mem, CF_VECTOR_PAGE + 4, 4, 1, entry);
+    for (i = 2; i < 64; i++)
+        gm_store(&g->mem, CF_VECTOR_PAGE + (uint32_t)i * 4, 4, 1,
+                 CF_MAGIC_BASE + (uint32_t)i * 4);
+    g->mem.loading = 0;
 
-    if (cpu->d[0] == CF_SYS_FATAL) {
-        /* A guest-signalled runtime fault (Kobold trap, C abort): symbolize
-         * the stack, then return so the guest runs its own exit.  ret is the
-         * caller's return address; a6 is the caller's frame pointer. */
-        print_backtrace(o, g, cpu, ret);
-        return;
-    }
-
-    sys = sys_of_m68k(cpu->d[0]);
-    r = guest_syscall(g, sys, cpu->d[1], cpu->d[2], cpu->d[3], cpu->d[4],
-                      cpu->d[5], cpu->a[0]);
-    cpu->d[0] = (uint32_t)r;
-    if (g->exited)
-        cpu->halted = 1;
+    cf_init(cpu, skj_bus_r8, skj_bus_r16, skj_bus_r32,
+            skj_bus_w8, skj_bus_w16, skj_bus_w32, p);
+    cf_reset(cpu);              /* loads SP and PC from the vector table */
+    cpu->trap_window_base = CF_MAGIC_BASE;
+    cpu->trap_window_end = CF_MAGIC_END;
 }
+
+/* Drive cf_run, servicing TRAP #0 syscalls in place so only a terminal event
+ * (exit/halt, a real fault vector, a bus fault, a yield, or a spent budget)
+ * returns to the scheduler. */
+static enum skj_run_reason
+cf_run_adapter(proc *p, int budget, int *ran)
+{
+    cf_cpu *cpu = p->cpu;
+    enum skj_run_reason reason = SKJ_RUN_BUDGET;
+    int total = 0;
+
+    while (total < budget) {
+        int sub = 0;
+        enum skj_run_reason r = cf_run(cpu, budget - total, &sub);
+
+        total += sub;
+        if (p->g.mem.fault) {           /* a bus/address error */
+            reason = SKJ_RUN_TRAP;
+            break;
+        }
+        if (r == SKJ_RUN_TRAP) {        /* pc reached the exception-vector window */
+            int vec = (int)((cpu->pc - CF_MAGIC_BASE) / 4);
+
+            if (vec == CF_VEC_TRAP(0)) {
+                cf_service(p);
+                if (p->g.mem.fault) { reason = SKJ_RUN_TRAP; break; }
+                if (p->g.exited || cpu->halted) { reason = SKJ_RUN_HALT; break; }
+                if (cpu->yielding) { reason = SKJ_RUN_YIELD; break; }
+                continue;               /* serviced; keep running */
+            }
+            reason = SKJ_RUN_TRAP;      /* a real fault vector */
+            break;
+        }
+        reason = r;                     /* HALT / YIELD / BUDGET */
+        break;
+    }
+    *ran = total;
+    return reason;
+}
+
+static void     cf_halt(void *cpu)        { ((cf_cpu *)cpu)->halted = 1; }
+static void     cf_clear_yield(void *cpu) { ((cf_cpu *)cpu)->yielding = 0; }
+static uint32_t cf_fault_pc(void *cpu)    { return ((cf_cpu *)cpu)->pc; }
+static uint32_t cf_trap_pc(void *cpu)     { return ((cf_cpu *)cpu)->except_pc; }
+static uint32_t cf_bt_fp(void *cpu)       { return ((cf_cpu *)cpu)->a[6]; }
+
+static const skj_cpu_ops cf_ops = {
+    .name = "m68k/ColdFire",
+    .machine = EM_68K,
+    .arch = GUEST_ARCH_COLDFIRE,
+    .big_endian = 1,
+    .alloc = cf_alloc,
+    .free = cf_free,
+    .ready = cf_ready,
+    .run = cf_run_adapter,
+    .halt = cf_halt,
+    .clear_yield = cf_clear_yield,
+    .fault_pc = cf_fault_pc,
+    .trap_pc = cf_trap_pc,
+    .bt_fp = cf_bt_fp,
+    .bt_bigendian = 1,
+    .report_trap = cf_report_trap,
+    .trap_signal = cf_trap_signal,
+    .dump_regs = cf_dump_regs,
+    .dump_trace = cf_dump_trace,
+    .gdb = NULL,
+};
 
 int
 run_coldfire(const run_opts *o, int *status)
 {
-    guest g;
-    cf_cpu cpu;
-    elf32_info info;
-    uint32_t stack_base, sp, heap_base;
-    uint64_t insns = 0;
-    int rc = 0;
-    int i;
-
-    memset(&g, 0, sizeof(g));
-    gm_init(&g.mem, o->mem_limit);
-    g.arch = GUEST_ARCH_COLDFIRE;
-    g.big_endian = 1;
-    g.quiet = o->quiet;
-
-    if (elf32_load(&g, o->path, &info) != 0) {
-        gm_free(&g.mem);
-        return -1;
-    }
-    if (info.machine != EM_68K) {
-        fprintf(stderr, "skj-run: %s is not an m68k/ColdFire image\n", o->path);
-        gm_free(&g.mem);
-        return -1;
-    }
-    if (!info.big_endian) {
-        fprintf(stderr, "skj-run: %s is little-endian; m68k images are "
-                "big-endian\n", o->path);
-        gm_free(&g.mem);
-        return -1;
-    }
-
-    /* Heap directly above the image, then a gap, then the stack. */
-    heap_base = (info.hi + GM_PAGE_SIZE - 1) & ~(GM_PAGE_SIZE - 1);
-    g.brk_base = g.brk = heap_base;
-    g.brk_limit = heap_base + o->heap_size;
-    gm_map(&g.mem, heap_base, o->heap_size, GM_R | GM_W, "heap");
-
-    stack_base = g.brk_limit + GM_PAGE_SIZE;
-    gm_map(&g.mem, stack_base, o->stack_size, GM_R | GM_W, "stack");
-    g.stack_top = stack_base + o->stack_size;
-    sp = guest_build_stack(&g, o);
-    guest_install_mounts(&g, o->path, o);
-
-    /* Vector table: reset SP and PC, then every exception into the magic
-     * window so the driver sees it. */
-    gm_map(&g.mem, CF_VECTOR_PAGE, GM_PAGE_SIZE, GM_R, "vectors");
-    g.mem.loading = 1;
-    gm_store(&g.mem, CF_VECTOR_PAGE + 0, 4, 1, sp);
-    gm_store(&g.mem, CF_VECTOR_PAGE + 4, 4, 1, info.entry);
-    for (i = 2; i < 64; i++)
-        gm_store(&g.mem, CF_VECTOR_PAGE + (uint32_t)i * 4, 4, 1,
-                 CF_MAGIC_BASE + (uint32_t)i * 4);
-    g.mem.loading = 0;
-
-    cf_init(&cpu, bus_r8, bus_r16, bus_r32, bus_w8, bus_w16, bus_w32, &g);
-    cf_reset(&cpu);
-
-    while (!cpu.halted && !g.exited) {
-        if (cpu.pc >= CF_MAGIC_BASE && cpu.pc < CF_MAGIC_END) {
-            int vec = (int)((cpu.pc - CF_MAGIC_BASE) / 4);
-            if (vec == CF_VEC_TRAP(0)) {
-                do_syscall(o, &g, &cpu);
-                continue;
-            }
-            fprintf(stderr, "skj-run: %s (vector %d)\n", vector_name(vec),
-                    vec);
-            dump_regs(&cpu);
-            print_backtrace(o, &g, &cpu, cpu.except_pc);
-            if (o->trace)
-                dump_trace(&cpu);
-            rc = 128 + signal_of_vector(vec);
-            break;
-        }
-        if (cf_step(&cpu) < 0)
-            break;
-        insns++;
-        if (g.mem.fault) {
-            fprintf(stderr, "skj-run: bad memory %s at 0x%08x (%s), "
-                    "pc=0x%08x\n", g.mem.fault_write ? "write" : "read",
-                    g.mem.fault_addr, g.mem.fault_why, cpu.pc);
-            print_backtrace(o, &g, &cpu, cpu.pc);
-            if (o->trace)
-                dump_trace(&cpu);
-            rc = 128 + 11;
-            break;
-        }
-        if (o->max_insns && insns >= o->max_insns) {
-            fprintf(stderr, "skj-run: instruction limit (%llu) reached\n",
-                    (unsigned long long)o->max_insns);
-            rc = 128 + 24;      /* SIGXCPU */
-            break;
-        }
-    }
-
-    if (!rc && !g.exited) {
-        fprintf(stderr, "skj-run: guest stopped without calling exit "
-                "(pc=0x%08x)\n", cpu.pc);
-        if (o->trace)
-            dump_trace(&cpu);
-        rc = 128 + 6;
-    }
-
-    if (o->stats)
-        fprintf(stderr, "skj-run: %llu instructions, %llu syscalls, "
-                "%llu KB guest memory\n", (unsigned long long)insns,
-                (unsigned long long)g.syscalls,
-                (unsigned long long)(g.mem.committed / 1024));
-
-    *status = rc ? rc : g.exit_code;
-    gm_free(&g.mem);
-    return 0;
+    return run_sandbox(o, &cf_ops, status);
 }
