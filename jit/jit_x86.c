@@ -43,6 +43,10 @@ struct mc {
     int nlab, clab;
     const char *errsym;     /* an unresolved symbol name, or NULL */
     const char *asm_unsup;  /* inline-asm text the JIT cannot assemble, or NULL */
+    char asm_buf[256];      /* stable copy of asm_unsup: the selector may pass a
+                               transient (an extended asm's substituted template
+                               lives on its emitter's stack), and the message is
+                               read after that frame returns */
 };
 
 static void
@@ -280,7 +284,15 @@ void mc_movd_to_xmm(struct mc *m, int d, int s) { x_movd_to_xmm(m->c, d, s); }
    has no downstream assembler for a verbatim string, so report it unsupported.
    The cc JIT suite excludes the inline-asm test; a Kobold asm('...') program run
    under the JIT lands here and gets the ahead-of-time diagnostic below. */
-void mc_asm(struct mc *m, const char *text) { m->asm_unsup = text; }
+void mc_asm(struct mc *m, const char *text)
+{
+    size_t i = 0;
+    if (text)
+        for (; text[i] && i + 1 < sizeof m->asm_buf; i++)
+            m->asm_buf[i] = text[i];
+    m->asm_buf[i] = '\0';
+    m->asm_unsup = m->asm_buf;
+}
 void mc_cvtss2sd_rr(struct mc *m, int d, int s) { x_cvtss2sd_rr(m->c, d, s); }
 void mc_cvtsd2ss_rr(struct mc *m, int d, int s) { x_cvtsd2ss_rr(m->c, d, s); }
 void mc_cvtss2sd_load(struct mc *m, int d, int b, int32_t o) { x_cvtss2sd_load(m->c, d, b, o); }

@@ -33,8 +33,8 @@ type
     { threaded-code dispatch: `label` value type, `goto` computed jump
       (doc/languages/kobold/kp-grammar.md, the `label` type) }
     tkGoto, tkLabel,
-    { the units surface (doc/languages/kobold/kp-units.md), implemented; `property` is reserved for the
-      deferred uniform-access feature (doc/languages/kobold/kp-property.md) }
+    { the units surface (doc/languages/kobold/kp-units.md), implemented; `property` is the
+      uniform-access feature (doc/languages/kobold/kp-property.md), also implemented }
     tkImplementation, tkProperty, tkShared, tkUnit, tkUses, tkReexport, tkAs,
     { `ref array of T` is the reference (shared) dynamic array; `buffer of T` is its
       host-backed sibling. `slice` stays reserved for a future windowed view (a[lo..hi]). }
@@ -123,8 +123,11 @@ type
       or a cursor type (doc/languages/kobold/kp-foreach.md) }
     nkForIn,
     { `asm('text')`: basic inline assembly, emitted verbatim (AOT only)
-      (doc/languages/kobold/kp-grammar.md) }
-    nkAsm
+      (doc/languages/kobold/kp-grammar.md). nkAsmOp is one extended-asm operand or
+      clobber, a child of nkAsm: Text holds the constraint string (or the clobber's
+      register name), A the operand expression (or -1 for a clobber), Flag the role
+      (0 input, 1 output, 2 inout, 3 clobber). }
+    nkAsm, nkAsmOp
   );
 
   TNode = record
@@ -388,7 +391,7 @@ const
     'Interface', 'Implementation', 'Reexport', 'ReexportItem',
     'Implement',
     'FailsTest', 'OrElse', 'OrDivert',
-    'PropertyDecl', 'Defer', 'ToStr', 'ForIn', 'Asm'
+    'PropertyDecl', 'Defer', 'ToStr', 'ForIn', 'Asm', 'AsmOp'
   );
 
   { Token-kind sets the parser tests against. }
@@ -2285,8 +2288,14 @@ begin
       Nodes[n].A := ParseType();
     end;
     tkMap: begin
-      { `map of T`: a string-keyed associative array whose value type is T }
-      n := NewNode(nkMapType); NextToken; Expect(tkOf);
+      { `map of T`: a string-keyed associative array whose value type is T.
+        `map[K] of T`: an explicit ordinal (or string) key type K. }
+      n := NewNode(nkMapType); NextToken;
+      if Accept(tkLBracket) then begin
+        Nodes[n].B := ParseType();   { the explicit key type; absent (B < 0) means string }
+        Expect(tkRBracket);
+      end;
+      Expect(tkOf);
       Nodes[n].A := ParseType();
     end;
     tkInterface: n := ParseInterfaceType;
@@ -2405,6 +2414,59 @@ begin
   ParseCaseStmt := n;
 end;
 
+procedure ParseAsmOperands(parent: LongInt; isOutput: Boolean);
+{ Parse one extended-asm operand section: zero or more `"constraint" ( expr )`
+  entries, comma separated, each attached to the nkAsm parent as an nkAsmOp child.
+  An output whose constraint begins with `+` is read-write (Flag 2); a plain output
+  is Flag 1 and an input is Flag 0. The section ends at the next `:` or the closing
+  `)`. }
+var
+  op, c: LongInt;
+begin
+  if Tok.Kind in [tkColon, tkRParen] then Exit;   { an empty section }
+  repeat
+    op := NewNode(nkAsmOp);
+    if Tok.Kind = tkStrLit then begin
+      Nodes[op].Text := Tok.StrVal; NextToken;
+    end
+    else
+      ParseErr('an asm operand needs a "constraint" string');
+    Expect(tkLParen);
+    if isOutput then c := ParseDesignator else c := ParseExpression;
+    Nodes[op].A := c;
+    Expect(tkRParen);
+    if isOutput then begin
+      if (Length(Nodes[op].Text) >= 1) and (Nodes[op].Text[1] = '+') then
+        Nodes[op].Flag := 2
+      else
+        Nodes[op].Flag := 1;
+    end
+    else
+      Nodes[op].Flag := 0;
+    AddKid(parent, op);
+  until not Accept(tkComma);
+end;
+
+procedure ParseAsmClobbers(parent: LongInt);
+{ Parse the clobber section: zero or more bare `"register"` strings, comma
+  separated, each an nkAsmOp child with Flag 3 and no expression. }
+var
+  op: LongInt;
+begin
+  if Tok.Kind = tkRParen then Exit;
+  repeat
+    op := NewNode(nkAsmOp);
+    if Tok.Kind = tkStrLit then begin
+      Nodes[op].Text := Tok.StrVal; NextToken;
+    end
+    else
+      ParseErr('an asm clobber needs a "register" string');
+    Nodes[op].A := -1;
+    Nodes[op].Flag := 3;
+    AddKid(parent, op);
+  until not Accept(tkComma);
+end;
+
 function ParseStatement: LongInt;
 var
   n, d: LongInt;
@@ -2500,6 +2562,17 @@ begin
       end
       else
         ParseErr('asm expects a string literal with the assembly text');
+      { optional extended form, GNU style: `: outputs : inputs : clobbers`. Each
+        operand is `"constraint" ( expr )`; a clobber is a bare `"register"`. The
+        operands become nkAsmOp children, outputs then inputs then clobbers. }
+      if Accept(tkColon) then begin
+        ParseAsmOperands(n, True);
+        if Accept(tkColon) then begin
+          ParseAsmOperands(n, False);
+          if Accept(tkColon) then
+            ParseAsmClobbers(n);
+        end;
+      end;
       Expect(tkRParen);
     end;
     tkDefer: begin
@@ -3130,6 +3203,7 @@ function AssignCompatible(dst, src: LongInt): Boolean; forward;
 function IsDynArray(ty: LongInt): Boolean; forward;
 function IsBuffer(ty: LongInt): Boolean; forward;
 function IsMap(ty: LongInt): Boolean; forward;
+function MapKeyType(ty: LongInt): LongInt; forward;
 function BufRank(ty: LongInt): LongInt; forward;
 function IsSingle(ty: LongInt): Boolean; forward;
 function IsInt64(ty: LongInt): Boolean; forward;
@@ -3266,7 +3340,10 @@ begin
         TypeName := 'array of ' + TypeName(SemTypes[ty].Base);
     skRecord:    TypeName := 'record';
     skSet:       TypeName := 'set';
-    skMap:       TypeName := 'map of ' + TypeName(SemTypes[ty].Base);
+    skMap:       if MapKeyType(ty) = tyStr then
+                   TypeName := 'map of ' + TypeName(SemTypes[ty].Base)
+                 else
+                   TypeName := 'map[' + TypeName(MapKeyType(ty)) + '] of ' + TypeName(SemTypes[ty].Base);
     skMapIter:   TypeName := 'mapiter';
     skErrorVal:  TypeName := 'error';
     skInterface: TypeName := 'interface';
@@ -3312,12 +3389,16 @@ begin
 end;
 
 function IsPropertyValueType(ty: LongInt): Boolean;
-{ A property (declaration-level or a computed record field) is backed by accessor calls and
-  carries a simple value for now: an ordinal, a real/single, or a 64-bit integer. Handle and
-  aggregate property types (string, record, dynamic array) are deferred, since their accessor
-  result would need ARC ownership and sret handling (doc/languages/kobold/kp-property.md). }
+{ A property (declaration-level or a computed record field) is backed by accessor calls. Its
+  type may be a simple value (an ordinal, a real/single, or a 64-bit integer), a reference-counted
+  handle (a string, a dynamic array, a map, an interface, or a process), or an inline aggregate
+  (a record, a fixed array, or a large set). A handle read transfers its owned reference the way
+  any handle-returning call does (IsOwnedExpr); an aggregate read returns through the getter's
+  sret buffer, whose address is the value's location, exactly like an aggregate-returning
+  function call (doc/languages/kobold/kp-property.md). }
 begin
-  IsPropertyValueType := IsOrdinalType(ty) or IsRealType(ty) or IsSingle(ty) or IsInt64(ty);
+  IsPropertyValueType := IsOrdinalType(ty) or IsRealType(ty) or IsSingle(ty) or IsInt64(ty)
+    or IsHandle(ty) or IsAggregate(ty);
 end;
 
 function PropSetterName(node: LongInt): string;
@@ -4017,7 +4098,7 @@ var
   loV, hiV: TConstVal;
   lo, hi: Int64;
   rec, vp, f, f2, nm: LongInt;
-  cur, vbase, vmax, voff, dt: LongInt;
+  cur, vbase, vmax, voff, dt, kt: LongInt;
 begin
   ResolveType := tyErr;
   if node < 0 then Exit;
@@ -4140,6 +4221,14 @@ begin
         fixed array), so the same handle-field layout reclaims managed values. A set is
         reference-free, so its slot needs no handle layout. }
       ty := NewSemType(skMap);
+      { the key type: `map[K] of T` gives K, bare `map of T` is string-keyed. A string key uses
+        the handle-keyed table (kp_map_*); an ordinal key (integer, int64, char, enum, boolean)
+        is stored by value and hashed as a 64-bit integer (kp_imap_*). }
+      if Nodes[node].B >= 0 then kt := ResolveType(Nodes[node].B) else kt := tyStr;
+      if not ((kt = tyStr) or IsOrdinalType(kt)) then
+        SemErr(node, 'a map key must be a string or an ordinal (integer, int64, char, enum, boolean)');
+      SetLength(SemTypes[ty].Subs, 1);
+      SemTypes[ty].Subs[0] := kt;
       SemTypes[ty].Base := ResolveType(Nodes[node].A);
       if TypeMentionsLabel(SemTypes[ty].Base) then
         SemErr(node, 'a ''label'' value cannot be a map value');
@@ -4168,7 +4257,8 @@ begin
               Its accessors are methods of this record, resolved at the use site like any
               method, so a forward reference to an accessor declared later is fine. }
             if not IsPropertyValueType(fld) then
-              SemErr(f, 'a computed field must be a simple value (integer, real, or enum) for now');
+              SemErr(f, 'a computed field type must be a value (ordinal, real, int64), a handle '
+                + '(string, dynamic array, map, interface, process), or an aggregate (record, array, set)');
             AddMember(rec, Nodes[Nodes[f].Kids[0]].Text, fld);
             SetMemberOff(rec, -1);
             SetMemberProp(rec, Nodes[Nodes[f].B].Text, PropSetterName(f));
@@ -4442,8 +4532,10 @@ begin
     tkIn:
       if IsSet(rt) then AnalyzeBinary := tyBool
       else if IsMap(rt) then begin
-        if lt <> tyStr then
-          SemErr(node, 'the left operand of in on a map must be a string key')
+        CoerceCharLit(Nodes[node].A, MapKeyType(rt));
+        if Nodes[Nodes[node].A].Ty = tyChar then lt := tyChar;
+        if not AssignCompatible(MapKeyType(rt), lt) then
+          SemErr(node, 'the left operand of in on a map must be a ' + TypeName(MapKeyType(rt)) + ' key')
         else
           AnalyzeBinary := tyBool;   { k in m tests for a key }
       end
@@ -4536,15 +4628,18 @@ begin
       else
         AnalyzeIndex := SemTypes[bt].Base;
     skString: AnalyzeIndex := tyChar;   { s[i] is a character }
-    skMap:
-      { a map takes one string subscript, its key; the result is the value type }
+    skMap: begin
+      { a map takes one subscript, its key; the result is the value type }
+      if Length(Nodes[node].Kids) = 1 then
+        CoerceCharLit(Nodes[node].Kids[0], MapKeyType(bt));
       if Length(Nodes[node].Kids) <> 1 then
         SemErr(node, 'a map takes one key subscript, not ' +
           IntToStr(Length(Nodes[node].Kids)))
-      else if Nodes[Nodes[node].Kids[0]].Ty <> tyStr then
-        SemErr(node, 'a map key must be a string')
+      else if not AssignCompatible(MapKeyType(bt), Nodes[Nodes[node].Kids[0]].Ty) then
+        SemErr(node, 'a map key must be a ' + TypeName(MapKeyType(bt)))
       else
         AnalyzeIndex := SemTypes[bt].Base;
+    end;
     skInteger, skReal, skBoolean, skChar:
       SemErr(node, 'cannot index a ' + TypeName(bt));
   end;
@@ -4631,8 +4726,9 @@ begin
           integers. }
         if (Syms[s].Node < 0) and (Syms[s].LowerName = 'delete') and
            (Length(argtys) = 2) and IsMap(argtys[0]) then begin
-          if argtys[1] <> tyStr then
-            SemErr(errNode, 'Delete on a map takes a string key');
+          CoerceCharLit(Nodes[errNode].Kids[1], MapKeyType(argtys[0]));
+          if not AssignCompatible(MapKeyType(argtys[0]), Nodes[Nodes[errNode].Kids[1]].Ty) then
+            SemErr(errNode, 'Delete on a map takes a ' + TypeName(MapKeyType(argtys[0])) + ' key');
         end
         else if (Syms[s].Node < 0) and
            ((Syms[s].LowerName = 'delete') or (Syms[s].LowerName = 'insert')) then begin
@@ -4648,12 +4744,14 @@ begin
           it. The iterator is opaque, so MapNext's out value type is not checked against the map:
           the caller must pass a variable of the map's value type. }
         if (Syms[s].Node < 0) and (Syms[s].LowerName = 'tryget') then begin
+          if (Length(argtys) = 3) and IsMap(argtys[0]) then
+            CoerceCharLit(Nodes[errNode].Kids[1], MapKeyType(argtys[0]));
           if Length(argtys) <> 3 then
             SemErr(errNode, 'TryGet takes a map, a key, and an out value')
           else if not IsMap(argtys[0]) then
             SemErr(errNode, 'the first argument of TryGet must be a map')
-          else if argtys[1] <> tyStr then
-            SemErr(errNode, 'the key of TryGet must be a string')
+          else if not AssignCompatible(MapKeyType(argtys[0]), Nodes[Nodes[errNode].Kids[1]].Ty) then
+            SemErr(errNode, 'the key of TryGet must be a ' + TypeName(MapKeyType(argtys[0])))
           else if argtys[2] <> SemTypes[argtys[0]].Base then
             SemErr(errNode, 'the out value of TryGet must be the map value type');
         end;
@@ -4666,8 +4764,10 @@ begin
             SemErr(errNode, 'MapNext takes an iterator, an out key, and an out value')
           else if argtys[0] <> tyMapIter then
             SemErr(errNode, 'the first argument of MapNext must be a mapiter')
-          else if argtys[1] <> tyStr then
-            SemErr(errNode, 'the key of MapNext must be a string');
+          else if not ((argtys[1] = tyStr) or IsOrdinalType(argtys[1])) then
+            { the iterator is opaque, so the key kind cannot be checked against its map here;
+              the lowering dispatches on this out-key's own type (string handle vs ordinal) }
+            SemErr(errNode, 'the key of MapNext must be a string or an ordinal');
         end;
         { fail(code) builds an error value from an integer code; errorcode(e) reads it back }
         if (Syms[s].Node < 0) and (Syms[s].LowerName = 'fail') then begin
@@ -5059,12 +5159,12 @@ begin
     end;
     skMap: begin
       { for k, v in m  ->  it := MapFirst(m); while MapNext(it, k, v) do body.
-        A map binds the key (always a string) and optionally the value; a second
-        binder is the value. An omitted or '_' binder gets a hidden throwaway so
+        A map binds the key (the map's key type: a string or an ordinal) and optionally the
+        value; a second binder is the value. An omitted or '_' binder gets a hidden throwaway so
         MapNext always has both out slots. }
       keySym := -1; valSym := -1;
       if Nodes[node].Text = '_' then
-        keyNode := MkHiddenBinder('__for_k_' + IntToStr(node), tyStr)
+        keyNode := MkHiddenBinder('__for_k_' + IntToStr(node), MapKeyType(bt))
       else begin
         keySym := Lookup(Nodes[node].Text);
         keyNode := MkIdent(Nodes[node].Text);
@@ -5078,8 +5178,9 @@ begin
         valNode := MkIdent(Nodes[Nodes[node].B].Text);
       end;
       { clearer errors than MapNext's, naming the binder the user wrote }
-      if (keySym >= 0) and (Syms[keySym].TypeId <> tyStr) then
-        SemErr(node, 'a map key binder must be a string: ''' + Nodes[node].Text + '''');
+      if (keySym >= 0) and not AssignCompatible(MapKeyType(bt), Syms[keySym].TypeId) then
+        SemErr(node, 'a map key binder must be a ' + TypeName(MapKeyType(bt)) + ': ''' +
+          Nodes[node].Text + '''');
       if (valSym >= 0) and (Syms[valSym].TypeId <> SemTypes[bt].Base) then
         SemErr(node, 'the value binder must be the map value type (' +
           TypeName(SemTypes[bt].Base) + ')');
@@ -5364,12 +5465,15 @@ begin
   if IsDynArray(dst) and IsDynArray(src) and
      (SemTypes[dst].Base = SemTypes[src].Base) and
      (IsBuffer(dst) = IsBuffer(src)) then Exit;
-  { two maps share a value (a handle) when their value types match, the same structural rule
-    dynamic arrays get above. A map is always string-keyed and has no host-backed variant, so
-    the value type (Base) is the only thing that distinguishes two map types. This is what lets
-    a map pass to a `map of T` parameter and lets an `or else` fallback recover a map result, the
-    fallback and the call result being separate declaration occurrences. }
-  if IsMap(dst) and IsMap(src) and (SemTypes[dst].Base = SemTypes[src].Base) then Exit;
+  { two maps share a value (a handle) when their key types and value types match, the same
+    structural rule dynamic arrays get above. A map has no host-backed variant, so the key type
+    and the value type (Base) are the only things that distinguish two map types. The key types
+    must agree: a string-keyed map and an ordinal-keyed `map[K] of T` are different runtime
+    objects (KP_OBJ_MAP vs KP_OBJ_IMAP) whose operations dispatch differently. This is what lets
+    a map pass to a matching `map ... of T` parameter and lets an `or else` fallback recover a map
+    result, the fallback and the call result being separate declaration occurrences. }
+  if IsMap(dst) and IsMap(src) and (SemTypes[dst].Base = SemTypes[src].Base) and
+     (MapKeyType(dst) = MapKeyType(src)) then Exit;
   { the empty constructor `[]` (a set with no element type) also denotes an empty array }
   if IsDynArray(dst) and IsSet(src) and (SemTypes[src].Base = tyErr) then Exit;
   if (SemTypes[dst].Kind = skReal) and IsIntClass(src) then Exit;
@@ -5648,7 +5752,29 @@ begin
     nkBreak, nkContinue:
       if LoopDepth = 0 then
         SemErr(node, 'break or continue outside of a loop');
-    nkAsm: ;   { basic inline asm carries verbatim text; nothing to analyze }
+    nkAsm:
+      { basic inline asm carries only verbatim text. The extended form carries
+        operands: analyze each operand expression and restrict its type to a
+        single-register integer-class ordinal (the simple subset). An output or
+        inout operand must be an assignable lvalue; a clobber has no expression. }
+      for i := 0 to High(Nodes[node].Kids) do begin
+        s := Nodes[node].Kids[i];
+        if Nodes[s].Flag = 3 then Continue;   { a clobber: a register name only }
+        if Nodes[s].Flag >= 1 then
+          ct := AnalyzeLValue(Nodes[s].A)      { an output or inout: an lvalue }
+        else
+          ct := AnalyzeExpr(Nodes[s].A);       { an input }
+        if (ct <> tyErr) and not (IsOrdinalType(ct) and not IsInt64(ct)) then
+          SemErr(s, 'an asm operand must be an integer-class value (integer, char, ' +
+            'boolean, enum, or subrange); ' + TypeName(ct) + ' is not supported');
+        { the simple subset allows only the general register constraint: an output
+          is "=r", an inout "+r", and an input "r" }
+        if ((Nodes[s].Flag = 1) and (Nodes[s].Text <> '=r')) or
+           ((Nodes[s].Flag = 2) and (Nodes[s].Text <> '+r')) or
+           ((Nodes[s].Flag = 0) and (Nodes[s].Text <> 'r')) then
+          SemErr(s, 'only the register constraints ''r'', ''=r'', and ''+r'' are ' +
+            'supported; got ''' + Nodes[s].Text + '''');
+      end;
     nkDefer: begin
       CheckDeferBody(Nodes[node].A, node);
       AnalyzeStmt(Nodes[node].A);
@@ -6015,7 +6141,8 @@ var
 begin
   ty := ResolveType(Nodes[node].A);
   if not IsPropertyValueType(ty) then
-    SemErr(node, 'a property must be a simple value (integer, real, or enum) for now');
+    SemErr(node, 'a property type must be a value (ordinal, real, int64), a handle (string, '
+      + 'dynamic array, map, interface, process), or an aggregate (record, array, set)');
   s := Declare(Nodes[node].Text, syVar, node);
   Syms[s].TypeId := ty;
   Nodes[node].Sym := s;
@@ -7453,10 +7580,19 @@ begin
   IsBuffer := IsDynArray(ty) and SemTypes[ty].HostBuf;
 end;
 function IsMap(ty: LongInt): Boolean;
-{ A `map of T`: a string-keyed associative array. Its value is a reference-counted handle id,
-  like a dynamic array, with value (eager-copy) assignment semantics. }
+{ A `map[K] of T`: an associative array. Its value is a reference-counted handle id, like a
+  dynamic array, with value (eager-copy) assignment semantics. }
 begin
   IsMap := (ty >= 0) and (ty < SemCount) and (SemTypes[ty].Kind = skMap);
+end;
+
+function MapKeyType(ty: LongInt): LongInt;
+{ The key type of a map type (Subs[0]). A string key uses the handle-keyed runtime (kp_map_*);
+  any other (ordinal) key uses the value-keyed runtime (kp_imap_*), so MapKeyType = tyStr is the
+  one test that distinguishes the two lowerings. Defaults to tyStr defensively. }
+begin
+  if IsMap(ty) and (Length(SemTypes[ty].Subs) > 0) then MapKeyType := SemTypes[ty].Subs[0]
+  else MapKeyType := tyStr;
 end;
 
 function BufRank(ty: LongInt): LongInt;
@@ -9397,15 +9533,21 @@ procedure LowerMapDelete(mapDesig, keyNode: LongInt);
   reference (copy-on-write if the map is shared), stored back over the designator and the
   previous value released, the kp_arr_setlen discipline. }
 var
-  cur, key, newmap, s, old, maddr: LongInt;
+  cur, key, key64, newmap, s, old, maddr: LongInt;
+  isStr: Boolean;
+  dsym: string;
 begin
+  isStr := MapKeyType(Nodes[mapDesig].Ty) = tyStr;
+  dsym := 'kp_imap_del';
+  if isStr then dsym := 'kp_map_del';
   cur := LowerExpr(mapDesig);
-  key := LowerExpr(keyNode);
-  EnsureHelper('kp_map_del', 2, 'int');
+  key := -1; key64 := -1;
+  if isStr then key := LowerExpr(keyNode) else key64 := AsInt64(keyNode);
+  EnsureHelper(dsym, 2, 'int');
   EmitArg(cur);
-  EmitArg(key);
+  if isStr then EmitArg(key) else EmitArg64(key64);
   newmap := NewTemp;
-  PushInsn('CALL', 'dst=' + IntToStr(newmap) + ' sym=kp_map_del nargs=2');
+  PushInsn('CALL', 'dst=' + IntToStr(newmap) + ' sym=' + dsym + ' nargs=2');
   if Nodes[mapDesig].Kind = nkIdent then begin
     s := Nodes[mapDesig].Sym;
     old := LoadSym(s);
@@ -9418,7 +9560,7 @@ begin
     EmitStorePtr(maddr, newmap);
     EmitRelease(old);
   end;
-  ReleaseIfOwned(keyNode, key);
+  if isStr then ReleaseIfOwned(keyNode, key);   { an int key is a plain value }
 end;
 
 procedure StoreHandleDesig(desig, newid: LongInt);
@@ -9500,7 +9642,7 @@ function LowerBuiltin(const bname: string; callee: LongInt;
   write or setlength) when the name and argument count match a built-in; leaves
   handled False otherwise, so LowerCallSym falls through to a routine call. }
 var
-  i, d, na, arg, av, cur, delta, rTy, old, strm, aTy: LongInt;
+  i, d, na, arg, av, cur, delta, rTy, old, strm, aTy, rawk, kv: LongInt;
   nm: string;
 begin
   handled := True;
@@ -9586,37 +9728,72 @@ begin
   { tryget(m, key, out v): copy the value to v and return true, or return false }
   if (bname = 'tryget') and (Length(argNodes) = 3) then begin
     cur := LowerExpr(argNodes[0]);
-    delta := LowerExpr(argNodes[1]);
     av := AddrOf(argNodes[2]);
-    EnsureHelper('kp_map_tryget', 3, 'int');
-    EmitArg(cur);
-    EmitArg(delta);
-    EmitArg(av);
-    d := NewTemp;
-    PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_map_tryget nargs=3');
+    if MapKeyType(Nodes[argNodes[0]].Ty) = tyStr then begin
+      delta := LowerExpr(argNodes[1]);
+      EnsureHelper('kp_map_tryget', 3, 'int');
+      EmitArg(cur);
+      EmitArg(delta);
+      EmitArg(av);
+      d := NewTemp;
+      PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_map_tryget nargs=3');
+      ReleaseIfOwned(argNodes[1], delta);
+    end
+    else begin
+      EnsureHelper('kp_imap_tryget', 3, 'int');
+      EmitArg(cur);
+      EmitArg64(AsInt64(argNodes[1]));   { the key by value }
+      EmitArg(av);
+      d := NewTemp;
+      PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_imap_tryget nargs=3');
+    end;
     ReleaseIfOwned(argNodes[0], cur);
-    ReleaseIfOwned(argNodes[1], delta);
     LowerBuiltin := d;
     Exit;
   end;
-  { mapfirst(m): a new iterator over the map (an owned handle the caller stores) }
+  { mapfirst(m): a new iterator over the map (an owned handle the caller stores). The iterator
+    kind matches the map's key kind so mapnext can dispatch; a string map gets kp_mapiter_new, an
+    ordinal map kp_imapiter_new. }
   if (bname = 'mapfirst') and (Length(argNodes) = 1) then begin
     cur := LowerExpr(argNodes[0]);
-    LowerBuiltin := EmitStrCall1('kp_mapiter_new', cur);
+    if MapKeyType(Nodes[argNodes[0]].Ty) = tyStr then
+      LowerBuiltin := EmitStrCall1('kp_mapiter_new', cur)
+    else
+      LowerBuiltin := EmitStrCall1('kp_imapiter_new', cur);
     ReleaseIfOwned(argNodes[0], cur);
     Exit;
   end;
-  { mapnext(it, out k, out v): advance, writing the next key and value; false at the end }
+  { mapnext(it, out k, out v): advance, writing the next key and value; false at the end. The
+    iterator is opaque, so dispatch on the out-key's own type: a string key is written as an
+    owned handle straight into the designator; an ordinal key is written by the runtime as an
+    int64 into a scratch slot, then narrowed into the designator (value-level, so endian-safe). }
   if (bname = 'mapnext') and (Length(argNodes) = 3) then begin
     cur := LowerExpr(argNodes[0]);
-    av := AddrOf(argNodes[1]);
-    delta := AddrOf(argNodes[2]);
-    EnsureHelper('kp_mapiter_next', 3, 'int');
-    EmitArg(cur);
-    EmitArg(av);
-    EmitArg(delta);
-    d := NewTemp;
-    PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_mapiter_next nargs=3');
+    delta := AddrOf(argNodes[2]);   { the value out address }
+    if Nodes[argNodes[1]].Ty = tyStr then begin
+      av := AddrOf(argNodes[1]);
+      EnsureHelper('kp_mapiter_next', 3, 'int');
+      EmitArg(cur);
+      EmitArg(av);
+      EmitArg(delta);
+      d := NewTemp;
+      PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_mapiter_next nargs=3');
+    end
+    else begin
+      rawk := NewSlot(8);
+      EnsureHelper('kp_imapiter_next', 3, 'int');
+      EmitArg(cur);
+      EmitArg(EmitADL(rawk));
+      EmitArg(delta);
+      d := NewTemp;
+      PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_imapiter_next nargs=3');
+      kv := EmitLDL64(rawk);          { the raw int64 key }
+      av := AddrOf(argNodes[1]);
+      if WideStore(Nodes[argNodes[1]].Ty) then
+        EmitStoreScalar(av, kv, Nodes[argNodes[1]].Ty)         { an int64 key }
+      else
+        EmitStoreScalar(av, EmitUn('TRUNC64', kv), Nodes[argNodes[1]].Ty);
+    end;
     LowerBuiltin := d;
     Exit;
   end;
@@ -10744,6 +10921,11 @@ begin
       else if (s >= 0) and (Syms[s].Kind = syFunc) then
         { a paramless function used as a value is a call }
         LowerExpr := LowerCallSym(node, [], True)
+      else if (s >= 0) and IsPropertySym(s) then
+        { a property read is a getter call whatever its type; for an aggregate type the
+          call returns the value through its sret buffer, whose address LoadSym yields
+          (doc/languages/kobold/kp-property.md) }
+        LowerExpr := LoadSym(s)
       else if (s >= 0) and IsAggregate(Syms[s].TypeId) then
         { an aggregate value is its address }
         LowerExpr := AddrOf(node)
@@ -10830,9 +11012,18 @@ begin
       else if (Nodes[node].Op = tkIn) and IsMap(Nodes[Nodes[node].B].Ty) then begin
         { k in m: membership test on a map key }
         a := LowerExpr(Nodes[node].B);   { the map }
-        b := LowerExpr(Nodes[node].A);   { the key }
-        r := EmitStrCall2('kp_map_has', a, b);
-        ReleaseIfOwned(Nodes[node].A, b);
+        if MapKeyType(Nodes[Nodes[node].B].Ty) = tyStr then begin
+          b := LowerExpr(Nodes[node].A);   { the key handle }
+          r := EmitStrCall2('kp_map_has', a, b);
+          ReleaseIfOwned(Nodes[node].A, b);
+        end
+        else begin
+          EnsureHelper('kp_imap_has', 2, 'int');
+          EmitArg(a);
+          EmitArg64(AsInt64(Nodes[node].A));   { the key by value, nothing to release }
+          r := NewTemp;
+          PushInsn('CALL', 'dst=' + IntToStr(r) + ' sym=kp_imap_has nargs=2');
+        end;
         LowerExpr := r;
       end
       else if (Nodes[node].Op = tkIn) or IsSet(Nodes[node].Ty) or
@@ -11029,21 +11220,29 @@ function MapSlotAddr(node: LongInt; insert: Boolean): LongInt;
   discipline), then kp_map_get returns the now-present slot. The slot address is valid only
   until the next structural change to the map, so the caller uses it at once. }
 var
-  mapDesig, keykid, vt, cur, key, newmap, slot, s, old, maddr: LongInt;
+  mapDesig, keykid, vt, cur, key, key64, newmap, slot, s, old, maddr: LongInt;
+  isStr: Boolean;
+  rsym, gsym: string;
 begin
   mapDesig := Nodes[node].A;
   keykid := Nodes[node].Kids[0];
   vt := SemTypes[Nodes[mapDesig].Ty].Base;
+  { a string key is a handle passed by its id (kp_map_*); an ordinal key is a plain value
+    widened to int64 and passed by value (kp_imap_*). Everything else is identical. }
+  isStr := MapKeyType(Nodes[mapDesig].Ty) = tyStr;
+  if isStr then begin rsym := 'kp_map_reserve'; gsym := 'kp_map_get'; end
+  else begin rsym := 'kp_imap_reserve'; gsym := 'kp_imap_get'; end;
   cur := LowerExpr(mapDesig);
-  key := LowerExpr(keykid);
+  key := -1; key64 := -1;
+  if isStr then key := LowerExpr(keykid) else key64 := AsInt64(keykid);
   if insert then begin
-    EnsureHelper('kp_map_reserve', 4, 'int');
+    EnsureHelper(rsym, 4, 'int');
     EmitArg(cur);
-    EmitArg(key);
+    if isStr then EmitArg(key) else EmitArg64(key64);
     EmitArg(EmitLIC(TypeSize(vt)));
     EmitArg(EmitArrLayout(vt));
     newmap := NewTemp;
-    PushInsn('CALL', 'dst=' + IntToStr(newmap) + ' sym=kp_map_reserve nargs=4');
+    PushInsn('CALL', 'dst=' + IntToStr(newmap) + ' sym=' + rsym + ' nargs=4');
     { store the owned map back over the designator, releasing the previous handle }
     if Nodes[mapDesig].Kind = nkIdent then begin
       s := Nodes[mapDesig].Sym;
@@ -11059,12 +11258,12 @@ begin
     end;
     cur := newmap;
   end;
-  EnsureHelper('kp_map_get', 2, 'int');
+  EnsureHelper(gsym, 2, 'int');
   EmitArg(cur);
-  EmitArg(key);
+  if isStr then EmitArg(key) else EmitArg64(key64);
   slot := NewTemp;
-  PushInsn('CALL', 'dst=' + IntToStr(slot) + ' sym=kp_map_get nargs=2');
-  ReleaseIfOwned(keykid, key);   { reserve/get borrow the key; drop an owned key temp }
+  PushInsn('CALL', 'dst=' + IntToStr(slot) + ' sym=' + gsym + ' nargs=2');
+  if isStr then ReleaseIfOwned(keykid, key);   { an int key is a plain value, nothing to release }
   MapSlotAddr := slot;
 end;
 
@@ -11081,10 +11280,17 @@ begin
     nkIdent: begin
       s := Nodes[node].Sym;
       if IsPropertySym(s) then begin
-        { a property is accessor-backed and has no address (doc/languages/kobold/kp-property.md) }
-        SemErr(node, 'a property has no address; it cannot be passed by reference or have its '
-          + 'address taken');
-        AddrOf := EmitLIC(0);
+        if IsAggregate(Syms[s].TypeId) then
+          { an aggregate property has no stored cell, but its getter returns the value through
+            an sret buffer; that buffer's address serves as the value's location for a read or
+            a const-reference argument (doc/languages/kobold/kp-property.md) }
+          AddrOf := LowerExpr(node)
+        else begin
+          { a scalar or handle property is accessor-backed and has no address }
+          SemErr(node, 'a property has no address; it cannot be passed by reference or have its '
+            + 'address taken');
+          AddrOf := EmitLIC(0);
+        end;
       end
       else if s < 0 then AddrOf := EmitLIC(0)
       else if (Syms[s].Kind = syConst) and (Syms[s].ConstAggName <> '') then
@@ -11100,9 +11306,15 @@ begin
       if Nodes[node].Flag = 1 then
         AddrOf := VarAddr(Nodes[node].Sym)   { a unit-qualified var, addressed as a global }
       else if ComputedFieldGetter(node) <> '' then begin
-        { a computed field is accessor-backed and has no storage }
-        SemErr(node, 'a computed field has no address; it cannot be passed by reference');
-        AddrOf := EmitLIC(0);
+        if IsAggregate(Nodes[node].Ty) then
+          { an aggregate computed field returns through its getter method's sret buffer; that
+            buffer's address is the value's location (doc/languages/kobold/kp-property.md) }
+          AddrOf := LowerExpr(node)
+        else begin
+          { a scalar or handle computed field is accessor-backed and has no storage }
+          SemErr(node, 'a computed field has no address; it cannot be passed by reference');
+          AddrOf := EmitLIC(0);
+        end;
       end
       else begin
         base := AddrOf(Nodes[node].A);
@@ -11585,9 +11797,15 @@ begin
       not be released as a temporary, or `f := f + x` double-frees f (once as the
       operand, once as the assignment's old value). }
     nkIdent: IsOwnedExpr := (Nodes[node].Sym >= 0) and
-                            (Syms[Nodes[node].Sym].Kind = syFunc) and
-                            (Nodes[node].Sym <> CurFuncSym);
-    nkField: IsOwnedExpr := IsMethodField(node);
+                            (((Syms[Nodes[node].Sym].Kind = syFunc) and
+                              (Nodes[node].Sym <> CurFuncSym))
+                             { a property read is a getter call, so it transfers a fresh
+                               reference the same way a paramless function name does
+                               (doc/languages/kobold/kp-property.md) }
+                             or IsPropertySym(Nodes[node].Sym));
+    { a method field or a computed record field named as a value both auto-call,
+      transferring a fresh reference (the computed field through its getter method) }
+    nkField: IsOwnedExpr := IsMethodField(node) or (ComputedFieldGetter(node) <> '');
   else
     IsOwnedExpr := False;
   end;
@@ -12065,6 +12283,77 @@ begin
   EmitLabel(lEnd);
 end;
 
+procedure LowerAsm(node: LongInt);
+{ Lower an inline-asm statement. The basic form carries only verbatim text. The
+  extended form (nkAsmOp children) carries operands: lower each input and inout
+  value to a temp, give each plain output a fresh temp, then emit one ASM
+  instruction whose arguments describe the operands (outputs first, then inputs)
+  and the clobbers, and finally store each output temp back to its lvalue. The
+  KPM line is `ASM nout=.. nin=.. vol=1 o<k>=role,constraint,temp,size ...
+  c<k>=reg ... "template"`; the quoted template stays last so the reader can take
+  it with the first and last quote on the line (the simple subset's register
+  constraints and register names carry no quote). The simple subset allows only
+  integer-class operands and the `r`, `=r`, and `+r` constraints. }
+var
+  k, kid, nout, nin, nclob, t, sz: LongInt;
+  outTemps, outDesigs: array of LongInt;
+  args, role: string;
+begin
+  if Length(Nodes[node].Kids) = 0 then begin
+    PushInsn('ASM', EscapeStr(Nodes[node].Text));
+    Exit;
+  end;
+  { count operands by role }
+  nout := 0; nin := 0; nclob := 0;
+  for k := 0 to High(Nodes[node].Kids) do
+    case Nodes[Nodes[node].Kids[k]].Flag of
+      1, 2: Inc(nout);
+      0:    Inc(nin);
+      3:    Inc(nclob);
+    end;
+  SetLength(outTemps, nout);
+  SetLength(outDesigs, nout);
+  args := 'nout=' + IntToStr(nout) + ' nin=' + IntToStr(nin) + ' vol=1';
+  { outputs first in the operand list: an inout reads its lvalue into the temp
+    the asm both reads and writes; a plain output gets a fresh write-only temp }
+  nout := 0;
+  for k := 0 to High(Nodes[node].Kids) do begin
+    kid := Nodes[node].Kids[k];
+    if not (Nodes[kid].Flag in [1, 2]) then Continue;
+    if Nodes[kid].Flag = 2 then begin role := 'b'; t := LowerExpr(Nodes[kid].A); end
+    else begin role := 'o'; t := NewTemp; end;
+    outTemps[nout] := t;
+    outDesigs[nout] := Nodes[kid].A;
+    sz := 4;   { an integer-class ordinal lives in one GP register }
+    args := args + ' o' + IntToStr(nout) + '=' + role + ',' + Nodes[kid].Text +
+      ',' + IntToStr(t) + ',' + IntToStr(sz);
+    Inc(nout);
+  end;
+  { then the inputs, numbered after the outputs }
+  nin := nout;
+  for k := 0 to High(Nodes[node].Kids) do begin
+    kid := Nodes[node].Kids[k];
+    if Nodes[kid].Flag <> 0 then Continue;
+    t := LowerExpr(Nodes[kid].A);
+    args := args + ' o' + IntToStr(nin) + '=i,' + Nodes[kid].Text + ',' +
+      IntToStr(t) + ',4';
+    Inc(nin);
+  end;
+  { clobbers }
+  nclob := 0;
+  for k := 0 to High(Nodes[node].Kids) do begin
+    kid := Nodes[node].Kids[k];
+    if Nodes[kid].Flag <> 3 then Continue;
+    args := args + ' c' + IntToStr(nclob) + '=' + Nodes[kid].Text;
+    Inc(nclob);
+  end;
+  args := args + ' ' + EscapeStr(Nodes[node].Text);
+  PushInsn('ASM', args);
+  { store each output (and inout) result temp back to its lvalue }
+  for k := 0 to nout - 1 do
+    StoreScalarDesig(outDesigs[k], outTemps[k]);
+end;
+
 procedure LowerStmt(node: LongInt);
 var
   i: LongInt;
@@ -12110,10 +12399,11 @@ begin
         EmitJmp(LoopCont[LoopSP - 1]);
       end;
     nkAsm:
-      { basic inline asm: emit the verbatim text as an IR_ASM instruction. The
-        text is carried as a C-escaped quoted string, the same encoding the
-        module's .string data uses, so the KPM reader decodes it back verbatim. }
-      PushInsn('ASM', EscapeStr(Nodes[node].Text));
+      { inline asm. The basic form emits the verbatim text; the extended form adds
+        operand and clobber metadata. The text is carried as a C-escaped quoted
+        string, the same encoding the module's .string data uses, so the KPM reader
+        decodes it back verbatim (doc/languages/kobold/kp-grammar.md). }
+      LowerAsm(node);
     nkLabelStmt: begin
       { a `name:` label marks a jump target: emit its IR label here, then the
         statement it labels }

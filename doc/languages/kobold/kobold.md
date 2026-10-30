@@ -123,9 +123,10 @@ All built by `make all`. The reader regression and the source fixtures are in
   registers an opaque handle type of its own beside the standard runtime, the
   counterpart of the C JIT's embedding sample.
 
-The JIT and AOT paths are kept at byte-identical-stdout parity with the
-reference `kprun` across the behavioral corpus, on x86-64, arm64, and rv32,
-for single-module and multi-unit programs, overflow traps included.
+The JIT and AOT paths are kept at byte-identical-stdout parity with each other
+and with the checked-in `.expected` files across the behavioral corpus, on
+x86-64, arm64, and rv32, for single-module and multi-unit programs, overflow
+traps included.
 
 ## Source compilation
 
@@ -255,7 +256,8 @@ reals. It is shared between the JIT (bound as host symbols) and the AOT path
 - `str_core.c`, `str_fmt.c`: the guest-owned string object and number
   formatting/parsing (`Str`, `Val`).
 - `dynarr.c`: the guest-owned dynamic array (`array of T`).
-- `map.c`: the guest-owned string-keyed associative array (`map of T`).
+- `map.c`: the guest-owned associative array, string-keyed (`map of T`, `kp_map_*`)
+  and ordinal-keyed (`map[K] of T`, `kp_imap_*`).
 - `co.c`, `co_shim.c`: stackful coroutines (the coroutine runtime) and the
   host primitives they need. The per-arch context switch is
   `runtime/co_switch_{x86,arm64,rv}.S`, shared with the libc coroutine
@@ -294,7 +296,7 @@ differently.
 
 ## The freestanding tier
 
-A downstream host (boris and the like) runs a Kobold guest with no host OS: its
+A downstream VM host runs a Kobold guest with no host OS: its
 seam to the guest is only `write`, `read`, and `exit`, and it hands the guest its
 heap at entry rather than letting the runtime map memory. `libkpaot-rv-free.a` is
 the re-bottoming of the hosted `libkpaot-rv.a` for that seam. The compute
@@ -396,7 +398,7 @@ A program that `uses` units links across modules.
   symbol a unit does not export stays local, so two units' same-named private
   globals do not collide. `kobold/aot-run.sh` follows the main module's `.uses`
   transitively, compiles each dependency unit (resolving `<dir>/<name>.kpm`
-  then `KOBOLD_UNITS`, as `kprun` does), and links the whole set, the system
+  then `KOBOLD_UNITS`), and links the whole set, the system
   linker standing in for the JIT's in-memory link.
 
 ## Overflow-trap policy
@@ -437,32 +439,32 @@ raises it, and the checked ops never appear in C.
   `tests/kp-src` is the portable set: every mode, including the freestanding one,
   runs it, so it stays to integer, string, int64, and parameters.
 - **In-tree, behavioral corpus**: `tests/kp-corpus` is the broader behavioral set,
-  71 real Kobold programs. Each `<name>.expected` is the program's stdout as
-  produced by the **independent** reference VM `kprun`, not by a skjegg tool, so
-  the corpus is an oracle, not a self-comparison. It covers arithmetic, records,
-  arrays, maps, dynamic arrays, strings, enums, sets, coroutines, reals and
-  transcendentals, int64, casts, var parameters, and control flow. One
-  `.expected` pins the result across the x86-64 JIT and the x86-64, rv32, and
-  arm64 AOT paths at once, so it also checks that every backend agrees.
+  102 real Kobold programs. Each `<name>.expected` holds the program's expected
+  stdout, checked in beside the source as the committed oracle. It covers
+  arithmetic, records, arrays, string-keyed and ordinal-keyed maps, dynamic
+  arrays, strings, enums, sets, coroutines, reals and transcendentals, int64,
+  casts, var parameters, properties, and control flow. One `.expected` pins the
+  result across the x86-64 JIT and the x86-64, rv32, and arm64 AOT paths at once,
+  so it also checks that every backend agrees.
   `make check-kp-corpus` runs the x86 JIT and AOT (in `check-all`);
   `check-kp-corpus-rv` and `check-kp-corpus-arm64` run the AOT path under qemu (in
   `check-emu-all`); `check-kp-corpus-cf` runs the ColdFire AOT path under qemu-m68k
   (in `check-all`), the big-endian cross-check, linking the hosted ColdFire runtime
-  `libkpaot-cf.a` statically. The corpus is 83 programs, the failable two-return
-  (`CALL2`) cases `failforms`/`failmethod`/`failmanaged` among them (see the reader
+  `libkpaot-cf.a` statically. The failable two-return
+  (`CALL2`) cases `failforms`/`failmethod`/`failmanaged` are among them (see the reader
   note below); `failmanaged` covers `or else` recovering a managed result, and
   `failmethodwide` covers a failable method returning a wide value (real, int64,
   record) through the hidden caller buffer, the same sret path a failable free
   function uses reached through a by-reference receiver. `setelem` covers a set as
   a dynamic-array element and a map value, both a small set (the i64 scalar slot)
-  and a large set (the inline blit slot). The ten `conf_*` programs are a
+  and a large set (the inline blit slot). The `conf_*` programs are a
   conformance set pinning documented corner cases across all four backends:
   `conf_divmod` (div/mod truncate toward zero, mod takes the dividend's sign),
   `conf_wrap` (two's-complement overflow wrap with no `Q+` switch), `conf_strcmp`
   (unsigned bytewise string order, shorter prefix first), `conf_setrel` (set
   subset/superset relations and union/difference/intersection), `conf_defaults`
   (a global reads as the zero of its type), and `conf_evalorder` (operands left
-  to right, call arguments right to left). Six `conf_trap_*` programs pin the
+  to right, call arguments right to left). The `conf_trap_*` programs pin the
   fault exit code (70, empty stdout, through a per-fixture `.exitcode` file):
   `conf_trap_divzero` (integer divide by zero, always checked), `conf_trap_mapkey`
   (a missing map key), `conf_trap_range` (an out-of-bounds index under `{$R+}`),
@@ -477,7 +479,7 @@ raises it, and the checked ops never appear in C.
 - **In-tree, multi-unit corpus**: `tests/kp-multi` is the cross-module set, the
   one behavioral surface the single-module corpus cannot reach. A fixture is told
   apart by its first keyword: `program NAME;` is a test (paired with
-  `NAME.expected`, again `kprun`'s stdout), `unit NAME;` is a dependency with no
+  `NAME.expected`), `unit NAME;` is a dependency with no
   `.expected`. `tests/run-kp-multi-tests.sh` compiles every unit to its own module
   first, then runs the programs against the set: the JIT links the unit modules in
   memory, the AOT path links their objects (`aot-run.sh`), so one `.expected` also
@@ -491,7 +493,7 @@ raises it, and the checked ops never appear in C.
   arguments). A fixture may carry a `<name>.input` file (fed as the program's
   stdin) and a `<name>.args` file (one line, whitespace-separated, passed as its
   command line, so `ParamStr`/`ParamCount` see it); the `.expected` is the
-  reference `kprun`'s output under the same stdin and arguments. `make check-kp-io`
+  expected output under the same stdin and arguments. `make check-kp-io`
   runs the x86 JIT and AOT (in `check-all`); `check-kp-io-rv`, `check-kp-io-arm64`,
   and `check-kp-io-free` run the AOT and freestanding paths under qemu (in
   `check-emu-all`), so the entry argument vector and the `read` seam are exercised
@@ -501,7 +503,7 @@ raises it, and the checked ops never appear in C.
   resolved at compile time against the source directory, so a `<name>.inc` beside
   the program is found with no harness plumbing. One fixture splices expressions
   (a string and a number constant), one a whole procedure declaration; the
-  `.expected` is the reference `kprun`'s output. `make check-kp-inc` runs the x86
+  `.expected` is the expected output. `make check-kp-inc` runs the x86
   JIT and AOT (in `check-all`); `check-kp-inc-rv`, `check-kp-inc-arm64`, and
   `check-kp-inc-free` run the AOT and freestanding paths under qemu (in
   `check-emu-all`). The include is resolved by the host front end in every case,
@@ -511,14 +513,6 @@ raises it, and the checked ops never appear in C.
   end, the compiler-independence proof (see "The self-host and
   compiler-independence checks"). The in-guest `test-{rv,cf}-selfhost-kpc` targets
   assert the compiler reproduces its reference on the target.
-- **Optional external cross-check**: a reference `kprun` build, when one is
-  available, can run a wider byte-identical-stdout comparison (the full
-  74-to-76-case set, including input-dependent programs) than the in-tree
-  corpora. `kobold/aot-check.sh` runs skjegg's AOT path against it and
-  `kobold/aot-run.sh` stands in for `kprun`, when `KPDIR` and `KPRUN` point at
-  such a tree. Neither is wired into skjegg CI; the in-tree corpora are the
-  committed oracle.
-
 ## Language documentation
 
 This file is the in-tree reference for how the Kobold front end is built,

@@ -607,6 +607,40 @@ read_int_list(char **tok, int n, int *out, int max)
         out[k - 1] = (int)strtol(tok[k], NULL, 10);
 }
 
+/* A digit, without pulling in ctype. */
+static int
+kpm_isdigit(char c)
+{
+    return c >= '0' && c <= '9';
+}
+
+/* Parse one extended-asm operand descriptor "role,constraint,temp,size" (role is
+   'o' output, 'i' input, 'b' inout) into op, with temp range-checked against
+   ntemps. Mutates desc in place. Returns 0, or -1 if malformed or out of range. */
+static int
+parse_asm_op(struct arena *a, char *desc, struct ir_asm_op *op, int ntemps)
+{
+    char *role = desc, *constraint, *temp_s, *size_s, *c;
+    long t, sz;
+
+    c = strchr(desc, ',');       if (!c) return -1; *c = '\0'; constraint = c + 1;
+    c = strchr(constraint, ',');  if (!c) return -1; *c = '\0'; temp_s = c + 1;
+    c = strchr(temp_s, ',');      if (!c) return -1; *c = '\0'; size_s = c + 1;
+    if (role[0] != 'o' && role[0] != 'i' && role[0] != 'b')
+        return -1;
+    t = strtol(temp_s, NULL, 10);
+    sz = strtol(size_s, NULL, 10);
+    if (t < 0 || t >= ntemps || sz <= 0 || sz > 8)
+        return -1;
+    op->constraint = arena_strdup(a, constraint);
+    op->pin_reg = NULL;
+    op->temp = (int)t;
+    op->size = (int)sz;
+    op->is_output = (role[0] == 'o' || role[0] == 'b');
+    op->is_inout = (role[0] == 'b');
+    return 0;
+}
+
 static int
 read_func(struct reader *r, struct ir_func *fn)
 {
@@ -697,15 +731,94 @@ read_func(struct reader *r, struct ir_func *fn)
                below, would do destructively). */
             if (strncmp(line, "ASM", 3) == 0 &&
                 (line[3] == ' ' || line[3] == '\t')) {
-                char *body = quoted_body(line);
+                char *p = line + 3;
                 int slen;
-                if (!body) {
-                    fail(r, r->pos + 1, "malformed ASM");
-                    return -1;
+                while (*p == ' ' || *p == '\t')
+                    p++;
+                if (*p == '"') {
+                    /* basic asm: the template is the whole quoted body */
+                    char *body = quoted_body(line);
+                    if (!body) {
+                        fail(r, r->pos + 1, "malformed ASM");
+                        return -1;
+                    }
+                    in = ir_emit(fn, IR_ASM);
+                    in->sym = unescape(a, body, &slen);
+                    continue;
                 }
-                in = ir_emit(fn, IR_ASM);
-                in->sym = unescape(a, body, &slen);
-                continue;
+                /* extended asm: operand and clobber metadata, then the quoted
+                   template last.  Decode the template first (quoted_body takes the
+                   first and last quote of the q.. tail), then terminate the
+                   metadata region at the opening quote and tokenize it. */
+                {
+                    char *q = strchr(p, '"');
+                    char *body, *mtok[MAX_TOKENS];
+                    struct ir_asm_info *info;
+                    int mn, mi, no = -1, ni = -1, vol = 1, nc = 0, nops, ci, k;
+
+                    if (!q || !(body = quoted_body(q))) {
+                        fail(r, r->pos + 1, "malformed ASM");
+                        return -1;
+                    }
+                    *q = '\0';
+                    mn = tokenize(p, mtok);
+                    for (mi = 0; mi < mn; mi++) {
+                        if (strncmp(mtok[mi], "nout=", 5) == 0)
+                            no = (int)strtol(mtok[mi] + 5, NULL, 10);
+                        else if (strncmp(mtok[mi], "nin=", 4) == 0)
+                            ni = (int)strtol(mtok[mi] + 4, NULL, 10);
+                        else if (strncmp(mtok[mi], "vol=", 4) == 0)
+                            vol = (int)strtol(mtok[mi] + 4, NULL, 10);
+                        else if (mtok[mi][0] == 'c' && kpm_isdigit(mtok[mi][1]))
+                            nc++;
+                    }
+                    if (no < 0 || ni < 0 || no > KPM_MAX_COUNT ||
+                        ni > KPM_MAX_COUNT) {
+                        fail(r, r->pos + 1, "malformed ASM operand counts");
+                        return -1;
+                    }
+                    nops = no + ni;
+                    info = arena_zalloc(a, sizeof *info);
+                    info->noutputs = no;
+                    info->ninputs = ni;
+                    info->is_volatile = vol;
+                    info->nclobbers = nc;
+                    info->ops = nops ? arena_zalloc(a,
+                        (size_t)nops * sizeof *info->ops) : NULL;
+                    info->clobbers = nc ? arena_zalloc(a,
+                        (size_t)nc * sizeof *info->clobbers) : NULL;
+                    ci = 0;
+                    for (mi = 0; mi < mn; mi++) {
+                        char *eq = strchr(mtok[mi], '=');
+                        if (!eq)
+                            continue;
+                        if (mtok[mi][0] == 'o' && kpm_isdigit(mtok[mi][1])) {
+                            int oi = (int)strtol(mtok[mi] + 1, NULL, 10);
+                            if (oi < 0 || oi >= nops ||
+                                parse_asm_op(a, eq + 1, &info->ops[oi],
+                                             fn->ntemps) != 0) {
+                                fail(r, r->pos + 1, "malformed ASM operand");
+                                return -1;
+                            }
+                        } else if (mtok[mi][0] == 'c' &&
+                                   kpm_isdigit(mtok[mi][1])) {
+                            if (ci < nc)
+                                info->clobbers[ci++] = arena_strdup(a, eq + 1);
+                        }
+                    }
+                    /* every operand slot must have been filled (a truncated or
+                       missing descriptor would leave a NULL constraint) */
+                    for (k = 0; k < nops; k++) {
+                        if (!info->ops[k].constraint) {
+                            fail(r, r->pos + 1, "missing ASM operand");
+                            return -1;
+                        }
+                    }
+                    in = ir_emit(fn, IR_ASM);
+                    in->sym = unescape(a, body, &slen);
+                    in->asm_info = info;
+                    continue;
+                }
             }
             n = tokenize(line, tok);
             if (n == 0)

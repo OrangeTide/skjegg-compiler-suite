@@ -150,6 +150,10 @@ There is no array concatenation operator or `concat` built-in; grow with
 ## Map procedures and functions
 
 A `map of T` is accessed through indexing, the `in` operator, and these routines.
+The key is a `string`, or, in the bracketed form `map[K] of T`, an ordinal `K`
+(integer, int64, char, enum, boolean). The signatures below show the string form;
+in the bracketed form `key` has type `K` and `mapnext`'s `key` binder is a `K`
+variable. Everything else is the same.
 
 ```pascal
 function length(m: map of T): integer;
@@ -161,7 +165,7 @@ procedure delete(var m: map of T; key: string);
 
 - `m[key]` reads the value for `key`. Reading an **absent** key **traps**. Assigning
   `m[key] := v` inserts or replaces the entry.
-- `key in m` tests whether a string key is present and yields a boolean; it never
+- `key in m` tests whether a key is present and yields a boolean; it never
   traps.
 - `length(m)` yields the number of entries.
 - `tryget` is the trap-free read: if `key` is present it copies the value into

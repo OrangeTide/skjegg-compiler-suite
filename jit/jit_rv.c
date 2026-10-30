@@ -48,6 +48,9 @@ struct rv_mc {
     int nlab, clab;
     const char *errsym;
     const char *asm_unsup;  /* inline-asm text the JIT cannot assemble, or NULL */
+    char asm_buf[256];      /* stable copy of asm_unsup (the selector may pass a
+                               transient; the message is read after that frame
+                               returns) */
 };
 
 #define T6 31                   /* the address/immediate scratch (reserved) */
@@ -371,7 +374,15 @@ rv_mc_j_sym(struct rv_mc *m, const char *name)
 /* Inline assembly has no byte-sink form: report it unsupported. The cc JIT suite
    excludes the inline-asm test; a Kobold asm('...') program run under the JIT
    lands here and gets the ahead-of-time diagnostic in emit_func. */
-void rv_mc_asm(struct rv_mc *m, const char *text) { m->asm_unsup = text; }
+void rv_mc_asm(struct rv_mc *m, const char *text)
+{
+    size_t i = 0;
+    if (text)
+        for (; text[i] && i + 1 < sizeof m->asm_buf; i++)
+            m->asm_buf[i] = text[i];
+    m->asm_buf[i] = '\0';
+    m->asm_unsup = m->asm_buf;
+}
 
 /****************************************************************
  * kp_target: the RISC-V back end kp_jit() drives

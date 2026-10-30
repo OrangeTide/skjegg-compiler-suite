@@ -73,7 +73,8 @@ one), not a computed expression.
   ```
 
 - **A map** binds two variables, the key and the value: `for k, v in m do`. The
-  key is always a string; the value takes the map's value type. The iteration
+  key takes the map's key type (a string, or the ordinal `K` of a `map[K] of T`),
+  and the value takes the map's value type. The iteration
   order is unspecified, and inserting or removing a key during the loop traps
   (updating an existing key's value is fine). Bind only the key with one
   variable (`for k in m do`), or ignore either side with `_`

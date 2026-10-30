@@ -302,10 +302,24 @@ every target assembler accepts, so the program builds on each backend. For a
 real instruction you would write target-specific text, for example
 `asm('syscall')` on x86-64 or `asm('svc #0')` on AArch64.
 
-There are no operand constraints and no register substitution: the compiler does
-not read the text and register allocation does not see it, so an `asm` block must
-leave the machine state the surrounding code expects. The literal is also taken
-as written, with no `${...}` interpolation even in a double-quoted string.
+In this basic form there are no operand constraints and no register
+substitution: the compiler does not read the text and register allocation does
+not see it, so the block must leave the machine state the surrounding code
+expects. The literal is taken as written, with no `${...}` interpolation even in
+a double-quoted string.
+
+To hand values to the template, use the extended form, which adds GNU-style
+operand sections. Each operand is a constraint string and a parenthesised value,
+and `%N` in the template is operand N (outputs first, then inputs):
+
+```
+asm('add %0, %1' : '+r'(a) : 'r'(b));   { a := a + b, both in registers }
+```
+
+The supported subset is integer-class operands and the general register class:
+`=r` for an output, `+r` for a read-write output, and `r` for an input, with a
+final section listing any clobbered registers. The compiler places each operand
+in a register and substitutes its name into the template.
 
 Inline assembly is ahead-of-time only. The in-process JIT emits machine code
 directly and has no assembler for a verbatim string, so a program that uses

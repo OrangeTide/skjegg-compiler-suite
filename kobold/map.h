@@ -45,4 +45,24 @@ kp_gptr  kp_map_clone(KP_VM_P kp_gptr m);
 kp_gptr  kp_mapiter_new(KP_VM_P kp_gptr m);
 int32_t  kp_mapiter_next(KP_VM_P kp_gptr it, kp_gptr kaddr, kp_gptr vaddr);
 
+/* kp_imap_* : the ordinal-keyed sibling (map[K] of T, where K is an integer, int64, char, enum,
+   or boolean). The key is passed by value as a 64-bit integer: the front end widens an ordinal
+   key to int64 consistently per key type, so equality holds and a key of any ordinal width works
+   on every target regardless of pointer width. Keys are plain values, never retained; a slot's
+   occupancy lives in a parallel states block (0 empty, 1 tombstone, 2 live), since 0 and 1 are
+   valid keys and cannot double as sentinels the way an even string-handle address can. The value
+   storage, handle-field layout, value (eager-copy) assignment, clone, and iterator model all match
+   kp_map_*. kp_imapiter_next writes the key as an int64 to `kaddr`, which the front end narrows to
+   the binder's ordinal width; it is not a handle, so it is not retained. */
+kp_gptr  kp_imap_new(KP_VM_P int32_t elemsize, kp_gptr layout);
+kp_gptr  kp_imap_reserve(KP_VM_P kp_gptr m, int64_t key, int32_t elemsize, kp_gptr layout);
+kp_gptr  kp_imap_get(KP_VM_P kp_gptr m, int64_t key);
+int32_t  kp_imap_tryget(KP_VM_P kp_gptr m, int64_t key, kp_gptr vaddr);
+int32_t  kp_imap_has(KP_VM_P kp_gptr m, int64_t key);
+kp_gptr  kp_imap_del(KP_VM_P kp_gptr m, int64_t key);
+int32_t  kp_imap_len(KP_VM_P kp_gptr m);
+kp_gptr  kp_imap_clone(KP_VM_P kp_gptr m);
+kp_gptr  kp_imapiter_new(KP_VM_P kp_gptr m);
+int32_t  kp_imapiter_next(KP_VM_P kp_gptr it, kp_gptr kaddr, kp_gptr vaddr);
+
 #endif /* KP_MAP_H */

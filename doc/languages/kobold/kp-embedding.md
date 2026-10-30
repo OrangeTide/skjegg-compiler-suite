@@ -7,8 +7,8 @@ module format, `kp-module-format.md`.
 
 Kobold-Pascal is split in two. The front end (`kpcom`) turns Pascal source into a
 KPM1 module, a portable image of the intermediate representation. The backend is a
-small C library, `libkobold.a`, that loads a module, JITs it to native x86-64, and
-runs it in the host process. A host embeds the backend; the front end is a
+small C library, `libkobold.a`, that loads a module, JITs it to native code
+(x86-64 or AArch64), and runs it in the host process. A host embeds the backend; the front end is a
 build-time or optional runtime tool, not something the host links.
 
 ## What you need

@@ -6,6 +6,29 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.31.0
+
+#### Added
+- Ordinal-keyed maps. A `map[K] of T` is keyed by an ordinal `K` (integer,
+  int64, char, enum, or boolean) alongside the existing string-keyed `map of T`.
+  Indexing, `in`, `Delete`, `TryGet`, `Length`, `MapFirst` / `MapNext`, and
+  `for k, v in m` all work on both. The two are distinct types with distinct
+  runtime representations, and value (copy-on-assign) semantics are unchanged.
+- Handle-typed and aggregate-typed properties. A `property` may now carry a
+  handle value (string, dynamic array, map, interface, or process) or an
+  aggregate value (record, fixed array, or large set), extending the scalar
+  properties shipped earlier. The accessor calls and uniform-access rules are
+  the same.
+- Extended inline assembly. The `asm(...)` statement accepts the GNU extended
+  form `asm(template : outputs : inputs : clobbers)` in a simple subset: the
+  general register class (`=r` output, `+r` read-write output, `r` input) over
+  integer-class operands, plus a clobber list, with `%N` substitution in the
+  template. The register allocator places each operand and reserves the
+  clobbers. The basic verbatim form is unchanged. Ahead-of-time only.
+- `std.time` and `std.random` link on the hosted AOT and JIT tiers, so `Now`,
+  `Sleep`, and the random surface are available there as well as on the
+  freestanding tiers.
+
 ### 0.30.0
 
 #### Added

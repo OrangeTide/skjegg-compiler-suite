@@ -220,6 +220,16 @@ A **map** is a string-keyed associative array with a typed value:
 var scores: map of integer;
 ```
 
+The key may instead be an ordinal, written `map[K] of T`, where `K` is `integer`,
+`int64`, `char`, an enum, or `boolean`:
+
+```pascal
+var hits: map[integer] of integer;
+var tally: map[char] of integer;
+```
+
+Everything below applies to both forms; only the key type changes.
+
 `scores[k]` reads or writes the value for key `k`. Assigning to a key inserts it, creating the
 map if the variable is nil; reading a key that is not present traps, so test first with `k in m`
 or fetch with `TryGet`. Like a dynamic array, a map has value semantics: assigning or passing
@@ -248,8 +258,10 @@ while MapNext(it, k, v) do
 `MapFirst(m)` returns a `mapiter` over the map, and `MapNext(it, k, v)` writes the next entry's
 key and value and returns true, or false at the end. The iteration order is unspecified.
 Inserting or removing a key while an iteration is in progress traps; updating the value of a key
-that already exists is allowed. The key passed to any map operation is a string, and the value
-type is whatever the map was declared with (an ordinal, real, string, record, or array).
+that already exists is allowed. The key passed to any map operation has the map's declared key
+type (a string, or the ordinal `K` of a `map[K] of T`), and the value type is whatever the map
+was declared with (an ordinal, real, string, record, or array). For an ordinal-keyed map, the
+`MapNext` key binder is a variable of type `K`.
 
 ### Records
 
@@ -348,9 +360,10 @@ address: it cannot be passed by reference or have its address taken. A record ma
 computed field with the same form, where the accessors are methods of the record (see
 [Records](#records)).
 
-For now a property carries a simple value (an ordinal, a real, or a 64-bit integer).
-Handle and aggregate property types, cross-module (unit interface) properties, and inline
-accessor bodies are deferred. See `kp-property.md`.
+A property carries an ordinal, a real, a 64-bit integer, a handle (string, dynamic array,
+map, interface, or process), or an aggregate value (record, fixed array, or large set).
+Cross-module (unit interface) properties and inline accessor bodies are not yet supported.
+See `kp-property.md`.
 
 ## Expressions and operators
 
@@ -413,7 +426,7 @@ Argument and operand evaluation order is right to left.
   pre-declared variable `x` in turn. The source is a fixed array (over its index
   range), a dynamic array (`0..high`), a string (byte by byte, each a `char`), a
   set (its members in ordinal order), a map, or a custom cursor. A map binds two
-  variables, `for k, v in m do`, the key (a string) and the value. A custom
+  variables, `for k, v in m do`, the key (the map's key type) and the value. A custom
   cursor is a type with a `function Next for (c): E fails` method, failure ending
   the loop. Use `_` to ignore a binder and run the body once per element.
   `break` and `continue` work as in any loop. See `kp-foreach.md`.
@@ -436,14 +449,19 @@ Argument and operand evaluation order is right to left.
   `NEXT`. There is no unstructured `goto`: a bare `goto name` to a label is a compile
   error, and because a label value cannot leave its frame, a computed jump always
   lands in a live frame. See kp-semantics.md for the `label` type's rules.
-- **inline assembly.** `asm('text')` emits its one string literal verbatim into the
-  generated assembly at that point, so the text must match the target assembler's
-  syntax. There are no operand constraints, no register substitution, and no string
-  interpolation (the literal is taken as written). The compiler does not read the text
-  and register allocation does not see it, so the block must leave the machine state the
-  surrounding code expects. Inline assembly is AOT only: the in-process JIT does not
-  assemble text, so a program that uses it must be compiled ahead of time. See
-  kp-grammar.md.
+- **inline assembly.** `asm('text')` emits its template string into the generated
+  assembly at that point, so the text must match the target assembler's syntax. There
+  is no string interpolation (the literal is taken as written). The basic form is the
+  template alone: the compiler does not read it and register allocation does not see it,
+  so the block must leave the machine state the surrounding code expects. The extended
+  form, `asm(template : outputs : inputs : clobbers)`, ties the template to program
+  values with GNU-style operand constraints, where `%N` in the template is operand N
+  (outputs first, then inputs). The supported subset is integer-class operands and the
+  general register class: `=r` for an output, `+r` for a read-write output, and `r` for
+  an input, an output being an assignable designator; the compiler places each operand
+  in a register and reserves the clobbers. Inline assembly is AOT only: the in-process
+  JIT does not assemble text, so a program that uses it must be compiled ahead of time.
+  See kp-grammar.md.
 
 ## Routines
 
@@ -689,7 +707,7 @@ A directive is a brace comment whose first character is `$`.
 - **Conditional compilation.** `{$DEFINE name}` and `{$UNDEF name}` set and clear a
   symbol; `{$IFDEF name}` / `{$IFNDEF name}` ... `{$ELSE}` ... `{$ENDIF}` include a region
   by whether a symbol is defined. The compiler predefines `KOBOLD`, so a source can select
-  a Kobold-only body against a bootstrap that does not define it.
+  a Kobold-only region with `{$IFDEF KOBOLD}`.
 - **Include.** `{$I filename}` (with a space after `I`) inserts another file at that point.
   The compiler searches the including file's directory.
 
@@ -699,7 +717,7 @@ a source shared with Free Pascal may carry them.
 ## See also
 
 - `kp-grammar.md` the full grammar in EBNF.
-- `kobold.md` the compiler and runtime design, including nested-routine lowering, the
-  string and coroutine runtimes, and the self-hosting bootstrap.
+- `kobold.md` the compiler and runtime design, including nested-routine lowering and the
+  string and coroutine runtimes.
 - `kp-abi.md` the host ABI for `external` routines and handle types.
 - `kp-module-format.md` the KPM1 module the front end emits.

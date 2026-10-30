@@ -3,14 +3,12 @@
 This is the end-to-end path from a Kobold-Pascal source file to a program running
 inside the in-tree RV32 emulator (`skj-run`, the `emu/rv32.c` core). It is the
 freestanding tier: the program links against the no-libc guest runtime, so it is
-the same build a real RV32 VM host (smolmoo, aldeby) would load, not a hosted
-libc executable.
+the same build a real RV32 VM host would load, not a hosted libc executable.
 
 `skj-kp-jit` (see `kp-guide.md`) is the quickest way to run a program on the
 host, and `kobold/aot-run.sh` builds a hosted native executable. Neither loads
-the program into the emulator. This document covers that missing path, which has
-been easy to miss because the steps live in the test runner rather than in one
-place.
+the program into the emulator. This document covers that path, whose steps
+otherwise live only in the test runner.
 
 ## The pipeline
 

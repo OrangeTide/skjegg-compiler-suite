@@ -476,7 +476,7 @@ into the existing symbol table (see [the fold rule](#definition-uniqueness-the-c
 
 ### Building and running a unit set
 
-The runner links the set. `kprun` loads a program `.kpm`, reads its `.uses` list, and loads
+The runner links the set. It loads a program `.kpm`, reads its `.uses` list, and loads
 each dependency `.kpm` by name from the program's directory, following each dependency's own
 `.uses` so a transitive unit is loaded once. It then links and runs the whole set in one
 `kp_link`. An embedding host does the same through the public API: `kp_module_dep_count` and
@@ -509,7 +509,7 @@ directories first, then the installed standard library.
   directory in that same order, each unit taken from the first directory that has it (as a
   single `uses` would), and the members are sorted so the resulting dependency list is
   deterministic regardless of the directory's own order.
-- **Run time.** `kprun` resolves each dependency in the `.uses` list by searching, in order,
+- **Run time.** The runner resolves each dependency in the `.uses` list by searching, in order,
   the main module's own directory, every colon-separated entry of the `KOBOLD_UNITS`
   environment variable, then the same baked-in standard library directory. A dotted dependency
   maps its dots to path separators the same way; a wildcard has already been expanded to
@@ -532,12 +532,12 @@ the default qualifier act on).
 
 The leading namespace is a portability and category contract, read at a glance:
 
-- `core` — pure, needs no host: available on every tier (hosted, JIT, sandbox, bare metal).
-- `io` — input and output (console, files, directories): available wherever the target has
+- `core`: pure, needs no host; available on every tier (hosted, JIT, sandbox, bare metal).
+- `io`: input and output (console, files, directories); available wherever the target has
   that I/O seam.
-- `std` — needs an operating system or host service: available everywhere except bare metal.
-- `experimental` — unstable, for trying things out; no stability promise.
-- `kobold` — units about the toolchain itself (host-side developer tools).
+- `std`: needs an operating system or host service; available everywhere except bare metal.
+- `experimental`: unstable, for trying things out; no stability promise.
+- `kobold`: units about the toolchain itself (host-side developer tools).
 
 The tier is **organizational for now**: the compiler maps the namespace to a directory and
 nothing yet stops a bare-metal build from using a `std` unit. Enforcement, where a build target
@@ -563,15 +563,15 @@ same name ahead of it with `-U` or `KOBOLD_UNITS`.
 
 The units, by tier:
 
-- `io.files` — whole-file (`ReadFile`/`WriteFile`) and handle (`Open`/`Create`/`ReadLine`/
+- `io.files`: whole-file (`ReadFile`/`WriteFile`) and handle (`Open`/`Create`/`ReadLine`/
   `WriteLine`/`Close`) text I/O, plus the file-metadata and path operations: `Exists`,
   `FileSize` (an `Int64`), `IsDir`, `DeleteFile`, `RenameFile`, `MakeDir`, `RemoveDir`. Each
   metadata/path call is a thin wrapper over an external cdecl into the runtime, which reaches
   the host through the libc `stat`/`fileops` helpers (statx and the `*at` syscall forms on the
   freestanding tier). `FileSize` and the predicates return a sentinel on a missing path
   (`-1` size, `false` predicate) rather than failing.
-- `io.dirs` — directory enumeration.
-- `io.console` — the standard input and output as typed functions: `Eof` (the sticky
+- `io.dirs`: directory enumeration.
+- `io.console`: the standard input and output as typed functions: `Eof` (the sticky
   end-of-input latch), `ReadLine`/`ReadChar`, `WriteStr`/`WriteLine`/`WriteChar`, and the real
   surface `ReadReal`/`WriteReal` (`ReadReal` skips whitespace and reads one real token,
   `WriteReal` prints it in the write statement's `%g` shape). A real crosses the unit cdecl FFI
@@ -581,7 +581,7 @@ The units, by tier:
   signed decimal token, returning an `Int64` (the same 64-bit cdecl return as `std.time`'s `Now`,
   so endian-safe on both tiers); `WriteInt` prints a 32-bit `Integer`. A non-numeric input reads
   as zero (this tier's lenient scan); a status-returning `Val` surface is a later design pass.
-- `io.buffered` — buffered streams over any descriptor, written entirely in Kobold on the raw
+- `io.buffered`: buffered streams over any descriptor, written entirely in Kobold on the raw
   fd seam (`io_write_str`/`kpf_read`). A `BufWriter` (`OpenWriter`/`PutStr`/`PutChar`/`Flush`)
   batches a run of small writes into one `write` per bufferful or per `Flush`; a `BufReader`
   (`OpenReader`/`GetChar`/`UngetStr`/`ReadLine`/`Eof`) pulls host chunks and serves bytes and
@@ -589,10 +589,10 @@ The units, by tier:
   input pushback its own numeric and line reads need; this unit is where larger buffering, output
   batching, and a general ungetc live, as the design intends (a stream owns its descriptor, so a
   program does not mix it with the console builtins or a second stream on the same fd).
-- `std.time` — `Now` (monotonic milliseconds) and `Sleep(ms)`, over the host clock and the
+- `std.time`: `Now` (monotonic milliseconds) and `Sleep(ms)`, over the host clock and the
   park seam. A give-up-the-turn yield is `Pause` in `std.threads`; `Sleep(0)` also parks the
   turn at the host.
-- `std.threads` — cooperative threads, the Kobold parallel of the C `<threads.h>` subset
+- `std.threads`: cooperative threads, the Kobold parallel of the C `<threads.h>` subset
   (`include/threads.h`). It is pure Kobold with no runtime glue: it rides the language's own
   `start` / `yield` / `process` / `release` coroutine primitive, so it works on every tier that
   has coroutines. `Ready(start worker(a, b))` enqueues a started task, `RunAll` round-robins the
@@ -604,18 +604,18 @@ The units, by tier:
   uncontended unless it spans a `Pause`, so `Lock` spins on `Pause` until free and `Wait` pauses
   until the next `Signal` (a broadcast). The caller hands the unit a `process` value, since a
   yielding routine cannot be passed as a value and so cannot be spawned from inside the unit.
-- `std.random` — `SeedRandom`, `Randomize` (seed from host entropy), `RandomBelow` and
+- `std.random`: `SeedRandom`, `Randomize` (seed from host entropy), `RandomBelow` and
   `RandomReal` (a uniform real in [0, 1)) over the fast generator, and `SecureRandom(bound)`
   over the ChaCha20 CSPRNG (seeded once from host entropy, rejection-sampled to stay unbiased).
   It needs host entropy, hence `std`. `RandomReal` crosses the cdecl FFI as a real the same
   way `io.console`'s `ReadReal` does, no bridge. A pure, seed-only `core.random` subset usable
   on bare metal is a later addition.
-- `core.strings` — pure string helpers built over the string builtins with no runtime
+- `core.strings`: pure string helpers built over the string builtins with no runtime
   primitive of its own, so it works on every tier (hence `core`): `UpperCase`/`LowerCase`
   (ASCII), `Trim`/`TrimLeft`/`TrimRight`, `StringReplace`, and a non-mutating string
   `Delete`/`Insert`. Reached qualified as `strings.Delete` so it does not shadow the
   dynamic-array built-ins of the same name.
-- `core.convert` — the failable face of the classic `Val(s, v, code)` builtin: `ValInt(s):
+- `core.convert`: the failable face of the classic `Val(s, v, code)` builtin: `ValInt(s):
   Int64 fails` and `ValReal(s): real fails`. A console read is lenient (a non-numeric token
   reads as zero), so a program that needs to know whether the text was a number reads it as a
   string and converts here, catching a bad token with `or else` or `fails`: `n := ValInt(line)
@@ -669,9 +669,12 @@ on demand in functions that touch globals is an emitter detail, deferred.
   This is the Rust `Arc<Mutex>` or Clojure atom shape. It is less "looks like a global"
   than an exported `var`, but it is the honest home for genuinely shared, synchronized
   state.
-- **The `property` feature.** Uniform-access, accessor-backed, and computed values,
-  including computed record fields, are specified in `kp-property.md` as an independent
-  proposal. Units can use it once it lands but do not require it.
+- **Exporting a `property` across a unit interface.** The `property` feature itself
+  (uniform-access, accessor-backed, and computed values, including computed record
+  fields) is implemented and specified in `kp-property.md`; a unit can use it today and
+  does not require it. What is not yet built is placing a property in a unit's exported
+  interface, which needs the interface to carry the accessor binding so the consumer can
+  inline across the unit boundary.
 
 ## Open questions
 
@@ -681,7 +684,7 @@ on demand in functions that touch globals is an emitter detail, deferred.
 ## See also
 
 - `kp-grammar.md` the concrete syntax for units and the `uses` clause.
-- `kp-property.md` the split-out property / uniform-access proposal.
+- `kp-property.md` the property / uniform-access feature.
 - `kp-module-format.md` the KPM1 module kinds and interface section.
 - `kobold.md` the language and runtime design.
 - `kp-conformance.md` where units sit against the Pascal standards and dialects.

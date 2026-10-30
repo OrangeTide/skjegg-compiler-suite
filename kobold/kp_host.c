@@ -263,6 +263,17 @@ kp_install_runtime(struct kp_binding *binds, int *n, int cap)
     BIND("kp_mapiter_new", kp_mapiter_new);
     BIND("kp_mapiter_next", kp_mapiter_next);
 
+    BIND("kp_imap_new", kp_imap_new);
+    BIND("kp_imap_reserve", kp_imap_reserve);
+    BIND("kp_imap_get", kp_imap_get);
+    BIND("kp_imap_tryget", kp_imap_tryget);
+    BIND("kp_imap_has", kp_imap_has);
+    BIND("kp_imap_del", kp_imap_del);
+    BIND("kp_imap_len", kp_imap_len);
+    BIND("kp_imap_clone", kp_imap_clone);
+    BIND("kp_imapiter_new", kp_imapiter_new);
+    BIND("kp_imapiter_next", kp_imapiter_next);
+
 #ifdef KP_RV_FLOAT_BRIDGE
     BIND("kp_sin", brv_sin);
     BIND("kp_cos", brv_cos);

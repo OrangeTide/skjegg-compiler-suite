@@ -308,13 +308,17 @@ check-jit: build/skj-jit
 ## skj-kp-patrol a host that adds an opaque handle type.
 KP_RT  := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kobold/map.c kobold/rt_host.c \
           kobold/co_shim.c runtime/co_switch_x86.S kobold/kp_host.c kobold/kp_io.c \
+          runtime/rng.c runtime/rng_glue.c runtime/sched_glue.c \
           jit/jit_common.c jit/jit_arena.c jit/jit_x86.c jit/emit_x86.c jit/code.c \
           jit/call_guest_x86.S \
           backend/x86_select.c backend/regalloc_x86.c $(IR_SRC)
 KP_HDRS := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue.h kobold/obj.h kobold/gheap_core.h kobold/co.h \
            kobold/handle.h kobold/lowmem.h kobold/kp_host.h jit/jit_common.h jit/jit_arena.h \
-           jit/jit_x86.h jit/emit_x86.h jit/code.h backend/mc.h backend/x86_select.h ir/ir.h ir/target.h
-KP_CFLAGS := $(CFLAGS) -DX86_BITS=64 -DKP_FREESTANDING -DKP_REAL=double -Iir -Ijit -Ibackend -Ikobold
+           jit/jit_x86.h jit/emit_x86.h jit/code.h backend/mc.h backend/x86_select.h ir/ir.h ir/target.h runtime/rng.h
+# -DKP_GLUE_HOSTED: the hosted Kobold runtime (the in-process JIT and libkpaot.a)
+# links runtime/rng_glue.c and sched_glue.c against the host libc clock, sleep,
+# and entropy, not the freestanding 32-bit syscall seam those files use on rv/cf.
+KP_CFLAGS := $(CFLAGS) -DX86_BITS=64 -DKP_FREESTANDING -DKP_REAL=double -DKP_GLUE_HOSTED -Iir -Ijit -Ibackend -Ikobold
 
 ## co.c is vendored unchanged from the Kobold tree, which builds with -Wall -Wextra
 ## (no -Wpedantic).  Compile it with that same set so it stays byte-identical and
@@ -470,6 +474,7 @@ build/skj-kp-patrol: kobold/patrol_main.c $(KP_RT) build/kp_co.o $(KP_HDRS) Make
 ## rv64 toolchain has no ilp32 multilib) and run under qemu-riscv32.
 KP_RT_RV := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kobold/map.c kobold/rt_host.c \
             kobold/co_shim.c runtime/co_switch_rv.S kobold/kp_host.c kobold/kp_io.c \
+            runtime/rng.c runtime/rng_glue.c runtime/sched_glue.c \
             jit/jit_common.c jit/jit_arena.c jit/jit_rv.c jit/emit_rv.c jit/code.c \
             jit/call_guest_rv.S jit/rv_jit_i64.S \
             backend/rv_select.c backend/regalloc_rv.c $(IR_SRC)
@@ -495,13 +500,14 @@ build/skj-kp-jit-rv: kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c $(KP_
 ## qemu-aarch64, which executes the JIT-generated code.
 KP_RT_A64 := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kobold/map.c kobold/rt_host.c \
              kobold/co_shim.c runtime/co_switch_arm64.S kobold/kp_host.c kobold/kp_io.c \
+             runtime/rng.c runtime/rng_glue.c runtime/sched_glue.c \
              jit/jit_common.c jit/jit_arena.c jit/jit_arm64.c jit/emit_arm64.c jit/code.c \
              jit/call_guest_arm64.S \
              backend/arm64_select.c backend/regalloc_arm64.c $(IR_SRC)
 KP_HDRS_A64 := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue.h kobold/obj.h kobold/gheap_core.h kobold/co.h \
                kobold/handle.h kobold/lowmem.h kobold/kp_host.h jit/jit_common.h jit/jit_arena.h \
                jit/emit_arm64.h jit/code.h backend/arm64_mc.h backend/arm64_select.h ir/ir.h
-KP_CFLAGS_A64 := $(CFLAGS) -DKP_FREESTANDING -DKP_REAL=double -Iir -Ijit -Ibackend -Ikobold
+KP_CFLAGS_A64 := $(CFLAGS) -DKP_FREESTANDING -DKP_REAL=double -DKP_GLUE_HOSTED -Iir -Ijit -Ibackend -Ikobold
 
 ## ColdFire shares the arm64/rv flag set (no -DX86_BITS); it cross-builds the
 ## hosted Kobold runtime for big-endian m68k with the glibc m68k toolchain.
@@ -562,6 +568,7 @@ check-kp: build/skj-kp
 ## from the shared build/kp_co.o rule rather than recompiled here.
 KP_AOT_RT := kobold/aot_rt.c kobold/kp_host.c kobold/kp_io.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
              kobold/map.c kobold/rt_host.c kobold/co_shim.c \
+             runtime/rng.c runtime/rng_glue.c runtime/sched_glue.c \
              runtime/co_switch_x86.S jit/call_guest_x86.S
 build/libkpaot.a: $(KP_AOT_RT) build/kp_co_lp64.o $(KP_HDRS) Makefile | build
 	@rm -rf build/aot && mkdir -p build/aot
@@ -628,6 +635,7 @@ build/libkpaot-rv.a: $(KP_AOT_RT_RV) build/kp_co_rv.o $(KP_HDRS_RV) runtime/i64_
 
 KP_AOT_RT_A64 := kobold/aot_rt.c kobold/kp_host.c kobold/kp_io.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
                  kobold/map.c kobold/rt_host.c kobold/co_shim.c \
+                 runtime/rng.c runtime/rng_glue.c runtime/sched_glue.c \
                  runtime/co_switch_arm64.S jit/call_guest_arm64.S
 build/libkpaot-arm64.a: $(KP_AOT_RT_A64) build/kp_co_a64_lp64.o $(KP_HDRS_A64) Makefile | build
 	@rm -rf build/aot-arm64 && mkdir -p build/aot-arm64
@@ -942,6 +950,10 @@ check-kp-dirs: build/skj-kp-jit build/skj-kpc build/skj-kpc-rv build/skj-kp buil
 ## unit and the program compile to rv objects and link with the crt and the free
 ## archive.  The dotted unit names resolve through the front end's own directory
 ## (dot -> path separator), so the unit .kpm files are staged under io/ and std/.
+## The rng/sched glue also ships in the hosted runtimes (libkpaot.a, the arm64
+## sibling, and the in-process JIT, all -DKP_GLUE_HOSTED over the host libc
+## clock/sleep/entropy), so std.time / std.random work on the hosted AOT and JIT
+## tiers too; check-kp-stdlib exercises those.
 build/kp-stdlib/io/console.kpm: kobold/lib/io/console.pas build/skj-kpc-rv | build
 	@mkdir -p build/kp-stdlib/io
 	./build/skj-kpc-rv --emit-kpm $< > $@
@@ -982,6 +994,56 @@ build/kp-stdlib-cf/core/convert.kpm: kobold/lib/core/convert.pas build/skj-kpc-c
 build/kp-stdlib-cf/std/threads.kpm: kobold/lib/std/threads.pas build/skj-kpc-cf | build
 	@mkdir -p build/kp-stdlib-cf/std
 	./build/skj-kpc-cf --emit-kpm $< > $@
+
+## The hosted tiers for the same stddemo (std.random, std.time, io.console): the
+## in-process x86-64 JIT and the native x86-64 AOT linked against libkpaot.a.
+## This pins the std.time / std.random host glue (runtime/rng_glue.c,
+## sched_glue.c) on the hosted paths; the glue formerly shipped only in the
+## freestanding rv/cf archives, so a hosted `uses std.time`/`std.random` failed
+## to link.  The .kpm modules are x86-64 (host skj-kpc) and are shared by both
+## lanes (the JIT loads the same modules the AOT path links).
+check-kp-stdlib: build/skj-kpc build/skj-kp build/skj-kp-jit build/libkpaot.a build/skj-as-x86-64 \
+                 build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP)
+	@mkdir -p build/kp-stdlib-host/std build/kp-stdlib-host/io
+	@cp tests/kp-stdlib/stddemo.pas build/kp-stdlib-host/stddemo.pas
+	@E=build/kp-stdlib-host/build.err; : > $$E; \
+	 for u in std/random std/time io/console; do \
+	   ./build/skj-kpc --emit-kpm kobold/lib/$$u.pas > build/kp-stdlib-host/$$u.kpm 2>>$$E || \
+	     { echo "FAIL kp-stdlib (emit $$u)"; cat $$E; exit 1; }; \
+	 done; \
+	 ./build/skj-kp-jit build/kp-stdlib-host/stddemo.pas </dev/null \
+	   > build/kp-stdlib-host/jit.out 2>>$$E; \
+	 cmp -s build/kp-stdlib-host/jit.out tests/kp-stdlib/stddemo.expected \
+	   || { echo "FAIL kp-stdlib (jit)"; cat $$E build/kp-stdlib-host/jit.out; exit 1; }; \
+	 ./build/skj-kpc -U build/kp-stdlib-host --emit-kpm build/kp-stdlib-host/stddemo.pas \
+	   > build/kp-stdlib-host/stddemo.kpm 2>>$$E || \
+	     { echo "FAIL kp-stdlib (emit stddemo)"; cat $$E; exit 1; }; \
+	 KOBOLD_UNITS=$(CURDIR)/build/kp-stdlib-host KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
+	   KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
+	   sh kobold/aot-run.sh build/kp-stdlib-host/stddemo.kpm </dev/null \
+	   > build/kp-stdlib-host/aot.out 2>>$$E; \
+	 cmp -s build/kp-stdlib-host/aot.out tests/kp-stdlib/stddemo.expected \
+	   || { echo "FAIL kp-stdlib (aot)"; cat $$E build/kp-stdlib-host/aot.out; exit 1; }
+	@# arm64 native AOT (the mac's NATIVE_LIBKPAOT): the same glue must ship in
+	@# libkpaot-arm64.a; run under qemu-aarch64.  Units are target-bound, so emit
+	@# arm64 .kpm separately with the arm64 front end.
+	@mkdir -p build/kp-stdlib-host/arm64/std build/kp-stdlib-host/arm64/io
+	@E=build/kp-stdlib-host/build.err; \
+	 for u in std/random std/time io/console; do \
+	   ./build/skj-kpc-arm64 --emit-kpm kobold/lib/$$u.pas > build/kp-stdlib-host/arm64/$$u.kpm 2>>$$E || \
+	     { echo "FAIL kp-stdlib (emit arm64 $$u)"; cat $$E; exit 1; }; \
+	 done; \
+	 ./build/skj-kpc-arm64 -U build/kp-stdlib-host/arm64 --emit-kpm build/kp-stdlib-host/stddemo.pas \
+	   > build/kp-stdlib-host/arm64/stddemo.kpm 2>>$$E || \
+	     { echo "FAIL kp-stdlib (emit arm64 stddemo)"; cat $$E; exit 1; }; \
+	 KOBOLD_UNITS=$(CURDIR)/build/kp-stdlib-host/arm64 KPAOT=build/skj-kp-arm64 \
+	   KPAOTLIB=build/libkpaot-arm64.a KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" \
+	   KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
+	   sh kobold/aot-run.sh build/kp-stdlib-host/arm64/stddemo.kpm </dev/null \
+	   > build/kp-stdlib-host/arm64.out 2>>$$E; \
+	 cmp -s build/kp-stdlib-host/arm64.out tests/kp-stdlib/stddemo.expected \
+	   || { echo "FAIL kp-stdlib (aot-arm64)"; cat $$E build/kp-stdlib-host/arm64.out; exit 1; }
+	@echo "kp-stdlib: 3 passed (jit, aot-x86-64, aot-arm64): std.random, std.time, io.console"
 
 check-kp-stdlib-free: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
                       build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a \
@@ -6659,7 +6721,7 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive \
            test-cc-rv-psabi-struct test-cc-driver check-libc \
            check-kp \
-           check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-corpus check-kp-corpus-cf check-kp-multi check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-inc
+           check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-corpus check-kp-corpus-cf check-kp-multi check-kp-files check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-inc
 	@echo "All architecture test suites passed."
 
 clean:
@@ -6678,4 +6740,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-preempt check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-preempt check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE

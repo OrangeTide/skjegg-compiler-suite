@@ -5,18 +5,22 @@ every use site but is implemented by routines. It follows the uniform access pri
 so a consumer cannot tell, and does not need to know, whether it is reading a stored cell
 or a computed value.
 
-> Status: implemented (routine-reference accessors), scalar-value types for now. The
-> declaration-level property and the computed record field both work: a read becomes a call
-> to the getter, a write a call to the setter, and a property with only `read` is read-only.
-> Units do not require it: a unit exports plain `var` and `const`, and can use a `property`
-> once this feature exists.
+> Status: implemented (routine-reference accessors), for scalar values, reference-counted
+> handles, and inline aggregate values. The declaration-level property and the computed record
+> field both work: a read becomes a call to the getter, a write a call to the setter, and a
+> property with only `read` is read-only. A handle-typed property (a string, a dynamic array, a
+> map, an interface, or a process) returns the handle with its reference owned, so a read
+> transfers ownership exactly like any handle-returning call. An aggregate-typed property (a
+> record, a fixed array, or a large set) returns its value through the getter's caller-provided
+> storage (sret), the same path an aggregate-returning function uses, so a read yields the
+> value's address and a field or element of a record property reads through it. Units do not
+> require any of this: a unit exports plain `var` and `const`, and can use a `property` once
+> this feature exists.
 >
-> Deferred: a property whose type is a handle or aggregate (string, record, dynamic array),
-> since the accessor result would need ARC ownership and sret handling; a property in a
-> unit's exported interface (cross-module, which needs interface emission and inlining); and
-> the inline accessor syntax below. The accessors are a parameterless getter and a one-argument
-> setter; for a computed field they are methods of the record, resolved at the use site like
-> any method, so an accessor may be declared after the field.
+> Deferred: a property in a unit's exported interface (cross-module, which needs interface
+> emission and inlining); and the inline accessor syntax below. The accessors are a parameterless
+> getter and a one-argument setter; for a computed field they are methods of the record, resolved
+> at the use site like any method, so an accessor may be declared after the field.
 
 ## The surface
 
@@ -82,9 +86,11 @@ for the cases that genuinely need an accessor.
 
 - **Inline accessor syntax.** The routine-reference form (`read getX write setX`) is the
   surface now; an inline, likely lambda-shaped form is a later addition.
-- **Handle and aggregate property types.** A property or computed field carries a simple
-  value for now (an ordinal, a real, or a 64-bit integer). A string, record, or dynamic-array
-  property needs the accessor result handled with ARC ownership and sret, which is deferred.
+- **Property types (done).** A property or computed field may carry a scalar value (an ordinal,
+  a real, or a 64-bit integer), a reference-counted handle (a string, a dynamic array, a map, an
+  interface, or a process), or an inline aggregate (a record, a fixed array, or a large set). A
+  handle read transfers its owned reference like any handle-returning call; an aggregate read
+  returns through the getter's sret buffer, the same path an aggregate-returning function uses.
 - **Cross-module properties.** A property in a unit's exported interface needs the interface
   emission and inlining described above; for now a property is module-private. The accessor
   bodies live in the same program or unit as the property.

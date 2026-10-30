@@ -216,12 +216,13 @@ BufferType       = 'buffer' [ '[' { ',' } ']' ] 'of' Type .
                     per-axis extents and byte strides are set by the host at creation, so a
                     row pitch may exceed cols * elemsize *)
 
-MapType          = 'map' 'of' Type .
-                 (* a string-keyed associative array with value type Type, a refcounted
-                    handle. m[k] gets or sets (set inserts, get traps if absent), k in m tests
-                    membership, Delete(m, k) removes, Length(m) counts, TryGet(m, k, v) fetches,
-                    and MapFirst/MapNext iterate with a 'mapiter' cursor. A map is a value type:
-                    assignment eager-copies, like a dynamic array *)
+MapType          = 'map' [ '[' Type ']' ] 'of' Type .
+                 (* an associative array with value type Type, a refcounted handle. The key type
+                    in brackets is an ordinal (integer, int64, char, enum, boolean); 'map of T'
+                    with no brackets is the string-keyed form. m[k] gets or sets (set inserts, get
+                    traps if absent), k in m tests membership, Delete(m, k) removes, Length(m)
+                    counts, TryGet(m, k, v) fetches, and MapFirst/MapNext iterate with a 'mapiter'
+                    cursor. A map is a value type: assignment eager-copies, like a dynamic array *)
 
 RecordType       = 'record' FieldList [ VariantPart ] 'end' .
 FieldList        = [ FieldDecl { ';' FieldDecl } [ ';' ] ] .
@@ -456,16 +457,34 @@ Statement        = [ LabelPrefix ]
                     statements their value is discarded. See Coroutine
                     constructs. *)
 
-AsmStmt          = 'asm' '(' StringLiteral ')' .
-                 (* basic inline assembly: the one StringLiteral is emitted
-                    verbatim into the generated assembly at that point, so its
-                    text must match the target assembler's syntax. There are no
-                    operand constraints, no register substitution, and no '${}'
-                    interpolation (the literal is taken as written; a single- or
-                    double-quoted literal is accepted, but a double-quoted one
-                    does not interpolate here). The compiler does not parse the
-                    text and register allocation does not see it, so the block
-                    must leave the machine state the surrounding code expects.
+AsmStmt          = 'asm' '(' StringLiteral
+                     [ ':' [ AsmOperand { ',' AsmOperand } ]
+                       [ ':' [ AsmOperand { ',' AsmOperand } ]
+                         [ ':' [ StringLiteral { ',' StringLiteral } ] ] ] ] ')' .
+AsmOperand       = StringLiteral '(' Expression ')' .
+                 (* Inline assembly. The first StringLiteral is the template, emitted
+                    into the generated assembly at that point, so its text must match
+                    the target assembler's syntax. There is no '${}' interpolation (the
+                    literal is taken as written; a single- or double-quoted literal is
+                    accepted, but a double-quoted one does not interpolate here).
+
+                    The basic form is the template alone. The template then carries no
+                    operands, the compiler does not parse it, and register allocation
+                    does not see it, so the block must leave the machine state the
+                    surrounding code expects.
+
+                    The extended form adds, after a ':', the output operands, then a
+                    second ':' and the input operands, then a third ':' and the
+                    clobbered register names (GNU style). Each operand is a constraint
+                    string and a parenthesised expression; in the template, '%N' is
+                    operand N, outputs numbered first then inputs. The simple subset the
+                    compiler supports: the operand type is a single-register integer-class
+                    ordinal (integer, char, boolean, enum, or subrange), the constraint is
+                    the general register class only ('=r' for an output, '+r' for a
+                    read-write output, 'r' for an input), and an output expression must be
+                    an assignable designator. The register allocator places each operand
+                    and reserves the clobbers.
+
                     AOT only: the in-process JIT does not assemble text. *)
 
 LabelPrefix      = Identifier ':' .
@@ -761,7 +780,8 @@ code-address value type it jumps through (see the `label` type above). `goto`
 takes a `label`-valued expression only; a bare `goto name` to a label identifier
 is rejected, so there is no unstructured goto.
 
-`map` opens `map of T`, a string-keyed associative array with value type `T` (see MapType).
+`map` opens `map of T`, a string-keyed associative array with value type `T`, or
+`map[K] of T`, keyed by an ordinal `K` (integer, int64, char, enum, boolean) (see MapType).
 
 `buffer` opens `buffer of T`, a host-backed shared array whose element backing the host owns
 and places, so ARC never frees it and the guest cannot resize it. `ref` and `slice` stay
@@ -771,9 +791,9 @@ reserved but are not parsed. `slice` is held for a possible future windowed view
 `unit`, `uses`, `reexport`, `implementation`, and `shared` are part of the implemented units
 surface (see the Compilation units section), as is `implement` for guest-record trait
 conformance (`implement I for R`, a static conformance check). `as` is the import alias in a
-`uses` clause. `property` declares an accessor-backed value (`kp-property.md`); `kpcom` parses
-it in a program or in a unit's implementation part, with cross-module property export still
-deferred.
+`uses` clause. `property` declares an accessor-backed value (`kp-property.md`); it works in a program or in a
+unit's implementation part for scalar, handle, and aggregate value types, with cross-module
+property export still deferred.
 
 `out` (a parameter mode), `cdecl` (a calling convention on a host import),
 `export` (a module entry), `read` and `write` (property accessors), and `fails` (the

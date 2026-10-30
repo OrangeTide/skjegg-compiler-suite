@@ -32,9 +32,9 @@ not a systems programmer.
   function interface. A host object is named by an integer handle id, never by
   an address, so a script never holds a host pointer.
 
-Kobold-Pascal began from the ideas in Compact Pascal (`../pascal.md`) but takes
-a different path: it compiles to native machine code rather than WebAssembly,
-and it uses opaque handles rather than pointers.
+Kobold-Pascal shares much of its syntax with Compact Pascal (`../pascal.md`),
+but compiles to native machine code rather than WebAssembly and uses opaque
+handles rather than pointers.
 
 ## The language at a glance
 
@@ -78,7 +78,7 @@ end.
 - `array[lo..hi] of T`, and dynamic `array of T`
 - `record`, including variant records
 - `string` (host-managed, not a raw memory type)
-- `map of T` (a string-keyed associative array)
+- `map of T` (a string-keyed associative array; `map[K] of T` keys by an ordinal `K`)
 - opaque host handles (see below)
 
 ### Control flow and structure
@@ -204,5 +204,5 @@ feeding a cross build.
 - `kp-sandbox.md` walks through compiling a program to a freestanding RV32 ELF
   and running it in the in-tree emulator (`skj-run`), the build a real RV32 VM
   host would load.
-- `kobold.md` describes how the Kobold front end is built, bootstrapped, and run
-  inside the skjegg tree.
+- `kobold.md` describes how the Kobold front end is built and run inside the
+  skjegg tree.

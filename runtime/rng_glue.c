@@ -9,15 +9,78 @@
  * entropy on first use, so Random differs each run, while kp_random_seed pins a
  * reproducible sequence and kp_randomize draws fresh entropy on demand. */
 
+#if defined(KP_GLUE_HOSTED)
+/* Expose the POSIX monotonic clock from <time.h> under the strict-C99 build;
+   must precede every system header. */
+#  if defined(__APPLE__)
+#    define _DARWIN_C_SOURCE 1
+#  else
+#    ifndef _DEFAULT_SOURCE
+#      define _DEFAULT_SOURCE 1
+#    endif
+#    ifndef _POSIX_C_SOURCE
+#      define _POSIX_C_SOURCE 200809L
+#    endif
+#  endif
+#endif
+
 #include "rng.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
+/* The platform seam, isolated to two helpers: filling a small buffer with host
+   entropy and reading the monotonic clock in milliseconds.  A hosted build (the
+   in-process JIT and the native AOT runtime libkpaot.a) uses the host libc,
+   whose timespec has pointer-width fields on an LP64 host and whose getentropy
+   takes a size_t.  The freestanding tiers (rv/cf, boris) use the 32-bit syscall
+   seam below, unchanged. */
+#if defined(KP_GLUE_HOSTED)
+
+#include <time.h>
+
+extern int getentropy(void *buf, size_t buflen);
+
+static int
+glue_fill_entropy(void *buf, int len)
+{
+    return getentropy(buf, (size_t)len) == 0;
+}
+
+static long long
+glue_now_ms(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (long long)ts.tv_sec * 1000 + (long long)ts.tv_nsec / 1000000;
+}
+
+#else
+
 /* The syscall seam (syscall_rv.S / syscall_cf.S), the same wrappers libc and
    the Kobold freestanding runtime link. */
 extern int getrandom(void *buf, int len, unsigned flags);
 extern int clock_gettime(int clk_id, void *ts);
+
+static int
+glue_fill_entropy(void *buf, int len)
+{
+    return getrandom(buf, len, 0) == len;
+}
+
+static long long
+glue_now_ms(void)
+{
+    int32_t ts[2] = { 0, 0 };           /* {tv_sec, tv_nsec}, the 32-bit seam */
+
+    if (clock_gettime(1, ts) != 0)      /* 1 = monotonic */
+        return 0;
+    return (long long)ts[0] * 1000 + (long long)ts[1] / 1000000;
+}
+
+#endif
 
 static struct kp_rng    g_rng;
 static struct kp_csprng g_csprng;
@@ -32,7 +95,7 @@ entropy_seed(void)
     uint32_t seed = 0x9e3779b9u;
     uint8_t b[4];
 
-    if (getrandom(b, (int)sizeof b, 0) == (int)sizeof b)
+    if (glue_fill_entropy(b, (int)sizeof b))
         seed = (uint32_t)b[0] | ((uint32_t)b[1] << 8)
              | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
     return seed;
@@ -93,9 +156,9 @@ kp_secure_bytes(void *buf, long n)
     if (!g_csprng_seeded) {
         uint8_t key[32], nonce[12];
 
-        if (getrandom(key, (int)sizeof key, 0) != (int)sizeof key)
+        if (!glue_fill_entropy(key, (int)sizeof key))
             kp_rng_seed(&g_rng, g_rng.s[0]);    /* no entropy: still proceed */
-        (void)getrandom(nonce, (int)sizeof nonce, 0);
+        (void)glue_fill_entropy(nonce, (int)sizeof nonce);
         kp_csprng_seed(&g_csprng, key, nonce);
         g_csprng_seeded = 1;
     }
@@ -126,9 +189,5 @@ kp_secure_below(int bound)
 long long
 kp_now_ms(void)
 {
-    int32_t ts[2] = { 0, 0 };           /* {tv_sec, tv_nsec}, the 32-bit seam */
-
-    if (clock_gettime(1, ts) != 0)      /* 1 = monotonic */
-        return 0;
-    return (long long)ts[0] * 1000 + (long long)ts[1] / 1000000;
+    return glue_now_ms();
 }

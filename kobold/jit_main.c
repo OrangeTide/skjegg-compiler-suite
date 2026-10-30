@@ -637,6 +637,17 @@ int main(int argc, char **argv)
     kp_install_runtime(g_binds, &g_nbinds, (int)(sizeof g_binds / sizeof g_binds[0]));
     kp_io_set_args(argc, argv);
 
+    /* std.time / std.random host glue (runtime/sched_glue.c, rng_glue.c), linked
+       into the JIT through KP_RT.  Scalar signatures (no guest pointers), so they
+       bind directly, with no host-pointer bridge like the kpf_* file calls need. */
+    extern long long kp_now_ms(void);
+    extern void kp_sleep_ms(int ms);
+    extern void kp_random_seed(int seed);
+    extern void kp_randomize(void);
+    extern int kp_random_below(int bound);
+    extern double kp_random_real(void);
+    extern int kp_secure_below(int bound);
+
     /* The kprun-compatible debug/test surface. */
     if (add_binding("printInt", jit_as_addr((void (*)(void))h_printInt), err, sizeof err) ||
         add_binding("emit", jit_as_addr((void (*)(void))h_printInt), err, sizeof err) ||
@@ -658,7 +669,14 @@ int main(int argc, char **argv)
         add_binding("kpf_rmdir", jit_as_addr((void (*)(void))h_kpf_rmdir), err, sizeof err) ||
         add_binding("kpd_open", jit_as_addr((void (*)(void))h_kpd_open), err, sizeof err) ||
         add_binding("kpd_next", jit_as_addr((void (*)(void))h_kpd_next), err, sizeof err) ||
-        add_binding("kpd_close", jit_as_addr((void (*)(void))h_kpd_close), err, sizeof err)) {
+        add_binding("kpd_close", jit_as_addr((void (*)(void))h_kpd_close), err, sizeof err) ||
+        add_binding("kp_now_ms", jit_as_addr((void (*)(void))kp_now_ms), err, sizeof err) ||
+        add_binding("kp_sleep_ms", jit_as_addr((void (*)(void))kp_sleep_ms), err, sizeof err) ||
+        add_binding("kp_random_seed", jit_as_addr((void (*)(void))kp_random_seed), err, sizeof err) ||
+        add_binding("kp_randomize", jit_as_addr((void (*)(void))kp_randomize), err, sizeof err) ||
+        add_binding("kp_random_below", jit_as_addr((void (*)(void))kp_random_below), err, sizeof err) ||
+        add_binding("kp_random_real", jit_as_addr((void (*)(void))kp_random_real), err, sizeof err) ||
+        add_binding("kp_secure_below", jit_as_addr((void (*)(void))kp_secure_below), err, sizeof err)) {
         fprintf(stderr, "skj-kp-jit: %s\n", err);
         return 1;
     }

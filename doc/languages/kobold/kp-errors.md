@@ -340,8 +340,7 @@ does not raise the grammar's lookahead class.
 - `exit` and `fail` are not reserved. After `or`, a one-token peek decides: `else`, `exit`,
   `break`, `continue`, or `fail` means the failable suffix (and the boolean-`or` loop stops);
   anything else is boolean `or`. `exit` and `fail` stay ordinary builtins, so `Exit()` and
-  `fail(code)` keep their normal call path, and the self-hosting compiler (which uses `Exit`
-  heavily) is unaffected.
+  `fail(code)` keep their normal call path.
 - `or else` exists as the failable recover suffix. There is no `and then`; the success path of a
   failable call needs no operator, because the value simply flows out.
 

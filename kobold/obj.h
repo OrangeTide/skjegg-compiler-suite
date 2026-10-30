@@ -44,7 +44,9 @@ enum kp_obj_kind {
                                    descriptor and never the backing */
     KP_OBJ_MAP    = 5,          /* a string-keyed associative array (map of T) */
     KP_OBJ_MAPITER = 6,         /* a cursor over a map, produced by MapFirst, advanced by MapNext */
-    KP_OBJ_NKINDS = 7,          /* one past the last, the finalizer table's length */
+    KP_OBJ_IMAP   = 7,          /* an ordinal-keyed associative array (map[K] of T, K an ordinal) */
+    KP_OBJ_IMAPITER = 8,        /* a cursor over an ordinal-keyed map */
+    KP_OBJ_NKINDS = 9,          /* one past the last, the finalizer table's length */
 };
 
 struct kp_obj_hdr {

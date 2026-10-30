@@ -106,7 +106,8 @@ toolkit (a `shared` parameter is call-scoped, never stored or returned).
   spans only 26 values. A base whose maximum ordinal exceeds 255 is not diagnosed; the
   representation is silently capped at four words (256 bits) and higher bits are lost.
 - A **map** (`map of T`) is a string-keyed associative array with value type `T`, a
-  handle.
+  handle. The bracketed form `map[K] of T` keys by an ordinal `K` (integer, int64,
+  char, enum, boolean) instead of a string.
 
 A dynamic-array element and a map value may be any of: an ordinal, a real, a
 record, a fixed array, a set, or any handle (including a nested dynamic array or
@@ -138,7 +139,8 @@ has to flow into a variable written at a different source location:
 - **Dynamic arrays** match when their element types are equal and both are the same
   array kind (both plain `array of T`, or both `buffer of T`). Array-ness does not
   alias across the host-ownership boundary.
-- **`map of T`** values match when their value types `T` are equal.
+- **`map of T`** values match when their key types and value types `T` are equal (a
+  string-keyed map and a `map[K] of T` are distinct types).
 - **Procedural types** match when they have the same result type, the same number
   of parameters, and pairwise-equal parameter types.
 

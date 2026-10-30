@@ -130,7 +130,7 @@ that fit an embedded scripting language, though not always with the ISO syntax.
 
 ## Turbo Pascal / Delphi / Free Pascal family
 
-`fpc` is the bootstrap compiler, so the accepted source is a Free Pascal subset.
+Kobold accepts a subset of the Free Pascal dialect, so these family features apply.
 
 | Feature | Status | Notes |
 |---|---|---|
@@ -152,7 +152,8 @@ that fit an embedded scripting language, though not always with the ISO syntax.
 | `str` / `val` conversion | Done | |
 | Directives `{$R+}`, `{$Q+}`, `{$DEFINE}`, `{$IFDEF}`, `{$ELSE}`, `{$ENDIF}`, `{$I}` | Done | Predefines `KOBOLD`. Unknown directives such as `{$mode}` and `{$H+}` are accepted and ignored, so source can be shared with `fpc`. |
 | `external` / `cdecl` foreign routines | Done | The FFI to the C host. See `kp-abi.md`. |
-| Classes, objects, inheritance, `constructor` / `destructor`, exceptions, generics, properties | Omitted | Kobold uses receiver methods and host handles instead of a class model, and traps instead of exceptions. |
+| Classes, objects, inheritance, `constructor` / `destructor`, exceptions, generics | Omitted | Kobold uses receiver methods and host handles instead of a class model, and traps instead of exceptions. |
+| Properties (uniform access `read` / `write`) | Done | A `property name: T read getX write setX;` on a record, or a computed field, that reads and writes through accessor routines. Scalar, handle, and aggregate value types are all supported. Inline accessor bodies and cross-module export are not yet available. See `kp-property.md`. |
 | Units (`unit` / `interface` / `implementation`, `uses`) | Done | Not the class model above; a separate-compilation feature, with selective imports, renames, re-export, and `implement I for R` trait conformance. See the Modules row under Extended Pascal, `kp-units.md`, and `kp-module-format.md`. |
 
 ## Kobold-original and Compact-Pascal extensions
@@ -169,15 +170,17 @@ than a general-purpose Pascal.
 | Host buffers `buffer of T`, multidimensional `buffer[,] of T` | Done | A shared array over a host-owned, strided element region; the host creates it and the guest indexes it. Read, written, and mapped through the checked `kp_buf_*` FFI. |
 | Guest-record trait conformance `implement I for R` | Done | Checks at compile time that record `R`'s receiver methods match interface `I`; retroactive and cross-unit, with no runtime representation. |
 | Stackful coroutines: `start`, `yield`, `bind`, `release` | Done | Each coroutine runs on its own reference-counted private stack. `yield` is statement-position only. Resumed one at a time, not forkable. |
-| `process` handle type | Done | The handle type of a coroutine. |
+| `process` handle type | Done | The handle type of a coroutine. The `std.threads` unit builds a cooperative thread API on top of coroutines. |
+| Associative maps `map of T` and `map[K] of T` | Done | A reference-counted container with value (copy-on-assign) semantics. The key is a `string`, or an ordinal `K` (integer, int64, char, enum, boolean) in the bracketed form. Indexing, `in`, `Delete`, `Length`, `TryGet`, `MapFirst` / `MapNext`, and `for k, v in m` all apply. See `kp-language.md` and `kp-builtins.md`. |
+| Inline assembly `asm("...")` | Done | A statement carrying an assembly template to the backend. It is the string form, not Turbo/FPC `asm ... end` blocks. The basic form is the template alone; the extended form adds GNU-style operand constraints and clobbers, in the simple subset of integer-class operands and the general register class (`r`, `=r`, `+r`). AOT only. See `AsmStmt` in `kp-grammar.md`. |
 | `export` routine directive | Done | Adds a module entry a host can call besides `main`, which is how the two-stage boot compiles in memory. |
 | Opt-in range checks `{$R+}` and overflow checks `{$Q+}` | Done | Off by default; raise host-reported traps when on. |
 | Runtime traps (divide by zero, bounds, overflow, nil dispatch, coroutine misuse, out of memory, stack overflow) | Done | Reported through a host hook with a source location when built `-g`. |
 
 ## Production-readiness assessment
 
-The standard language surface an author writes against is complete, and the front
-end self-hosts. In place: the full type system, control flow, routines (including
+The standard language surface an author writes against is complete. In place: the
+full type system, control flow, routines (including
 nested routines, overloading, receiver methods, and procedural values), the string
 and dynamic-array runtimes, handles with ARC, coroutines, separate compilation with
 units, and the opt-in range and overflow checks. The standard ordinal and numeric

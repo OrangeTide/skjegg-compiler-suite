@@ -45,6 +45,9 @@ struct mc64 {
     int nlab, clab;
     const char *errsym;
     const char *asm_unsup;  /* inline-asm text the JIT cannot assemble, or NULL */
+    char asm_buf[256];      /* stable copy of asm_unsup (the selector may pass a
+                               transient; the message is read after that frame
+                               returns) */
 };
 
 #define SCR 15                  /* the address/immediate scratch (x15) */
@@ -305,7 +308,15 @@ void mc64_loc(struct mc64 *m, int line, int col) { (void)col; kp_add_line(m->e, 
 /* Inline assembly has no byte-sink form: report it unsupported. The cc JIT suite
    excludes the inline-asm test; a Kobold asm('...') program run under the JIT
    lands here and gets the ahead-of-time diagnostic in emit_func. */
-void mc64_asm(struct mc64 *m, const char *text) { m->asm_unsup = text; }
+void mc64_asm(struct mc64 *m, const char *text)
+{
+    size_t i = 0;
+    if (text)
+        for (; text[i] && i + 1 < sizeof m->asm_buf; i++)
+            m->asm_buf[i] = text[i];
+    m->asm_buf[i] = '\0';
+    m->asm_unsup = m->asm_buf;
+}
 
 /****************************************************************
  * kp_target: the AArch64 back end kp_jit() drives

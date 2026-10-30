@@ -297,6 +297,22 @@ end.
 a = 42
 ```
 
+The extended form (`tests/kp-asm/inline_asm_ext.pas`) ties the template to program
+variables with GNU-style operand constraints. The simple subset supports
+integer-class operands and the general register class: `=r` names an output, `+r`
+a read-write output, and `r` an input, with `%N` in the template standing for
+operand N (outputs first, then inputs). A fourth section lists clobbered
+registers. It is ahead-of-time only, like the basic form.
+
+```pascal
+var a, b: integer;
+begin
+  a := 40; b := 2;
+  asm('add %0, %1' : '+r'(a) : 'r'(b));   { a := a + b, in registers }
+  WriteLn('a = ', a);                      { a = 42 }
+end.
+```
+
 ## More programs
 
 The skjegg test corpora hold many more Kobold programs, each paired with its
