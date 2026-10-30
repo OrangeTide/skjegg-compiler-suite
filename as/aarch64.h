@@ -44,12 +44,17 @@
 #define R_AARCH64_CALL26       283
 #define EM_AARCH64             183
 
-/* Sections.  The bounded input uses only these four; no DWARF (no .loc). */
+/* Sections.  The first four hold the program; the three __DWARF sections are
+   populated only on the Mach-O path under -g, from the .file/.loc directives
+   (a64_emit_debug).  They stay empty on the ELF path, which carries no DWARF. */
 enum a64_section_id {
     ASEC_TEXT,
     ASEC_RODATA,
     ASEC_DATA,
     ASEC_BSS,
+    ASEC_DEBUG_LINE,
+    ASEC_DEBUG_INFO,
+    ASEC_DEBUG_ABBREV,
     ASEC_COUNT,
 };
 
@@ -127,6 +132,16 @@ struct a64_asm {
     struct a64_litref *litrefs;
     int nlitrefs;
     int litref_cap;
+    /* DWARF debug info, collected from .file/.loc (only present under -g on the
+       Mach-O path).  debug_files is the file table (index N-1 holds the name
+       from `.file N "..."`); the .loc rows, gathered ascending in the emit pass,
+       each name a 1-based file and a column. */
+    const char **debug_files;
+    int n_debug_files;
+    int debug_files_cap;
+    struct a64_locrow { uint32_t offset; int line; int file; int col; } *locrows;
+    int n_locrows;
+    int locrow_cap;
 };
 
 /* Lifecycle and the two-pass driver (as/aarch64_parse.c). */
@@ -157,6 +172,11 @@ void a64_elf_write(struct a64_asm *a, FILE *out);
 
 /* The Mach-O (MH_OBJECT) writer (as/aarch64_macho.c), for the Darwin target. */
 void a64_macho_write(struct a64_asm *a, FILE *out);
+
+/* Build the three __DWARF sections (__debug_line/info/abbrev) from the .loc rows
+   collected in the emit pass.  A no-op when no .loc was seen (no -g).  Called on
+   the Mach-O path only; the ELF path keeps the sections empty. */
+void a64_emit_debug(struct a64_asm *a);
 
 /* Name lookups (as/aarch64_parse.c), shared with the encoder.  a64_reg returns
    the class (A_RC_*), sets num/size/is_sp, or A_RC_NONE.  a64_cond returns a

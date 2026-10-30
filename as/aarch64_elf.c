@@ -217,6 +217,13 @@ a64_elf_write(struct a64_asm *a, FILE *out)
     nesyms++;
 
     for (k = 0; k < ASEC_COUNT; k++) {
+        /* The __DWARF sections have no ELF home (xsec_shndx returns UNDEF) and
+           are never populated on the ELF path; carry no section symbol for them
+           so ELF output stays identical to the pre-DWARF layout. */
+        if (xsec_shndx(k) == SHN_UNDEF) {
+            sec_sym[k] = 0;
+            continue;
+        }
         esyms[nesyms] = (struct elf_sym){
             .st_name = 0, .st_value = 0, .st_size = 0,
             .st_info = ELF64_ST_INFO(STB_LOCAL, STT_SECTION),

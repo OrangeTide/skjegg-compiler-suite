@@ -1,13 +1,20 @@
 /* lex.c : hand-written lexer for Compact Pascal */
 
 #include "pascal.h"
+#include "target.h"
 
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-int lex_align = 4;
+/* Default record field alignment: the target pointer width (4 on ILP32, 8 on
+   LP64). An LP64 record must align its pointer and 64-bit fields on 8-byte
+   boundaries, both so loads stay naturally aligned and so a pointer relocation
+   lands on an 8-aligned offset (the Mach-O static linker rejects an unaligned
+   one; GNU ld tolerates it, which is why the ILP32-era default of 4 went
+   unnoticed on LP64). {$A n} still overrides. */
+int lex_align = SKJ_PTR_BYTES;
 int lex_rangechecks;
 int lex_overflowchecks;
 
@@ -205,7 +212,7 @@ lex_init(struct arena *a, const char *src, const char *filename)
     ndefines = 0;
     ifdef_depth = 0;
     inc_depth = 0;
-    lex_align = 4;
+    lex_align = SKJ_PTR_BYTES;
     lex_rangechecks = 0;
     lex_overflowchecks = 0;
     add_define("CPAS");

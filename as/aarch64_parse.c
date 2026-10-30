@@ -10,6 +10,7 @@
  */
 
 #include "aarch64.h"
+#include "dwarf.h"
 #include "util.h"
 
 #include <stdlib.h>
@@ -178,6 +179,28 @@ parse_mem(struct a64_asm *a, struct a64_operand *op)
     lex_next(l);
 }
 
+/* A Mach-O relocation suffix on a symbol operand: `_sym@PAGE` / `_sym@PAGEOFF`.
+   Sets op->pageref (1 = PAGE, 2 = PAGEOFF) and consumes the tokens; a no-op if
+   the current token is not `@`. */
+static void
+parse_reloc_suffix(struct a64_asm *a, struct a64_operand *op)
+{
+    struct lexer *l = &a->lex;
+
+    if (l->tok.type != T_AT)
+        return;
+    lex_next(l);
+    if (l->tok.type != T_IDENT)
+        die("line %d: expected PAGE/PAGEOFF after '@'", l->tok.line);
+    if (strcmp(l->tok.str, "PAGE") == 0)
+        op->pageref = 1;
+    else if (strcmp(l->tok.str, "PAGEOFF") == 0)
+        op->pageref = 2;
+    else
+        die("line %d: unknown relocation suffix @%s", l->tok.line, l->tok.str);
+    lex_next(l);
+}
+
 static void
 parse_operand(struct a64_asm *a, struct a64_operand *op)
 {
@@ -218,15 +241,32 @@ parse_operand(struct a64_asm *a, struct a64_operand *op)
         return;
     }
     if (l->tok.type == T_IDENT) {
-        /* register? */
+        /* register?  Register names are not reserved: a symbol (a function or
+           global) may be spelled like one, e.g. `s8`, `x0`, `w1`.  GAS resolves
+           this by parsing each operand in the class its opcode expects; this
+           assembler parses operands uniformly, so it disambiguates the two
+           contexts where a register-spelled identifier must be a symbol.  A
+           trailing `@PAGE`/`@PAGEOFF` (a register never takes one) is handled
+           here; a bare branch/adr target is recovered from op->sym by the
+           b/bl/cbz/adr/adrp encoders (a register-consuming encoder never reads
+           op->sym). */
         int cls = a64_reg(l->tok.str, &num, &sz, &sp);
         if (cls != A_RC_NONE) {
+            const char *name = arena_strdup(&a->arena, l->tok.str);
+            lex_next(l);
+            if (l->tok.type == T_AT) {          /* `reg@PAGE`: really a symbol */
+                op->kind = AO_SYM;
+                op->is_sym = 1;
+                op->sym = name;
+                parse_reloc_suffix(a, op);
+                return;
+            }
             op->kind = AO_REG;
             op->rclass = cls;
             op->reg = num;
             op->size = sz;
             op->is_sp = sp;
-            lex_next(l);
+            op->sym = name;                     /* for a branch/adr target */
             return;
         }
         /* shift modifier `lsl #n` (only on add/sub immediates here) */
@@ -257,19 +297,7 @@ parse_operand(struct a64_asm *a, struct a64_operand *op)
                 op->sym = arena_strdup(&a->arena, l->tok.str);
             lex_next(l);
             op->add = (int32_t)parse_addend(l);
-            if (l->tok.type == T_AT) {      /* Mach-O `_sym@PAGE` / `@PAGEOFF` */
-                lex_next(l);
-                if (l->tok.type != T_IDENT)
-                    die("line %d: expected PAGE/PAGEOFF after '@'", l->tok.line);
-                if (strcmp(l->tok.str, "PAGE") == 0)
-                    op->pageref = 1;
-                else if (strcmp(l->tok.str, "PAGEOFF") == 0)
-                    op->pageref = 2;
-                else
-                    die("line %d: unknown relocation suffix @%s",
-                        l->tok.line, l->tok.str);
-                lex_next(l);
-            }
+            parse_reloc_suffix(a, op);          /* Mach-O `_sym@PAGE`/`@PAGEOFF` */
             return;
         }
     }
@@ -366,6 +394,43 @@ set_section(struct a64_asm *a, int sec)
     if (a->cur_section == ASEC_TEXT && a->nlits > 0)
         a64_flush_litpool(a, a->pass == 2);
     a->cur_section = sec;
+}
+
+/* Append one line-table row (emit pass only; see .loc below). */
+static void
+a64_add_locrow(struct a64_asm *a, uint32_t offset, int file, int line, int col)
+{
+    if (a->n_locrows >= a->locrow_cap) {
+        a->locrow_cap = a->locrow_cap ? a->locrow_cap * 2 : 64;
+        a->locrows = realloc(a->locrows,
+                             (size_t)a->locrow_cap * sizeof *a->locrows);
+    }
+    a->locrows[a->n_locrows].offset = offset;
+    a->locrows[a->n_locrows].file = file;
+    a->locrows[a->n_locrows].line = line;
+    a->locrows[a->n_locrows].col = col;
+    a->n_locrows++;
+}
+
+/* Record `.file N "name"`: store the name at the 1-based index N (both passes;
+   the table is small and identical across them). */
+static void
+a64_set_debug_file(struct a64_asm *a, int n, const char *name)
+{
+    if (n < 1)
+        return;
+    if (n > a->debug_files_cap) {
+        int newcap = a->debug_files_cap ? a->debug_files_cap * 2 : 8;
+        while (newcap < n)
+            newcap *= 2;
+        a->debug_files = realloc(a->debug_files,
+                                 (size_t)newcap * sizeof *a->debug_files);
+        while (a->debug_files_cap < newcap)
+            a->debug_files[a->debug_files_cap++] = NULL;
+    }
+    if (n > a->n_debug_files)
+        a->n_debug_files = n;
+    a->debug_files[n - 1] = arena_strdup(&a->arena, name);
 }
 
 static void
@@ -563,9 +628,48 @@ handle_directive(struct a64_asm *a, const char *dir)
         return;
     }
 
+    /* .file N "name" (or bare .file "name", taken as file 1) : a DWARF source
+       name.  Collected into the file table for the __DWARF line table built on
+       the Mach-O path (a64_emit_debug). */
+    if (strcmp(dir, ".file") == 0) {
+        int fileno = 1;
+        lex_next(l);
+        if (l->tok.type == T_INT) {     /* the file number, if present */
+            fileno = (int)l->tok.ival;
+            lex_next(l);
+        }
+        if (l->tok.type == T_STRING)
+            a64_set_debug_file(a, fileno, l->tok.str);
+        skip_to_eol(l);
+        return;
+    }
+
+    /* .loc N line [column] [opts] : one row of the line table.  The address is
+       the current .text offset, known only in the emit pass, so rows are
+       collected then; options past the column are ignored. */
+    if (strcmp(dir, ".loc") == 0) {
+        int file = 0, line = 0, col = 0, seen_line = 0;
+        lex_next(l);
+        if (l->tok.type == T_INT) {     /* file number */
+            file = (int)l->tok.ival;
+            lex_next(l);
+            if (l->tok.type == T_INT) {
+                line = (int)l->tok.ival;
+                seen_line = 1;
+                lex_next(l);
+                if (l->tok.type == T_INT)   /* optional column */
+                    col = (int)l->tok.ival;
+            }
+        }
+        if (a->pass == 2 && seen_line && a->cur_section == ASEC_TEXT)
+            a64_add_locrow(a, (uint32_t)a->sections[ASEC_TEXT].len,
+                           file, line, col);
+        skip_to_eol(l);
+        return;
+    }
+
     /* metadata accepted and ignored */
-    if (strcmp(dir, ".file") == 0 || strcmp(dir, ".loc") == 0 ||
-        strcmp(dir, ".ident") == 0 || strcmp(dir, ".local") == 0 ||
+    if (strcmp(dir, ".ident") == 0 || strcmp(dir, ".local") == 0 ||
         strcmp(dir, ".arch") == 0 || strcmp(dir, ".arch_extension") == 0 ||
         strcmp(dir, ".cpu") == 0 || strncmp(dir, ".cfi_", 5) == 0) {
         skip_to_eol(l);
@@ -729,8 +833,82 @@ a64_free(struct a64_asm *a)
     free(a->numlabels);
     free(a->lits);
     free(a->litrefs);
+    free(a->locrows);
+    free(a->debug_files);
     free(a->lex.str_buf);
     arena_free(&a->arena);
+}
+
+/* Build the three __DWARF sections from the .loc rows the emit pass collected.
+   The sections are non-alloc, so they do not perturb the text/data layout; the
+   only link-time unknowns are the absolute address fields, each an 8-byte
+   ARM64_RELOC_UNSIGNED (recorded as R_AARCH64_ABS64) against a synthesized text
+   base symbol (value 0 at ASEC_TEXT offset 0), with the offset carried inline in
+   the field per the Mach-O UNSIGNED addend convention.  LP64, little-endian. */
+void
+a64_emit_debug(struct a64_asm *a)
+{
+    struct arena *ar = &a->arena;
+    struct section *sl = &a->sections[ASEC_DEBUG_LINE];
+    struct section *si = &a->sections[ASEC_DEBUG_INFO];
+    struct section *sa = &a->sections[ASEC_DEBUG_ABBREV];
+    const char **files;
+    const char *name;
+    int nfiles;
+    struct dw_line_row *rows;
+    uint8_t *bytes;
+    size_t len, set_addr_off, low_off, high_off, b;
+    uint32_t text_end;
+    int sym, i;
+
+    if (a->n_locrows == 0)
+        return;                 /* no .loc seen (no -g): emit nothing */
+
+    /* The file table: at least one entry (fall back to "?"); any gap left by a
+       sparse .file sequence becomes "?" too, so an index is never NULL. */
+    nfiles = a->n_debug_files > 0 ? a->n_debug_files : 1;
+    files = arena_alloc(ar, (size_t)nfiles * sizeof *files);
+    for (i = 0; i < nfiles; i++)
+        files[i] = (i < a->n_debug_files && a->debug_files[i])
+                       ? a->debug_files[i] : "?";
+    name = files[0];            /* the CU name is file 1 (the primary source) */
+
+    /* The text-base symbol the absolute address fields relocate against. */
+    sym = sym_lookup(&a->st, ".Ldebug_text0");
+    if (sym < 0)
+        sym = sym_add(&a->st, ".Ldebug_text0");
+    sym_define(&a->st, sym, ASEC_TEXT, 0);
+
+    rows = arena_alloc(ar, (size_t)a->n_locrows * sizeof *rows);
+    for (i = 0; i < a->n_locrows; i++) {
+        rows[i].addr = a->locrows[i].offset;
+        rows[i].line = a->locrows[i].line;
+        rows[i].file = a->locrows[i].file;
+        rows[i].col = a->locrows[i].col;
+    }
+    text_end = (uint32_t)a->sections[ASEC_TEXT].len;
+
+    /* .debug_line: the line program, set_address fixed to .text + first row. */
+    len = dw_line_build(ar, files, nfiles, rows, a->n_locrows, text_end, &bytes,
+                        &set_addr_off, 0, 8);
+    for (b = 0; b < len; b++)
+        sec_emit8(sl, bytes[b]);
+    sec_add_reloc_t(sl, (uint32_t)set_addr_off, sym,
+                    (int32_t)rows[0].addr, R_AARCH64_ABS64);
+
+    /* .debug_abbrev: fixed, no relocations. */
+    len = dw_abbrev_build(ar, &bytes);
+    for (b = 0; b < len; b++)
+        sec_emit8(sa, bytes[b]);
+
+    /* .debug_info: a CU spanning all of .text, stmt_list at line program 0. */
+    len = dw_info_build(ar, "skjegg", name, ".", 0, text_end, 0, &bytes,
+                        &low_off, &high_off, 0, 8);
+    for (b = 0; b < len; b++)
+        sec_emit8(si, bytes[b]);
+    sec_add_reloc_t(si, (uint32_t)low_off, sym, 0, R_AARCH64_ABS64);
+    sec_add_reloc_t(si, (uint32_t)high_off, sym, (int32_t)text_end,
+                    R_AARCH64_ABS64);
 }
 
 void

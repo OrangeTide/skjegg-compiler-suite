@@ -760,7 +760,7 @@ mips_emit_debug(struct mips_asm *a)
         sym = sym_add(&a->st, ".Ldebug_text0");
     sym_define(&a->st, sym, MSEC_TEXT, 0);
 
-    rows = arena_alloc(ar, (size_t)a->n_locrows * sizeof *rows);
+    rows = arena_zalloc(ar, (size_t)a->n_locrows * sizeof *rows);
     for (i = 0; i < a->n_locrows; i++) {
         rows[i].addr = a->locrows[i].offset;
         rows[i].line = a->locrows[i].line;
@@ -768,8 +768,8 @@ mips_emit_debug(struct mips_asm *a)
     text_end = (uint32_t)a->sections[MSEC_TEXT].len;
 
     /* .debug_line: the line program, set_address fixed to .text + first row. */
-    len = dw_line_build(ar, name, rows, a->n_locrows, text_end, &bytes,
-                        &set_addr_off, 0);
+    len = dw_line_build(ar, &name, 1, rows, a->n_locrows, text_end, &bytes,
+                        &set_addr_off, 0, 4);
     for (b = 0; b < len; b++)
         sec_emit8(sl, bytes[b]);
     sec_add_reloc_t(sl, (uint32_t)set_addr_off, sym, 0, R_MIPS_32);
@@ -781,7 +781,7 @@ mips_emit_debug(struct mips_asm *a)
 
     /* .debug_info: a CU spanning all of .text, stmt_list at line program 0. */
     len = dw_info_build(ar, "skjegg", name, ".", 0, text_end, 0, &bytes,
-                        &low_off, &high_off, 0);
+                        &low_off, &high_off, 0, 4);
     for (b = 0; b < len; b++)
         sec_emit8(si, bytes[b]);
     sec_add_reloc_t(si, (uint32_t)low_off, sym, 0, R_MIPS_32);

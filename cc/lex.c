@@ -11,6 +11,8 @@ static const char *src_buf;
 static const char *src_file;
 static const char *p;
 static int line;
+static const char *line_start;  /* start of the current physical line, for columns */
+static int cur_tok_col;         /* column of the token cc_lex_next last returned */
 static int peeked;
 static struct cc_token peek_tok;
 
@@ -81,7 +83,15 @@ cc_lex_init(struct arena *a, const char *src, const char *filename)
     src_file = filename ? filename : "<input>";
     p = src;
     line = 1;
+    line_start = src;
+    cur_tok_col = 1;
     peeked = 0;
+}
+
+int
+cc_lex_col(void)
+{
+    return cur_tok_col;
 }
 
 int
@@ -144,16 +154,31 @@ cc_lex_print_context(int n, int before)
         return;
     if (from < 1)
         from = 1;
-    while (*s && cur < from) {
-        if (*s++ == '\n')
-            cur++;
-    }
-    for (; *s && cur <= n; cur++) {
+
+    /* The buffer carries GNU line markers (see skip_ws), so the logical source
+       line is not the physical line: a `# N "file"` line sets the next line to
+       N and is itself neither printed nor counted. */
+    while (*s) {
         const char *eol = s;
         while (*eol && *eol != '\n')
             eol++;
-        fprintf(stderr, "  %5d | %.*s\n", cur, (int)(eol - s), s);
+        if (*s == '#') {                /* a line marker: reset cur, skip it */
+            const char *q = s + 1;
+            int ln = 0, got = 0;
+            while (*q == ' ' || *q == '\t')
+                q++;
+            while (*q >= '0' && *q <= '9') { ln = ln * 10 + (*q++ - '0'); got = 1; }
+            if (got)
+                cur = ln;
+            s = (*eol == '\n') ? eol + 1 : eol;
+            continue;
+        }
+        if (cur >= from && cur <= n)
+            fprintf(stderr, "  %5d | %.*s\n", cur, (int)(eol - s), s);
         s = (*eol == '\n') ? eol + 1 : eol;
+        cur++;
+        if (cur > n)
+            break;
     }
 }
 
@@ -166,6 +191,50 @@ skip_ws(void)
         if (*p == '\n') {
             line++;
             p++;
+            line_start = p;
+            continue;
+        }
+        /* GNU line marker `# <line> "<file>"` injected by cc/main.c: reset the
+           line counter (and current file) to the true source position, so a
+           token after an #include-expanded region is numbered by its source
+           line, not its position in the flattened stream.  A `#` cannot occur
+           anywhere else in preprocessed C. */
+        if (*p == '#') {
+            const char *q = p + 1;
+            while (*q == ' ' || *q == '\t')
+                q++;
+            if (*q >= '0' && *q <= '9') {
+                int ln = 0;
+                while (*q >= '0' && *q <= '9')
+                    ln = ln * 10 + (*q++ - '0');
+                while (*q == ' ' || *q == '\t')
+                    q++;
+                if (*q == '"') {
+                    const char *fs = ++q;
+                    while (*q && *q != '"')
+                        q++;
+                    {
+                        int flen = (int)(q - fs);
+                        char *fn = arena_alloc(lex_arena, (size_t)flen + 1);
+                        memcpy(fn, fs, (size_t)flen);
+                        fn[flen] = '\0';
+                        src_file = fn;
+                    }
+                    if (*q == '"')
+                        q++;
+                }
+                while (*q && *q != '\n')
+                    q++;
+                if (*q == '\n')
+                    q++;
+                p = q;
+                line = ln;        /* the next line is source line `ln` */
+                line_start = p;
+                continue;
+            }
+            /* not a marker: skip the line defensively */
+            while (*p && *p != '\n')
+                p++;
             continue;
         }
         if (p[0] == '/' && p[1] == '/') {
@@ -176,8 +245,10 @@ skip_ws(void)
         if (p[0] == '/' && p[1] == '*') {
             p += 2;
             while (*p && !(p[0] == '*' && p[1] == '/')) {
-                if (*p == '\n')
+                if (*p == '\n') {
                     line++;
+                    line_start = p + 1;
+                }
                 p++;
             }
             if (*p)
@@ -309,6 +380,7 @@ lex_token(void)
 
     skip_ws();
     t.line = line;
+    t.col = (int)(p - line_start) + 1;
 
     if (*p == '\0') {
         t.kind = TOK_EOF;
@@ -553,11 +625,15 @@ lex_token(void)
 struct cc_token
 cc_lex_next(void)
 {
+    struct cc_token t;
     if (peeked) {
         peeked = 0;
+        cur_tok_col = peek_tok.col;
         return peek_tok;
     }
-    return lex_token();
+    t = lex_token();
+    cur_tok_col = t.col;
+    return t;
 }
 
 struct cc_token

@@ -681,11 +681,31 @@ cpp_get_filename(struct cpp *p)
 }
 
 int
+cpp_get_emit_line(struct cpp *p)
+{
+    return p->emit_line;
+}
+
+const char *
+cpp_get_emit_file(struct cpp *p)
+{
+    return p->emit_file;
+}
+
+int
 cpp_next_line(struct cpp *p, char *buf, int bufsize)
 {
     for (;;) {
+        int start_line;
+        const char *start_file;
+
         if (!p->file)
             return 0;
+
+        /* The emitted content starts at the current source line; read_logical_line
+           advances p->file->line past it, so capture it now. */
+        start_line = p->file->line;
+        start_file = p->file->path;
 
         if (!read_logical_line(p, p->linebuf, sizeof p->linebuf)) {
             file_pop(p);
@@ -738,6 +758,8 @@ cpp_next_line(struct cpp *p, char *buf, int bufsize)
             continue;
         buf[len++] = '\n';
         buf[len] = '\0';
+        p->emit_line = start_line;
+        p->emit_file = start_file;
         return len;
     }
 }

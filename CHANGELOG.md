@@ -6,6 +6,38 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.30.0
+
+#### Added
+- Source-level debug information carried through the arm64 macOS toolchain.
+  `skj-cc-arm64 -g` emits a DWARF 4 line table that `skj-as-aarch64` assembles
+  into `__DWARF` sections and `skj-ld-aarch64` places in a `__DWARF` segment of
+  the linked executable, inside the ad-hoc code signature. The table carries a
+  multi-file file list, so a `static` function defined in a header is attributed
+  to that header rather than the including source, and records source columns.
+  Apple `dwarfdump` and `llvm-dwarfdump --verify` read it, and `lldb` resolves
+  breakpoints and source lines against it.
+- Full `make all` self-hosting on a Darwin arm64 host. Beyond the C toolchain,
+  the Kobold front ends and the in-process JITs build and run natively on macOS
+  with clang as the only external C compiler (no Apple `as`/`ld` and no cross
+  tools); the Kobold AOT lane assembles with the in-tree `skj-as-aarch64`.
+
+#### Changed
+- The arm64 Mach-O linker emits dyld chained fixups (`LC_DYLD_CHAINED_FIXUPS`)
+  in place of the classic bind and rebase opcode streams, and places the `__got`
+  and the pointer-bearing const data in a read-only `__DATA_CONST` segment that
+  dyld maps writable, fixes up, then protects.
+
+#### Fixed
+- C compiler `-g` line numbers were wrong for any translation unit with an
+  `#include`: a statement was numbered by its position in the fully preprocessed
+  stream, which counts the spliced-in header text, not by its source line. The
+  preprocessor now records each emitted line's origin and the compiler numbers
+  by it, so the line table is correct on every backend.
+- `skj-as-aarch64` miscompiled a symbol spelled like a register, for example a
+  function named `s8`: it was taken as the register, so a branch to it lost its
+  target and an address calculation using it became a register operation.
+
 ### 0.29.0
 
 #### Added

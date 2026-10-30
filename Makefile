@@ -97,6 +97,10 @@ NATIVE_LIBKPAOT := $(if $(HOST_IS_ARM64),build/libkpaot-arm64.a,build/libkpaot.a
 
 A64_AS  ?= build/skj-as-aarch64
 A64_LD  ?= aarch64-linux-gnu-ld
+# Host-tool link flag: the kpcom front ends are linked -no-pie on Linux (the AOT
+# runtime's low-memory model expects code and data below 4GB).  macOS is PIE-only
+# and clang rejects -no-pie, so the flag is dropped on a Darwin host.
+HOST_NO_PIE := $(if $(HOST_IS_DARWIN),,-no-pie)
 A64_CC  ?= $(if $(HOST_IS_ARM64),cc,aarch64-linux-gnu-gcc)
 # Rules that run $(A64_AS) depend on $(A64_ASM_DEP) so the in-tree assembler is
 # built first and dependents re-assemble when it changes; an override to the
@@ -107,6 +111,11 @@ else
 A64_ASM_DEP :=
 endif
 QEMU_A64 ?= qemu-aarch64
+# How to run an arm64 binary on this host: directly on an arm64 host (an Apple
+# Silicon Mac or an arm64 Linux box, where the in-process JIT and native AOT
+# output run without emulation), through qemu-aarch64 on any other host.  Used
+# by the in-process JIT test lanes, whose driver binary is host-native.
+A64_RUN := $(if $(HOST_IS_ARM64),,$(QEMU_A64))
 # The in-process RV32 JIT driver is a hosted program (mmap/stdio/malloc), which
 # the rv64 riscv64-linux-gnu toolchain cannot build for rv32 (no ilp32 glibc
 # multilib).  zig cc bundles an rv32 libc, so it cross-builds the driver; it runs
@@ -405,7 +414,7 @@ endif
 build/skj-kpc: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(HOST_ASM_DEP) | build
 	$(HOST_PC) -d KOBOLD -d KP_TARGET_X64 -o build/kpcom-x86-64-fe.s $(KPCOM_SRC_PAS)
 	$(call host_assemble,build/kpcom-x86-64-fe.s,build/kpcom-x86-64-fe.o)
-	$(CC) -no-pie build/kpcom-x86-64-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
+	$(CC) $(HOST_NO_PIE) build/kpcom-x86-64-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
 
 ## skj-kpc-arm64: the host front end for the AArch64 target.  Same LP64 width as
 ## skj-kpc, but KP_TARGET_ARM64 stamps `.target arm64`, so the arm64 backend accepts
@@ -414,7 +423,7 @@ build/skj-kpc: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPC
 build/skj-kpc-arm64: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(HOST_ASM_DEP) | build
 	$(HOST_PC) -d KOBOLD -d KP_TARGET_ARM64 -o build/kpcom-arm64-fe.s $(KPCOM_SRC_PAS)
 	$(call host_assemble,build/kpcom-arm64-fe.s,build/kpcom-arm64-fe.o)
-	$(CC) -no-pie build/kpcom-arm64-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
+	$(CC) $(HOST_NO_PIE) build/kpcom-arm64-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
 
 build/skj-kpc-x86-64: build/skj-kpc | build
 	cp -f build/skj-kpc $@
@@ -430,12 +439,12 @@ build/skj-kpc-x86-64: build/skj-kpc | build
 build/skj-kpc-rv: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(HOST_ASM_DEP) | build
 	$(HOST_PC) -d KOBOLD -d KP_TARGET_RV -o build/kpcom-rv-fe.s $(KPCOM_SRC_PAS)
 	$(call host_assemble,build/kpcom-rv-fe.s,build/kpcom-rv-fe.o)
-	$(CC) -no-pie build/kpcom-rv-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
+	$(CC) $(HOST_NO_PIE) build/kpcom-rv-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
 
 build/skj-kpc-cf: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(HOST_ASM_DEP) | build
 	$(HOST_PC) -d KOBOLD -d KP_TARGET_CF -o build/kpcom-cf-fe.s $(KPCOM_SRC_PAS)
 	$(call host_assemble,build/kpcom-cf-fe.s,build/kpcom-cf-fe.o)
-	$(CC) -no-pie build/kpcom-cf-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
+	$(CC) $(HOST_NO_PIE) build/kpcom-cf-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
 
 ## skj-kp-jit-san: build/skj-kp-jit with the guest-heap write-after-free instrument
 ## (GH_POISON, kobold/rt_host.c) plus ASan/UBSan, at -O1 -g so a report carries a usable
@@ -719,7 +728,7 @@ check-kp-jit-rv: build/skj-kp-jit-rv
 	@MODE=jit JIT=build/skj-kp-jit-rv QEMU="$(QEMU_RV)" sh tests/run-kp-src-tests.sh
 
 check-kp-jit-arm64: build/skj-kp-jit-arm64
-	@MODE=jit JIT=build/skj-kp-jit-arm64 QEMU="$(QEMU_A64)" sh tests/run-kp-src-tests.sh
+	@MODE=jit JIT=build/skj-kp-jit-arm64 QEMU="$(A64_RUN)" sh tests/run-kp-src-tests.sh
 
 check-kp-aot-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
 	@MODE=aot FRONTEND=build/skj-kpc-rv \
@@ -727,10 +736,11 @@ check-kp-aot-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
 	    KPAOTCC="$(RVJIT_CC)" KPAOTQEMU="$(QEMU_RV)" \
 	    sh tests/run-kp-src-tests.sh
 
-check-kp-aot-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a
+check-kp-aot-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP)
 	@MODE=aot FRONTEND=build/skj-kpc-arm64 \
 	    KPAOT=build/skj-kp-arm64 KPAOTLIB=build/libkpaot-arm64.a \
-	    KPAOTCC="$(A64_CC)" KPAOTQEMU="$(QEMU_A64)" \
+	    KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" \
+	    KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
 	    sh tests/run-kp-src-tests.sh
 
 ## ---- the behavioral corpus (tests/kp-corpus) ----
@@ -777,10 +787,11 @@ check-kp-corpus-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
 	    KPAOTCC="$(RVJIT_CC)" KPAOTQEMU="$(QEMU_RV)" \
 	    sh tests/run-kp-src-tests.sh
 
-check-kp-corpus-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a
+check-kp-corpus-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP)
 	@KP_SRCDIR=tests/kp-corpus MODE=aot FRONTEND=build/skj-kpc-arm64 \
 	    KPAOT=build/skj-kp-arm64 KPAOTLIB=build/libkpaot-arm64.a \
-	    KPAOTCC="$(A64_CC)" KPAOTQEMU="$(QEMU_A64)" \
+	    KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" \
+	    KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
 	    sh tests/run-kp-src-tests.sh
 
 ## The ColdFire corpus runs the hosted AOT path under qemu-m68k: skj-kp-cf emits
@@ -821,10 +832,11 @@ check-kp-multi-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
 	    KPAOTCC="$(RVJIT_CC)" KPAOTQEMU="$(QEMU_RV)" \
 	    sh tests/run-kp-multi-tests.sh
 
-check-kp-multi-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a
+check-kp-multi-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP)
 	@KP_SRCDIR=tests/kp-multi MODE=aot FRONTEND=build/skj-kpc-arm64 \
 	    KPAOT=build/skj-kp-arm64 KPAOTLIB=build/libkpaot-arm64.a \
-	    KPAOTCC="$(A64_CC)" KPAOTQEMU="$(QEMU_A64)" \
+	    KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" \
+	    KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
 	    sh tests/run-kp-multi-tests.sh
 
 ## ---- file I/O provided as a Kobold unit (tests/kp-files) ----
@@ -1190,10 +1202,11 @@ check-kp-io-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
 	    KPAOTCC="$(RVJIT_CC)" KPAOTQEMU="$(QEMU_RV)" \
 	    sh tests/run-kp-src-tests.sh
 
-check-kp-io-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a
+check-kp-io-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP)
 	@KP_SRCDIR=tests/kp-io MODE=aot FRONTEND=build/skj-kpc-arm64 \
 	    KPAOT=build/skj-kp-arm64 KPAOTLIB=build/libkpaot-arm64.a \
-	    KPAOTCC="$(A64_CC)" KPAOTQEMU="$(QEMU_A64)" \
+	    KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" \
+	    KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
 	    sh tests/run-kp-src-tests.sh
 
 check-kp-io-free: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
@@ -1227,10 +1240,11 @@ check-kp-inc-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
 	    KPAOTCC="$(RVJIT_CC)" KPAOTQEMU="$(QEMU_RV)" \
 	    sh tests/run-kp-src-tests.sh
 
-check-kp-inc-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a
+check-kp-inc-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP)
 	@KP_SRCDIR=tests/kp-inc MODE=aot FRONTEND=build/skj-kpc-arm64 \
 	    KPAOT=build/skj-kp-arm64 KPAOTLIB=build/libkpaot-arm64.a \
-	    KPAOTCC="$(A64_CC)" KPAOTQEMU="$(QEMU_A64)" \
+	    KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" \
+	    KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
 	    sh tests/run-kp-src-tests.sh
 
 check-kp-inc-free: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
@@ -1572,7 +1586,7 @@ build/skj-jit-arm64: $(JIT_SRC_A64) cc/cc.h jit/jit_common.h jit/jit_arena.h jit
 ## Run the C suite in-process through skj-jit-arm64 under qemu-aarch64.  The
 ## arm64 JIT supports _Float16 natively (fcvt), so it excludes only inline asm.
 check-jit-arm64: build/skj-jit-arm64
-	@JIT="$(CURDIR)/build/skj-jit-arm64" RUNNER="$(QEMU_A64)" \
+	@JIT="$(CURDIR)/build/skj-jit-arm64" RUNNER="$(A64_RUN)" \
 	 EXCLUDE="cc_t077_inline_asm" sh tests/run-jit-tests.sh
 
 ## test-jit-arm64-high: prove the arm64 C JIT is high-address-safe.  Run the
@@ -1767,6 +1781,21 @@ MACOS_TOOLS := build/skj-cpp build/skj-cc build/skj-cc-arm64 build/skj-pc \
 macos: $(MACOS_TOOLS)
 	@echo "built the macOS host tool set for $$(uname -s) ($(HOST_ARCH))"
 
+## check-macos: the native validation suite for a Darwin arm64 host.  The Mach-O
+## cc and libc lanes build and run native executables through the fully in-tree
+## pipeline (skj-cc-arm64 -> skj-as-aarch64 -> skj-ld-aarch64); the in-process C
+## and Kobold JIT lanes JIT and run arm64 code in-process, and the Kobold AOT
+## lane assembles with the in-tree skj-as-aarch64 and runs native (A64_RUN is
+## empty on an arm64 host, so no emulator).  Each lane skips cleanly off a Darwin
+## arm64 host, so this is safe to invoke anywhere, but it is meant for the mac.
+## check-kp-corpus-arm64 is NOT included: skj-kpc-arm64 currently segfaults on
+## the `interp` fixture only when run native on arm64 (it passes under qemu and
+## native x86-64), a latent arm64 front-end bug tracked separately.
+.PHONY: check-macos
+check-macos: check-cc-macho-arm64 check-libc-macho-arm64 check-jit-arm64 \
+             check-kp-jit-arm64 check-kp-aot-arm64 test-macho-arm64-dwarf
+	@echo "check-macos: native Darwin arm64 lanes complete"
+
 ## CI coverage for the portable confinement path: the same emulator with
 ## -DHP_FORCE_POSIX, which selects the cap_walk component walk in place of the
 ## Linux openat2 accelerator.  On Linux openat2 would otherwise hide cap_walk, so
@@ -1948,6 +1977,45 @@ test-macho-arm64: build/skj-cc-arm64 build/skj-cc-arm64-macho build/skj-as-aarch
 	    else echo "FAIL: macho arm64 generation framing wrong"; exit 1; fi; \
 	 fi
 
+## skj-cc-arm64 -g carries a DWARF line table through the whole Mach-O pipeline:
+## the compiler emits .file/.loc, skj-as-aarch64 assembles them into __DWARF
+## (__debug_line/info/abbrev) with text-base relocations, and skj-ld-aarch64
+## resolves those and places __DWARF between __DATA and __LINKEDIT (inside the
+## signed region).  Structure is validated with llvm-dwarfdump --verify on both
+## the object and the executable; this runs on any host (a Mach-O binary need not
+## run here, only parse), so it guards only on llvm-dwarfdump being present.
+## Source-level stepping in lldb is verified separately on a Darwin arm64 host.
+test-macho-arm64-dwarf: build/skj-cc-arm64-macho build/skj-as-aarch64-macho \
+                        build/skj-ld-aarch64 tests/macho/hello.c \
+                        tests/macho/dwmulti.c tests/macho/dwinc.h | build
+	@DD=`command -v llvm-dwarfdump || command -v dwarfdump || true`; \
+	 if [ -z "$$DD" ]; then \
+	    echo "SKIP: test-macho-arm64-dwarf (no dwarfdump)"; exit 0; fi; \
+	 mkdir -p build/debug; \
+	 ./build/skj-cc-arm64-macho -g -o build/debug/mdw.s tests/macho/hello.c && \
+	 ./build/skj-as-aarch64-macho -o build/debug/mdw.o build/debug/mdw.s && \
+	 ./build/skj-ld-aarch64 -o build/debug/mdw build/debug/mdw.o \
+	    || { echo "FAIL: -g Mach-O pipeline"; exit 1; }; \
+	 for f in build/debug/mdw.o build/debug/mdw; do \
+	     $$DD --debug-line $$f 2>/dev/null | grep -qE '^0x[0-9a-f]+ +[0-9]+ ' \
+	         || { echo "FAIL: $$f has no __debug_line rows"; exit 1; }; \
+	     $$DD --verify $$f 2>&1 | grep -q 'No errors\.' \
+	         || { echo "FAIL: $$f DWARF does not verify"; exit 1; }; \
+	 done; \
+	 echo "PASS: macho arm64 -g (__DWARF assembled and linked through, verifies)"; \
+	 ./build/skj-cc-arm64-macho -g -o build/debug/mdwm.s tests/macho/dwmulti.c && \
+	 ./build/skj-as-aarch64-macho -o build/debug/mdwm.o build/debug/mdwm.s && \
+	 ./build/skj-ld-aarch64 -o build/debug/mdwm build/debug/mdwm.o \
+	    || { echo "FAIL: -g multi-file pipeline"; exit 1; }; \
+	 $$DD --debug-line build/debug/mdwm 2>/dev/null | grep -q 'file_names\[  2\]' \
+	     || { echo "FAIL: multi-file line table missing a second file"; exit 1; }; \
+	 $$DD --debug-line build/debug/mdwm 2>/dev/null \
+	     | awk '/ is_stmt/ && $$4 == 2 { f2=1 } /is_stmt/ && $$3+0 > 0 { c=1 } END { exit !(f2 && c) }' \
+	     || { echo "FAIL: no row names file 2 with a column"; exit 1; }; \
+	 $$DD --verify build/debug/mdwm 2>&1 | grep -q 'No errors\.' \
+	     || { echo "FAIL: multi-file DWARF does not verify"; exit 1; }; \
+	 echo "PASS: macho arm64 -g multi-file (header code attributes to file 2, columns present)"
+
 ## The native macOS (Mach-O) corpus lanes: compile each cc/libc test with
 ## skj-cc-arm64 (Mach-O), assemble and link with Apple clang against libSystem,
 ## and run natively.  These exercise the Mach-O code generation across the whole
@@ -2036,19 +2104,20 @@ build/skj-as-x86-64: $(AS_X64_SRC) as/x86_64.h as/asm_lex.h as/asm_obj.h | build
 	$(CC) $(CFLAGS) -Ias -Iir -o $@ $(AS_X64_SRC)
 
 ## AArch64 assembler (shares the lexer + object helpers with skj-as).  Reads the
-## native GNU as syntax the arm64 backends emit; no DWARF (bounded input).
+## native GNU as syntax the arm64 backends emit.  On the Mach-O (Darwin) path it
+## also consumes .file/.loc and emits __DWARF line info, so it links dwarf/.
 AS_A64_SRC := as/aarch64_main.c as/asm_lex.c as/asm_obj.c as/aarch64_parse.c \
               as/aarch64_encode.c as/aarch64_elf.c as/aarch64_macho.c \
-              ir/util.c ir/arena.c
+              dwarf/dwarf.c ir/util.c ir/arena.c
 
-build/skj-as-aarch64: $(AS_A64_SRC) as/aarch64.h as/asm_lex.h as/asm_obj.h | build
-	$(CC) $(CFLAGS) -Ias -Iir -o $@ $(AS_A64_SRC)
+build/skj-as-aarch64: $(AS_A64_SRC) as/aarch64.h as/asm_lex.h as/asm_obj.h dwarf/dwarf.h | build
+	$(CC) $(CFLAGS) -Ias -Iir -Idwarf -o $@ $(AS_A64_SRC)
 
 # The same assembler configured for the Darwin (Mach-O) target, for cross use on
 # a non-Darwin host.  The output format is fixed at compile time by -DSKJ_DARWIN;
 # a native macOS build of skj-as-aarch64 selects Mach-O automatically.
-build/skj-as-aarch64-macho: $(AS_A64_SRC) as/aarch64.h as/asm_lex.h as/asm_obj.h | build
-	$(CC) $(CFLAGS) -DSKJ_DARWIN -Ias -Iir -o $@ $(AS_A64_SRC)
+build/skj-as-aarch64-macho: $(AS_A64_SRC) as/aarch64.h as/asm_lex.h as/asm_obj.h dwarf/dwarf.h | build
+	$(CC) $(CFLAGS) -DSKJ_DARWIN -Ias -Iir -Idwarf -o $@ $(AS_A64_SRC)
 
 ## skj-ld linker
 LD_SRC := ld/main.c ld/elf_read.c ld/script.c ld/link.c ld/elf_write.c ld/mapfile.c ld/archive.c ir/util.c ir/arena.c
@@ -2858,8 +2927,8 @@ build/san/as-x86-64-fuzz: as/as_fuzz.c $(AS_X64_FUZZ_LIB) as/x86_64.h as/asm_lex
 	    as/as_fuzz.c $(AS_X64_FUZZ_LIB)
 
 build/san/as-aarch64-fuzz: as/as_fuzz.c $(AS_A64_FUZZ_LIB) as/aarch64.h as/asm_lex.h as/asm_obj.h \
-                           tests/fuzz_mutate.h build/version.h | build build/san
-	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DASFUZZ_AARCH64 -Ias -Iir -Itests -o $@ \
+                           dwarf/dwarf.h tests/fuzz_mutate.h build/version.h | build build/san
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DASFUZZ_AARCH64 -Ias -Iir -Idwarf -Itests -o $@ \
 	    as/as_fuzz.c $(AS_A64_FUZZ_LIB)
 
 # The IR front-end parser fuzz harnesses (one arch-parameterized source over
@@ -6609,4 +6678,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-preempt check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-preempt check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE

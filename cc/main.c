@@ -151,11 +151,39 @@ main(int argc, char **argv)
     if (cpp_open(pp, inpath) < 0)
         die("cannot open '%s'", inpath);
 
-    while ((n = cpp_next_line(pp, linebuf, sizeof linebuf)) > 0) {
-        if (pplen + n >= (int)sizeof(ppbuf) - 1)
-            die("preprocessed source too large");
-        memcpy(ppbuf + pplen, linebuf, n);
-        pplen += n;
+    {
+        /* Re-lexing the flattened stream would number every line by its position
+           after all #includes were spliced in, not by its source line.  So, on
+           the compile path, emit a GNU line marker (`# <line> "<file>"`) whenever
+           the source line or file is not simply the previous line + 1; cc_lex
+           resets its counter on each marker, giving IR_LOC (hence DWARF) the true
+           source line.  -E output stays marker-free (byte-identical to before). */
+        int last_line = 0;
+        const char *last_file = NULL;
+        while ((n = cpp_next_line(pp, linebuf, sizeof linebuf)) > 0) {
+            if (!preprocess_only) {
+                int el = cpp_get_emit_line(pp);
+                const char *ef = cpp_get_emit_file(pp);
+                if (ef && (!last_file || strcmp(ef, last_file) != 0
+                           || el != last_line + 1)) {
+                    char marker[4200];
+                    int m = snprintf(marker, sizeof marker,
+                                     "# %d \"%s\"\n", el, ef);
+                    if (m > 0 && m < (int)sizeof marker) {
+                        if (pplen + m >= (int)sizeof(ppbuf) - 1)
+                            die("preprocessed source too large");
+                        memcpy(ppbuf + pplen, marker, m);
+                        pplen += m;
+                    }
+                    last_file = arena_strdup(&a, ef);
+                }
+                last_line = el;
+            }
+            if (pplen + n >= (int)sizeof(ppbuf) - 1)
+                die("preprocessed source too large");
+            memcpy(ppbuf + pplen, linebuf, n);
+            pplen += n;
+        }
     }
     ppbuf[pplen] = '\0';
     cpp_free(pp);

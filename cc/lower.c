@@ -4145,7 +4145,7 @@ lower_stmt(struct cc_node *n)
        block carries no line of its own; its inner statements each mark theirs. */
     if (cc_debug && n->line > 0 && n->line != last_loc_line
         && n->kind != ND_BLOCK) {
-        ir_loc(cur_fn, n->line);
+        ir_loc(cur_fn, n->line)->b = n->col;    /* b carries the source column */
         last_loc_line = n->line;
     }
 
@@ -4514,7 +4514,7 @@ lower_function(struct cc_node *fndef)
 {
     struct ir_func *fn = ir_new_func(lower_arena, fndef->name);
     fn->is_local = fndef->is_static;
-    fn->src_file = cc_debug ? cc_src_file : NULL;
+    fn->src_file = cc_debug ? (fndef->file ? fndef->file : cc_src_file) : NULL;
     last_loc_line = 0;
     cur_fn = fn;
     cur_fn_name = fndef->name;

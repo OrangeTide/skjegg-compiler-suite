@@ -2,9 +2,9 @@
  * (skj-ld-aarch64).  It reads the MH_OBJECT relocatable objects skj-as-aarch64
  * writes, resolves symbols (defined across the inputs, undefined against
  * libSystem), lays out a PIE MH_EXECUTE, applies the arm64 relocations, binds
- * the dylib imports through arm64 stubs and a __got with classic dyld bind
- * opcodes, and self-signs with an ad-hoc code signature (arm64 macOS refuses to
- * run an unsigned binary).  Linking stays hosted on libSystem; there is no
+ * the dylib imports through arm64 stubs and a __got via dyld chained fixups,
+ * and self-signs with an ad-hoc code signature (arm64 macOS refuses to run an
+ * unsigned binary).  Linking stays hosted on libSystem; there is no
  * freestanding arm64 macOS tier.
  */
 
@@ -41,6 +41,7 @@
 #define LC_UUID            0x1Bu
 #define LC_SEGMENT_64      0x19u
 #define LC_DYLD_INFO_ONLY  (0x22u | LC_REQ_DYLD)
+#define LC_DYLD_CHAINED_FIXUPS (0x34u | LC_REQ_DYLD)
 #define LC_MAIN            (0x28u | LC_REQ_DYLD)
 #define LC_BUILD_VERSION   0x32u
 #define LC_CODE_SIGNATURE  0x1Du
@@ -53,6 +54,9 @@
 #define S_SYMBOL_STUBS          0x8u
 #define S_ATTR_PURE_INSTRUCTIONS 0x80000000u
 #define S_ATTR_SOME_INSTRUCTIONS 0x00000400u
+#define S_ATTR_DEBUG            0x02000000u
+
+#define SG_READ_ONLY       0x10u   /* segment made read-only after dyld fixups */
 
 #define VM_PROT_READ       0x1u
 #define VM_PROT_WRITE      0x2u
@@ -87,6 +91,12 @@
 #define BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB 0x70
 #define BIND_OPCODE_DO_BIND                     0x90
 
+/* dyld chained fixups (LC_DYLD_CHAINED_FIXUPS) */
+#define DYLD_CHAINED_PTR_64_OFFSET  6       /* target is an image-relative offset */
+#define DYLD_CHAINED_IMPORT         1       /* imports_format: dyld_chained_import */
+#define DYLD_CHAINED_PTR_START_NONE 0xFFFFu /* no fixups on this page */
+#define CHAINED_PAGE_SIZE           0x4000u /* 16 KiB arm64 page */
+
 /* code signing */
 #define CSMAGIC_EMBEDDED_SIGNATURE 0xfade0cc0u
 #define CSMAGIC_CODEDIRECTORY      0xfade0c02u
@@ -116,7 +126,18 @@ void sha256_final(struct sha256 *s, uint8_t out[32]);
  * In-memory model of an input object
  ****************************************************************/
 
-enum { MSEC_TEXT, MSEC_CONST, MSEC_DATA, MSEC_BSS, MSEC_KIND_COUNT };
+/* The placed section kinds.  TEXT/CONST/DATA/BSS are loaded; the three __DWARF
+   kinds are non-loaded debug sections carried through to the executable (an
+   object compiled with -g) so llvm-dwarfdump and lldb can read it.  A debug
+   kind is identified by DEBUG_FIRST..; see msec_is_debug(). */
+enum {
+    MSEC_TEXT, MSEC_CONST, MSEC_DATA, MSEC_BSS,
+    MSEC_DEBUG_LINE, MSEC_DEBUG_INFO, MSEC_DEBUG_ABBREV,
+    MSEC_KIND_COUNT,
+};
+
+#define MSEC_DEBUG_FIRST MSEC_DEBUG_LINE
+static inline int msec_is_debug(int k) { return k >= MSEC_DEBUG_FIRST; }
 
 /* A relocation read from an input object, resolved against that object's
    symbols; target_sym is an index into the global symbol table. */

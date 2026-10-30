@@ -101,6 +101,7 @@ main(int argc, char **argv)
        build emits Mach-O, a cross build emits it with -DSKJ_DARWIN, otherwise
        ELF.  There is no run-time flag. */
 #if defined(__APPLE__) || defined(SKJ_DARWIN)
+    a64_emit_debug(&a);         /* __DWARF line info from .file/.loc, if any */
     a64_macho_write(&a, out);
 #else
     a64_elf_write(&a, out);

@@ -16,14 +16,18 @@
 #   KPAOT      the AOT driver (build/skj-kp, skj-kp-rv, skj-kp-arm64)   [required]
 #   KPAOTLIB   the runtime archive to link (build/libkpaot*.a)          [required]
 #   KPAOTCC    the compiler driver that assembles the .s and links      [required]
-#   KPAOTAS    an explicit assembler step (x86 host as, intel mode); empty elsewhere
+#   KPAOTAS    an explicit assembler step (x86 host as, or the in-tree
+#              skj-as-aarch64); empty lets KPAOTCC assemble the .s
 #   KPAOTQEMU  an emulator prefix for a cross target; empty on the host
+#   KPAOTNOPIE the link driver's no-PIE flag; default -no-pie, empty on a
+#              PIE-only host (macOS), where clang rejects it
 #   KOBOLD_UNITS  colon-separated extra directories to find unit .kpm files
 set -e
 
 : "${KPAOT:?set KPAOT to the AOT driver}"
 : "${KPAOTLIB:?set KPAOTLIB to the runtime archive}"
 : "${KPAOTCC:?set KPAOTCC to the link driver}"
+NOPIE=${KPAOTNOPIE--no-pie}
 
 mod="$1"
 [ -n "$mod" ] || { echo "usage: aot-run.sh module [args...]" >&2; exit 2; }
@@ -65,7 +69,7 @@ compile_module() {
         $KPAOTAS "$tmp/m.s" -o "$o"
     else
         "$KPAOT" "$file" -o "$tmp/m.s"
-        $KPAOTCC -no-pie -c "$tmp/m.s" -o "$o"
+        $KPAOTCC $NOPIE -c "$tmp/m.s" -o "$o"
     fi
     objs="$objs $o"
 
@@ -79,6 +83,6 @@ compile_module() {
 objn=0
 compile_module "$mod"
 
-$KPAOTCC -no-pie $objs "$KPAOTLIB" -o "$tmp/p" -lm
+$KPAOTCC $NOPIE $objs "$KPAOTLIB" -o "$tmp/p" -lm
 
 exec $KPAOTQEMU "$tmp/p" "$@"

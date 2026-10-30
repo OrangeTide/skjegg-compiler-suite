@@ -142,7 +142,7 @@ void mc64_trap_div_zero(struct mc64 *m);
 void mc64_trap_overflow(struct mc64 *m);
 
 /* ---- A source-line marker (the byte sink builds an address-to-line table). */
-void mc64_loc(struct mc64 *m, int line);
+void mc64_loc(struct mc64 *m, int line, int col);
 
 /* ---- Inline assembly: emit a verbatim assembly string (text sink only; the
    byte sink reports it unsupported through its error channel). */

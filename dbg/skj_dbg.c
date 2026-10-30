@@ -11,7 +11,12 @@
    stub's integer-only target (that client requires an FPU for the lockstep
    oracle, which this target does not expose). */
 
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE                /* expose INADDR_LOOPBACK, which strict
+                                           _POSIX_C_SOURCE hides on Darwin */
+#else
 #define _POSIX_C_SOURCE 200809L         /* fork, execvp, kill, getpid, sockets */
+#endif
 
 #include "dwread.h"
 #include "arena.h"

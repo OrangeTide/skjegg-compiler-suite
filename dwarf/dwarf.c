@@ -101,6 +101,26 @@ w_u32(struct writer *w, uint32_t v)
 }
 
 static void
+w_u64(struct writer *w, uint64_t v)
+{
+    int i;
+    if (w->big)
+        for (i = 7; i >= 0; i--) w_u8(w, (uint8_t)(v >> (i * 8)));
+    else
+        for (i = 0; i < 8; i++) w_u8(w, (uint8_t)(v >> (i * 8)));
+}
+
+/* A DWARF address (DW_FORM_addr / the set_address operand): addr_size bytes. */
+static void
+w_addr(struct writer *w, uint64_t v, int addr_size)
+{
+    if (addr_size == 8)
+        w_u64(w, v);
+    else
+        w_u32(w, (uint32_t)v);
+}
+
+static void
 w_uleb(struct writer *w, uint64_t v)
 {
     do {
@@ -165,19 +185,23 @@ w_patch_u32(struct writer *w, size_t at, uint32_t v)
 #define DW_OPCODE_BASE 13
 
 size_t
-dw_line_build(struct arena *a, const char *file_name,
+dw_line_build(struct arena *a, const char *const *files, int nfiles,
               const struct dw_line_row *rows, int nrows,
               uint32_t end_addr, uint8_t **out, size_t *set_addr_off,
-              int big)
+              int big, int addr_size)
 {
     struct writer w;
-    size_t unit_len_at, after_len, hdr_len_at, after_hdr;
-    int i;
+    size_t unit_len_at, after_len, hdr_len_at, after_hdr, files_len = 0;
+    int i, cur_file, cur_col;
 
-    /* Upper bound: the fixed header, the file name, and per row at most
-       advance_pc (1 + 5 ULEB), advance_line (1 + 5 SLEB) and copy (1), plus
-       the set_address (7) and end_sequence (3) framing. */
-    size_t cap = 64 + strlen(file_name) + 1 + (size_t)nrows * 16 + 16;
+    for (i = 0; i < nfiles; i++)
+        files_len += strlen(files[i]) + 4;
+
+    /* Upper bound: the fixed header, the file table, and per row at most
+       set_file (1 + 5 ULEB), set_column (1 + 5 ULEB), advance_pc (1 + 5 ULEB),
+       advance_line (1 + 5 SLEB) and copy (1), plus the set_address
+       (3 + addr_size) and end_sequence (3) framing. */
+    size_t cap = 64 + files_len + (size_t)nrows * 28 + 16 + addr_size;
     w.p = arena_alloc(a, cap);
     w.len = 0;
     w.cap = cap;
@@ -210,33 +234,49 @@ dw_line_build(struct arena *a, const char *file_name,
     w_u8(&w, 0);                    /* DW_LNS_set_prologue_end */
     w_u8(&w, 0);                    /* DW_LNS_set_epilogue_begin */
     w_u8(&w, 1);                    /* DW_LNS_set_isa */
-    /* include_directories: none (the file carries its own path). */
+    /* include_directories: none (each file carries its own path). */
     w_u8(&w, 0);
-    /* file_names: one entry, dir 0, mtime 0, size 0; then the terminator. */
-    w_str(&w, file_name);
-    w_uleb(&w, 0);
-    w_uleb(&w, 0);
-    w_uleb(&w, 0);
+    /* file_names: nfiles entries, each dir 0, mtime 0, size 0; then the
+       terminating null name. */
+    for (i = 0; i < nfiles; i++) {
+        w_str(&w, files[i]);
+        w_uleb(&w, 0);
+        w_uleb(&w, 0);
+        w_uleb(&w, 0);
+    }
     w_u8(&w, 0);
     w_patch_u32(&w, hdr_len_at, (uint32_t)(w.len - after_hdr));
 
-    /* ---- Line-number program. */
+    /* ---- Line-number program.  The file register starts at 1 and the column
+       register at 0 (DWARF defaults); emit set_file / set_column only on a
+       change, so a single-file, column-less table encodes neither. */
+    cur_file = 1;
+    cur_col = 0;
     /* Set the starting address with the extended opcode. */
     w_u8(&w, 0);                    /* extended opcode escape */
-    w_uleb(&w, 1 + 4);              /* length: sub-opcode + 4-byte address */
+    w_uleb(&w, (uint64_t)(1 + addr_size)); /* length: sub-opcode + address */
     w_u8(&w, DW_LNE_set_address);
     if (set_addr_off)
-        *set_addr_off = w.len;      /* the 4-byte operand a R_RISCV_32 fixes */
-    w_u32(&w, rows[0].addr);
-    /* The row register starts at line 1; step to the first row's line. */
-    w_u8(&w, DW_LNS_advance_line);
-    w_sleb(&w, (int64_t)rows[0].line - 1);
-    w_u8(&w, DW_LNS_copy);
-    for (i = 1; i < nrows; i++) {
-        w_u8(&w, DW_LNS_advance_pc);
-        w_uleb(&w, (uint64_t)(rows[i].addr - rows[i - 1].addr));
+        *set_addr_off = w.len;      /* the address operand a reloc fixes */
+    w_addr(&w, rows[0].addr, addr_size);
+    for (i = 0; i < nrows; i++) {
+        int f = rows[i].file ? rows[i].file : 1;
+        if (i > 0) {
+            w_u8(&w, DW_LNS_advance_pc);
+            w_uleb(&w, (uint64_t)(rows[i].addr - rows[i - 1].addr));
+        }
+        if (f != cur_file) {
+            w_u8(&w, DW_LNS_set_file);
+            w_uleb(&w, (uint64_t)f);
+            cur_file = f;
+        }
+        if (rows[i].col != cur_col) {
+            w_u8(&w, DW_LNS_set_column);
+            w_uleb(&w, (uint64_t)rows[i].col);
+            cur_col = rows[i].col;
+        }
         w_u8(&w, DW_LNS_advance_line);
-        w_sleb(&w, (int64_t)rows[i].line - rows[i - 1].line);
+        w_sleb(&w, (int64_t)rows[i].line - (i ? rows[i - 1].line : 1));
         w_u8(&w, DW_LNS_copy);
     }
     /* Advance to the end address and close the sequence. */
@@ -290,12 +330,12 @@ size_t
 dw_info_build(struct arena *a, const char *producer, const char *file_name,
               const char *comp_dir, uint32_t low_pc, uint32_t high_pc,
               uint32_t stmt_list_off, uint8_t **out,
-              size_t *low_pc_off, size_t *high_pc_off, int big)
+              size_t *low_pc_off, size_t *high_pc_off, int big, int addr_size)
 {
     struct writer w;
     size_t unit_len_at, after_len;
     size_t cap = 32 + strlen(producer) + 1 + strlen(file_name) + 1
-                 + strlen(comp_dir) + 1 + 16;
+                 + strlen(comp_dir) + 1 + 16 + 2 * addr_size;
 
     w.p = arena_alloc(a, cap);
     w.len = 0;
@@ -308,7 +348,7 @@ dw_info_build(struct arena *a, const char *producer, const char *file_name,
     after_len = w.len;
     w_u16(&w, 4);                   /* version */
     w_u32(&w, 0);                   /* debug_abbrev_offset (one CU at 0) */
-    w_u8(&w, 4);                    /* address_size (32-bit targets) */
+    w_u8(&w, (uint8_t)addr_size);   /* address_size (4 ILP32, 8 LP64) */
 
     /* ---- The single compile_unit DIE, matching dw_abbrev_build's order. */
     w_uleb(&w, DW_ABBREV_COMPILE_UNIT);
@@ -317,11 +357,11 @@ dw_info_build(struct arena *a, const char *producer, const char *file_name,
     w_str(&w, file_name);
     w_str(&w, comp_dir);
     if (low_pc_off)
-        *low_pc_off = w.len;        /* each a 4-byte operand a R_RISCV_32 fixes */
-    w_u32(&w, low_pc);
+        *low_pc_off = w.len;        /* each an address operand a reloc fixes */
+    w_addr(&w, low_pc, addr_size);
     if (high_pc_off)
         *high_pc_off = w.len;
-    w_u32(&w, high_pc);
+    w_addr(&w, high_pc, addr_size);
     w_u32(&w, stmt_list_off);       /* DW_AT_stmt_list -> .debug_line offset */
 
     w_patch_u32(&w, unit_len_at, (uint32_t)(w.len - after_len));

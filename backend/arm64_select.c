@@ -885,7 +885,7 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
         }
         switch (in->op) {
         case IR_LOC:
-            mc64_loc(m, (int)in->imm);
+            mc64_loc(m, (int)in->imm, in->b);
             break;
         case IR_NOP:
         case IR_MARK:

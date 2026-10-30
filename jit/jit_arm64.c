@@ -300,7 +300,7 @@ mc64_trap(struct mc64 *m, const char *name)
 void mc64_trap_div_zero(struct mc64 *m) { mc64_trap(m, "kp_trap_div_zero"); }
 void mc64_trap_overflow(struct mc64 *m) { mc64_trap(m, "kp_trap_overflow"); }
 
-void mc64_loc(struct mc64 *m, int line) { kp_add_line(m->e, m->c->len, line); }
+void mc64_loc(struct mc64 *m, int line, int col) { (void)col; kp_add_line(m->e, m->c->len, line); }
 
 /* Inline assembly has no byte-sink form: report it unsupported. The cc JIT suite
    excludes the inline-asm test; a Kobold asm('...') program run under the JIT

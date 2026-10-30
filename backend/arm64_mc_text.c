@@ -23,6 +23,8 @@ struct mc64 {
     FILE *out;
     int serial;             /* per-function label namespace */
     int nlab;               /* next label id */
+    int cur_file;           /* DWARF file index of the function being emitted
+                               (1-based; 0 before any -g function) */
     const char *errsym;     /* parity with the byte sink; never set here */
 };
 
@@ -277,7 +279,14 @@ void mc64_fcvtns(struct mc64 *m, int sz, int Rd, int Rn) { fprintf(m->out, "\tfc
 void mc64_call_sym(struct mc64 *m, const char *name) { fprintf(m->out, "\tbl %s%s\n", sympfx(), name); }
 void mc64_trap_div_zero(struct mc64 *m) { fprintf(m->out, "\tbl %skp_trap_div_zero\n", sympfx()); }
 void mc64_trap_overflow(struct mc64 *m) { fprintf(m->out, "\tbl %skp_trap_overflow\n", sympfx()); }
-void mc64_loc(struct mc64 *m, int line) { (void)m; (void)line; }   /* AOT ignores -g markers */
+void mc64_loc(struct mc64 *m, int line, int col)
+{
+    int f = m->cur_file ? m->cur_file : 1;
+    if (col > 0)
+        fprintf(m->out, "\t.loc %d %d %d\n", f, line, col);
+    else
+        fprintf(m->out, "\t.loc %d %d\n", f, line);
+}
 void mc64_asm(struct mc64 *m, const char *text) { fprintf(m->out, "%s\n", text); }
 
 /****************************************************************
@@ -502,8 +511,32 @@ target_emit(FILE *out, struct ir_program *prog)
     struct ir_func *fn;
     struct mc64 *m;
     int serial = 0;
+    const char *dbg_files[256];
+    int dbg_nfiles = 0;
 
     fputs("// generated AArch64 (ARM64) assembly\n", out);
+
+    /* Under -g each function carries its defining source file; emit a .file N
+       directive per distinct file (1-based, in first-seen order) so a .loc can
+       name the right one.  skj-as-aarch64 turns .file/.loc into the
+       __debug_line/__debug_info/__debug_abbrev sections.  Functions from the
+       same file share one index; code pulled in from a header lands under its
+       own file. */
+    {
+        int i;
+        for (fn = prog->funcs; fn; fn = fn->next) {
+            if (!fn->src_file)
+                continue;
+            for (i = 0; i < dbg_nfiles; i++)
+                if (strcmp(dbg_files[i], fn->src_file) == 0)
+                    break;
+            if (i == dbg_nfiles
+                && dbg_nfiles < (int)(sizeof dbg_files / sizeof *dbg_files)) {
+                dbg_files[dbg_nfiles++] = fn->src_file;
+                fprintf(out, "\t.file %d \"%s\"\n", dbg_nfiles, fn->src_file);
+            }
+        }
+    }
 
     m = mct64_new(out);
     if (!m) {
@@ -517,6 +550,17 @@ target_emit(FILE *out, struct ir_program *prog)
         if (!fn->is_local)
             fprintf(out, "\t.globl %s%s\n", sympfx(), fn->name);
         fprintf(out, "%s%s:\n", sympfx(), fn->name);
+
+        /* select this function's DWARF file index so its .loc rows name it */
+        m->cur_file = 0;
+        if (fn->src_file) {
+            int i;
+            for (i = 0; i < dbg_nfiles; i++)
+                if (strcmp(dbg_files[i], fn->src_file) == 0) {
+                    m->cur_file = i + 1;
+                    break;
+                }
+        }
 
         mct64_begin_func(m, ++serial);
         if (arm64_select_func(m, fn,

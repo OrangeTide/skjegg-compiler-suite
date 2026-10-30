@@ -38,10 +38,11 @@ main(int argc, char **argv)
        0x118.  The Makefile asserts these exact (line, address) pairs, and that
        a lookup of 0x108 resolves to line 11. */
     static const struct dw_line_row rows[] = {
-        { 0x100, 10 },
-        { 0x108, 11 },
-        { 0x110, 12 },
+        { 0x100, 10, 0, 0 },
+        { 0x108, 11, 0, 0 },
+        { 0x110, 12, 0, 0 },
     };
+    static const char *const files[] = { "loc.c" };
     struct arena a;
     uint8_t *buf;
     size_t n;
@@ -52,7 +53,7 @@ main(int argc, char **argv)
 
     arena_init(&a);
 
-    n = dw_line_build(&a, "loc.c", rows, 3, 0x118, &buf, NULL, 0);
+    n = dw_line_build(&a, files, 1, rows, 3, 0x118, &buf, NULL, 0, 4);
     write_section(argv[1], "dwline.bin", buf, n);
 
     n = dw_abbrev_build(&a, &buf);
@@ -61,7 +62,7 @@ main(int argc, char **argv)
     /* The CU spans the rows' code; stmt_list points at offset 0, the sole line
        program in .debug_line. */
     n = dw_info_build(&a, "skjegg", "loc.c", "/skjegg", 0x100, 0x118, 0, &buf,
-                      NULL, NULL, 0);
+                      NULL, NULL, 0, 4);
     write_section(argv[1], "dwinfo.bin", buf, n);
 
     arena_free(&a);

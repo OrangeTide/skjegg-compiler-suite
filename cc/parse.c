@@ -97,6 +97,7 @@ node(int kind, int line)
     memset(n, 0, sizeof *n);
     n->kind = kind;
     n->line = line;
+    n->col = cc_lex_col();      /* column of the token being parsed, for -g */
     return n;
 }
 
@@ -1578,6 +1579,7 @@ parse_top_decl(void)
     /* function definition? */
     if (dt->kind == TY_FUNC && peek().kind == TOK_LBRACE) {
         struct cc_node *n = node(ND_FUNC_DEF, cc_lex_line());
+        n->file = cc_lex_file();        /* the file this function is defined in */
         n->name = name;
         n->decl_type = dt;
         n->is_static = is_static;

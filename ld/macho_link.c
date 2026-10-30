@@ -1,17 +1,20 @@
 /* macho_link.c : lay out a PIE MH_EXECUTE from the input objects, apply the
- * arm64 relocations, bind the libSystem imports through stubs and a __got with
- * classic dyld bind opcodes, and self-sign with an ad-hoc code signature.
+ * arm64 relocations, bind the libSystem imports through stubs and a __got via
+ * dyld chained fixups, and self-sign with an ad-hoc code signature.
  *
  * Layout (arm64, 16 KiB segment pages):
  *   __PAGEZERO  (no file)         4 GiB guard
  *   __TEXT  r-x  @ 0x100000000    mach header + load commands, __text, __stubs
  *   __DATA  rw                    __got, __const, __data, __bss(zerofill)
- *   __LINKEDIT r                  dyld info, symbol table, string table, signature
+ *   __LINKEDIT r                  chained fixups, symbol table, string table, signature
  *
- * The imports are bound with classic LC_DYLD_INFO_ONLY bind opcodes writing the
- * __got slots directly (no indirect symbol table, no dyld_stub_binder); each
- * `bl _import` is redirected to a three-instruction stub that loads its __got
- * slot and branches.  Absolute data pointers to our own symbols get a rebase. */
+ * The imports and the absolute __DATA pointers are a dyld fixup chain
+ * (LC_DYLD_CHAINED_FIXUPS, DYLD_CHAINED_PTR_64_OFFSET): each __got slot is a
+ * bind word naming an import, each absolute pointer to our own symbols a rebase
+ * word, all linked per 16 KiB page by a `next` field (no indirect symbol table,
+ * no dyld_stub_binder, no bind/rebase opcode stream).  Each `bl _import` is
+ * redirected to a three-instruction stub that loads its __got slot and
+ * branches. */
 
 #include "macho_ld.h"
 
@@ -49,18 +52,6 @@ bput(struct buf *b, const void *p, size_t n)
 }
 
 static void bu8(struct buf *b, uint8_t v)  { bput(b, &v, 1); }
-
-static void
-uleb(struct buf *b, uint64_t v)
-{
-    do {
-        uint8_t byte = v & 0x7f;
-        v >>= 7;
-        if (v)
-            byte |= 0x80;
-        bu8(b, byte);
-    } while (v);
-}
 
 static void w16(uint8_t *p, uint16_t v) { p[0] = v; p[1] = v >> 8; }
 static void
@@ -251,7 +242,10 @@ apply_relocs(struct macho_link *ld, struct layout *L,
                         w64(p, target);
                     else
                         w32(p, (uint32_t)target);
-                    if (!t->is_import) {
+                    /* __DWARF holds absolute (unslid) addresses that dyld never
+                       maps or slides, so it records no rebase; only the loadable
+                       __const/__data pointers join the fixup chain. */
+                    if (!t->is_import && !msec_is_debug(kind)) {
                         if (nrb == rbcap) {
                             rbcap = rbcap ? rbcap * 2 : 16;
                             rb = realloc(rb, (size_t)rbcap
@@ -276,9 +270,6 @@ apply_relocs(struct macho_link *ld, struct layout *L,
 /****************************************************************
  * the linker
  ****************************************************************/
-
-/* indices into the segment list, for bind/rebase segment references */
-enum { SEG_PAGEZERO, SEG_TEXT, SEG_DATA, SEG_LINKEDIT };
 
 void
 macho_link_and_write(struct macho_link *ld, const char *outpath,
@@ -313,12 +304,18 @@ macho_link_and_write(struct macho_link *ld, const char *outpath,
     L.stubs_size = (uint64_t)ld->nimport * 12;
     L.got_size = (uint64_t)ld->nimport * 8;
 
-    /* ---- compute the load-command size, so we know where __text starts ---- */
+    /* ---- compute the load-command size, so we know where __text starts ----
+       __DATA_CONST (got + const) and __DATA (data + bss) are each emitted only
+       when non-empty; presence is known here from the section sizes. */
     int text_nsects = 1 + (L.stubs_size ? 1 : 0);          /* __text [+ __stubs] */
-    int data_nsects = (L.got_size ? 1 : 0)
-                    + (L.m[MSEC_CONST].size ? 1 : 0)
-                    + (L.m[MSEC_DATA].size ? 1 : 0)
-                    + (L.m[MSEC_BSS].size ? 1 : 0);
+    int dc_nsects   = (L.got_size ? 1 : 0) + (L.m[MSEC_CONST].size ? 1 : 0);
+    int data_nsects = (L.m[MSEC_DATA].size ? 1 : 0) + (L.m[MSEC_BSS].size ? 1 : 0);
+    int dw_nsects   = (L.m[MSEC_DEBUG_LINE].size ? 1 : 0)
+                    + (L.m[MSEC_DEBUG_INFO].size ? 1 : 0)
+                    + (L.m[MSEC_DEBUG_ABBREV].size ? 1 : 0);
+    int have_dc   = dc_nsects   ? 1 : 0;
+    int have_data = data_nsects ? 1 : 0;
+    int have_dw   = dw_nsects   ? 1 : 0;
     const char *dyld_path = "/usr/lib/dyld";
     const char *dylib_path = "/usr/lib/libSystem.B.dylib";
     uint32_t dyld_lc = (uint32_t)align_up(12 + strlen(dyld_path) + 1, 8);
@@ -327,9 +324,11 @@ macho_link_and_write(struct macho_link *ld, const char *outpath,
     uint32_t sizeofcmds =
         72                                  /* PAGEZERO */
       + 72 + (uint32_t)text_nsects * 80     /* TEXT */
-      + 72 + (uint32_t)data_nsects * 80     /* DATA */
+      + (have_dc   ? 72 + (uint32_t)dc_nsects   * 80 : 0)  /* DATA_CONST */
+      + (have_data ? 72 + (uint32_t)data_nsects * 80 : 0)  /* DATA */
+      + (have_dw   ? 72 + (uint32_t)dw_nsects   * 80 : 0)  /* DWARF (debug) */
       + 72                                  /* LINKEDIT */
-      + 48                                  /* DYLD_INFO_ONLY */
+      + 16                                  /* DYLD_CHAINED_FIXUPS */
       + 24                                  /* SYMTAB */
       + 80                                  /* DYSYMTAB */
       + dyld_lc                             /* LOAD_DYLINKER */
@@ -338,8 +337,9 @@ macho_link_and_write(struct macho_link *ld, const char *outpath,
       + 24                                  /* MAIN */
       + dylib_lc                            /* LOAD_DYLIB */
       + 16;                                 /* CODE_SIGNATURE */
-    uint32_t ncmds = 4 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1;  /* see below */
-    ncmds = 13;
+    /* __PAGEZERO, __TEXT, [__DATA_CONST], [__DATA], [__DWARF], __LINKEDIT
+       + 9 others */
+    uint32_t ncmds = (uint32_t)(3 + have_dc + have_data + have_dw + 9);
     uint64_t hdr_size = 32 + sizeofcmds;
 
     /* ---- __TEXT layout ---- */
@@ -357,22 +357,30 @@ macho_link_and_write(struct macho_link *ld, const char *outpath,
     uint64_t text_filesize = t;
     uint64_t text_vmsize = align_up(t, SEG_ALIGN);
 
-    /* ---- __DATA layout ---- */
-    uint64_t data_vmaddr = TEXT_BASE + text_vmsize;
-    uint64_t data_fileoff = text_vmsize;
-    uint64_t d = 0;
+    /* ---- __DATA_CONST layout (got + const: pointer-bearing, mapped read-only
+       after dyld applies the fixup chain) ---- */
+    uint64_t dc_vmaddr = TEXT_BASE + text_vmsize;
+    uint64_t dc_fileoff = text_vmsize;
+    uint64_t dc = 0;
     if (L.got_size) {
-        d = align_up(d, 8);
-        L.got_fileoff = data_fileoff + d;
-        L.got_addr = data_vmaddr + d;
-        d += L.got_size;
+        dc = align_up(dc, 8);
+        L.got_fileoff = dc_fileoff + dc;
+        L.got_addr = dc_vmaddr + dc;
+        dc += L.got_size;
     }
     if (L.m[MSEC_CONST].size) {
-        d = align_up(d, (uint64_t)L.m[MSEC_CONST].align);
-        L.m[MSEC_CONST].out_fileoff = data_fileoff + d;
-        L.m[MSEC_CONST].out_addr = data_vmaddr + d;
-        d += L.m[MSEC_CONST].size;
+        dc = align_up(dc, (uint64_t)L.m[MSEC_CONST].align);
+        L.m[MSEC_CONST].out_fileoff = dc_fileoff + dc;
+        L.m[MSEC_CONST].out_addr = dc_vmaddr + dc;
+        dc += L.m[MSEC_CONST].size;
     }
+    uint64_t dc_filesize = dc;
+    uint64_t dc_vmsize = align_up(dc, SEG_ALIGN);
+
+    /* ---- __DATA layout (data + bss: mutable) ---- */
+    uint64_t data_vmaddr = dc_vmaddr + dc_vmsize;
+    uint64_t data_fileoff = dc_fileoff + dc_vmsize;
+    uint64_t d = 0;
     if (L.m[MSEC_DATA].size) {
         d = align_up(d, (uint64_t)L.m[MSEC_DATA].align);
         L.m[MSEC_DATA].out_fileoff = data_fileoff + d;
@@ -386,6 +394,34 @@ macho_link_and_write(struct macho_link *ld, const char *outpath,
         d += L.m[MSEC_BSS].size;
     }
     uint64_t data_vmsize = align_up(d, SEG_ALIGN);
+
+    /* ---- __DWARF layout (non-loaded debug sections, byte-aligned, carried
+       through from a -g object) ---- */
+    uint64_t dw_vmaddr = data_vmaddr + data_vmsize;
+    uint64_t dw_fileoff = data_fileoff + data_vmsize;
+    uint64_t dw = 0;
+    {
+        int dk;
+        for (dk = MSEC_DEBUG_FIRST; dk < MSEC_KIND_COUNT; dk++) {
+            if (!L.m[dk].size)
+                continue;
+            L.m[dk].out_fileoff = dw_fileoff + dw;
+            L.m[dk].out_addr = dw_vmaddr + dw;
+            dw += L.m[dk].size;
+        }
+    }
+    uint64_t dw_filesize = dw;
+    uint64_t dw_vmsize = have_dw ? align_up(dw, SEG_ALIGN) : 0;
+
+    /* segments in load order; a data segment is omitted when empty.  The
+       chained-fixups starts-in-image is indexed by this order.  __DWARF (if
+       present) sits between __DATA and __LINKEDIT and carries no fixups. */
+    int seg_idx = 2;                            /* after __PAGEZERO, __TEXT */
+    int seg_dc  = have_dc   ? seg_idx++ : -1;
+    int seg_dat = have_data ? seg_idx++ : -1;
+    int seg_dw  = have_dw   ? seg_idx++ : -1;
+    int seg_count = seg_idx + 1;                /* + __LINKEDIT */
+    (void)seg_dw;
 
     /* ---- generate the stubs now that addresses are known ---- */
     uint8_t *stub_bytes = NULL;
@@ -414,46 +450,147 @@ macho_link_and_write(struct macho_link *ld, const char *outpath,
     int nrb;
     apply_relocs(ld, &L, &rb, &nrb);
 
-    /* ---- __got contents: start zero; dyld binds them ---- */
+    /* ---- chained fixups ----
+       The __got slots (binds) and the absolute __DATA pointers (rebases) become
+       a dyld pointer chain: each site holds a 64-bit fixup word whose `next`
+       field (12 bits at bit 51, in 4-byte strides) links it to the following
+       fixup on the same page, 0 ending a page's chain.  The __got starts as
+       bind words, and apply_relocs left each rebase site's unslid vm address in
+       place, which we rewrite as a rebase word.  This replaces the classic
+       rebase/bind opcode streams; the format is DYLD_CHAINED_PTR_64_OFFSET
+       (target is an image-relative offset dyld adds to the load address). */
     uint8_t *got_bytes = NULL;
     if (L.got_size) {
         got_bytes = arena_alloc(&ld->arena, (size_t)L.got_size);
         memset(got_bytes, 0, (size_t)L.got_size);
     }
 
-    /* ---- dyld info: rebase + bind ---- */
-    struct buf rebase = {0}, bind = {0};
-    if (nrb) {
-        bu8(&rebase, REBASE_OPCODE_SET_TYPE_IMM | REBASE_TYPE_POINTER);
-        for (i = 0; i < nrb; i++) {
-            uint64_t seg_off;
-            if (rb[i].kind == MSEC_CONST)
-                seg_off = (L.m[MSEC_CONST].out_addr - data_vmaddr) + rb[i].off;
-            else
-                seg_off = (L.m[MSEC_DATA].out_addr - data_vmaddr) + rb[i].off;
-            bu8(&rebase, REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | SEG_DATA);
-            uleb(&rebase, seg_off);
-            bu8(&rebase, REBASE_OPCODE_DO_REBASE_ULEB_TIMES);
-            uleb(&rebase, 1);
-        }
-        bu8(&rebase, REBASE_OPCODE_DONE);
+    /* Split the fixups by segment: the __got binds and the __const rebases live
+       in __DATA_CONST, the __data rebases in __DATA.  Each site's seg_off is
+       relative to its own segment's vm address. */
+    struct fixsite { uint64_t seg_off; uint64_t word; uint8_t *slot; };
+    struct fixsite *dcfx = arena_alloc(&ld->arena,
+        (size_t)((ld->nimport + nrb) ? (ld->nimport + nrb) : 1) * sizeof(struct fixsite));
+    struct fixsite *dfx = arena_alloc(&ld->arena,
+        (size_t)(nrb ? nrb : 1) * sizeof(struct fixsite));
+    int ndc = 0, ndat = 0;
+    for (i = 0; i < ld->nimport; i++) {         /* __got: dyld_chained_ptr_64_bind */
+        dcfx[ndc].seg_off = (L.got_addr - dc_vmaddr) + (uint64_t)i * 8;
+        dcfx[ndc].word = ((uint64_t)1 << 63)            /* bind = 1 */
+                       | ((uint64_t)i & 0xFFFFFF);      /* ordinal (24 bits) */
+        dcfx[ndc].slot = got_bytes + i * 8;
+        ndc++;
     }
-    if (ld->nimport) {
-        bu8(&bind, BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | 1);   /* libSystem = 1 */
-        bu8(&bind, BIND_OPCODE_SET_TYPE_IMM | BIND_TYPE_POINTER);
-        for (i = 0; i < ld->nimport; i++) {
-            const char *nm = ld->gsyms[ld->imports[i]].name;
-            uint64_t seg_off = (L.got_addr - data_vmaddr) + (uint64_t)i * 8;
-            bu8(&bind, BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM);
-            bput(&bind, nm, strlen(nm) + 1);
-            bu8(&bind, BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | SEG_DATA);
-            uleb(&bind, seg_off);
-            bu8(&bind, BIND_OPCODE_DO_BIND);
+    for (i = 0; i < nrb; i++) {                 /* absolute pointer: rebase word */
+        struct merged *mg = &L.m[rb[i].kind];
+        uint8_t *slot = mg->data + rb[i].off;
+        uint64_t off = r64(slot) - TEXT_BASE;           /* image-relative target */
+        uint64_t word = (off & 0xFFFFFFFFFULL)          /* target (36 bits) */
+                      | (((off >> 56) & 0xFF) << 36);   /* high8 */
+        if (rb[i].kind == MSEC_CONST) {
+            dcfx[ndc].seg_off = (mg->out_addr - dc_vmaddr) + rb[i].off;
+            dcfx[ndc].word = word; dcfx[ndc].slot = slot; ndc++;
+        } else {
+            dfx[ndat].seg_off = (mg->out_addr - data_vmaddr) + rb[i].off;
+            dfx[ndat].word = word; dfx[ndat].slot = slot; ndat++;
         }
-        bu8(&bind, BIND_OPCODE_DONE);
     }
-    while (rebase.len & 7) bu8(&rebase, 0);
-    while (bind.len & 7) bu8(&bind, 0);
+
+    /* the chained segments, in load order; each is sorted by offset and linked
+       into a per-16 KiB-page chain (next in 4-byte strides, 0 ends a page). */
+    struct chseg { int seg_index; uint64_t vmaddr; struct fixsite *fx; int nf;
+                   uint64_t pages; uint32_t info_off; } cs[2];
+    int ncs = 0;
+    if (seg_dc  >= 0 && ndc)  { cs[ncs].seg_index = seg_dc;  cs[ncs].vmaddr = dc_vmaddr;
+                                cs[ncs].fx = dcfx; cs[ncs].nf = ndc;  ncs++; }
+    if (seg_dat >= 0 && ndat) { cs[ncs].seg_index = seg_dat; cs[ncs].vmaddr = data_vmaddr;
+                                cs[ncs].fx = dfx;  cs[ncs].nf = ndat; ncs++; }
+    for (i = 0; i < ncs; i++) {
+        struct fixsite *v = cs[i].fx;
+        int n = cs[i].nf, a, b;
+        for (a = 1; a < n; a++) {               /* insertion sort by seg_off */
+            struct fixsite t = v[a];
+            b = a - 1;
+            while (b >= 0 && v[b].seg_off > t.seg_off) { v[b + 1] = v[b]; b--; }
+            v[b + 1] = t;
+        }
+        for (a = 0; a < n; a++) {               /* link + write each word */
+            uint64_t next = 0;
+            if (a + 1 < n &&
+                v[a + 1].seg_off / CHAINED_PAGE_SIZE == v[a].seg_off / CHAINED_PAGE_SIZE)
+                next = (v[a + 1].seg_off - v[a].seg_off) / 4;
+            w64(v[a].slot, v[a].word | (next << 51));
+        }
+        cs[i].pages = n ? (v[n - 1].seg_off / CHAINED_PAGE_SIZE + 1) : 0;
+    }
+
+    /* the LC_DYLD_CHAINED_FIXUPS payload: header, starts-in-image (one entry per
+       segment, nonzero for each chained data segment), each chained segment's
+       starts-in-segment page_start table, then the import table + symbol pool. */
+    struct buf chainfix = {0};
+    {
+        uint32_t off_starts = 32;                       /* 28-byte header, pad to 32 */
+        uint32_t cur = off_starts + 4 + 4u * (uint32_t)seg_count;
+        for (i = 0; i < ncs; i++) {
+            cs[i].info_off = (uint32_t)align_up(cur, 8);
+            cur = cs[i].info_off + 22 + 2u * (uint32_t)cs[i].pages;
+        }
+        uint32_t off_imports = (uint32_t)align_up(cur, 4);
+        uint32_t off_syms = off_imports + 4u * (uint32_t)ld->nimport;
+
+        bput(&chainfix, NULL, off_imports);             /* reserve header + starts */
+        w32(chainfix.d + 0, 0);                         /* fixups_version */
+        w32(chainfix.d + 4, off_starts);                /* starts_offset */
+        w32(chainfix.d + 8, off_imports);               /* imports_offset */
+        w32(chainfix.d + 12, off_syms);                 /* symbols_offset */
+        w32(chainfix.d + 16, (uint32_t)ld->nimport);    /* imports_count */
+        w32(chainfix.d + 20, DYLD_CHAINED_IMPORT);      /* imports_format */
+        w32(chainfix.d + 24, 0);                        /* symbols_format (uncompressed) */
+
+        /* dyld_chained_starts_in_image + a starts-in-segment per chained seg */
+        w32(chainfix.d + off_starts, (uint32_t)seg_count);
+        for (i = 0; i < ncs; i++) {
+            uint8_t *sg = chainfix.d + cs[i].info_off;
+            uint64_t p;
+            w32(chainfix.d + off_starts + 4 + 4 * cs[i].seg_index,
+                cs[i].info_off - off_starts);
+            w32(sg + 0, 22 + 2u * (uint32_t)cs[i].pages); /* size */
+            w16(sg + 4, (uint16_t)CHAINED_PAGE_SIZE);     /* page_size */
+            w16(sg + 6, DYLD_CHAINED_PTR_64_OFFSET);      /* pointer_format */
+            w64(sg + 8, cs[i].vmaddr - TEXT_BASE);        /* segment_offset */
+            w32(sg + 16, 0);                              /* max_valid_pointer */
+            w16(sg + 20, (uint16_t)cs[i].pages);          /* page_count */
+            for (p = 0; p < cs[i].pages; p++) {
+                uint16_t start = DYLD_CHAINED_PTR_START_NONE;
+                int k;
+                for (k = 0; k < cs[i].nf; k++)
+                    if (cs[i].fx[k].seg_off / CHAINED_PAGE_SIZE == p) {
+                        start = (uint16_t)(cs[i].fx[k].seg_off % CHAINED_PAGE_SIZE);
+                        break;
+                    }
+                w16(sg + 22 + 2 * p, start);
+            }
+        }
+
+        /* imports table + symbol-name pool */
+        {
+            struct buf syms = {0};
+            bu8(&syms, 0);                              /* pool index 0 = empty */
+            for (i = 0; i < ld->nimport; i++) {
+                const char *nm = ld->gsyms[ld->imports[i]].name;
+                uint32_t imp = 1u                       /* lib_ordinal = libSystem (8) */
+                             | (0u << 8)                /* weak_import (1) */
+                             | ((uint32_t)syms.len << 9); /* name_offset (23) */
+                uint8_t w[4];
+                w32(w, imp);
+                bput(&chainfix, w, 4);
+                bput(&syms, nm, strlen(nm) + 1);
+            }
+            bput(&chainfix, syms.d, syms.len);
+            free(syms.d);
+        }
+        while (chainfix.len & 7) bu8(&chainfix, 0);
+    }
 
     /* ---- symbol + string tables ---- */
     struct buf strtab = {0};
@@ -489,12 +626,11 @@ macho_link_and_write(struct macho_link *ld, const char *outpath,
     }
     while (strtab.len & 7) bu8(&strtab, 0);
 
-    /* ---- LINKEDIT layout ---- */
-    uint64_t le_vmaddr = data_vmaddr + data_vmsize;
-    uint64_t le_fileoff = data_fileoff + data_vmsize;
+    /* ---- LINKEDIT layout (after __DWARF, if any) ---- */
+    uint64_t le_vmaddr = dw_vmaddr + dw_vmsize;
+    uint64_t le_fileoff = dw_fileoff + dw_vmsize;
     uint64_t cur = le_fileoff;
-    uint64_t rebase_off = cur; cur += rebase.len;
-    uint64_t bind_off = cur; cur += bind.len;
+    uint64_t chainfix_off = cur; cur += chainfix.len;
     uint64_t symoff = cur; cur += (uint64_t)nsym * 16;
     uint64_t stroff = cur; cur += strtab.len;
     cur = align_up(cur, 16);
@@ -529,14 +665,14 @@ macho_link_and_write(struct macho_link *ld, const char *outpath,
     }
 
     /* segment emitters */
-#define SEG(name, vmaddr, vmsize, fileoff, filesize, maxp, initp, nsects) \
+#define SEG(name, vmaddr, vmsize, fileoff, filesize, maxp, initp, nsects, segflags) \
     do { uint8_t c[72]; memset(c, 0, 72); \
          w32(c + 0, LC_SEGMENT_64); w32(c + 4, 72 + (uint32_t)(nsects) * 80); \
          strncpy((char *)c + 8, (name), 16); \
          w64(c + 24, (vmaddr)); w64(c + 32, (vmsize)); \
          w64(c + 40, (fileoff)); w64(c + 48, (filesize)); \
          w32(c + 56, (maxp)); w32(c + 60, (initp)); \
-         w32(c + 64, (uint32_t)(nsects)); w32(c + 68, 0); \
+         w32(c + 64, (uint32_t)(nsects)); w32(c + 68, (segflags)); \
          bput(&f, c, 72); } while (0)
 #define SECT(sect, seg, addr, size, off, al, flags) \
     do { uint8_t c[80]; memset(c, 0, 80); \
@@ -545,11 +681,11 @@ macho_link_and_write(struct macho_link *ld, const char *outpath,
          w32(c + 52, (al)); w32(c + 64, (flags)); \
          bput(&f, c, 80); } while (0)
 
-    SEG("__PAGEZERO", 0, PAGEZERO_SZ, 0, 0, 0, 0, 0);
+    SEG("__PAGEZERO", 0, PAGEZERO_SZ, 0, 0, 0, 0, 0, 0);
 
     SEG("__TEXT", TEXT_BASE, text_vmsize, 0, text_filesize,
         VM_PROT_READ | VM_PROT_EXECUTE, VM_PROT_READ | VM_PROT_EXECUTE,
-        text_nsects);
+        text_nsects, 0);
     SECT("__text", "__TEXT", L.m[MSEC_TEXT].out_addr, L.m[MSEC_TEXT].size,
          L.m[MSEC_TEXT].out_fileoff, 2,
          S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS);
@@ -557,33 +693,63 @@ macho_link_and_write(struct macho_link *ld, const char *outpath,
         SECT("__stubs", "__TEXT", L.stubs_addr, L.stubs_size, L.stubs_fileoff, 2,
              S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS);
 
-    SEG("__DATA", data_vmaddr, data_vmsize, data_fileoff, data_filesize,
-        VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE, data_nsects);
-    if (L.got_size)
-        SECT("__got", "__DATA", L.got_addr, L.got_size, L.got_fileoff, 3, S_REGULAR);
-    if (L.m[MSEC_CONST].size)
-        SECT("__const", "__DATA", L.m[MSEC_CONST].out_addr, L.m[MSEC_CONST].size,
-             L.m[MSEC_CONST].out_fileoff, 3, S_REGULAR);
-    if (L.m[MSEC_DATA].size)
-        SECT("__data", "__DATA", L.m[MSEC_DATA].out_addr, L.m[MSEC_DATA].size,
-             L.m[MSEC_DATA].out_fileoff, 3, S_REGULAR);
-    if (L.m[MSEC_BSS].size)
-        SECT("__bss", "__DATA", L.m[MSEC_BSS].out_addr, L.m[MSEC_BSS].size, 0, 3,
-             S_ZEROFILL);
+    /* __DATA_CONST (got + const): SG_READ_ONLY, so dyld maps it writable, applies
+       the fixup chain, then protects it read-only. */
+    if (have_dc) {
+        SEG("__DATA_CONST", dc_vmaddr, dc_vmsize, dc_fileoff, dc_filesize,
+            VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE,
+            dc_nsects, SG_READ_ONLY);
+        if (L.got_size)
+            SECT("__got", "__DATA_CONST", L.got_addr, L.got_size, L.got_fileoff,
+                 3, S_REGULAR);
+        if (L.m[MSEC_CONST].size)
+            SECT("__const", "__DATA_CONST", L.m[MSEC_CONST].out_addr,
+                 L.m[MSEC_CONST].size, L.m[MSEC_CONST].out_fileoff, 3, S_REGULAR);
+    }
+    if (have_data) {
+        SEG("__DATA", data_vmaddr, data_vmsize, data_fileoff, data_filesize,
+            VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE,
+            data_nsects, 0);
+        if (L.m[MSEC_DATA].size)
+            SECT("__data", "__DATA", L.m[MSEC_DATA].out_addr, L.m[MSEC_DATA].size,
+                 L.m[MSEC_DATA].out_fileoff, 3, S_REGULAR);
+        if (L.m[MSEC_BSS].size)
+            SECT("__bss", "__DATA", L.m[MSEC_BSS].out_addr, L.m[MSEC_BSS].size, 0, 3,
+                 S_ZEROFILL);
+    }
+
+    /* __DWARF: the debug sections, read-only and not slid (S_ATTR_DEBUG).  The
+       absolute addresses inside were resolved by apply_relocs to unslid vm
+       addresses; a DWARF consumer applies the image slide itself. */
+    if (have_dw) {
+        SEG("__DWARF", dw_vmaddr, dw_vmsize, dw_fileoff, dw_filesize,
+            VM_PROT_READ, VM_PROT_READ, dw_nsects, 0);
+        if (L.m[MSEC_DEBUG_LINE].size)
+            SECT("__debug_line", "__DWARF", L.m[MSEC_DEBUG_LINE].out_addr,
+                 L.m[MSEC_DEBUG_LINE].size, L.m[MSEC_DEBUG_LINE].out_fileoff,
+                 0, S_ATTR_DEBUG);
+        if (L.m[MSEC_DEBUG_INFO].size)
+            SECT("__debug_info", "__DWARF", L.m[MSEC_DEBUG_INFO].out_addr,
+                 L.m[MSEC_DEBUG_INFO].size, L.m[MSEC_DEBUG_INFO].out_fileoff,
+                 0, S_ATTR_DEBUG);
+        if (L.m[MSEC_DEBUG_ABBREV].size)
+            SECT("__debug_abbrev", "__DWARF", L.m[MSEC_DEBUG_ABBREV].out_addr,
+                 L.m[MSEC_DEBUG_ABBREV].size, L.m[MSEC_DEBUG_ABBREV].out_fileoff,
+                 0, S_ATTR_DEBUG);
+    }
 
     {
         uint64_t le_filesize = file_end - le_fileoff;
         SEG("__LINKEDIT", le_vmaddr, align_up(le_filesize, SEG_ALIGN),
-            le_fileoff, le_filesize, VM_PROT_READ, VM_PROT_READ, 0);
+            le_fileoff, le_filesize, VM_PROT_READ, VM_PROT_READ, 0, 0);
     }
 
-    /* LC_DYLD_INFO_ONLY */
+    /* LC_DYLD_CHAINED_FIXUPS */
     {
-        uint8_t c[48]; memset(c, 0, 48);
-        w32(c + 0, LC_DYLD_INFO_ONLY); w32(c + 4, 48);
-        if (rebase.len) { w32(c + 8, (uint32_t)rebase_off); w32(c + 12, (uint32_t)rebase.len); }
-        if (bind.len)   { w32(c + 16, (uint32_t)bind_off); w32(c + 20, (uint32_t)bind.len); }
-        bput(&f, c, 48);
+        uint8_t c[16]; memset(c, 0, 16);
+        w32(c + 0, LC_DYLD_CHAINED_FIXUPS); w32(c + 4, 16);
+        w32(c + 8, (uint32_t)chainfix_off); w32(c + 12, (uint32_t)chainfix.len);
+        bput(&f, c, 16);
     }
     /* LC_SYMTAB */
     {
@@ -654,7 +820,6 @@ macho_link_and_write(struct macho_link *ld, const char *outpath,
     if (L.m[MSEC_TEXT].size) bput(&f, L.m[MSEC_TEXT].data, (size_t)L.m[MSEC_TEXT].size);
     if (L.stubs_size) { while (f.len < L.stubs_fileoff) bu8(&f, 0);
                         bput(&f, stub_bytes, (size_t)L.stubs_size); }
-    while (f.len < data_fileoff) bu8(&f, 0);
     if (L.got_size) { while (f.len < L.got_fileoff) bu8(&f, 0);
                       bput(&f, got_bytes, (size_t)L.got_size); }
     if (L.m[MSEC_CONST].size) { while (f.len < L.m[MSEC_CONST].out_fileoff) bu8(&f, 0);
@@ -662,10 +827,20 @@ macho_link_and_write(struct macho_link *ld, const char *outpath,
     if (L.m[MSEC_DATA].size) { while (f.len < L.m[MSEC_DATA].out_fileoff) bu8(&f, 0);
                                bput(&f, L.m[MSEC_DATA].data, (size_t)L.m[MSEC_DATA].size); }
 
+    /* ---- __DWARF debug sections ---- */
+    {
+        int dk;
+        for (dk = MSEC_DEBUG_FIRST; dk < MSEC_KIND_COUNT; dk++) {
+            if (!L.m[dk].size)
+                continue;
+            while (f.len < L.m[dk].out_fileoff) bu8(&f, 0);
+            bput(&f, L.m[dk].data, (size_t)L.m[dk].size);
+        }
+    }
+
     /* ---- LINKEDIT ---- */
     while (f.len < le_fileoff) bu8(&f, 0);
-    bput(&f, rebase.d, rebase.len);
-    bput(&f, bind.d, bind.len);
+    bput(&f, chainfix.d, chainfix.len);
     bput(&f, symtab.d, symtab.len);
     bput(&f, strtab.d, strtab.len);
     while (f.len < sig_off) bu8(&f, 0);
@@ -750,6 +925,6 @@ macho_link_and_write(struct macho_link *ld, const char *outpath,
         chmod(outpath, 0755);
     }
 
-    free(rebase.d); free(bind.d); free(symtab.d); free(strtab.d); free(f.d);
+    free(chainfix.d); free(symtab.d); free(strtab.d); free(f.d);
     free(rb);
 }

@@ -82,6 +82,7 @@ struct cc_token {
     char *sval;
     int slen;
     int line;
+    int col;
     int is_float;
     int is_half;
     int is_long;    /* integer literal with an l/L suffix or too big for int */
@@ -222,6 +223,8 @@ struct cc_node {
     int kind;
     int op;
     int line;
+    int col;                /* 1-based source column, for -g debug info (0 = none) */
+    const char *file;       /* defining source file (set on a function-def node) */
     struct cc_type *type;
 
     struct cc_node *a, *b, *c, *d;
@@ -250,6 +253,7 @@ void cc_lex_init(struct arena *a, const char *src, const char *filename);
 struct cc_token cc_lex_next(void);
 struct cc_token cc_lex_peek(void);
 int cc_lex_line(void);
+int cc_lex_col(void);
 const char *cc_lex_file(void);
 const char *cc_tok_name(int kind);
 void cc_lex_print_context(int n, int before);

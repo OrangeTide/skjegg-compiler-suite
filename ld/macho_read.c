@@ -75,6 +75,9 @@ sec_kind(const char *seg, const char *sect)
     if (strcmp(sect, "__cstring") == 0) return MSEC_CONST;
     if (strcmp(sect, "__data") == 0)    return MSEC_DATA;
     if (strcmp(sect, "__bss") == 0)     return MSEC_BSS;
+    if (strcmp(sect, "__debug_line") == 0)   return MSEC_DEBUG_LINE;
+    if (strcmp(sect, "__debug_info") == 0)   return MSEC_DEBUG_INFO;
+    if (strcmp(sect, "__debug_abbrev") == 0) return MSEC_DEBUG_ABBREV;
     return -1;
 }
 

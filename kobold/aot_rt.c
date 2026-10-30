@@ -9,11 +9,13 @@
    the exact names the guest calls, since those are the ones the JIT's binding table
    renamed rather than provided verbatim.
 
-   The entry sets up a low-memory execution stack (a guest address is a 32-bit
-   value, so the stack must live below 4GB, matching the JIT's execution stack and
-   the low-memory guest heap in rt_host.c) and enters the program through
-   kp_call_guest, exactly as the JIT driver does.  The program is linked -no-pie so
-   its code and data also sit below 4GB. */
+   The entry sets up an execution stack and enters the program through
+   kp_call_guest, exactly as the JIT driver does.  On an ILP32 target a guest
+   address is a 32-bit value, so the stack and the guest heap (rt_host.c) must
+   live below 4GB and the program is linked -no-pie to keep its code and data
+   there too.  On an LP64 target a guest address is a full host pointer, so the
+   stack can live anywhere and the -no-pie / low-memory constraints do not
+   apply (and macOS, which is PIE-only, drops -no-pie). */
 
 #if !defined(_DARWIN_C_SOURCE)
 #define _DEFAULT_SOURCE                 /* glibc gates MAP_ANONYMOUS behind this */
@@ -361,8 +363,9 @@ int main(int argc, char **argv)
         kp_io_set_args(argc + 1, gargv);
     }
 
-    /* A low-memory execution stack so an address-of-local fits the 32-bit guest
-       address model, as the JIT's execution stack does. */
+    /* The execution stack (aot_map_low): low memory on an ILP32 target so an
+       address-of-local fits the 32-bit guest model, anywhere on LP64, as the
+       JIT's execution stack does. */
     stack = aot_map_low(KP_STACK_BYTES);
     if (stack == MAP_FAILED) {
         fprintf(stderr, "skj-kp: cannot map execution stack\n");

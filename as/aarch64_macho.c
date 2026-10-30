@@ -34,6 +34,7 @@
 #define S_ZEROFILL              0x1u
 #define S_ATTR_PURE_INSTRUCTIONS 0x80000000u
 #define S_ATTR_SOME_INSTRUCTIONS 0x00000400u
+#define S_ATTR_DEBUG            0x02000000u
 
 #define N_EXT              0x01u
 #define N_SECT             0x0Eu
@@ -174,7 +175,9 @@ a64_macho_write(struct a64_asm *a, FILE *out)
     }
 
     /* Which sections are present (nonempty).  Order: __text, __const, __data,
-       then the zerofill __bss last, as Mach-O requires. */
+       the __DWARF debug sections, then the zerofill __bss last, as Mach-O
+       requires.  The __DWARF sections carry S_ATTR_DEBUG and are empty unless
+       the input had .loc rows (a64_emit_debug), so a non-g object is unchanged. */
     {
         struct { int xsec; const char *seg, *sect; uint32_t flags; int zf; }
         want[ASEC_COUNT] = {
@@ -182,6 +185,9 @@ a64_macho_write(struct a64_asm *a, FILE *out)
               S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS, 0 },
             { ASEC_RODATA, "__DATA", "__const", S_REGULAR, 0 },
             { ASEC_DATA,   "__DATA", "__data",  S_REGULAR, 0 },
+            { ASEC_DEBUG_LINE,   "__DWARF", "__debug_line",   S_ATTR_DEBUG, 0 },
+            { ASEC_DEBUG_INFO,   "__DWARF", "__debug_info",   S_ATTR_DEBUG, 0 },
+            { ASEC_DEBUG_ABBREV, "__DWARF", "__debug_abbrev", S_ATTR_DEBUG, 0 },
             { ASEC_BSS,    "__DATA", "__bss",   S_ZEROFILL, 1 },
         };
         int i;
