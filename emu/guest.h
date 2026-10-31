@@ -183,14 +183,13 @@ enum {
 /* The sandbox fd table.  A guest fd is an opaque INDEX into this table; the
  * host fd lives only in the entry and is never handed to the guest, so a guest
  * cannot name a host fd it was not given.  Each entry routes to a device
- * driver; its param is the host fd.  (Only console and hostfs exist today, both
- * backed by a host fd; the tag is there for ramfs / 9p / null drivers later.) */
+ * driver; its param is the host fd.  (Only hostfs exists today, backed by a
+ * host fd; the tag is there for ramfs / 9p / null drivers later.) */
 #define GUEST_MAX_FDS 64
 
 enum guest_dev {
     GDEV_NONE = 0,
-    GDEV_CONSOLE,               /* 0/1/2 */
-    GDEV_HOSTFS,                /* param is a host fd (file or directory) */
+    GDEV_HOSTFS,                /* param is a host fd (file, dir, pipe, stdio) */
 };
 
 struct gfd {
@@ -280,11 +279,66 @@ typedef struct run_opts {
     int gdb_port;               /* >0: serve the GDB remote protocol on this port (RV32) */
 } run_opts;
 
+/* One installed mount recorded host-side, so a spawned child can inherit its
+ * parent's namespace (the guest's own fd_tab is a static the host cannot read,
+ * and the guest's live fs_mounts is post-adoption, so the inheritable form is
+ * kept here instead).  `host_fd` is the real directory fd a FS_KIND_HOST grant
+ * is confined to, which a child inherits through a dup; other kinds carry -1.
+ * FS_KIND_ROM/9P are recorded for an accurate count but are not inheritable in
+ * this version (their backing lives in the parent's guest memory / a host
+ * server bound to the parent). */
+struct guest_grant {
+    char     name[8];           /* FS_NAME_MAX, NUL-padded                      */
+    int      namelen;
+    uint32_t kind;              /* FS_KIND_* (low byte)                         */
+    int      host_fd;           /* FS_KIND_HOST: a host dir fd; else -1         */
+};
+
 /* The launcher: open each --mount host directory as a hostfs capability in the
  * guest fd table and write the fs/ mount table (the fs_mounts / fs_mount_count /
  * fs_cur_mount symbols) into guest memory.  A no-op if the guest links no fs/
- * table or no mounts were granted. */
-void guest_install_mounts(guest *g, const char *elf_path, const run_opts *o);
+ * table or no mounts were granted.  When `rec` is non-NULL it records each
+ * installed grant there (up to FS_MAX_MOUNTS) and writes the count to `*nrec`,
+ * so the root process can later hand its namespace to a child. */
+void guest_install_mounts(guest *g, const char *elf_path, const run_opts *o,
+                          struct guest_grant *rec, int *nrec);
+
+/* Install a recorded grant list into a freshly spawned child's guest, resolving
+ * the child's fs_mounts table from its in-memory ELF image.  Each FS_KIND_HOST
+ * grant's host fd is dup'd so the child owns an independent fd; FS_KIND_DEV is
+ * stateless.  Records what it installed into `rec`/`*nrec` (nullable) so the
+ * child can pass the namespace on in turn.  A no-op if the image links no
+ * fs_mounts (a non-fs or 64-bit child). */
+void guest_install_grants_mem(guest *g, const uint8_t *img, long imglen,
+                              const struct guest_grant *in, int nin,
+                              struct guest_grant *rec, int *nrec);
+
+/* Close every host fd a sandbox holds in its capability table (its own 0/1/2
+ * dups, mount capability fds, pipe ends).  Called when a process is torn down,
+ * so a writer's exit closes its pipe ends and the reader sees EOF. */
+void guest_fds_free(guest *g);
+
+/* SKJ_SYS_PIPE: create a host pipe and allocate a guest capability fd for each
+ * end, writing the two indices (read, then write) as u32 at guest address
+ * `out_addr`.  Returns 0, or -1 on any failure (nothing is written on failure).
+ */
+int guest_make_pipe(guest *g, uint32_t out_addr);
+
+/* One descriptor a parent passes to a child at spawn: `gfd` is the index into
+ * the parent sandbox's own capability table that backs the fd, `dst` the id the
+ * child should see it as.  The resource is dup'd into the child, which owns it. */
+struct guest_fdpass {
+    int gfd;
+    int dst;
+};
+
+/* Pass descriptors from a parent to a freshly spawned child: dup each parent
+ * capability fd into the child's fd table and record the child's fs_inherit_fds
+ * table (resolved from the child's in-memory ELF image) for its fs_init to
+ * install.  A no-op if the child links no fs_inherit_fds. */
+void guest_install_fdmap_mem(guest *child, const uint8_t *img, long imglen,
+                             guest *parent, const struct guest_fdpass *in,
+                             int nin);
 
 /* Each front end loads the ELF, builds the machine, runs it, and returns
  * the process exit status the driver should adopt. */

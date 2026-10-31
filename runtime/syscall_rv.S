@@ -283,3 +283,44 @@ __skj_p9_doorbell:
 	ecall
 	ret
 	.size	__skj_p9_doorbell,.-__skj_p9_doorbell
+
+/* unsigned skj_spawnv(const void *req);  spawn a child from a size-prefixed
+   request in guest memory (SKJ_SYS_SPAWNV), returning its handle in a0.
+   unsigned skj_wait(unsigned handle);  wait on a child and return its status
+   (SKJ_SYS_WAIT).  The one argument is already in a0. */
+	.globl	skj_spawnv
+	.type	skj_spawnv,@function
+skj_spawnv:
+	li	a7, 0x000f0006		/* SKJ_SYS_SPAWNV */
+	ecall
+	ret
+	.size	skj_spawnv,.-skj_spawnv
+
+	.globl	skj_wait
+	.type	skj_wait,@function
+skj_wait:
+	li	a7, 0x000f0007		/* SKJ_SYS_WAIT */
+	ecall
+	ret
+	.size	skj_wait,.-skj_wait
+
+/* unsigned skj_kill(unsigned handle, unsigned status);  terminate a child
+   (SKJ_SYS_KILL), a0=handle a1=status already in place, result in a0. */
+	.globl	skj_kill
+	.type	skj_kill,@function
+skj_kill:
+	li	a7, 0x000f0008		/* SKJ_SYS_KILL */
+	ecall
+	ret
+	.size	skj_kill,.-skj_kill
+
+/* int skj_pipe(unsigned *ends);  create a host pipe (SKJ_SYS_PIPE); a0 points
+   at two u32 the host fills with the read and write capability indices; the
+   result (0 or -1) is in a0. */
+	.globl	skj_pipe
+	.type	skj_pipe,@function
+skj_pipe:
+	li	a7, 0x000f0009		/* SKJ_SYS_PIPE */
+	ecall
+	ret
+	.size	skj_pipe,.-skj_pipe

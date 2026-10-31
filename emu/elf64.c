@@ -244,3 +244,76 @@ elf64_load(guest *g, const char *path, elf32_info *info)
     free(b);
     return rc;
 }
+
+/* Resolve a global symbol's value from an in-memory ELF64 image, the ELF64
+ * analogue of elf32_symbol_mem.  The guest lives under 4 GiB, so the value
+ * fits 32 bits and is returned as such; 0 means not found.  Used to locate a
+ * spawned LP64 child's fs_mounts / fs_inherit_fds tables for inheritance. */
+#define SHT_SYMTAB 2
+uint32_t
+elf64_symbol_mem(const uint8_t *b, long size, const char *name)
+{
+    elf32_info info;
+    uint64_t shoff;
+    uint32_t shentsize, shnum, i, found = 0;
+    int be;
+
+    if (read_header("<image>", b, size, &info) != 0)
+        return 0;
+    be = info.big_endian;
+    shoff = rd64(b + 40, be);
+    shentsize = rd16(b + 58, be);
+    shnum = rd16(b + 60, be);
+
+    for (i = 0; i < shnum && !found; i++) {
+        const uint8_t *sh = b + shoff + (uint64_t)i * shentsize;
+        uint64_t off, sz, entsize, stroff, strsz, j;
+        uint32_t type, link;
+        const uint8_t *strtab;
+
+        if ((long)(shoff + (uint64_t)(i + 1) * shentsize) > size)
+            break;
+        type = rd32(sh + 4, be);
+        if (type != SHT_SYMTAB)
+            continue;
+        off = rd64(sh + 24, be);
+        sz = rd64(sh + 32, be);
+        link = rd32(sh + 40, be);
+        entsize = rd64(sh + 56, be);
+        if (!entsize || (long)(off + sz) > size)
+            continue;
+
+        stroff = rd64(b + shoff + (uint64_t)link * shentsize + 24, be);
+        strsz = rd64(b + shoff + (uint64_t)link * shentsize + 32, be);
+        if ((long)(stroff + strsz) > size)
+            continue;
+        strtab = b + stroff;
+
+        for (j = 0; j < sz / entsize; j++) {
+            const uint8_t *sym = b + off + j * entsize;
+            uint32_t nameoff = rd32(sym + 0, be);
+            if (nameoff >= strsz)
+                continue;
+            if (strcmp((const char *)strtab + nameoff, name) == 0) {
+                found = (uint32_t)rd64(sym + 8, be);
+                break;
+            }
+        }
+    }
+    return found;
+}
+
+/* File-based wrapper: slurp the ELF64 image and resolve a symbol from it. */
+uint32_t
+elf64_symbol(const char *path, const char *name)
+{
+    long size;
+    uint8_t *b = slurp(path, &size);
+    uint32_t found;
+
+    if (!b)
+        return 0;
+    found = elf64_symbol_mem(b, size, name);
+    free(b);
+    return found;
+}

@@ -54,6 +54,10 @@
 	.globl getdents64
 	.weak  exit
 	.globl _exit
+	.globl skj_spawnv
+	.globl skj_wait
+	.globl skj_kill
+	.globl skj_pipe
 	.weak  __libc_fini
 	.weak  environ
 
@@ -133,6 +137,36 @@ __sys_close:
 	li	$v0, 4006		/* __NR_close */
 	syscall
 	SYSRET
+
+/* unsigned skj_spawnv(const void *req);  spawn from a size-prefixed request
+   (SKJ_SYS_SPAWNV).  unsigned skj_wait(unsigned handle);  wait on a child
+   (SKJ_SYS_WAIT).  The one argument is already in $a0.  These are
+   emulator-private selectors: the host returns the result directly in $v0, so
+   unlike the Linux wrappers they do not run SYSRET. */
+skj_spawnv:
+	li	$v0, 0x000f0006		/* SKJ_SYS_SPAWNV */
+	syscall
+	jr	$ra
+
+skj_wait:
+	li	$v0, 0x000f0007		/* SKJ_SYS_WAIT */
+	syscall
+	jr	$ra
+
+/* unsigned skj_kill(unsigned handle, unsigned status);  terminate a child
+   (SKJ_SYS_KILL).  $a0=handle, $a1=status already in place; result in $v0. */
+skj_kill:
+	li	$v0, 0x000f0008		/* SKJ_SYS_KILL */
+	syscall
+	jr	$ra
+
+/* int skj_pipe(unsigned *ends);  create a host pipe (SKJ_SYS_PIPE); $a0 points
+   at two u32 the host fills with the read and write capability indices; result
+   (0 or -1) in $v0. */
+skj_pipe:
+	li	$v0, 0x000f0009		/* SKJ_SYS_PIPE */
+	syscall
+	jr	$ra
 
 /* void *__sys_brk(void *addr);  the raw Linux brk (#4045), returning the new
    program break.  libc/sbrk.c grows a real heap through it on the ILP32

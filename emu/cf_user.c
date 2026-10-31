@@ -97,6 +97,10 @@ cf_service(proc *p)
     case SKJ_PRIV_OK:    cpu->d[0] = result; return;
     case SKJ_PRIV_FATAL: cpu->halted = 1; return;   /* exit + code set by the handler */
     case SKJ_PRIV_YIELD: cpu->yielding = 1; return;
+    case SKJ_PRIV_RETRY:                /* re-trap next slice (SP already pre-trap) */
+        cpu->pc = ret - 2;
+        cpu->yielding = 1;
+        return;
     case SKJ_PRIV_NO:    break;
     }
 

@@ -13,8 +13,9 @@
  * in a0..a7.  The syscall wrappers pass them straight through: write's
  * (fd, buf, n) are already in a0, a1, a2, which is the ecall order too.
  *
- * _start drops argc/argv (tests take no arguments), calls main, then
- * passes main's return value to _exit.
+ * _start (in the shared crt_entry_rv.S) reads argc/argv/envp from the entry
+ * stack, passes argc/argv to main and sets environ, then passes main's return
+ * value to _exit.
  */
 
 	.text

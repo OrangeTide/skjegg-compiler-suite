@@ -720,10 +720,18 @@ reschedules one that merely spent its slice. This is the consumer the
 batched-run reason contract was built for, and one copy serves all three
 cores through the `skj_cpu_ops` vtable over a `void *cpu` handle.
 
+The full model this is growing into, a small unix-like system with one sandbox
+per process and a `jsh` userland, and the spawn/wait/kill ABI with argument,
+environment, descriptor, and capability passing, is written up in
+[`process-model.md`](process-model.md). This section covers what ships today.
+
 `SPAWN` (`0x000f0003`, arg0 an image pointer, arg1 its length, returns a
 handle) loads a child from an image the guest holds in its own memory: the
 host reads the bytes out with `gm_read_out` and loads them with the
-in-memory ELF loader into a fresh process. A returned handle is a slot plus
+in-memory ELF loader into a fresh process. `SPAWNV` (`0x000f0006`) is the same
+but takes a size-prefixed request in guest memory so it can also pass an argv
+vector (and, later, environment, descriptors, and a mount table); see
+[`process-model.md`](process-model.md). A returned handle is a slot plus
 a generation, so a handle held past a child's death does not match a later
 child that reuses the slot. `SPAWN` is one of the emulator-private host-call
 selectors (`MAP`/`MUNMAP`/`SPAWN`/`FATAL`/`YIELD`/`P9`, listed under "How guest

@@ -82,6 +82,7 @@ struct fs_dirent {
 #define FS_S_IFMT  0170000u
 #define FS_S_IFREG 0100000u
 #define FS_S_IFDIR 0040000u
+#define FS_S_IFCHR 0020000u
 
 /* The metadata fs_stat / fs_fstat report.  A fixed, front-end-neutral subset of
  * POSIX stat: enough for the type and size checks and for matching an object
@@ -150,6 +151,20 @@ struct fs_mount_aux {
 };
 extern struct fs_mount_aux fs_mount_aux[FS_MAX_MOUNTS];
 
+/* Inherited descriptors handed to a spawned child.  The launcher writes this
+ * fixed-layout table (two ints per entry, so the host marshals it without the
+ * private fd_slot layout) before the child runs; fs_init installs each as an
+ * fd-space slot.  `gfd` is the index into the child's own capability table that
+ * backs the fd (the host dup'd the resource into the child).  An inherited fd
+ * is always a stream the child owns: this is how a redirected stream or a pipe
+ * end reaches a child, since there is no fork/dup2. */
+struct fs_inherit_fd {
+    int dst;                    /* fd id the child should see it as             */
+    int gfd;                    /* the child's capability index backing it      */
+};
+extern struct fs_inherit_fd fs_inherit_fds[FS_MAX_FDS];
+extern int                   fs_inherit_n;
+
 /* A backend's operation table: one shared instance per backend kind.
  *
  * fs.c owns the one shared fd space and all per-fd state; a backend handle is
@@ -215,6 +230,16 @@ int     fs_read(int fd, void *buf, int n);
 int     fs_write(int fd, const void *buf, int n);
 int64_t fs_lseek(int fd, int64_t off, int whence);
 int     fs_close(int fd);
+
+/* Adopt a host capability index (a pipe end the SKJ_SYS_PIPE host call handed
+ * back) as a pipe fd-space slot; returns the fd or a negative errno.  The slot
+ * reads/writes the raw host fd and closes it on fs_close. */
+int     fs_adopt_pipe(int gfd);
+
+/* Report the capability index backing a console or pipe fd, for building a
+ * spawn fd map.  Returns 0 and sets `*gfd`, or a negative errno if fd is not a
+ * passable (host-backed) descriptor. */
+int     fs_fd_backing(int fd, int *gfd);
 
 int     fs_exists(const char *path);
 int64_t fs_size(const char *path);

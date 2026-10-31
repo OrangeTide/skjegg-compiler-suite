@@ -286,3 +286,43 @@ __skj_p9_doorbell:
     move.l  #0x000f0005, %d0   | SKJ_SYS_P9
     trap    #0
     rts
+
+| unsigned skj_spawnv(const void *req);  spawn from a size-prefixed request
+| (SKJ_SYS_SPAWNV).  unsigned skj_wait(unsigned handle);  wait on a child
+| (SKJ_SYS_WAIT).  The one argument is at 4(%sp); the result comes back in d0.
+    .globl skj_spawnv
+skj_spawnv:
+    move.l  4(%sp), %d1        | req
+    move.l  #0x000f0006, %d0   | SKJ_SYS_SPAWNV
+    trap    #0
+    rts
+
+    .globl skj_wait
+skj_wait:
+    move.l  4(%sp), %d1        | handle
+    move.l  #0x000f0007, %d0   | SKJ_SYS_WAIT
+    trap    #0
+    rts
+
+| unsigned skj_kill(unsigned handle, unsigned status);  terminate a child
+| (SKJ_SYS_KILL); result in d0.  d2 is callee-saved, so save it around the call;
+| the pushed word shifts the stack arguments up by four.
+    .globl skj_kill
+skj_kill:
+    move.l  %d2, -(%sp)        | save callee-saved d2
+    move.l  8(%sp), %d1        | handle
+    move.l  12(%sp), %d2       | status
+    move.l  #0x000f0008, %d0   | SKJ_SYS_KILL
+    trap    #0
+    move.l  (%sp)+, %d2        | restore
+    rts
+
+| int skj_pipe(unsigned *ends);  create a host pipe (SKJ_SYS_PIPE); the pointer
+| arg names two u32 the host fills with the read and write capability indices;
+| result (0 or -1) in d0.
+    .globl skj_pipe
+skj_pipe:
+    move.l  4(%sp), %d1        | ends pointer
+    move.l  #0x000f0009, %d0   | SKJ_SYS_PIPE
+    trap    #0
+    rts

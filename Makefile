@@ -1531,7 +1531,7 @@ build/kpfree-cf/numfmt.o: libc/numfmt.c libc/fmt.h $(wildcard include/*.h) build
 ## the rv rules): the Kobold-side io_free.c shim plus the shared stat.c/fileops.c
 ## path ops, built with SKJ_FS_INTERPOSE and the temporary ambient host backend.
 KPFREE_CF_FS := -DSKJ_FS_INTERPOSE -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -Ifs
-FS_FREE_CC_CF := ./build/skj-cc -Iinclude -Ilibc -Ifs -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_AMBIENT_DEFAULT -DFS_WITH_DEV -DFS_WITH_ROM -DFS_WITH_9P
+FS_FREE_CC_CF := ./build/skj-cc -Iinclude -Ilibc -Ifs -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_AMBIENT_DEFAULT -DFS_WITH_DEV -DFS_WITH_ROM -DFS_WITH_9P -DFS_WITH_STREAMS
 build/kpfree-cf/io_free.o: kobold/io_free.c $(KP_HDRS_CF) $(FS_HDR) $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
 	./build/skj-cc $(KPFREE_CF_SKJFLAGS) -Iinclude -Ilibc $(KPFREE_CF_FS) -o $(@:.o=.s) kobold/io_free.c
 	./build/skj-as -o $@ $(@:.o=.s)
@@ -1896,6 +1896,9 @@ build/hv-x86_64/start.o: runtime/start_x86_64_hv.S $(X64_ASM_DEP) | build/hv-x86
 build/hv-x86_64/syscall.o: runtime/syscall_x86_64_hv.S $(X64_ASM_DEP) | build/hv-x86_64
 	$(X64_ASM) $(X64_ASMFLAGS) -o $@ $<
 
+build/hv-x86_64/setjmp.o: runtime/setjmp_x86_64.S $(X64_ASM_DEP) | build/hv-x86_64
+	$(X64_ASM) $(X64_ASMFLAGS) -o $@ $<
+
 build/hv-x86_64/hello.elf: tests/hv/hello_x86_64.S $(X64_ASM_DEP) | build/hv-x86_64
 	$(X64_ASM) $(X64_ASMFLAGS) -o build/hv-x86_64/hello.o $<
 	$(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none \
@@ -1930,6 +1933,9 @@ build/hv-arm64/start.o: runtime/start_arm64_hv.S $(A64_ASM_DEP) | build/hv-arm64
 	$(A64_AS) -o $@ $<
 
 build/hv-arm64/syscall.o: runtime/syscall_arm64_hv.S $(A64_ASM_DEP) | build/hv-arm64
+	$(A64_AS) -o $@ $<
+
+build/hv-arm64/setjmp.o: runtime/setjmp_arm64.S $(A64_ASM_DEP) | build/hv-arm64
 	$(A64_AS) -o $@ $<
 
 build/hv-arm64/hello_c.elf: tests/hv/hello_c.c build/skj-cc-arm64 \
@@ -2571,7 +2577,7 @@ build/skj-mkromfs: fs/mkromfs.c fs/romfs_build.c fs/romfs.h fs/fs.h | build
 ## FS_AMBIENT_DEFAULT is the documented temporary override that lands a no-mount
 ## guest on the ambient host instead, kept while the freestanding test harnesses
 ## still open host files by bare path under qemu.
-FS_FREE_CC := ./build/skj-cc-rv -Iinclude -Ilibc -Ifs -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_AMBIENT_DEFAULT -DFS_WITH_DEV -DFS_WITH_ROM -DFS_WITH_9P
+FS_FREE_CC := ./build/skj-cc-rv -Iinclude -Ilibc -Ifs -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_AMBIENT_DEFAULT -DFS_WITH_DEV -DFS_WITH_ROM -DFS_WITH_9P -DFS_WITH_STREAMS
 build/kpfree-rv/fs.o: fs/fs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
 	$(FS_FREE_CC) -o $(@:.o=.s) fs/fs.c
 	./build/skj-as-rv -o $@ $(@:.o=.s)
@@ -2842,7 +2848,10 @@ test-ops-emu: build/skj-run build/ops_test_cf
 check-emu-all: check-emu check-rv-emu check-mips-emu test-coop-read \
                test-rv-irq test-rv-run test-guest-mmap \
                test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox \
-               test-cf-sandbox test-rv-decode-cache \
+               test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill \
+               test-rv-spawn-mounts test-cf-spawn-mounts \
+               test-rv-spawn-pipe test-cf-spawn-pipe \
+               test-rv-jsh test-cf-jsh test-x86-64-jsh test-arm64-jsh test-rv-decode-cache \
                test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp \
                check-rv32 \
                test-fpu-emu test-i64-emu test-ops-emu bench \
@@ -2867,9 +2876,9 @@ build/san/test_rv_run: tests/test_rv_run.c emu/rv32.c emu/rv32.h | build build/s
 
 build/san/test_guest_mmap: tests/test_guest_mmap.c emu/guest.c emu/guest.h \
                            emu/hostplat.c emu/hostplat.h emu/elf32.c emu/elf32.h \
-                           fs/p9_server.c fs/p9_server.h | build build/san
+                           emu/elf64.c emu/elf64.h fs/p9_server.c fs/p9_server.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Iemu -Ifs -o $@ tests/test_guest_mmap.c \
-	    emu/guest.c emu/hostplat.c emu/elf32.c fs/p9_server.c -lm
+	    emu/guest.c emu/hostplat.c emu/elf32.c emu/elf64.c fs/p9_server.c -lm
 
 build/san/test_rv_decode_cache: tests/test_rv_decode_cache.c emu/rv32.c emu/rv32.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Iemu -o $@ tests/test_rv_decode_cache.c emu/rv32.c -lm
@@ -3485,9 +3494,9 @@ test-rv-run: build/test_rv_run
 ## gm_read_out.  Drives emu/guest.c directly, no CPU core.  Host-only.
 build/test_guest_mmap: tests/test_guest_mmap.c emu/guest.c emu/guest.h \
                        emu/hostplat.c emu/hostplat.h emu/elf32.c emu/elf32.h \
-                       fs/p9_server.c fs/p9_server.h | build
+                       emu/elf64.c emu/elf64.h fs/p9_server.c fs/p9_server.h | build
 	$(CC) $(CFLAGS) -Iemu -Ifs -o $@ tests/test_guest_mmap.c \
-	    emu/guest.c emu/hostplat.c emu/elf32.c fs/p9_server.c -lm
+	    emu/guest.c emu/hostplat.c emu/elf32.c emu/elf64.c fs/p9_server.c -lm
 
 test-guest-mmap: build/test_guest_mmap
 	@./build/test_guest_mmap
@@ -3569,7 +3578,7 @@ RV32_UNIT := test_mem test_fp test_fp_d test_atomic test_zcmp test_zcb \
              test_bitmanip test_irq
 RV32_INC  := -Iemu -Ifs -Itests/rv32
 RV32_CORE := emu/rv32.c tests/rv32/machine.c
-RV32_LOAD := emu/elf32.c emu/guest.c emu/hostplat.c fs/p9_server.c
+RV32_LOAD := emu/elf32.c emu/elf64.c emu/guest.c emu/hostplat.c fs/p9_server.c
 
 ## gdbclient speaks the GDB remote protocol over a socket, and the POSIX
 ## headers for that are hidden by -std=c99.
@@ -5847,6 +5856,212 @@ build/sandbox/parent.elf: build/sandbox/parent.o build/sandbox/sys.o build/rv-sk
 test-rv-sandbox: build/sandbox/parent.elf build/skj-run
 	@sh tests/run-sandbox-test.sh "$(CURDIR)/build/skj-run" "$(CURDIR)/build/sandbox/parent.elf"
 
+## The SKJ_SYS_SPAWNV argv round-trip: a C root (skj-cc-rv) spawns a child with
+## an argv vector through the size-prefixed spawn request, and the child echoes
+## what it received.  This pins argv passing across the spawn boundary and the
+## crt delivering argc/argv to main, the groundwork for the jsh userland.
+build/spawn-argv:
+	mkdir -p build/spawn-argv
+
+build/spawn-argv/child.o: tests/spawn-argv/child.c build/skj-cc-rv build/skj-as-rv | build/spawn-argv
+	./build/skj-cc-rv -o build/spawn-argv/child.s $<
+	./build/skj-as-rv -o $@ build/spawn-argv/child.s
+
+build/spawn-argv/child.elf: build/spawn-argv/child.o build/rv-skj/start.o build/skj-ld-rv
+	./build/skj-ld-rv -o $@ build/rv-skj/start.o build/spawn-argv/child.o
+
+build/spawn-argv/child_image.h: build/spawn-argv/child.elf
+	printf 'static const unsigned char child_img[] = {\n' > $@
+	xxd -i < build/spawn-argv/child.elf >> $@
+	printf '};\n#define CHILD_IMG_LEN %uu\n' "$$(wc -c < build/spawn-argv/child.elf)" >> $@
+
+build/spawn-argv/parent.o: tests/spawn-argv/parent.c build/spawn-argv/child_image.h build/skj-cc-rv build/skj-as-rv | build/spawn-argv
+	./build/skj-cc-rv -Ibuild/spawn-argv -o build/spawn-argv/parent.s $<
+	./build/skj-as-rv -o $@ build/spawn-argv/parent.s
+
+build/spawn-argv/parent.elf: build/spawn-argv/parent.o build/rv-skj/start.o build/skj-ld-rv
+	./build/skj-ld-rv -o $@ build/rv-skj/start.o build/spawn-argv/parent.o
+
+test-rv-spawn-argv: build/spawn-argv/parent.elf build/skj-run
+	@sh tests/run-spawn-argv.sh "$(CURDIR)/build/skj-run" "$(CURDIR)/build/spawn-argv/parent.elf"
+
+## SKJ_SYS_WAIT: a C root spawns a child, blocks in wait() until it exits, and
+## reads back its status.  The parent reaches wait() before the child runs, so
+## this pins the park/wake path and the zombie-then-reap flow as well as the
+## status round-trip.
+build/spawn-wait:
+	mkdir -p build/spawn-wait
+
+build/spawn-wait/child.o: tests/spawn-wait/child.c build/skj-cc-rv build/skj-as-rv | build/spawn-wait
+	./build/skj-cc-rv -o build/spawn-wait/child.s $<
+	./build/skj-as-rv -o $@ build/spawn-wait/child.s
+
+build/spawn-wait/child.elf: build/spawn-wait/child.o build/rv-skj/start.o build/skj-ld-rv
+	./build/skj-ld-rv -o $@ build/rv-skj/start.o build/spawn-wait/child.o
+
+build/spawn-wait/child_image.h: build/spawn-wait/child.elf
+	printf 'static const unsigned char child_img[] = {\n' > $@
+	xxd -i < build/spawn-wait/child.elf >> $@
+	printf '};\n#define CHILD_IMG_LEN %uu\n' "$$(wc -c < build/spawn-wait/child.elf)" >> $@
+
+build/spawn-wait/parent.o: tests/spawn-wait/parent.c build/spawn-wait/child_image.h build/skj-cc-rv build/skj-as-rv | build/spawn-wait
+	./build/skj-cc-rv -Ibuild/spawn-wait -o build/spawn-wait/parent.s $<
+	./build/skj-as-rv -o $@ build/spawn-wait/parent.s
+
+build/spawn-wait/parent.elf: build/spawn-wait/parent.o build/rv-skj/start.o build/skj-ld-rv
+	./build/skj-ld-rv -o $@ build/rv-skj/start.o build/spawn-wait/parent.o
+
+test-rv-spawn-wait: build/spawn-wait/parent.elf build/skj-run
+	@sh tests/run-spawn-wait.sh "$(CURDIR)/build/skj-run" "$(CURDIR)/build/spawn-wait/parent.elf"
+
+## SKJ_SYS_KILL: a C root spawns a child, kills it with a chosen status before
+## it runs, then waits and reads that status back.  Pins kill setting a wait
+## status and the kill/wait/reap flow; the child must never run.
+build/spawn-kill:
+	mkdir -p build/spawn-kill
+
+build/spawn-kill/child.o: tests/spawn-kill/child.c build/skj-cc-rv build/skj-as-rv | build/spawn-kill
+	./build/skj-cc-rv -o build/spawn-kill/child.s $<
+	./build/skj-as-rv -o $@ build/spawn-kill/child.s
+
+build/spawn-kill/child.elf: build/spawn-kill/child.o build/rv-skj/start.o build/skj-ld-rv
+	./build/skj-ld-rv -o $@ build/rv-skj/start.o build/spawn-kill/child.o
+
+build/spawn-kill/child_image.h: build/spawn-kill/child.elf
+	printf 'static const unsigned char child_img[] = {\n' > $@
+	xxd -i < build/spawn-kill/child.elf >> $@
+	printf '};\n#define CHILD_IMG_LEN %uu\n' "$$(wc -c < build/spawn-kill/child.elf)" >> $@
+
+build/spawn-kill/parent.o: tests/spawn-kill/parent.c build/spawn-kill/child_image.h build/skj-cc-rv build/skj-as-rv | build/spawn-kill
+	./build/skj-cc-rv -Ibuild/spawn-kill -o build/spawn-kill/parent.s $<
+	./build/skj-as-rv -o $@ build/spawn-kill/parent.s
+
+build/spawn-kill/parent.elf: build/spawn-kill/parent.o build/rv-skj/start.o build/skj-ld-rv
+	./build/skj-ld-rv -o $@ build/rv-skj/start.o build/spawn-kill/parent.o
+
+test-rv-spawn-kill: build/spawn-kill/parent.elf build/skj-run
+	@sh tests/run-spawn-kill.sh "$(CURDIR)/build/skj-run" "$(CURDIR)/build/spawn-kill/parent.elf"
+
+## SKJ_SPAWN_FLAG_SHARE_MOUNTS: a root granted a --mount spawns a child that
+## inherits the mount and reads a seeded file through it.  The runner builds
+## both guests with the fs/-interpose libc, embeds the child in the parent, and
+## runs the parent under skj-run with the data mount granted.  rv and cf cover
+## both freestanding VM tiers (one little-endian, one big-endian guest).
+test-rv-spawn-mounts: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv/start.o build/rv/va_rv.o build/rv/soft64_div.o build/rv/co_switch.o build/skj-run
+	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
+	 ASM="$(CURDIR)/build/skj-as-rv -o" \
+	 LD="$(CURDIR)/build/skj-ld-rv -o" \
+	 START="$(CURDIR)/build/rv/start.o" \
+	 HALF="$(CURDIR)/build/rv/va_rv.o $(CURDIR)/build/rv/soft64_div.o $(CURDIR)/build/rv/co_switch.o" \
+	 OUTDIR="$(CURDIR)/build/spawn-mounts-rv" \
+	 RUN="$(CURDIR)/build/skj-run" \
+	 NAME=test-rv-spawn-mounts \
+	 sh tests/run-spawn-mounts.sh
+
+test-cf-spawn-mounts: build/skj-cc build/skj-as build/skj-ld build/start.o build/half.o build/va_cf.o build/co_switch_cf.o build/skj-run
+	@CCBIN="$(CURDIR)/build/skj-cc" \
+	 ASM="$(CURDIR)/build/skj-as -o" \
+	 LD="$(CURDIR)/build/skj-ld -o" \
+	 START="$(CURDIR)/build/start.o" \
+	 HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o $(CURDIR)/build/co_switch_cf.o" \
+	 OUTDIR="$(CURDIR)/build/spawn-mounts-cf" \
+	 RUN="$(CURDIR)/build/skj-run" \
+	 NAME=test-cf-spawn-mounts \
+	 sh tests/run-spawn-mounts.sh
+
+## SKJ_SYS_PIPE + fd passing: a root wires a pipe between a writer and a reader
+## child (the ends placed through the spawn fd map), so a message crosses the
+## pipe between two sandboxes.  rv and cf cover both freestanding VM tiers.
+test-rv-spawn-pipe: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv/start.o build/rv/va_rv.o build/rv/soft64_div.o build/rv/co_switch.o build/skj-run
+	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
+	 ASM="$(CURDIR)/build/skj-as-rv -o" \
+	 LD="$(CURDIR)/build/skj-ld-rv -o" \
+	 START="$(CURDIR)/build/rv/start.o" \
+	 HALF="$(CURDIR)/build/rv/va_rv.o $(CURDIR)/build/rv/soft64_div.o $(CURDIR)/build/rv/co_switch.o" \
+	 OUTDIR="$(CURDIR)/build/spawn-pipe-rv" \
+	 RUN="$(CURDIR)/build/skj-run" \
+	 NAME=test-rv-spawn-pipe \
+	 sh tests/run-spawn-pipe.sh
+
+test-cf-spawn-pipe: build/skj-cc build/skj-as build/skj-ld build/start.o build/half.o build/va_cf.o build/co_switch_cf.o build/skj-run
+	@CCBIN="$(CURDIR)/build/skj-cc" \
+	 ASM="$(CURDIR)/build/skj-as -o" \
+	 LD="$(CURDIR)/build/skj-ld -o" \
+	 START="$(CURDIR)/build/start.o" \
+	 HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o $(CURDIR)/build/co_switch_cf.o" \
+	 OUTDIR="$(CURDIR)/build/spawn-pipe-cf" \
+	 RUN="$(CURDIR)/build/skj-run" \
+	 NAME=test-cf-spawn-pipe \
+	 sh tests/run-spawn-pipe.sh
+
+## The jsh userland: the jsh shell plus the coreutils (cat, echo, ls, rm, sleep,
+## cp, mv), built as guest ELFs over the fs-interpose libc.  The coreutils are
+## packed into a romfs mounted at bin:, jsh resolves a bare command name there
+## and spawns a fresh sandbox per command, wiring pipes and redirects through
+## the spawn fd map.  rv and cf cover both freestanding VM tiers.
+test-rv-jsh: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv/start.o build/rv/va_rv.o build/rv/soft64_div.o build/rv/co_switch.o build/rv/setjmp.o build/skj-mkromfs build/skj-run
+	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
+	 ASM="$(CURDIR)/build/skj-as-rv -o" \
+	 LD="$(CURDIR)/build/skj-ld-rv -o" \
+	 START="$(CURDIR)/build/rv/start.o" \
+	 HALF="$(CURDIR)/build/rv/va_rv.o $(CURDIR)/build/rv/soft64_div.o $(CURDIR)/build/rv/co_switch.o $(CURDIR)/build/rv/setjmp.o" \
+	 OUTDIR="$(CURDIR)/build/jsh-rv" \
+	 RUN="$(CURDIR)/build/skj-run" \
+	 MKROMFS="$(CURDIR)/build/skj-mkromfs" \
+	 NAME=test-rv-jsh \
+	 sh tests/run-jsh.sh
+
+test-cf-jsh: build/skj-cc build/skj-as build/skj-ld build/start.o build/half.o build/va_cf.o build/co_switch_cf.o build/setjmp_cf.o build/skj-mkromfs build/skj-run
+	@CCBIN="$(CURDIR)/build/skj-cc" \
+	 ASM="$(CURDIR)/build/skj-as -o" \
+	 LD="$(CURDIR)/build/skj-ld -o" \
+	 START="$(CURDIR)/build/start.o" \
+	 HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o $(CURDIR)/build/co_switch_cf.o $(CURDIR)/build/setjmp_cf.o" \
+	 OUTDIR="$(CURDIR)/build/jsh-cf" \
+	 RUN="$(CURDIR)/build/skj-run" \
+	 MKROMFS="$(CURDIR)/build/skj-mkromfs" \
+	 NAME=test-cf-jsh \
+	 sh tests/run-jsh.sh
+
+## The LP64 hardware-virtualization tiers run jsh too: the same shell + coreutils
+## over the fs-interpose libc, built by the x86-64 / arm64 toolchain, linked with
+## the HV crt and seam (plus the LP64 setjmp), spawned per command under skj-run.
+## x86-64 runs the guest where /dev/kvm is reachable and skips cleanly otherwise;
+## arm64 can only run on an aarch64 KVM host, so it verifies the build everywhere
+## and runs the guest only there.
+test-x86-64-jsh: build/skj-cc-x86-64 build/skj-as-x86-64 \
+                 build/hv-x86_64/start.o build/hv-x86_64/syscall.o build/hv-x86_64/setjmp.o \
+                 build/x86_64/half.o build/x86_64/va.o build/x86_64/soft64.o build/x86_64/co_switch.o \
+                 build/skj-mkromfs build/skj-run
+	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: x86-64 jsh (no accessible /dev/kvm)"; exit 0; fi; \
+	 CCBIN="$(CURDIR)/build/skj-cc-x86-64" \
+	 ASM="$(CURDIR)/build/skj-as-x86-64 -o" \
+	 LD="$(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none -o" \
+	 START="$(CURDIR)/build/hv-x86_64/start.o" \
+	 HALF="$(CURDIR)/build/hv-x86_64/syscall.o $(CURDIR)/build/x86_64/va.o $(CURDIR)/build/x86_64/half.o $(CURDIR)/build/x86_64/soft64.o $(CURDIR)/build/x86_64/co_switch.o $(CURDIR)/build/hv-x86_64/setjmp.o" \
+	 OUTDIR="$(CURDIR)/build/jsh-x86_64" \
+	 RUN="$(CURDIR)/build/skj-run" \
+	 MKROMFS="$(CURDIR)/build/skj-mkromfs" \
+	 NAME=test-x86-64-jsh \
+	 sh tests/run-jsh.sh
+
+test-arm64-jsh: build/skj-cc-arm64 build/skj-as-aarch64 \
+                build/hv-arm64/start.o build/hv-arm64/syscall.o build/hv-arm64/setjmp.o \
+                build/arm64/va.o build/arm64/soft64.o build/arm64/co_switch.o \
+                build/skj-mkromfs build/skj-run
+	@if [ "$$(uname -m)" = "aarch64" ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then B=; else B=1; fi; \
+	 CCBIN="$(CURDIR)/build/skj-cc-arm64" \
+	 ASM="$(CURDIR)/build/skj-as-aarch64 -o" \
+	 LD="$(A64_LD) -e _start -Ttext=0x100000 --build-id=none -o" \
+	 START="$(CURDIR)/build/hv-arm64/start.o" \
+	 HALF="$(CURDIR)/build/hv-arm64/syscall.o $(CURDIR)/build/arm64/va.o $(CURDIR)/build/arm64/soft64.o $(CURDIR)/build/arm64/co_switch.o $(CURDIR)/build/hv-arm64/setjmp.o" \
+	 OUTDIR="$(CURDIR)/build/jsh-arm64" \
+	 RUN="$(CURDIR)/build/skj-run" \
+	 MKROMFS="$(CURDIR)/build/skj-mkromfs" \
+	 NAME=test-arm64-jsh \
+	 BUILD_ONLY="$$B" \
+	 sh tests/run-jsh.sh
+
 ## The cross-language sandbox demo: a C root (skj-cc-rv) spawns two children,
 ## one built from C and one from Kobold-Pascal (skj-kpc -> skj-kp-rv ->
 ## skj-as-rv -> skj-ld-rv over the freestanding crt + libkpaot-rv-free.a).  All
@@ -6747,4 +6962,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-preempt check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill test-rv-spawn-mounts test-cf-spawn-mounts test-rv-spawn-pipe test-cf-spawn-pipe test-rv-jsh test-cf-jsh test-x86-64-jsh test-arm64-jsh test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-preempt check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE

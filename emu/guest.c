@@ -13,6 +13,7 @@
 
 #include "guest.h"
 #include "elf32.h"
+#include "elf64.h"
 #include "fs.h"             /* the guest fs/ mount-table layout the launcher fills */
 #include "ninefs.h"         /* P9_MSIZE: the 9p channel buffer size               */
 #include "p9_server.h"      /* the host-side 9p file server the doorbell drives   */
@@ -89,23 +90,29 @@ gm_mmap(guest_mem *m, uint32_t size, unsigned flags)
 {
     uint32_t base;
 
-    uint64_t next, base64, end;
+    uint64_t next, base64, end, ceiling;
     int slots;
 
     size = (size + GM_PAGE_SIZE - 1) & ~(GM_PAGE_SIZE - 1);
     if (size == 0)
         return 0;
+    /* An extern-backed guest (the HV tier) has one contiguous RAM buffer, so
+     * the dynamic area lives inside it, above the stack (proc_finish seeds the
+     * cursor).  A paged guest spans the whole 32-bit space, so it starts the
+     * dynamic area high, well clear of the image/heap/stack. */
     if (m->mmap_next == 0)
         m->mmap_next = GM_MMAP_BASE;
+    ceiling = m->extern_base ? (uint64_t)m->extern_size : 0x100000000ull;
 
     /* Lay out an optional guard page, the mapping, and a trailing gap, all in
      * 64-bit so a large request cannot wrap the 32-bit cursor and hand back a
      * low address that overlaps the image, the heap, or an earlier mapping.
-     * The whole extent must stay inside the 32-bit space. */
+     * The whole extent must stay inside the backing (RAM size, or the 32-bit
+     * space for a paged guest). */
     next = m->mmap_next;
     base64 = next + ((flags & GM_MAP_GUARD_LO) ? GM_PAGE_SIZE : 0);
     end = base64 + (uint64_t)size + GM_PAGE_SIZE;   /* + the trailing gap */
-    if (end > 0x100000000ull)
+    if (end > ceiling)
         return 0;
 
     /* Reserve the region slots up front, so a full table never leaves a guard
@@ -472,10 +479,15 @@ gfd_init(guest *g)
     int i;
     if (g->fds_inited)
         return;
-    for (i = 0; i < 3; i++) {           /* stdin/stdout/stderr -> console */
+    for (i = 0; i < 3; i++) {
+        /* Give the sandbox its own dup of the real stdin/stdout/stderr, so its
+         * 0/1/2 are ordinary owned host fds with no special case: closing one
+         * in the guest closes only this sandbox's dup, never the shared
+         * terminal.  If the dup fails, fall back to the shared fd. */
+        int d = dup(i);
         g->fdtab[i].used = 1;
-        g->fdtab[i].dev = GDEV_CONSOLE;
-        g->fdtab[i].host_fd = i;
+        g->fdtab[i].dev = GDEV_HOSTFS;
+        g->fdtab[i].host_fd = d >= 0 ? d : i;
     }
     g->fds_inited = 1;
 }
@@ -540,9 +552,17 @@ gfd_close(guest *g, uint32_t gfd)
         g->fdtab[gfd].dirp = 0;
     }
     g->fdtab[gfd].used = 0;
-    if (gfd >= 3)                       /* keep 0/1/2's host fds open */
-        close(hf);
+    close(hf);                          /* each sandbox owns its host fds */
     return 0;
+}
+
+void
+guest_fds_free(guest *g)
+{
+    uint32_t i;
+    for (i = 0; i < GUEST_MAX_FDS; i++)
+        if (g->fdtab[i].used)
+            gfd_close(g, i);
 }
 
 /* Write one 16-byte fs_mount entry at table slot `slot`:
@@ -617,22 +637,58 @@ load_rom_image(guest *g, const char *path, uint32_t *base_out, uint32_t *len_out
  * never mounts; it reads this pre-populated table (and fs_mount_aux for the
  * extra romfs/9pfs parameters).  A guest that links no fs_mounts symbol just
  * runs with no mounts (a warning if a grant was nonetheless given). */
+/* Append one installed grant to a recorder, if one was given and has room. */
+static void
+grant_record(struct guest_grant *rec, int *nrec, const char *name, int namelen,
+             uint32_t kind, int host_fd)
+{
+    struct guest_grant *g;
+    int k;
+
+    if (!rec || !nrec || *nrec >= FS_MAX_MOUNTS)
+        return;
+    g = &rec[*nrec];
+    for (k = 0; k < FS_NAME_MAX; k++)
+        g->name[k] = (char)(k < namelen ? name[k] : 0);
+    g->namelen = namelen;
+    g->kind = kind;
+    g->host_fd = host_fd;
+    (*nrec)++;
+}
+
 void
-guest_install_mounts(guest *g, const char *elf_path, const run_opts *o)
+guest_install_mounts(guest *g, const char *elf_path, const run_opts *o,
+                     struct guest_grant *rec, int *nrec)
 {
     uint32_t tbl, cnt_sym, cur_sym, aux_sym;
     int i, installed = 0;
     int ngrants = o->nmounts + o->ndevs + o->nroms + o->np9s;
 
+    if (nrec)
+        *nrec = 0;
     if (ngrants == 0)
         return;
 
     gfd_init(g);                        /* reserve 0/1/2 before any grant fd */
 
-    tbl = elf32_symbol(elf_path, "fs_mounts");
-    cnt_sym = elf32_symbol(elf_path, "fs_mount_count");
-    cur_sym = elf32_symbol(elf_path, "fs_cur_mount");
-    aux_sym = elf32_symbol(elf_path, "fs_mount_aux");
+    /* Resolve the launcher symbols with the resolver matching the root ELF's
+     * class, so an LP64 root (x86-64, arm64) is handled as well as an ILP32 one
+     * (rv, cf, mips). */
+    {
+        uint32_t (*symf)(const char *, const char *) = elf32_symbol;
+        FILE *cf = fopen(elf_path, "rb");
+
+        if (cf) {
+            unsigned char id[5];
+            if (fread(id, 1, 5, cf) == 5 && id[4] == 2 /* ELFCLASS64 */)
+                symf = elf64_symbol;
+            fclose(cf);
+        }
+        tbl = symf(elf_path, "fs_mounts");
+        cnt_sym = symf(elf_path, "fs_mount_count");
+        cur_sym = symf(elf_path, "fs_cur_mount");
+        aux_sym = symf(elf_path, "fs_mount_aux");
+    }
     if (!tbl || !cnt_sym) {
         fprintf(stderr, "skj-run: a mount was given but %s links no fs_mounts "
                 "table; ignoring %d grant(s)\n", elf_path, ngrants);
@@ -670,6 +726,7 @@ guest_install_mounts(guest *g, const char *elf_path, const run_opts *o)
             continue;
         }
         write_mount_entry(g, tbl, installed, spec, nl, idx, (uint32_t)FS_KIND_HOST);
+        grant_record(rec, nrec, spec, nl, (uint32_t)FS_KIND_HOST, hostfd);
         installed++;
     }
 
@@ -682,6 +739,7 @@ guest_install_mounts(guest *g, const char *elf_path, const run_opts *o)
             continue;
         }
         write_mount_entry(g, tbl, installed, name, nl, 0, (uint32_t)FS_KIND_DEV);
+        grant_record(rec, nrec, name, nl, (uint32_t)FS_KIND_DEV, -1);
         installed++;
     }
 
@@ -713,6 +771,7 @@ guest_install_mounts(guest *g, const char *elf_path, const run_opts *o)
                  g->big_endian, base);
         gm_store(&g->mem, aux_sym + (uint32_t)installed * 8u + 4u, 4,
                  g->big_endian, len);
+        grant_record(rec, nrec, spec, nl, (uint32_t)FS_KIND_ROM, -1);
         installed++;
     }
 
@@ -764,6 +823,7 @@ guest_install_mounts(guest *g, const char *elf_path, const run_opts *o)
         }
         gm_zero(&g->mem, chan, chansz);              /* req_len/rsp_len start 0 */
         write_mount_entry(g, tbl, installed, spec, nl, 0, (uint32_t)FS_KIND_9P);
+        grant_record(rec, nrec, spec, nl, (uint32_t)FS_KIND_9P, -1);
         gm_store(&g->mem, aux_sym + (uint32_t)installed * 8u, 4,
                  g->big_endian, chan);
         gm_store(&g->mem, aux_sym + (uint32_t)installed * 8u + 4u, 4,
@@ -780,6 +840,155 @@ guest_install_mounts(guest *g, const char *elf_path, const run_opts *o)
     if (g->mem.fault)
         fprintf(stderr, "skj-run: fault writing the mount table into %s\n",
                 elf_path);
+}
+
+/* Resolve a guest symbol's address from an in-memory child image, dispatching
+ * on the ELF class so an ILP32 child (rv/cf/mips) and an LP64 child (x86-64,
+ * arm64) are both handled.  The value fits 32 bits either way: every guest
+ * lives in the 32-bit guest-memory space. */
+static uint32_t
+sym_mem(const uint8_t *img, long imglen, const char *name)
+{
+    if (imglen > 4 && img[4] == 2 /* ELFCLASS64 */)
+        return elf64_symbol_mem(img, imglen, name);
+    return elf32_symbol_mem(img, imglen, name);
+}
+
+void
+guest_install_grants_mem(guest *g, const uint8_t *img, long imglen,
+                         const struct guest_grant *in, int nin,
+                         struct guest_grant *rec, int *nrec)
+{
+    uint32_t tbl, cnt_sym, cur_sym;
+    int i, installed = 0;
+
+    if (nrec)
+        *nrec = 0;
+    if (nin <= 0)
+        return;
+
+    tbl = sym_mem(img, imglen, "fs_mounts");
+    cnt_sym = sym_mem(img, imglen, "fs_mount_count");
+    cur_sym = sym_mem(img, imglen, "fs_cur_mount");
+    if (!tbl || !cnt_sym)
+        return;                         /* the child links no fs/ table */
+
+    gfd_init(g);                        /* reserve 0/1/2 before any grant fd */
+
+    for (i = 0; i < nin && installed < FS_MAX_MOUNTS; i++) {
+        const struct guest_grant *gr = &in[i];
+        switch (gr->kind & FS_KIND_MASK) {
+        case FS_KIND_HOST: {
+            int newfd, idx;
+            if (gr->host_fd < 0)
+                continue;
+            newfd = dup(gr->host_fd);   /* the child owns an independent fd */
+            if (newfd < 0)
+                continue;
+            idx = gfd_alloc(g, GDEV_HOSTFS, newfd);
+            if (idx < 0) {
+                close(newfd);
+                continue;
+            }
+            write_mount_entry(g, tbl, installed, gr->name, gr->namelen, idx,
+                              (uint32_t)FS_KIND_HOST);
+            grant_record(rec, nrec, gr->name, gr->namelen,
+                         (uint32_t)FS_KIND_HOST, newfd);
+            installed++;
+            break;
+        }
+        case FS_KIND_DEV:
+            write_mount_entry(g, tbl, installed, gr->name, gr->namelen, 0,
+                              (uint32_t)FS_KIND_DEV);
+            grant_record(rec, nrec, gr->name, gr->namelen,
+                         (uint32_t)FS_KIND_DEV, -1);
+            installed++;
+            break;
+        default:
+            /* FS_KIND_ROM / FS_KIND_9P are not inheritable in this version. */
+            break;
+        }
+    }
+
+    gm_store(&g->mem, cnt_sym, 4, g->big_endian, (uint32_t)installed);
+    if (cur_sym)
+        gm_store(&g->mem, cur_sym, 4, g->big_endian, 0);
+    if (g->mem.fault)
+        fprintf(stderr, "skj-run: fault writing an inherited mount table\n");
+}
+
+int
+guest_make_pipe(guest *g, uint32_t out_addr)
+{
+    int hp[2], idx_r, idx_w;
+
+    gfd_init(g);                        /* reserve 0/1/2 before any pipe fd */
+    if (pipe(hp) != 0)
+        return -1;
+    idx_r = gfd_alloc(g, GDEV_HOSTFS, hp[0]);
+    if (idx_r < 0) {
+        close(hp[0]);
+        close(hp[1]);
+        return -1;
+    }
+    idx_w = gfd_alloc(g, GDEV_HOSTFS, hp[1]);
+    if (idx_w < 0) {
+        gfd_close(g, (uint32_t)idx_r);  /* frees idx_r and closes hp[0] */
+        close(hp[1]);
+        return -1;
+    }
+    gm_store(&g->mem, out_addr, 4, g->big_endian, (uint32_t)idx_r);
+    gm_store(&g->mem, out_addr + 4u, 4, g->big_endian, (uint32_t)idx_w);
+    if (g->mem.fault) {
+        g->mem.fault = 0;
+        gfd_close(g, (uint32_t)idx_r);
+        gfd_close(g, (uint32_t)idx_w);
+        return -1;
+    }
+    return 0;
+}
+
+void
+guest_install_fdmap_mem(guest *child, const uint8_t *img, long imglen,
+                        guest *parent, const struct guest_fdpass *in, int nin)
+{
+    uint32_t tbl, cnt_sym;
+    int i, installed = 0;
+
+    if (nin <= 0)
+        return;
+
+    tbl = sym_mem(img, imglen, "fs_inherit_fds");
+    cnt_sym = sym_mem(img, imglen, "fs_inherit_n");
+    if (!tbl || !cnt_sym)
+        return;                         /* the child links no inherit table */
+
+    gfd_init(child);                    /* reserve 0/1/2 before any passed fd */
+
+    for (i = 0; i < nin && installed < GUEST_MAX_FDS; i++) {
+        int src = in[i].gfd, newfd, nidx;
+        uint32_t ent;
+        if (src < 0 || src >= GUEST_MAX_FDS || !parent->fdtab[src].used)
+            continue;
+        newfd = dup(parent->fdtab[src].host_fd);  /* the child's own fd */
+        if (newfd < 0)
+            continue;
+        nidx = gfd_alloc(child, GDEV_HOSTFS, newfd);
+        if (nidx < 0) {
+            close(newfd);
+            continue;
+        }
+        /* struct fs_inherit_fd is two ints {dst, gfd}, a fixed 8-byte layout on
+         * every guest, so it marshals without the private fd_slot layout. */
+        ent = tbl + (uint32_t)installed * 8u;
+        gm_store(&child->mem, ent,      4, child->big_endian, (uint32_t)in[i].dst);
+        gm_store(&child->mem, ent + 4u, 4, child->big_endian, (uint32_t)nidx);
+        installed++;
+    }
+
+    gm_store(&child->mem, cnt_sym, 4, child->big_endian, (uint32_t)installed);
+    if (child->mem.fault)
+        fprintf(stderr, "skj-run: fault writing an inherited fd table\n");
 }
 
 int
@@ -1624,10 +1833,11 @@ guest_build_stack64(guest *g, const run_opts *o)
     }
     sp &= ~15u;
 
-    /* argc + argv + NULL + envp NULL + two auxv words, 8 bytes each.  Keep the
-     * final sp 16-byte aligned by padding the slot count to an even number. */
+    /* argc + argv + argv NULL + envp NULL + auxv (AT_PAGESZ pair + AT_NULL
+     * pair = 4 words), 8 bytes each.  Keep the final sp 16-byte aligned by
+     * padding the slot count to an even number. */
     {
-        uint32_t slots = 1 + (uint32_t)argc + 1 + 1 + 2 + 1;
+        uint32_t slots = 1 + (uint32_t)argc + 1 + 1 + 4;
         sp -= 8 * (slots + (slots & 1));
         sp &= ~15u;
     }

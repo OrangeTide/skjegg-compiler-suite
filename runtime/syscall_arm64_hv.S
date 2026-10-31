@@ -146,6 +146,33 @@ __skj_p9_doorbell:
 	ldr	x8, =0x000f0005
 	b	.Ldoorbell
 
+/* unsigned skj_spawnv(const void *req); SKJ_SYS_SPAWNV.
+   unsigned skj_wait(unsigned handle); SKJ_SYS_WAIT.  The one argument is in x0;
+   the host reads it and returns the result in x0. */
+	.globl	skj_spawnv
+skj_spawnv:
+	ldr	x8, =0x000f0006
+	b	.Ldoorbell
+
+	.globl	skj_wait
+skj_wait:
+	ldr	x8, =0x000f0007
+	b	.Ldoorbell
+
+/* unsigned skj_kill(unsigned handle, unsigned status); SKJ_SYS_KILL.
+   handle in x0, status in x1; result in x0. */
+	.globl	skj_kill
+skj_kill:
+	ldr	x8, =0x000f0008
+	b	.Ldoorbell
+
+/* int skj_pipe(unsigned *ends); SKJ_SYS_PIPE.  x0 points at two u32 the host
+   fills with the read and write capability indices; result (0/-1) in x0. */
+	.globl	skj_pipe
+skj_pipe:
+	ldr	x8, =0x000f0009
+	b	.Ldoorbell
+
 /* void __skj_trap_backtrace(int code); SKJ_SYS_FATAL. */
 __skj_trap_backtrace:
 	ldr	x8, =0x000f0000

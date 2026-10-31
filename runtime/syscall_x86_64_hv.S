@@ -198,3 +198,34 @@ __skj_p9_doorbell:
     mov rax, 0x000f0005
     mov rax, [0x30000000]
     ret
+
+/* unsigned skj_spawnv(const void *req); SKJ_SYS_SPAWNV.
+   unsigned skj_wait(unsigned handle); SKJ_SYS_WAIT.  The one argument is in rdi
+   (System V arg0); the host reads it and returns the result as the load data. */
+    .globl skj_spawnv
+skj_spawnv:
+    mov rax, 0x000f0006
+    mov rax, [0x30000000]
+    ret
+
+    .globl skj_wait
+skj_wait:
+    mov rax, 0x000f0007
+    mov rax, [0x30000000]
+    ret
+
+/* unsigned skj_kill(unsigned handle, unsigned status); SKJ_SYS_KILL.
+   handle in rdi, status in rsi (System V arg0/arg1), result in rax. */
+    .globl skj_kill
+skj_kill:
+    mov rax, 0x000f0008
+    mov rax, [0x30000000]
+    ret
+
+/* int skj_pipe(unsigned *ends); SKJ_SYS_PIPE.  The pointer arg is in rdi; the
+   host fills two u32 (read, write capability indices) and returns 0/-1 in rax. */
+    .globl skj_pipe
+skj_pipe:
+    mov rax, 0x000f0009
+    mov rax, [0x30000000]
+    ret

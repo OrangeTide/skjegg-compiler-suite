@@ -6,6 +6,49 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.33.0
+
+#### Added
+- A process model for the `skj-run` emulator: one sandbox per process. Four
+  emulator-private syscalls build it up. `SKJ_SYS_SPAWNV` spawns a child from a
+  size-prefixed descriptor in guest memory, carrying the child image, its argv,
+  a flags word, and an fd map. `SKJ_SYS_WAIT` returns a child's exit status and
+  reaps it. `SKJ_SYS_KILL` terminates a child by handle. `SKJ_SYS_PIPE` creates
+  a host-backed pipe as two capability fds. Each spawned process gets its own
+  guest memory and its own capability and filesystem view, so isolation is the
+  default, not an accident. The spawn descriptor is a size-prefixed row of
+  pointer-width words, so a single layout serves the ILP32 tiers (ColdFire,
+  RISC-V, MIPS) and the LP64 tiers (x86-64, arm64).
+- Mount and descriptor inheritance across a spawn. A parent hands a child its
+  mount namespace (host and dev grants) and an fd map through the spawn
+  descriptor, host-mediated so neither side marshals the other's private fd
+  table. This is how a spawned command reaches the same files and how a shell
+  wires a child's stdin, stdout, and stderr.
+- A mini unix userland: the `jsh` shell plus coreutils (`cat`, `echo`, `ls`,
+  `rm`, `sleep`, `cp`, `mv`), built as guest ELFs over skjegg's libc and the
+  `fs/` layer. jsh resolves a bare command name in a romfs mounted at `bin:`,
+  then spawns a fresh sandbox per command. With no fork and no exec, a redirect
+  is "open the target and place its capability in the child's fd map", and a
+  pipeline is a host pipe wired through the same map. It runs on all five tiers:
+  ColdFire, RISC-V, and MIPS, and the x86-64 and arm64 hardware-virtualization
+  tiers.
+- The console descriptors (0, 1, 2) are bound into the one fd space as ordinary
+  stream fds. Each sandbox owns its own duplicates, so close and inheritance are
+  uniform with every other descriptor.
+- LP64 `setjmp` / `longjmp` for the hardware-virtualization tiers (x86-64 SysV
+  and aarch64 AAPCS), which the userland needs. [x86-64, arm64]
+
+#### Fixed
+- The LP64 initial stack the hardware-virtualization guests receive under-reserved
+  its auxv by one slot pair, so the terminating entry could overrun the argv
+  string area. Whether it corrupted an argument depended on alignment, so it
+  struck only particular argv layouts. The reservation now matches the words
+  written. [x86-64, arm64]
+- The dynamic `mmap` area for a hardware-virtualization guest now stays inside
+  the guest's RAM instead of starting at the paged default address, which lay
+  past the end of that RAM. A rom mount, a 9P channel, a pipe buffer, or a guest
+  `mmap` reached that address and faulted. [x86-64, arm64]
+
 ### 0.32.0
 
 #### Added

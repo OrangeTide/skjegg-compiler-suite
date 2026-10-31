@@ -4,21 +4,16 @@
    raw crt wrappers (runtime/syscall_*.S) stand.
 
    The crt wrappers are weak, so these strong definitions override open / read /
-   write / lseek / close for a program linked against this libc.  Descriptors
-   0, 1 and 2 are the console and are not fs-managed, so they go straight to the
-   raw __sys_* seam; every other fd comes from fs_open and is an fs fd.  open()
+   write / lseek / close for a program linked against this libc.  Every fd lives
+   in the one fs/ fd space, including 0/1/2: fs_init binds them to the sandbox's
+   own stdin/out/err as ordinary stream slots, so every op routes through fs_*
+   and they can be rebound or passed to a child like any other fd.  Each op
    installs the default mount policy (fs_init) on first use. */
 
 #ifdef SKJ_FS_INTERPOSE
 
 #include "fs.h"
 #include <fcntl.h>
-
-/* The raw seam the console path and fs/ itself use. */
-int  __sys_read(int fd, void *buf, int n);
-int  __sys_write(int fd, const void *buf, int n);
-int  __sys_close(int fd);
-long __sys_lseek(int fd, long off, int whence);
 
 static int fs_ready;
 
@@ -59,26 +54,56 @@ open(const char *path, int flags, int mode)
 int
 read(int fd, void *buf, int n)
 {
-    return fd < FS_FD_BASE ? __sys_read(fd, buf, n) : fs_read(fd, buf, n);
+    ensure_fs();
+    return fs_read(fd, buf, n);
 }
 
 int
 write(int fd, const void *buf, int n)
 {
-    return fd < FS_FD_BASE ? __sys_write(fd, buf, n) : fs_write(fd, buf, n);
+    ensure_fs();
+    return fs_write(fd, buf, n);
 }
 
 long
 lseek(int fd, long off, int whence)
 {
-    return fd < FS_FD_BASE ? __sys_lseek(fd, off, whence)
-                           : (long)fs_lseek(fd, off, whence);
+    ensure_fs();
+    return (long)fs_lseek(fd, off, whence);
 }
 
 int
 close(int fd)
 {
-    return fd < FS_FD_BASE ? __sys_close(fd) : fs_close(fd);
+    ensure_fs();
+    return fs_close(fd);
+}
+
+/* SKJ_SYS_PIPE: the host creates a host pipe and hands back the two capability
+ * indices backing its read and write ends.  pipe() adopts each as an fs pipe
+ * fd, so the ends live in the one fd space and can be passed to a child. */
+int skj_pipe(unsigned *ends);
+
+int
+pipe(int fd[2])
+{
+    unsigned ends[2];
+    int r, w;
+
+    ensure_fs();
+    if (skj_pipe(ends) != 0)
+        return -1;
+    r = fs_adopt_pipe((int)ends[0]);
+    if (r < 0)
+        return -1;
+    w = fs_adopt_pipe((int)ends[1]);
+    if (w < 0) {
+        fs_close(r);
+        return -1;
+    }
+    fd[0] = r;
+    fd[1] = w;
+    return 0;
 }
 
 #endif /* SKJ_FS_INTERPOSE */

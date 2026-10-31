@@ -14,7 +14,9 @@
 #define PROC_HANDLE(slot, gen)  ((uint32_t)((slot) + 1) | ((uint32_t)(gen) << 8))
 
 static int proc_new_mem(sched *S, const uint8_t *img, long len,
-                        const char *what);
+                        const char *what, char **argv, int argc, int parent);
+static void reap_child(sched *S, int slot);
+static proc *proc_from_handle(sched *S, uint32_t handle);
 
 /****************************************************************
  * Memory bus
@@ -99,6 +101,7 @@ skj_bus_w32(void *ctx, uint32_t addr, uint32_t val)
 static uint32_t
 do_spawn(proc *p, uint32_t ptr, uint32_t len)
 {
+    static char *child_argv[] = { "child", NULL };
     uint8_t *buf;
     int h;
 
@@ -117,9 +120,231 @@ do_spawn(proc *p, uint32_t ptr, uint32_t len)
         free(buf);
         return 0;
     }
-    h = proc_new_mem(p->sched, buf, (long)len, "<spawned image>");
+    h = proc_new_mem(p->sched, buf, (long)len, "<spawned image>", child_argv, 1,
+                     p->slot);
     free(buf);
     return (uint32_t)h;
+}
+
+/* Read a 32-bit word out of the calling guest's memory in its byte order,
+ * without faulting the process: an unmapped address clears the transient fault
+ * flag and reports failure, so a malformed spawn request fails the spawn rather
+ * than killing the caller mid host-call. */
+static int
+gread_u32(proc *p, uint32_t addr, uint32_t *out)
+{
+    uint32_t v = gm_load(&p->g.mem, addr, 4, p->g.big_endian);
+
+    if (p->g.mem.fault) {
+        p->g.mem.fault = 0;
+        return -1;
+    }
+    *out = v;
+    return 0;
+}
+
+/* Copy a NUL-terminated string out of the calling guest's memory into dst (up
+ * to cap bytes, always NUL-terminated).  Non-faulting like gread_u32. */
+static int
+gread_cstr(proc *p, uint32_t addr, char *dst, int cap)
+{
+    int i;
+
+    for (i = 0; i < cap - 1; i++) {
+        uint32_t c = gm_load(&p->g.mem, addr + (uint32_t)i, 1, p->g.big_endian);
+        if (p->g.mem.fault) {
+            p->g.mem.fault = 0;
+            return -1;
+        }
+        dst[i] = (char)c;
+        if (c == 0)
+            return 0;
+    }
+    dst[cap - 1] = 0;
+    return 0;                           /* truncated, but a valid C string */
+}
+
+/* Spawn from a size-prefixed request in guest memory (SKJ_SYS_SPAWNV): read the
+ * image and, when the request is long enough, an argv vector, marshalling both
+ * out of guest memory under fixed caps.  Returns the child handle, 0 on any
+ * failure.  Later request fields (env, mounts, fds) are not read yet. */
+static uint32_t
+do_spawnv(proc *p, uint32_t desc)
+{
+    char argbuf[SKJ_SPAWN_ARGBUF];
+    char *argv[SKJ_SPAWN_MAX_ARGC + 1];
+    uint32_t size, image, image_len, argv_ptr = 0, argc = 0;
+    uint32_t flags = 0, fdmap_ptr = 0, fdmap_n = 0;
+    struct guest_fdpass fdpass[SKJ_SPAWN_MAX_FDMAP];
+    int nfdpass = 0;
+    uint8_t *buf;
+    int i, off = 0, h;
+    /* The descriptor is a row of pointer-width words: an address field holds a
+     * guest pointer, so the field width (and the argv[] stride) is the guest's
+     * pointer size.  Scalars (size, counts, flags) just occupy a word; their
+     * value fits 32 bits and gread_u32 reads the low word (both LP64 tiers are
+     * little-endian).  On ILP32 ps is 4, so the layout is unchanged. */
+    uint32_t ps = p->sched->ops->word64 ? 8u : 4u;
+
+    if (gread_u32(p, desc + 0u * ps, &size))
+        return 0;
+    if (size < 3u * ps)                 /* image + image_len is the minimum */
+        return 0;
+    if (gread_u32(p, desc + 1u * ps, &image)
+        || gread_u32(p, desc + 2u * ps, &image_len))
+        return 0;
+    if (image_len == 0 || image_len > (16u * 1024u * 1024u))
+        return 0;
+
+    if (size >= 5u * ps) {              /* through argc: argv passing present */
+        if (gread_u32(p, desc + 3u * ps, &argv_ptr)
+            || gread_u32(p, desc + 4u * ps, &argc))
+            return 0;
+        if (argc > SKJ_SPAWN_MAX_ARGC)
+            return 0;
+    }
+
+    if (size >= 8u * ps) {              /* through fdmap_n: flags + fd map */
+        if (gread_u32(p, desc + 5u * ps, &flags)
+            || gread_u32(p, desc + 6u * ps, &fdmap_ptr)
+            || gread_u32(p, desc + 7u * ps, &fdmap_n))
+            return 0;
+        if (fdmap_n > SKJ_SPAWN_MAX_FDMAP)
+            return 0;
+        /* The fd map is {gfd, dst} pairs: the guest resolved each of its fds to
+         * the index into its own sandbox capability table (fs_fd_backing), so
+         * the host passes it without reading the guest's private fd table.  An
+         * inherited fd is always a host-fd stream the child owns. */
+        for (i = 0; i < (int)fdmap_n; i++) {
+            uint32_t gfd, dst;
+            if (gread_u32(p, fdmap_ptr + (uint32_t)i * 8u, &gfd)
+                || gread_u32(p, fdmap_ptr + (uint32_t)i * 8u + 4u, &dst))
+                return 0;
+            if (dst >= 64u)                 /* dst < FS_MAX_FDS */
+                return 0;
+            fdpass[nfdpass].gfd = (int)gfd;
+            fdpass[nfdpass].dst = (int)dst;
+            nfdpass++;
+        }
+    }
+    for (i = 0; i < (int)argc; i++) {
+        uint32_t sptr;
+        int room = SKJ_SPAWN_ARGBUF - off;
+        int cap = room < SKJ_SPAWN_ARG_MAX ? room : SKJ_SPAWN_ARG_MAX;
+
+        if (cap < 2)                    /* out of argv string space */
+            return 0;
+        if (gread_u32(p, argv_ptr + (uint32_t)i * ps, &sptr))
+            return 0;
+        if (gread_cstr(p, sptr, argbuf + off, cap))
+            return 0;
+        argv[i] = argbuf + off;
+        off += (int)strlen(argbuf + off) + 1;
+    }
+    argv[argc] = 0;
+
+    buf = malloc(image_len);
+    if (!buf)
+        return 0;
+    gm_read_out(&p->g.mem, image, buf, image_len);
+    if (p->g.mem.fault) {
+        p->g.mem.fault = 0;
+        free(buf);
+        return 0;
+    }
+    h = proc_new_mem(p->sched, buf, (long)image_len, "<spawned image>",
+                     argv, (int)argc, p->slot);
+
+    /* Hand the child its namespace while the image buffer is still live (the
+     * child's fs_mounts symbol is resolved from it).  Without the flag the
+     * child keeps the default: no mounts, console on 0/1/2 from gfd_init. */
+    if (h) {
+        proc *c = proc_from_handle(p->sched, (uint32_t)h);
+        if (c && (flags & SKJ_SPAWN_FLAG_SHARE_MOUNTS))
+            guest_install_grants_mem(&c->g, buf, (long)image_len,
+                                     p->grants, p->ngrants,
+                                     c->grants, &c->ngrants);
+        if (c && nfdpass > 0)
+            guest_install_fdmap_mem(&c->g, buf, (long)image_len,
+                                    &p->g, fdpass, nfdpass);
+    }
+    free(buf);
+    return (uint32_t)h;
+}
+
+/* Resolve a spawn handle to a live process in the table, or NULL.  A handle is
+ * a slot-plus-generation token (PROC_HANDLE), so a handle kept past a child's
+ * death does not match the different process that later reuses the slot. */
+static proc *
+proc_from_handle(sched *S, uint32_t handle)
+{
+    int slot = (int)(handle & 0xff) - 1;
+    proc *p;
+
+    if (slot < 0 || slot >= S->nprocs)
+        return 0;
+    p = S->procs[slot];
+    if (!p || p->handle != handle)
+        return 0;
+    return p;
+}
+
+/* SKJ_SYS_WAIT: wait on a child of the caller and return its status, reaping it.
+ * A child that has already exited is a zombie whose status is kept until this
+ * reads it.  If the child is still running, park the caller and re-execute the
+ * call next slice (the scheduler skips it until the child exits); a core that
+ * cannot park reports WOULDBLOCK so the guest retries.  A handle that is not a
+ * live child of the caller is BADHANDLE. */
+static uint32_t
+do_wait(proc *p, uint32_t handle, enum skj_priv *how)
+{
+    proc *c = proc_from_handle(p->sched, handle);
+
+    *how = SKJ_PRIV_OK;
+    if (!c || c->parent != p->slot)
+        return SKJ_WAIT_BADHANDLE;
+    if (c->done) {
+        /* Mask to 8 bits (the POSIX exit-status width) so a real status can
+         * never alias SKJ_WAIT_WOULDBLOCK / SKJ_WAIT_BADHANDLE, which share this
+         * return channel.  A child that exited 0xfffffffe would otherwise read
+         * back as "would block" and spin the waiter forever. */
+        uint32_t status = (uint32_t)(c->rc ? c->rc : c->g.exit_code) & 0xffu;
+        reap_child(p->sched, c->slot);
+        p->wait_slot = -1;
+        return status;
+    }
+    if (!p->g.can_park)                 /* the HV cores: cannot cooperatively park */
+        return SKJ_WAIT_WOULDBLOCK;
+
+    /* Park: record the awaited child and re-run the call next slice.  Setting
+     * GPARK_RETRY makes proc_slice mark this process io_blocked (no fd), and the
+     * scheduler clears that once the child exits. */
+    p->wait_slot = c->slot;
+    p->g.park = GPARK_RETRY;
+    p->g.park_fd = -1;
+    p->g.park_events = 0;
+    p->g.park_deadline = 0;
+    *how = SKJ_PRIV_RETRY;
+    return 0;
+}
+
+/* SKJ_SYS_KILL: terminate a child of the caller, setting its wait status.  The
+ * child is marked done and never runs again (cooperative: it simply drops out
+ * of the schedule), becoming a zombie the caller can then wait on to read the
+ * status.  Reaches only the caller's own children; a stale or foreign handle,
+ * or a child that already exited, is reported but harmless. */
+static uint32_t
+do_kill(proc *p, uint32_t handle, uint32_t status)
+{
+    proc *c = proc_from_handle(p->sched, handle);
+
+    if (!c || c->parent != p->slot)
+        return SKJ_WAIT_BADHANDLE;
+    if (!c->done) {
+        c->rc = (int)status;            /* a kill status wait() will read back */
+        c->done = 1;
+    }
+    return 0;
 }
 
 enum skj_priv
@@ -136,6 +361,20 @@ sched_private(proc *p, uint32_t nr, uint32_t arg0, uint32_t arg1,
         return SKJ_PRIV_OK;
     case SKJ_SYS_SPAWN:
         *result = do_spawn(p, arg0, arg1);
+        return SKJ_PRIV_OK;
+    case SKJ_SYS_SPAWNV:
+        *result = do_spawnv(p, arg0);
+        return SKJ_PRIV_OK;
+    case SKJ_SYS_WAIT: {
+        enum skj_priv how;
+        *result = do_wait(p, arg0, &how);
+        return how;
+    }
+    case SKJ_SYS_KILL:
+        *result = do_kill(p, arg0, arg1);
+        return SKJ_PRIV_OK;
+    case SKJ_SYS_PIPE:
+        *result = (uint32_t)guest_make_pipe(&p->g, arg0);
         return SKJ_PRIV_OK;
     case SKJ_SYS_FATAL:
         p->fatal = 1;
@@ -193,6 +432,8 @@ proc_alloc(sched *S)
     p->sched = S;
     p->slot = slot;
     p->gen = S->slot_gen[slot];
+    p->parent = -1;                     /* the root; a spawn overrides it */
+    p->wait_slot = -1;
     if (S->ops->mem_init && S->ops->mem_init(p, S->o) != 0) {
         S->ops->free(p->cpu);
         gm_free(&p->g.mem);
@@ -211,6 +452,7 @@ proc_discard(sched *S, proc *p)
 {
     S->procs[p->slot] = NULL;
     S->ops->free(p->cpu);
+    guest_fds_free(&p->g);
     guest_p9_free(&p->g);
     gm_free(&p->g.mem);
     free(p);
@@ -233,6 +475,13 @@ proc_finish(sched *S, proc *p, const elf32_info *info, char **argv, int argc)
     stack_base = p->g.brk_limit + GM_PAGE_SIZE;
     gm_map(&p->g.mem, stack_base, S->o->stack_size, GM_R | GM_W, "stack");
     p->g.stack_top = stack_base + S->o->stack_size;
+
+    /* An extern-backed guest (HV tier) has one contiguous RAM buffer, not the
+     * full 32-bit space a paged guest enjoys.  Start its dynamic mmap area just
+     * above the stack so gm_mmap hands out addresses that fall inside RAM, not
+     * at the paged default of GM_MMAP_BASE (which lies past the RAM end). */
+    if (p->g.mem.extern_base)
+        p->g.mem.mmap_next = p->g.stack_top + GM_PAGE_SIZE;
 
     so = *S->o;                 /* the child keeps the driver's sizes, its own argv */
     so.argv = argv;
@@ -286,21 +535,22 @@ proc_new_file(sched *S, const char *path)
 
 /* A spawned child, from an in-memory image. */
 static int
-proc_new_mem(sched *S, const uint8_t *img, long len, const char *what)
+proc_new_mem(sched *S, const uint8_t *img, long len, const char *what,
+             char **argv, int argc, int parent)
 {
-    static char *child_argv[] = { "child", NULL };
     proc *p = proc_alloc(S);
     elf32_info info;
 
     if (!p)
         return 0;
+    p->parent = parent;                         /* who may wait on it */
     p->insn_budget = S->o->child_max_insns;     /* a spawned child is budgeted */
     if ((S->ops->word64 ? elf64_load_mem(&p->g, img, len, &info, what)
                         : elf32_load_mem(&p->g, img, len, &info, what)) != 0) {
         proc_discard(S, p);
         return 0;
     }
-    return proc_accept(S, p, &info, what, child_argv, 1);
+    return proc_accept(S, p, &info, what, argv, argc);
 }
 
 /****************************************************************
@@ -521,18 +771,38 @@ proc_slice(sched *S, proc *p)
     /* SKJ_RUN_BUDGET or SKJ_RUN_YIELD with room left: still runnable, reschedule. */
 }
 
-/* Reclaim a finished child: free its CPU and guest memory (returning its pages
- * to the pool), then free its slot for reuse with a bumped generation so a
- * stale handle to it no longer matches. The root process (slot 0) is kept for
- * the run's status and freed at the end. */
+/* Free a process's heavy resources (its CPU and guest memory, returning the
+ * pages to the pool), leaving the small proc struct so its exit status can
+ * still be read.  Idempotent via the zombie flag: never frees twice. */
 static void
-retire_child(sched *S, int slot)
+free_proc_resources(proc *p)
+{
+    if (p->zombie)
+        return;
+    p->ops->free(p->cpu);
+    guest_fds_free(&p->g);              /* close its host fds (pipe ends -> EOF) */
+    guest_p9_free(&p->g);
+    gm_free(&p->g.mem);
+    p->zombie = 1;
+}
+
+/* A finished child turns into a zombie: its resources are freed but its slot and
+ * exit status are kept until a wait reaps it (or it is orphaned). */
+static void
+zombify_child(sched *S, int slot)
+{
+    free_proc_resources(S->procs[slot]);
+}
+
+/* Reap a child for good: free whatever resources remain, then free its slot for
+ * reuse with a bumped generation so a stale handle no longer matches. The root
+ * process (slot 0) is kept for the run's status and freed at the end. */
+static void
+reap_child(sched *S, int slot)
 {
     proc *p = S->procs[slot];
 
-    S->ops->free(p->cpu);
-    guest_p9_free(&p->g);
-    gm_free(&p->g.mem);
+    free_proc_resources(p);             /* no-op if already a zombie */
     free(p);
     S->procs[slot] = NULL;
     S->slot_gen[slot]++;
@@ -649,9 +919,31 @@ run_scheduler(sched *S)
             if (S->limited)
                 return;                 /* the whole run stops at the budget */
         }
-        for (i = 1; i < S->nprocs; i++)         /* reclaim finished children */
+        /* Turn finished children into zombies, keeping their exit status for a
+         * wait.  Then wake any parent blocked in wait() whose child has exited,
+         * so it re-runs the call and reaps it.  Finally reap any zombie whose
+         * parent is gone or itself finished, so an unwaited child does not leak
+         * its slot. */
+        for (i = 1; i < S->nprocs; i++)
             if (S->procs[i] && S->procs[i]->done)
-                retire_child(S, i);
+                zombify_child(S, i);
+        for (i = 0; i < S->nprocs; i++) {
+            proc *w = S->procs[i];
+            if (w && w->io_blocked && w->wait_slot >= 0) {
+                proc *c = S->procs[w->wait_slot];
+                if (!c || c->done)
+                    w->io_blocked = 0;  /* re-run wait(): it reaps and returns */
+            }
+        }
+        for (i = 1; i < S->nprocs; i++) {
+            proc *c = S->procs[i];
+            if (c && c->done) {
+                proc *par = (c->parent >= 0 && c->parent < S->nprocs)
+                            ? S->procs[c->parent] : 0;
+                if (!par || par->done)
+                    reap_child(S, i);
+            }
+        }
 
         live = 0;
         for (i = 0; i < S->nprocs; i++)
@@ -689,7 +981,7 @@ run_sandbox(const run_opts *o, const skj_cpu_ops *ops, int *status)
         return -1;
 
     rp = S.procs[0];
-    guest_install_mounts(&rp->g, o->path, o);
+    guest_install_mounts(&rp->g, o->path, o, rp->grants, &rp->ngrants);
 
     if (ops->gdb && o->gdb_port > 0) {
         /* Debug the root process under the GDB remote protocol instead of

@@ -167,6 +167,11 @@ hv_service_doorbell(proc *p, struct vmm_exit *ex)
         cpu->yield = 1;
         vmm_vcpu_syscall_ret(ex, 0);
         return;
+    case SKJ_PRIV_RETRY:                /* unreachable: the HV cores set can_park=0,
+                                         * so wait() returns WOULDBLOCK, never parks */
+        cpu->yield = 1;
+        vmm_vcpu_syscall_ret(ex, 0);
+        return;
     case SKJ_PRIV_NO:
         break;
     }

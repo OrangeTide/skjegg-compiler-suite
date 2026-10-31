@@ -79,6 +79,7 @@ rv_ecall(rv_cpu *cpu, void *ctx)
     case SKJ_PRIV_OK:    cpu->x[10] = result; return RV_ECALL_OK;
     case SKJ_PRIV_FATAL: rv_halt(cpu); return RV_ECALL_OK;
     case SKJ_PRIV_YIELD: cpu->waiting = 1; return RV_ECALL_OK;
+    case SKJ_PRIV_RETRY: cpu->waiting = 1; return RV_ECALL_RETRY;  /* re-run the ecall */
     case SKJ_PRIV_NO:    break;
     }
 

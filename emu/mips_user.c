@@ -111,6 +111,11 @@ mips_syscall(mips_cpu *cpu, void *ctx)
     case SKJ_PRIV_OK:    cpu->r[2] = result; cpu->r[7] = 0; return 0;
     case SKJ_PRIV_FATAL: mips_halt(cpu); return 0;
     case SKJ_PRIV_YIELD: cpu->yielding = 1; return 0;
+    case SKJ_PRIV_RETRY:                /* re-run the syscall next slice */
+        cpu->pc = cpu->cur_pc;
+        cpu->next_pc = cpu->cur_pc + 4;
+        cpu->yielding = 1;
+        return 0;
     case SKJ_PRIV_NO:    break;
     }
 

@@ -24,4 +24,10 @@ int elf64_probe_mem(const uint8_t *buf, long size, elf32_info *info);
 int elf64_load_mem(guest *g, const uint8_t *buf, long size, elf32_info *info,
                    const char *what);
 
+/* Resolve a global symbol's value from an in-memory ELF64 image (the ELF64
+ * analogue of elf32_symbol_mem).  The HV guest lives under 4 GiB, so the value
+ * is returned as a 32-bit address; 0 means not found. */
+uint32_t elf64_symbol_mem(const uint8_t *buf, long size, const char *name);
+uint32_t elf64_symbol(const char *path, const char *name);
+
 #endif /* ELF64_H */

@@ -63,10 +63,16 @@ int             fs_mount_count = 0;
 int             fs_cur_mount = 0;
 struct fs_mount_aux fs_mount_aux[FS_MAX_MOUNTS];
 
-/* The one fd space.  A slot is a file, a directory, or a mount root; `h` is the
- * owning backend's opaque handle and `pos` is the file offset / dir cursor that
- * fs.c keeps on the backend's behalf. */
-enum { FD_FREE = 0, FD_FILE, FD_DIR, FD_ROOT };
+/* The one fd space.  A slot is a file, a directory, a mount root, or a console
+ * stream; `h` is the owning backend's opaque handle (a raw host fd for a
+ * console slot) and `pos` is the file offset / dir cursor that fs.c keeps on
+ * the backend's behalf.  A console slot has no mount: it reaches the host
+ * directly through the raw crt seam, so its byte ops bypass backend_for. */
+enum { FD_FREE = 0, FD_FILE, FD_DIR, FD_ROOT, FD_STREAM };
+/* FD_STREAM is a raw host-fd stream: the standard streams 0/1/2, a pipe end, or
+ * any descriptor inherited at spawn.  They are not special here; the sandbox
+ * owns its host fd (the host gives each sandbox its own 0/1/2), so fs_close
+ * closes it like any other.  Byte ops go straight to the raw crt seam. */
 struct fd_slot {
     int      kind;
     int      mount;
@@ -74,6 +80,22 @@ struct fd_slot {
     int64_t  pos;
 };
 static struct fd_slot fd_tab[FS_MAX_FDS];
+
+#ifdef FS_WITH_STREAMS
+/* The raw crt seam the host-fd stream slots read/write through.  Only the guest
+ * links these (0/1/2, pipe ends, and inherited fds bound to host capability
+ * fds); the hosted fs_test build leaves them undefined and never sets
+ * FS_WITH_STREAMS, so such a slot never appears. */
+int  __sys_read(int fd, void *buf, int n);
+int  __sys_write(int fd, const void *buf, int n);
+int  __sys_close(int fd);
+#endif
+
+/* Descriptors a spawned child inherits (redirects, pipe ends).  The launcher
+ * writes this fixed-layout table and fs_init installs it; empty on the root and
+ * in the hosted fs_test. */
+struct fs_inherit_fd fs_inherit_fds[FS_MAX_FDS];
+int                  fs_inherit_n = 0;
 
 /* Per-mount current directory as a normalized component path with no leading
  * slash ("" is the root), kept only so fs_getcwd can report it. */
@@ -141,7 +163,7 @@ fd_alloc(int kind, int mount, intptr_t h)
 static struct fd_slot *
 fd_get(int fd)
 {
-    if (fd < FS_FD_BASE || fd >= FS_MAX_FDS || fd_tab[fd].kind == FD_FREE)
+    if (fd < 0 || fd >= FS_MAX_FDS || fd_tab[fd].kind == FD_FREE)
         return 0;
     return &fd_tab[fd];
 }
@@ -336,6 +358,10 @@ fs_read(int fd, void *buf, int n)
 
     if (!s)
         return -EBADF;
+#ifdef FS_WITH_STREAMS
+    if (s->kind == FD_STREAM)
+        return __sys_read((int)s->h, buf, n);
+#endif
     b = backend_for(&fs_mounts[s->mount]);
     if (s->kind == FD_FILE)
         return b->read(&fs_mounts[s->mount], s->h, buf, n, &s->pos);
@@ -355,7 +381,13 @@ fs_write(int fd, const void *buf, int n)
 {
     struct fd_slot *s = fd_get(fd);
     const struct fs_backend *b;
-    if (!s || s->kind != FD_FILE)
+    if (!s)
+        return -EBADF;
+#ifdef FS_WITH_STREAMS
+    if (s->kind == FD_STREAM)
+        return __sys_write((int)s->h, buf, n);
+#endif
+    if (s->kind != FD_FILE)
         return -EBADF;
     if (fs_mounts[s->mount].flags & FS_RO)
         return -EROFS;
@@ -369,7 +401,13 @@ fs_lseek(int fd, int64_t off, int whence)
     struct fd_slot *s = fd_get(fd);
     const struct fs_backend *b;
     int64_t r;
-    if (!s || s->kind != FD_FILE)
+    if (!s)
+        return -EBADF;
+#ifdef FS_WITH_STREAMS
+    if (s->kind == FD_STREAM)
+        return -ESPIPE;                   /* a stream is not seekable */
+#endif
+    if (s->kind != FD_FILE)
         return -EBADF;
     b = backend_for(&fs_mounts[s->mount]);
     if (!b->lseek)
@@ -388,10 +426,50 @@ fs_close(int fd)
     int rc;
     if (!s)
         return -EBADF;
+#ifdef FS_WITH_STREAMS
+    if (s->kind == FD_STREAM) {
+        /* The sandbox owns its host fd (its own 0/1/2, pipe end, or inherited
+         * stream), so close it: a pipe peer then sees EOF. */
+        int rc = __sys_close((int)s->h);
+        s->kind = FD_FREE;
+        return rc;
+    }
+#endif
     b = backend_for(&fs_mounts[s->mount]);
     rc = b->close(&fs_mounts[s->mount], s->h, s->kind != FD_FILE);
     s->kind = FD_FREE;
     return rc;
+}
+
+int
+fs_adopt_pipe(int gfd)
+{
+    return fd_alloc(FD_STREAM, -1, gfd);
+}
+
+int
+fs_fd_backing(int fd, int *gfd)
+{
+    struct fd_slot *s = fd_get(fd);
+    if (!s)
+        return -EBADF;
+    if (s->kind == FD_STREAM) {
+        *gfd = (int)s->h;       /* 0/1/2, a pipe end, or an inherited stream */
+        return 0;
+    }
+    if (s->kind == FD_FILE && s->mount >= 0) {
+        /* A file on a host-backed mount (hostcap, devfs) carries a host
+         * capability index as its handle, the same thing a stream carries, so
+         * the host can dup it into a child: this is how a redirect to a file
+         * reaches a spawned command. A ramfs, romfs or 9p handle is backend
+         * state private to this process and cannot be passed. */
+        uint32_t kind = fs_mounts[s->mount].flags & FS_KIND_MASK;
+        if (kind == FS_KIND_HOST || kind == FS_KIND_DEV) {
+            *gfd = (int)s->h;
+            return 0;
+        }
+    }
+    return -EINVAL;                 /* not a host-backed, passable fd */
 }
 
 int
@@ -453,6 +531,14 @@ fs_fstat(int fd, struct fs_stat *st)
     const struct fs_backend *b;
     if (!s)
         return -EBADF;
+#ifdef FS_WITH_STREAMS
+    if (s->kind == FD_STREAM) {
+        memset(st, 0, sizeof *st);
+        st->mode = FS_S_IFCHR | 0666u;    /* a raw stream: a character device */
+        st->nlink = 1;
+        return 0;
+    }
+#endif
     b = backend_for(&fs_mounts[s->mount]);
     return b->fstat(&fs_mounts[s->mount], s->h, s->kind != FD_FILE, st);
 }
@@ -664,6 +750,40 @@ fs_init(void)
     if (started)
         return;
     started = 1;
+
+#ifdef FS_WITH_STREAMS
+    /* Bind 0/1/2 to the sandbox's own stdin/stdout/stderr as stream slots so
+     * they live in the one fd space like every other fd, with no special case:
+     * the host gave this sandbox its own host fds for them.  fd_alloc starts at
+     * FS_FD_BASE, so a later open never lands on them.  Runs on every path,
+     * before the table-adoption return below. */
+    {
+        int i;
+        for (i = 0; i < FS_FD_BASE; i++) {
+            fd_tab[i].kind = FD_STREAM;
+            fd_tab[i].mount = -1;
+            fd_tab[i].h = i;
+            fd_tab[i].pos = 0;
+        }
+    }
+
+    /* Install the descriptors a parent passed at spawn (redirects, pipe ends),
+     * each a host-fd stream the child owns.  These override the defaults above
+     * and claim their slots before the mount adoption below allocates any, so
+     * fd_alloc skips them. */
+    {
+        int i;
+        for (i = 0; i < fs_inherit_n && i < FS_MAX_FDS; i++) {
+            int dst = fs_inherit_fds[i].dst;
+            if (dst < 0 || dst >= FS_MAX_FDS)
+                continue;
+            fd_tab[dst].kind = FD_STREAM;
+            fd_tab[dst].mount = -1;
+            fd_tab[dst].h = fs_inherit_fds[i].gfd;
+            fd_tab[dst].pos = 0;
+        }
+    }
+#endif
 
     if (fs_mount_count > 0) {
         /* The table is already populated: either the launcher filled it (the

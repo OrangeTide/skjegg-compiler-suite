@@ -32,6 +32,7 @@
  *   MUNMAP arg0=base, arg1=size  -> 0
  *   SPAWN  arg0=image ptr, arg1=len -> child handle (0 on failure)
  *   YIELD  give up the rest of the scheduling slice
+ *   SPAWNV arg0=guest ptr to a size-prefixed spawn request -> child handle
  */
 #define SKJ_SYS_FATAL   0x000f0000u
 #define SKJ_SYS_MAP     0x000f0001u
@@ -39,6 +40,46 @@
 #define SKJ_SYS_SPAWN   0x000f0003u
 #define SKJ_SYS_YIELD   0x000f0004u
 #define SKJ_SYS_P9      0x000f0005u     /* arg0 = 9p channel addr -> 0, or -1 */
+#define SKJ_SYS_SPAWNV  0x000f0006u
+#define SKJ_SYS_WAIT    0x000f0007u     /* arg0 = child handle -> status, or a sentinel */
+#define SKJ_SYS_KILL    0x000f0008u     /* arg0 = child handle, arg1 = status -> 0 or -1 */
+#define SKJ_SYS_PIPE    0x000f0009u     /* arg0 = guest addr for 2 u32 ends -> 0 or -1 */
+
+/* SKJ_SYS_WAIT result sentinels, above any real status (exit codes 0..255 and
+ * 128+signal).  BADHANDLE: not a live child of the caller.  WOULDBLOCK: the
+ * child is still running and this core cannot park (the HV cores), so the guest
+ * must retry. */
+#define SKJ_WAIT_BADHANDLE  0xffffffffu
+#define SKJ_WAIT_WOULDBLOCK 0xfffffffeu
+
+/* The guest-memory spawn request SKJ_SYS_SPAWNV points at: a size-prefixed,
+ * extensible descriptor of 32-bit guest words.  The host reads `size` (the byte
+ * count the guest filled) and honors only the fields that fit, so later fields
+ * (env, mounts, fds) can be added without a new selector; a guest that fills
+ * only through argc gets argv passing and host defaults for the rest.  All words
+ * are in the guest's byte order. */
+enum {
+    SKJ_SPAWN_OFF_SIZE      = 0,    /* bytes the guest filled                   */
+    SKJ_SPAWN_OFF_IMAGE     = 4,    /* guest addr of the ELF image              */
+    SKJ_SPAWN_OFF_IMAGE_LEN = 8,
+    SKJ_SPAWN_OFF_ARGV      = 12,   /* guest addr of argc u32 string pointers   */
+    SKJ_SPAWN_OFF_ARGC      = 16,
+    SKJ_SPAWN_OFF_FLAGS     = 20,   /* u32 SKJ_SPAWN_FLAG_* request bits         */
+    SKJ_SPAWN_OFF_FDMAP     = 24,   /* guest addr of fdmap_n {src,dst} u32 pairs */
+    SKJ_SPAWN_OFF_FDMAP_N   = 28,   /* u32 count of fd-map pairs                 */
+    SKJ_SPAWN_MIN           = 12,   /* image + image_len is the minimum request */
+    SKJ_SPAWN_WITH_ARGV     = 20,   /* through argc: argv passing is present     */
+    SKJ_SPAWN_WITH_FDS      = 32    /* through fdmap_n: flags + fd map present   */
+};
+
+/* Spawn request flags (SKJ_SPAWN_OFF_FLAGS). */
+#define SKJ_SPAWN_FLAG_SHARE_MOUNTS 0x1u  /* give the child the parent's mounts */
+
+/* Marshalling caps for a spawn request (host-side bounds on untrusted input). */
+#define SKJ_SPAWN_MAX_ARGC   64
+#define SKJ_SPAWN_ARG_MAX    256
+#define SKJ_SPAWN_ARGBUF     4096
+#define SKJ_SPAWN_MAX_FDMAP  16
 
 #define SKJ_MAX_PROC    64
 #define SKJ_QUANTUM     8192            /* instructions per scheduling slice */
@@ -68,6 +109,11 @@ typedef struct proc {
     int park_fd;                /* host fd it waits on, or -1 (a pure sleeper) */
     short park_events;          /* poll events it waits for (POLLIN) */
     uint64_t park_deadline;     /* monotonic ns to wake a sleeper, 0 if none */
+    int parent;                 /* spawner's slot; -1 for the root */
+    int zombie;                 /* exited: heavy resources freed, status kept for wait */
+    int wait_slot;              /* slot it is blocked in SKJ_SYS_WAIT on, else -1 */
+    struct guest_grant grants[RUN_MAX_MOUNTS]; /* its mounts, for a child to inherit */
+    int ngrants;                /* live entries in grants[] */
 } proc;
 
 typedef struct sched {
@@ -93,6 +139,8 @@ enum skj_priv {
     SKJ_PRIV_OK,        /* handled; *result holds the value for the result reg */
     SKJ_PRIV_FATAL,     /* FATAL: the process is ending; the shim halts the cpu */
     SKJ_PRIV_YIELD,     /* YIELD: the shim sets the core's park flag */
+    SKJ_PRIV_RETRY,     /* WAIT park: re-execute the call next slice, do not
+                         * advance past it; the shim parks like GPARK_RETRY */
 };
 
 /* Handle MAP/MUNMAP/SPAWN/FATAL/YIELD.  arg0/arg1 are the call's two arguments
