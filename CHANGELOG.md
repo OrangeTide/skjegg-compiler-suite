@@ -6,6 +6,37 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.32.0
+
+#### Added
+- Cooperative yields for blocking guest syscalls in the `skj-run` emulator. A
+  `read` on a would-block descriptor, `nanosleep`, and `sched_yield` now park
+  the calling guest and hand the single host thread back to the scheduler, which
+  blocks in `poll()` only when no guest can run. A blocking call no longer
+  stalls the whole cooperative sandbox. The hardware-virtualization cores keep
+  their plain blocking behavior. [ColdFire, RISC-V, MIPS]
+- 9P request batching in the sandbox filesystem client. The hot `fs/` composites
+  now cost one doorbell round trip each instead of two or three: `stat` /
+  `size` / `exists` / `isdir`, `open`, `unlink` / `rmdir`, and `mkdir`. The 9P
+  server processes a pipeline of framed messages on one session, so a `Twalk`
+  and the operation on the fid it binds travel in the same round trip. A deep
+  path past the 16-element walk limit keeps the stepwise path.
+- `ROOT:` names the default root. Mount index 0 is the default root, and `ROOT:`
+  (any case) selects it without a program having to know the real mount name,
+  the DOS single-drive convention. It resolves only after an exact mount-name
+  match fails, so it never shadows a mount actually named `ROOT`.
+- `std.time` and `std.random` glue linked into the RISC-V and arm64 Kobold JITs,
+  extending the hosted-tier coverage added in 0.31.0 to those JIT targets.
+
+#### Fixed
+- The 9P sandbox server now rejects a truncated request with `Rerror` instead of
+  decoding its missing fields as zero and acting on them. Before, a short
+  `Tclunk` clunked fid 0, a short `Tversion` reset the session, and a short
+  `Twalk` bound a fid, all from malformed input.
+- `skj-cc` grows its preprocessed-source buffer to 2 MiB, so a translation unit
+  that embeds a large guest image as a byte array (the sandbox spawn demos)
+  compiles again after the embedded Kobold child crossed 1 MiB.
+
 ### 0.31.0
 
 #### Added

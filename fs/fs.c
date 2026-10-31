@@ -1,6 +1,10 @@
 /* fs/ core: the mount table, the one shared fd space, path resolution, the DOS
  * current-mount + per-mount-cwd state, and dispatch to the backends.
  *
+ * Mount index 0 is the default root; `ROOT:` (any case) is a resolver alias for
+ * it (see is_root_alias), the DOS single-drive convention where one drive is
+ * the implicit root.
+ *
  * Errno-style negatives here use <errno.h>; when this moves into the
  * freestanding guest build those map to the guest libc's errno codes. */
 
@@ -152,6 +156,35 @@ pad_name(char out[FS_NAME_MAX], const char *name)
         out[i] = 0;
 }
 
+/* "ROOT" (any case) is the conventional name for the default root, mount index
+ * 0.  It is a resolver alias, not a stored mount name: the table never holds a
+ * mount literally called ROOT, so this is tried only after an exact match
+ * fails, and it works whatever backend happens to sit at index 0.  The model is
+ * the DOS single-drive case: almost every workload uses one drive and treats it
+ * as the root, so ROOT: names it without the program having to know its real
+ * mount name. */
+static int
+is_root_alias(const char padded[FS_NAME_MAX])
+{
+    char up[FS_NAME_MAX], want[FS_NAME_MAX];
+    int i;
+    for (i = 0; i < FS_NAME_MAX; i++) {
+        char c = padded[i];
+        up[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+    }
+    pad_name(want, "ROOT");
+    return memcmp(up, want, FS_NAME_MAX) == 0;
+}
+
+/* The default root (mount index 0) when it is present and live, else -1. */
+static int
+root_mount(void)
+{
+    if (fs_mount_count > 0 && fs_mounts[0].fd != -1)
+        return 0;
+    return -1;
+}
+
 int
 fs_install_mount(const char *name, enum fs_kind kind, intptr_t root_handle,
                  uint32_t flags)
@@ -203,6 +236,8 @@ split_path(const char *path, const char **sub)
                     break;
                 }
         }
+        if (m < 0 && is_root_alias(q))
+            m = root_mount();
         if (m < 0)
             return -ENOENT;
         *sub = colon + 1;
@@ -516,6 +551,8 @@ fs_mount_find(const char *name)
         if (fs_mounts[i].fd != -1 &&
             memcmp(fs_mounts[i].name, q, FS_NAME_MAX) == 0)
             return i;
+    if (is_root_alias(q))
+        return root_mount();
     return -1;
 }
 

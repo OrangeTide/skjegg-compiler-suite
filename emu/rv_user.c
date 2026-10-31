@@ -76,18 +76,26 @@ rv_ecall(rv_cpu *cpu, void *ctx)
     int32_t r;
 
     switch (sched_private(p, nr, cpu->x[10], cpu->x[11], cpu->pc, &result)) {
-    case SKJ_PRIV_OK:    cpu->x[10] = result; return 0;
-    case SKJ_PRIV_FATAL: rv_halt(cpu); return 0;
-    case SKJ_PRIV_YIELD: cpu->waiting = 1; return 0;
+    case SKJ_PRIV_OK:    cpu->x[10] = result; return RV_ECALL_OK;
+    case SKJ_PRIV_FATAL: rv_halt(cpu); return RV_ECALL_OK;
+    case SKJ_PRIV_YIELD: cpu->waiting = 1; return RV_ECALL_OK;
     case SKJ_PRIV_NO:    break;
     }
 
     r = guest_syscall(g, sys_of_rv(nr), cpu->x[10], cpu->x[11], cpu->x[12],
                       cpu->x[13], cpu->x[14], cpu->x[15]);
+    if (g->park == GPARK_RETRY) {
+        /* The syscall did nothing: park and re-run the ecall next slice,
+         * committing no result (a0 keeps the call's own argument). */
+        cpu->waiting = 1;
+        return RV_ECALL_RETRY;
+    }
     cpu->x[10] = (uint32_t)r;
+    if (g->park == GPARK_YIELD)         /* completed, but end the slice */
+        cpu->waiting = 1;
     if (g->exited)
         rv_halt(cpu);
-    return 0;
+    return RV_ECALL_OK;
 }
 
 /****************************************************************
@@ -215,6 +223,7 @@ rv_ready(proc *p, uint32_t entry, uint32_t sp)
     cpu->dp = 1;                /* double precision, host-double (see rv_cpu.dp) */
     rv_dec_enable(cpu);         /* the decoded-instruction cache: a pure speed-up */
     cpu->x[2] = sp;             /* sp */
+    p->g.can_park = 1;          /* cooperative blocking-syscall yields (see guest.h) */
 }
 
 static enum skj_run_reason

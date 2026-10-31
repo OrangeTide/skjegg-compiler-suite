@@ -127,6 +127,16 @@ mips_syscall(mips_cpu *cpu, void *ctx)
         a2 = mips_oflags_to_host(a2);
 
     r = guest_syscall(g, sys, a0, a1, a2, a3, a4, a5);
+    if (g->park == GPARK_RETRY && !cpu->in_delay) {
+        /* The syscall did nothing: rewind to re-execute it next slice (the step
+         * loop has already advanced pc past the SYSCALL), commit no result, and
+         * yield.  A SYSCALL in a branch delay slot (never emitted by the libc
+         * stubs) cannot be cleanly rewound, so it falls through and blocks. */
+        cpu->pc = cpu->cur_pc;
+        cpu->next_pc = cpu->cur_pc + 4;
+        cpu->yielding = 1;
+        return 0;
+    }
     if (r < 0) {
         cpu->r[2] = (uint32_t)(-r);     /* $v0 = positive errno */
         cpu->r[7] = 1;                  /* $a3 = error */
@@ -134,6 +144,8 @@ mips_syscall(mips_cpu *cpu, void *ctx)
         cpu->r[2] = (uint32_t)r;        /* $v0 = result */
         cpu->r[7] = 0;                  /* $a3 = ok */
     }
+    if (g->park == GPARK_YIELD)         /* completed, but end the slice */
+        cpu->yielding = 1;
     if (g->exited)
         mips_halt(cpu);
     return 0;
@@ -227,6 +239,7 @@ mips_ready(proc *p, uint32_t entry, uint32_t sp)
     mips_reset(cpu, entry);
     mips_set_syscall(cpu, mips_syscall, p);
     cpu->r[29] = sp;            /* $sp */
+    p->g.can_park = 1;          /* cooperative blocking-syscall yields (see guest.h) */
 }
 
 static enum skj_run_reason

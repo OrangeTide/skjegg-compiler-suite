@@ -102,7 +102,18 @@ cf_service(proc *p)
 
     r = guest_syscall(g, sys_of_m68k(cpu->d[0]), cpu->d[1], cpu->d[2], cpu->d[3],
                       cpu->d[4], cpu->d[5], cpu->a[0]);
+    if (g->park == GPARK_RETRY) {
+        /* The syscall did nothing: rewind to the 2-byte TRAP #0 so it re-traps
+         * and re-issues next slice; commit no result, yield now.  The stack
+         * pointer stays at the popped (pre-trap) value a[7] already holds, so
+         * re-executing TRAP pushes an identical frame rather than leaking one. */
+        cpu->pc = ret - 2;
+        cpu->yielding = 1;
+        return;
+    }
     cpu->d[0] = (uint32_t)r;
+    if (g->park == GPARK_YIELD)         /* completed, but end the slice */
+        cpu->yielding = 1;
     if (g->exited)
         cpu->halted = 1;
 }
@@ -245,6 +256,7 @@ cf_ready(proc *p, uint32_t entry, uint32_t sp)
     cf_reset(cpu);              /* loads SP and PC from the vector table */
     cpu->trap_window_base = CF_MAGIC_BASE;
     cpu->trap_window_end = CF_MAGIC_END;
+    g->can_park = 1;            /* cooperative blocking-syscall yields (see guest.h) */
 }
 
 /* Drive cf_run, servicing TRAP #0 syscalls in place so only a terminal event

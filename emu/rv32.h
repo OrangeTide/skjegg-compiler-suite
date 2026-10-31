@@ -137,7 +137,11 @@ typedef int (*rv_probe_fn)(void *ctx, uint32_t addr, int size, int is_write);
 
 /* Environment call callback: invoked on ECALL before the trap is taken.
  * The callback reads arguments from cpu->x[]/cpu->f[] and writes results
- * back. Return 0 if handled, nonzero to fall through to the ECALL trap. */
+ * back. Return RV_ECALL_OK if handled, RV_ECALL_RETRY to park without
+ * advancing the PC (the ECALL re-executes on the next run), or any other
+ * value to fall through to the ECALL trap. */
+#define RV_ECALL_OK     0       /* handled; advance past the ECALL */
+#define RV_ECALL_RETRY  (-1)    /* parked; re-execute the ECALL next time */
 struct rv_cpu;
 typedef int (*rv_ecall_fn)(struct rv_cpu *cpu, void *ctx);
 

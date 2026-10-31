@@ -25,6 +25,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <poll.h>
 
 /****************************************************************
  * Sparse memory
@@ -801,7 +802,11 @@ guest_p9_doorbell(guest *g, uint32_t chan)
     if (reqlen > P9_MSIZE)
         reqlen = P9_MSIZE;
     gm_read_out(&g->mem, chan + 8u, req, reqlen);
-    n = p9_server_handle(srv, req, reqlen, rsp, sizeof rsp);
+    /* The request buffer may hold several framed T-messages (the client batches
+     * a walk+open or walk+stat+clunk into one ring); the stream handler runs
+     * each in order and concatenates the framed replies.  One message is a
+     * stream of one, so the common case is unchanged. */
+    n = p9_server_handle_stream(srv, req, reqlen, rsp, sizeof rsp);
     rsplen = n < 0 ? 0 : (uint32_t)n;
     gm_write(&g->mem, chan + 8u + (uint32_t)P9_MSIZE, rsp, rsplen);
     gm_store(&g->mem, chan + 4u, 4, g->big_endian, rsplen);
@@ -848,6 +853,38 @@ sys_write(guest *g, uint32_t fd, uint32_t buf, uint32_t len)
     return (int32_t)done;
 }
 
+/* A monotonic clock in nanoseconds, from the host-abstracted hp_clock.  Used for
+ * the cooperative park deadlines (nanosleep) the scheduler waits out. */
+static uint64_t
+mono_ns(void)
+{
+    uint32_t sec = 0, nsec = 0;
+
+    hp_clock(0, &sec, &nsec);                   /* 0 = monotonic */
+    return (uint64_t)sec * 1000000000ull + nsec;
+}
+
+/* True when a read on host fd hf would block right now: the fd reports neither
+ * readable data nor an end-of-file/error condition.  A regular file always polls
+ * ready, so this only ever holds for a pipe, socket, or terminal with no pending
+ * input. */
+static int
+read_would_block(int hf)
+{
+    struct pollfd pfd;
+    int r;
+
+    pfd.fd = hf;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    do {
+        r = poll(&pfd, 1, 0);
+    } while (r < 0 && errno == EINTR);
+    if (r <= 0)                                 /* 0 = not ready; <0 = give up, read */
+        return r == 0;
+    return (pfd.revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) == 0;
+}
+
 static int32_t
 sys_read(guest *g, uint32_t fd, uint32_t buf, uint32_t len)
 {
@@ -857,6 +894,15 @@ sys_read(guest *g, uint32_t fd, uint32_t buf, uint32_t len)
 
     if (hf < 0)
         return -GUEST_EBADF;
+    /* Cooperative park: if a read would block, yield the slice and re-run the
+     * syscall when the fd is ready rather than stalling the whole sandbox on the
+     * host.  The scheduler waits on park_fd.  Opt-in per core (can_park). */
+    if (g->can_park && len > 0 && read_would_block(hf)) {
+        g->park = GPARK_RETRY;
+        g->park_fd = hf;
+        g->park_events = POLLIN;
+        return 0;
+    }
     if (len > sizeof(tmp))
         len = sizeof(tmp);
     n = read(hf, tmp, len);
@@ -1338,7 +1384,26 @@ sys_nanosleep(guest *g, uint32_t req_ptr, uint32_t rem_ptr)
     nsec = gm_load(&g->mem, req_ptr + 4, 4, g->big_endian);
     if (nsec >= 1000000000u)
         return -GUEST_EINVAL;
-    hp_sleep(sec, nsec);
+    if (!g->can_park) {
+        hp_sleep(sec, nsec);                    /* no scheduler to yield to */
+        return 0;
+    }
+    /* Cooperative park: fix the deadline once (the guest re-runs this syscall
+     * with the same relative duration each retry), then yield the slice until
+     * the scheduler's poll timeout carries us past it.  One pending sleep per
+     * process, which suffices: the process runs one guest thread at a time. */
+    if (!g->sleeping) {
+        g->sleeping = 1;
+        g->sleep_deadline = mono_ns()
+                          + (uint64_t)sec * 1000000000ull + nsec;
+    }
+    if (mono_ns() < g->sleep_deadline) {
+        g->park = GPARK_RETRY;
+        g->park_fd = -1;
+        g->park_deadline = g->sleep_deadline;
+        return 0;
+    }
+    g->sleeping = 0;                            /* deadline reached: the sleep is done */
     return 0;
 }
 
@@ -1349,6 +1414,7 @@ guest_syscall(guest *g, int sys, uint32_t a0, uint32_t a1, uint32_t a2,
     (void)a5;
 
     g->syscalls++;
+    g->park = GPARK_NONE;               /* only a parking syscall leaves this set */
     gfd_init(g);                        /* pre-open 0/1/2 on first syscall */
 
     switch (sys) {
@@ -1434,6 +1500,10 @@ guest_syscall(guest *g, int sys, uint32_t a0, uint32_t a1, uint32_t a2,
         return sys_nanosleep(g, a0, a1);
 
     case GSYS_SCHED_YIELD:
+        if (g->can_park) {
+            g->park = GPARK_YIELD;      /* end the slice; siblings run this round */
+            return 0;
+        }
         hp_yield();
         return 0;
 

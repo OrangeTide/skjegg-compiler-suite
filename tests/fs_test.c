@@ -21,6 +21,21 @@
 
 static int failures;
 
+/* A transport that counts doorbell rings (rpc calls) and delegates to the real
+ * server, so the 9P batching is a tested property: a stat or an open must cost
+ * one ring, not the three or two it was before the composites were batched. */
+static struct p9_transport p9_real;
+static int                  p9_rings;
+
+static int
+counting_rpc(void *ctx, const uint8_t *tx, uint32_t txlen, uint8_t *rx,
+             uint32_t rxcap)
+{
+    (void)ctx;
+    p9_rings++;
+    return p9_real.rpc(p9_real.ctx, tx, txlen, rx, rxcap);
+}
+
 #define CHECK(cond, msg)                                                      \
     do {                                                                      \
         if (cond) {                                                           \
@@ -93,6 +108,16 @@ main(void)
 
     /* name: selector reaches the same scratch mount explicitly. */
     CHECK(fs_exists("tmp:hello") == 1, "tmp:hello exists via selector");
+
+    /* ROOT: is the case-insensitive alias for the default root (index 0, here
+     * the "tmp" scratch mount): it reaches the same file whatever case, and a
+     * name that is not a real mount nor the alias still fails. */
+    CHECK(fs_exists("ROOT:hello") == 1, "ROOT:hello exists via alias");
+    CHECK(fs_exists("root:hello") == 1, "root:hello exists (case-insensitive)");
+    CHECK(fs_exists("Root:hello") == 1, "Root:hello exists (case-insensitive)");
+    CHECK(fs_mount_find("ROOT") == 0, "find ROOT -> 0 (default root alias)");
+    CHECK(fs_mount_find("root") == 0, "find root -> 0 (case-insensitive)");
+    CHECK(fs_exists("nope:hello") < 0, "nope: is not a mount nor the alias");
 
     /* fs_stat / fs_lseek / fs_fstat on the ramfs file. */
     {
@@ -320,7 +345,9 @@ main(void)
         int np, nfd;
 
         CHECK(nproot != 0, "9pfs: made a server root dir");
-        if (nproot && p9_server_open(nproot, &tr) == 0) {
+        if (nproot && p9_server_open(nproot, &p9_real) == 0) {
+            tr.rpc = counting_rpc;       /* count rings, delegate to p9_real */
+            tr.ctx = 0;
             np = ninefs_mount("9p", &tr, 0);
             CHECK(np == 4, "9pfs is mount index 4 (version+attach ok)");
 
@@ -344,6 +371,20 @@ main(void)
                 CHECK(fs_stat("9p:hello.txt", &st) == 0
                       && (st.mode & FS_S_IFMT) == FS_S_IFREG && st.size == 5,
                       "9pfs: stat hello.txt is a 5-byte regular file");
+            }
+
+            /* The batching is a tested property: a stat (Twalk+Tstat+Tclunk)
+             * and an open (Twalk+Topen) each cost exactly one doorbell ring. */
+            {
+                struct fs_stat st;
+                int ofd;
+                p9_rings = 0;
+                fs_stat("9p:hello.txt", &st);
+                CHECK(p9_rings == 1, "9pfs: stat is one ring (walk+stat+clunk)");
+                p9_rings = 0;
+                ofd = fs_open("9p:hello.txt", FS_O_RDONLY, 0);
+                CHECK(p9_rings == 1, "9pfs: open is one ring (walk+open)");
+                if (ofd >= 0) fs_close(ofd);
             }
 
             /* The root directory lists hello.txt and docs. */
@@ -370,7 +411,30 @@ main(void)
             CHECK(fs_unlink("9p:docs/note") == 0, "9pfs: unlink docs/note");
             CHECK(fs_rmdir("9p:docs") == 0, "9pfs: rmdir docs");
 
-            p9_server_close(&tr);
+            /* A truncated T-message must not act on zeroed fields.  Feed the
+             * server a header-only Tclunk and Tversion (every body field is
+             * past the end, so the parse cursor latches not-ok): the reply must
+             * be Rerror, not an Rclunk that clunked fid 0 or an Rversion that
+             * reset the session. */
+            {
+                struct p9_server *bad = p9_server_create(nproot);
+                uint8_t rx[64];
+                int n;
+                uint8_t tclunk[7] = { 7, 0, 0, 0, P9_TCLUNK, 0, 0 };
+                uint8_t tver[7]   = { 7, 0, 0, 0, P9_TVERSION, 0, 0 };
+                CHECK(bad != 0, "9pfs: made a raw server for malformed frames");
+                if (bad) {
+                    n = p9_server_handle(bad, tclunk, sizeof tclunk, rx, sizeof rx);
+                    CHECK(n >= 5 && rx[4] == P9_RERROR,
+                          "9pfs: truncated Tclunk is rejected, not acted on");
+                    n = p9_server_handle(bad, tver, sizeof tver, rx, sizeof rx);
+                    CHECK(n >= 5 && rx[4] == P9_RERROR,
+                          "9pfs: truncated Tversion is rejected, not acted on");
+                    p9_server_destroy(bad);
+                }
+            }
+
+            p9_server_close(&p9_real);
             rmdir(nproot);
         }
     }

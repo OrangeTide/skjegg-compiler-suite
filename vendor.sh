@@ -402,7 +402,7 @@ if [ "$has_sandbox" -eq 1 ]; then
        "$S/fs/devfs.c" "$S/fs/devfs.h" \
        "$S/fs/romfs.c" "$S/fs/romfs.h" \
        "$S/fs/ninefs.c" "$S/fs/ninefs.h" \
-       "$S/fs/p9_guest.c" "$S/fs/p9_guest.h" "$S/fs/p9_wire.h" "$DEST/fs/"
+       "$S/fs/p9_guest.c" "$S/fs/p9_guest.h" "$S/fs/p9_wire.h" "$S/fs/wire.h" "$DEST/fs/"
 fi
 
 # cpp library (needed by cc and cpp tool)
@@ -485,7 +485,7 @@ if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || \
     # guest.c reads the fs/ mount-table layout and, for the --9p doorbell, drives
     # the host-side 9P2000 server; reaches host facilities through hostplat.
     # sched.c is the arch-neutral process sandbox every core's *_user.c binds to.
-    cp "$S/fs/fs.h" "$S/fs/ninefs.h" "$S/fs/p9_wire.h" \
+    cp "$S/fs/fs.h" "$S/fs/ninefs.h" "$S/fs/p9_wire.h" "$S/fs/wire.h" \
        "$S/fs/p9_server.c" "$S/fs/p9_server.h" "$DEST/fs/"
 fi
 if [ "$has_emu_cf" -eq 1 ]; then

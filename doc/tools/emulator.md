@@ -95,24 +95,8 @@ protection, then the heap (for `brk`) and the stack are mapped above
 the image. An access outside every region is a fault reported with the
 address and the reason, rather than a silent read of zero.
 
-Syscalls are the handful a freestanding guest reaches: `read`, `write`,
-`writev`, `brk`, `close`, `exit`, `exit_group`. The per-architecture
-number spaces (Linux/m68k, the RISC-V generic table, and the MIPS o32
-table) map onto one arch-neutral set, so a call added once reaches every
-target. Anything else answers `-ENOSYS`, the way Linux would, so an
-unexpected call surfaces as a guest-visible error.
-
-ColdFire has no syscall hook in the core, and it does not need one:
-user mode is built out of the hardware behavior. The vector table lives
-in a page of guest memory with every entry pointing at a distinct
-address in an unmapped magic window, so when the PC lands there the
-driver knows which vector fired. `TRAP #0` is serviced and returns
-through the exception frame; anything else is reported as the signal a
-kernel would have raised. RV32 uses the core's `ecall` callback. MIPS
-uses the core's `SYSCALL` callback: the number is in `$v0`, the args in
-`$a0-$a3` (the fifth and sixth on the stack), and the o32 return pair
-`$v0`/`$a3` (result or positive errno, plus the error flag) is written
-back from the arch-neutral negative-errno result.
+Syscalls reach one arch-neutral layer, described in "How guest syscalls
+work" below.
 
 The ELF loader has an in-memory form beside the path form. `elf32_load`
 now slurps the file and delegates to `elf32_load_mem`, which walks the
@@ -121,6 +105,80 @@ program headers over a caller-owned buffer and does no file I/O;
 a host load a guest from an image it already holds in memory (a vendored
 verb, a downloaded module) rather than only from a path. Every emulator
 suite exercises the `_mem` body through the path wrappers.
+
+## How guest syscalls work
+
+A guest issues a syscall through its architecture's normal trap, and skj-run
+turns that into a call on one arch-neutral layer. The flow is the same on every
+core:
+
+1. The guest raises its trap with the Linux number and arguments in that ISA's
+   registers: `ecall` with the number in `a7` and arguments in `a0`-`a5` on
+   RV32, `TRAP #0` with the number in `d0` and arguments in `d1`-`d5`/`a0` on
+   ColdFire, `SYSCALL` with the number in `$v0` and arguments in `$a0`-`$a3`
+   (the fifth and sixth on the stack) on MIPS. The hardware-virtualization cores
+   use a load from a doorbell address instead of a trap (see that section).
+2. Each core's `*_user.c` shim reads those registers and maps the
+   per-architecture Linux number onto one arch-neutral selector (`enum
+   guest_sys` in `emu/guest.h`). The Linux/m68k table, the RISC-V generic table
+   and the MIPS o32 table all collapse onto the same set, so a call added once
+   reaches every target.
+3. `guest_syscall` in `emu/guest.c` services the call against the guest's memory
+   and host bindings and returns the Linux convention: a non-negative result, or
+   a negative errno. The shim writes that back into the ISA's result register
+   (`a0`, `d0`, or the o32 `$v0`/`$a3` pair, which carries the result or a
+   positive errno plus an error flag).
+
+The set is the handful a freestanding guest reaches: `read`, `write`, `writev`,
+`openat`, `close`, `lseek`, `brk`, `exit`/`exit_group`, the stat, dirent and
+namespace calls the `fs/` layer needs, the clock and random seams, `nanosleep`
+and `sched_yield`. Anything outside it answers `-ENOSYS`, the way Linux would,
+so an unexpected call surfaces as a guest-visible error rather than a silent
+wrong result. Host-varying work (confined opens, directory reads, the clock,
+random bytes) goes through `emu/hostplat.h`, whose one implementation per host
+OS keeps `guest.c` free of host `#ifdef`s.
+
+ColdFire needs no syscall hook in the core: user mode is built out of the
+hardware behavior. The vector table sits in a page of guest memory with every
+entry pointing at a distinct address in an unmapped magic window, so when the PC
+lands there the driver knows which vector fired. `TRAP #0` is serviced and
+returns through the exception frame; any other vector is reported as the signal
+a kernel would raise. RV32 and MIPS instead use the core's `ecall` / `SYSCALL`
+callback.
+
+### Emulator-private host calls
+
+A second, non-Linux set of selectors sits far above the Linux syscall space
+(`0x000f0000` and up, in `emu/sched.h`), so a real kernel or qemu-user answers
+each with `-ENOSYS` and a guest built for skj-run still runs there, just without
+the service. The shared handler `sched_private` serves them before the Linux
+path: `MAP`/`MUNMAP` (guarded guest mmap), `SPAWN` (load a child process),
+`FATAL` (abort with a backtrace), `YIELD` (give up the rest of the slice), and
+`P9` (ring the 9P doorbell, see the filesystem section). Each core puts the
+selector in its own syscall-number register, so the values and meanings are
+identical across targets.
+
+### Blocking calls yield instead of stalling the sandbox
+
+skj-run runs every guest process on one host thread under a cooperative
+scheduler, so a syscall that blocks on the host would freeze the whole sandbox,
+not just its caller. `read`, `nanosleep` and `sched_yield` therefore yield the
+scheduler slice rather than block the host:
+
+- `read` probes the fd with a non-blocking `poll` first. If data (or EOF) is
+  ready it reads normally; if the read would block it parks the process and
+  re-runs the same syscall on a later slice, so no host fd flags are touched and
+  a regular file always reads at once.
+- `nanosleep` parks the process to an absolute deadline rather than sleeping on
+  the host clock.
+- `sched_yield` completes but ends the slice so siblings run this round.
+
+The scheduler skips a parked process until its fd is ready or its sleep deadline
+passes, and blocks the host in a single `poll` only when every live process is
+parked, so there is no busy-spin and no idle host stall. This is opt-in per core
+(the three emulated cores enable it; the hardware-virtualization cores keep the
+plain blocking path). The scheduler these yields drive is described under "The
+process sandbox".
 
 ## The RV32 interpreter loop
 
@@ -226,14 +284,14 @@ The **basic machine** (the CPU core, the Linux syscall surface, fault reporting
 and the symbolized backtrace) is at full parity: every target runs the same
 freestanding guests under skj-run the same way.
 
-The **capability filesystem** sandbox is the confined `fs/` layer: a guest links
-a freestanding `fs/` libc (named mounts, the `hostcap` backend, the host side
-enforcing `openat2(RESOLVE_BENEATH)`), and the launcher grants host directories
-with `--mount`. All three targets have it, exercised by `test-rv-fs-cap`,
+The **capability filesystem** is the confined `fs/` layer, described in full
+under "The filesystem layer" below: a guest links the freestanding `fs/` libc,
+and the launcher grants host directories with `--mount`, confined by the
+`hostcap` backend. All three targets have it, exercised by `test-rv-fs-cap`,
 `test-cf-fs-cap` and `test-mips-fs-cap` (and by `check-emu-posix`, which reruns
-them through the portable `cap_walk` confinement floor). The `fs/` sources are
-portable C compiled into the guest, and the host side
-(`guest_install_mounts`) is arch-neutral, so the per-target work is only in the
+them through the portable `cap_walk` confinement floor). Since the `fs/` sources
+are portable C compiled into the guest and the launcher
+(`guest_install_mounts`) is arch-neutral, the per-target work is only in the
 runtime seam. Bringing MIPS up to this level needed two runtime fixes worth
 noting as the kind of ABI divergence a new target surfaces: the MIPS crt gained
 the `__sys_*` syscall-seam aliases and `openat` the `fs/` layer calls (with the
@@ -265,7 +323,11 @@ part of that contract: rv parks on `wfi` (`cpu->waiting`), while MIPS and
 ColdFire use a reserved host-call selector `0x000f0004` (in `$v0` on MIPS, in
 `%d0` at `TRAP #0` on ColdFire) that the emulator picks up and never forwards to
 the host, so it is a yield under skj-run and a harmless unknown syscall
-(`-ENOSYS`) on a real host.  The scheduler clears the park flag (`ops->clear_yield`)
+(`-ENOSYS`) on a real host.  The blocking syscalls `read`, `nanosleep` and
+`sched_yield` hand back through this same yield reason rather than stalling the
+host, so a parked reader does not freeze its siblings (see "Blocking calls yield
+instead of stalling the sandbox" under "How guest syscalls work").  The
+scheduler clears the park flag (`ops->clear_yield`)
 at the start of each slice.  The GDB stub stays a per-core piece plugged into the
 same scheduler through an optional `ops->gdb` hook; `rv_gdb.c` and `mips_gdb.c`
 provide it for rv32 and MIPS, ColdFire not yet.  The MIPS stub derives its o32
@@ -663,10 +725,12 @@ handle) loads a child from an image the guest holds in its own memory: the
 host reads the bytes out with `gm_read_out` and loads them with the
 in-memory ELF loader into a fresh process. A returned handle is a slot plus
 a generation, so a handle held past a child's death does not match a later
-child that reuses the slot. The selectors sit in the register the core's
-ABI uses for a syscall number (a7 on rv, `$v0` on MIPS, `%d0` at `TRAP #0`
-on ColdFire) with the two arguments in that ABI's first two argument
-registers; the shared handler (`sched_private`) is the same for all three.
+child that reuses the slot. `SPAWN` is one of the emulator-private host-call
+selectors (`MAP`/`MUNMAP`/`SPAWN`/`FATAL`/`YIELD`/`P9`, listed under "How guest
+syscalls work"): each sits in the register the core's ABI uses for a syscall
+number (a7 on rv, `$v0` on MIPS, `%d0` at `TRAP #0` on ColdFire) with the two
+arguments in that ABI's first two argument registers, and the shared handler
+(`sched_private`) is the same for all three.
 
 The `--total-mem` cap is an aggregate `gm_pool` budget shared across every
 process, so many children cannot together exhaust host memory even though
@@ -685,6 +749,168 @@ pool and faults while the parent, isolated from it, still finishes and the
 run exits on the root's status. Each demo exercises spawn, the guarded map
 and release, the shared budget, and the scheduler resuming a child across
 many slices, on its own CPU core.
+
+## The filesystem layer (`fs/`)
+
+A guest that does file I/O does not reach the host directly. It goes through
+`fs/`, a small filesystem switch shared by every front end: the C libc and the
+Kobold runtime both call it. The design, and the guest-versus-host split, are
+the subject of this section.
+
+### What it is, and what it is not
+
+`fs/` is a flat table of named, independent namespaces (mounts) with one
+selected as current. It is **not** a VFS: there are no subdirectory mounts, no
+mount-point crossing, and no unions, so a path never spans two backends. The
+model is the old "filesystem switch", with DOS-style drive-letter naming:
+
+```
+name:/sub   mount `name`, from its root
+name:sub    mount `name`, from that mount's current directory
+/sub        current mount, from its root
+sub         current mount, from its current directory
+```
+
+The layer is language-agnostic and plain C. `fs.c` owns the one shared fd space
+and the resolver. It strips the `name:` selector, picks root versus current
+directory per the grammar, and dispatches the backend-relative path to the
+chosen backend through a `struct fs_backend` operation table
+(`open`/`read`/`write`/`lseek`/`readdir`/`stat` and the namespace ops).
+Directories are opened with `FS_O_DIRECTORY` and read as fixed `struct
+fs_dirent` records, so there is no separate `opendir`. A guest never mounts: the
+launcher fills the mount table before the program runs, and the guest only reads
+it.
+
+**The default root, `ROOT:`.** Mount index 0 is the default root. `ROOT:` (any
+case: `root:`, `Root:`) is a built-in selector alias for it, so a program can
+name the default drive without knowing its real mount name. The alias is
+resolved only after an exact `name:` match fails, so it never shadows a mount
+actually called `ROOT`, and it works whatever backend sits at index 0: the
+scratch ramfs in the no-grant default, or the first `--mount` grant otherwise.
+This is the DOS single-drive case. Almost every workload uses one drive and
+treats it as the root, the way `C:` is the only drive on most Windows and DOS
+programs, so `ROOT:` names it directly. It is a resolver convenience in `fs.c`,
+not a stored name: the table never holds a mount literally called `ROOT`.
+
+### Guest side versus host side
+
+The split is the key thing to keep straight. Almost the whole layer compiles
+**into the guest** and never reaches the host.
+
+| Piece | Where it runs | Files |
+|---|---|---|
+| The switch, resolver, fd space | guest | `fs/fs.c` |
+| ramfs (in-memory scratch) | guest | `fs/ramfs.c` |
+| romfs reader (read-only image) | guest | `fs/romfs.c` |
+| devfs (null/zero/full) | guest | `fs/devfs.c` |
+| hostcap (confined host tree) | guest client, host kernel enforces | `fs/hostcap.c` |
+| 9P client (ninefs) and transport | guest | `fs/ninefs.c`, `fs/p9_guest.c` |
+| 9P server | host, inside skj-run | `fs/p9_server.c` |
+| hostfs / ambientfs | host-side backends, for the hosted tools and tests | `fs/hostfs.c`, `fs/ambientfs.c` |
+| the launcher that fills the table | host, inside skj-run | `guest_install_mounts` (`emu/guest.c`) |
+| romfs builder | host tool | `fs/romfs_build.c`, `fs/mkromfs.c` |
+
+The only ways a mount can touch real host files are the two deliberately narrow
+host seams below: the confined hostcap backend, and the 9P server.
+
+### The launcher and the mount table
+
+When skj-run loads the root program it runs `guest_install_mounts`
+(`emu/guest.c`), which turns the launcher's grants into entries in the guest's
+`fs_mounts` table (resolved as guest-ELF symbols) before the first instruction
+runs. The guest's own `fs_init` then adopts that table. The command-line grants:
+
+```
+--mount NAME:DIR   a confined host directory (hostcap)
+--rom   NAME:IMG   a read-only romfs image
+--dev   NAME       a devfs mount (null/zero/full)
+--9p    NAME:DIR   a host directory served over 9P
+```
+
+With no grants the guest lands on an empty scratch ramfs, so a bare path stays
+in RAM and the host is reachable only through a mount that was explicitly
+granted. `fs_mount_aux` carries the extra per-mount parameters that do not fit
+the 16-byte table entry: a romfs image's guest address and length, and a 9P
+channel's guest address.
+
+### Reaching real host files, confined
+
+Two backends cross to the host, each through a capability rather than an ambient
+path:
+
+- **hostcap** (`--mount`). The launcher opens the granted directory on the host
+  and hands the guest only a capability fd for it; the host fd is never visible
+  to the guest. Every open under the mount is a host `openat` relative to that
+  fd with `RESOLVE_BENEATH` (a portable `cap_walk` floor stands in where the
+  kernel lacks it), so a `..`, an absolute path, or a climbing symlink cannot
+  escape the granted tree.
+- **9P** (`--9p`), described next, where the host side is a real file server the
+  guest talks to over a protocol rather than a shared backend.
+
+`hostfs` and `ambientfs` are the unconfined or host-resident variants used by
+the hosted tools and the test harness, not by a sandboxed guest. The
+scratch-ramfs default and the capability-only host access are what make a bare
+`skj-run prog.elf` unable to see the host filesystem at all.
+
+### How 9P works, and where each half lives
+
+9P gives a guest a real host directory tree without compiling any
+host-filesystem code into the guest: the guest runs a **client**, skj-run runs a
+**server**, and they exchange messages. This is the one backend whose host half
+is an active server rather than a passive capability.
+
+```
+guest                                   host (inside skj-run)
+-----                                   ---------------------
+fs_open / fs_read / ...                 p9_server.c
+   |                                    (a 9P2000 server over a
+   v                                     real host directory)
+ninefs.c  (9P2000 client)                        ^
+   |  builds a T-message                          |  dispatches, builds
+   v                                              |  the R-message
+p9_guest.c  (transport)                           |
+   |  writes the T-message into the shared        |
+   |  channel, then rings the doorbell  ----------+
+   v
+SKJ_SYS_P9 host call (0x000f0005)
+```
+
+- The **client** (`fs/ninefs.c`) turns each `fs/` operation into one or more
+  9P2000 request/reply exchanges (`Tversion`, `Twalk`, `Topen`, `Tread`, and so
+  on). It is freestanding and byte-order-safe: every wire field is
+  little-endian, assembled through explicit byte helpers, so one client is
+  correct on the big-endian ColdFire guest and the little-endian rv/MIPS guests
+  alike.
+- The **transport** (`fs/p9_guest.c`) is how the client reaches the server. The
+  launcher binds a shared-memory channel in guest memory (`--9p`) and records
+  its address in `fs_mount_aux`. To make one call the transport writes the
+  framed T-message into the channel, rings the `SKJ_SYS_P9` emulator-private
+  host call with the channel's address, and reads the R-message back out. The
+  channel is laid out as a request-length word, a reply-length word, and two
+  `P9_MSIZE` buffers.
+- The **doorbell** is synchronous. `SKJ_SYS_P9` lands in `guest_p9_doorbell`
+  (`emu/guest.c`), which finds the server bound to that channel, copies the
+  T-message out of guest memory, calls `p9_server_handle`, and writes the
+  R-message back into the channel before returning. The guest's call returns
+  with the reply already in place, so the client never waits on a separate
+  event.
+- The **server** (`fs/p9_server.c`) is host-only: it uses the host libc
+  directory and file API to serve one session rooted at the `--9p` directory.
+  The same `p9_server_handle` entry point also backs an in-process transport for
+  the host-only unit test, so the client is exercised with no emulator at all.
+
+Because the guest side is only a client and a byte channel, a 9P guest needs no
+host file code and no confinement logic of its own: the server, running on the
+host, decides what the session can see.
+
+### Tests
+
+`make test-fs` drives the switch and backends host-only (ramfs, romfs, devfs,
+hostcap over a temporary directory, and the 9P client against the in-process
+server). Under skj-run the `test-rv-fs-cap`, `test-cf-fs-cap` and
+`test-mips-fs-cap` targets exercise the confined `--mount` path end to end on
+each core, and `check-emu-posix` reruns them through the portable `cap_walk`
+confinement floor.
 
 ## Double precision (host double, on by default; revised 2026-10-07)
 

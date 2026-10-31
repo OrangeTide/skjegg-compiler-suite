@@ -3,10 +3,13 @@
 #include "sched.h"
 #include "elf32.h"
 #include "elf64.h"
+#include "hostplat.h"           /* hp_clock: the monotonic clock for park deadlines */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <poll.h>
 
 #define PROC_HANDLE(slot, gen)  ((uint32_t)((slot) + 1) | ((uint32_t)(gen) << 8))
 
@@ -503,6 +506,18 @@ proc_slice(sched *S, proc *p)
         S->limited = 1;
         return;
     }
+    /* A cooperative park on a blocking syscall (read/nanosleep): record what the
+     * process is waiting on so the scheduler can skip its slices and poll on its
+     * behalf, rather than spinning the syscall every round.  A plain yield
+     * (sched_yield / SKJ_SYS_YIELD) leaves io_blocked clear and just reschedules. */
+    if (reason == SKJ_RUN_YIELD && p->g.park == GPARK_RETRY) {
+        p->io_blocked = 1;
+        p->park_fd = p->g.park_fd;
+        p->park_events = p->g.park_events;
+        p->park_deadline = p->g.park_deadline;
+    }
+    p->g.park = GPARK_NONE;
+
     /* SKJ_RUN_BUDGET or SKJ_RUN_YIELD with room left: still runnable, reschedule. */
 }
 
@@ -523,34 +538,135 @@ retire_child(sched *S, int slot)
     S->slot_gen[slot]++;
 }
 
+/* A monotonic clock in nanoseconds, matching guest.c's sleep deadlines. */
+static uint64_t
+mono_ns(void)
+{
+    uint32_t sec = 0, nsec = 0;
+
+    hp_clock(0, &sec, &nsec);                   /* 0 = monotonic */
+    return (uint64_t)sec * 1000000000ull + nsec;
+}
+
+/* Wait for an I/O-parked process to become runnable.  Build a pollfd set from
+ * every io_blocked process with a real fd, take the nearest sleep deadline as a
+ * timeout, and poll.  When `block` is 0 the poll returns at once (timeout 0),
+ * just harvesting fds that are already ready; when 1 it blocks until something
+ * is ready or the nearest deadline passes.  A process is unblocked when its fd
+ * signals or its deadline has arrived.  Returns the number unblocked. */
+static int
+poll_blocked(sched *S, int block)
+{
+    struct pollfd fds[SKJ_MAX_PROC];
+    int idx[SKJ_MAX_PROC];              /* idx[k] = proc slot for fds[k] */
+    int nfds = 0, i, woke = 0;
+    uint64_t now, deadline = 0;         /* nearest future sleep deadline, 0 = none */
+    int timeout;
+
+    for (i = 0; i < S->nprocs; i++) {
+        proc *p = S->procs[i];
+
+        if (!p || p->done || !p->io_blocked)
+            continue;
+        if (p->park_fd >= 0) {
+            fds[nfds].fd = p->park_fd;
+            fds[nfds].events = p->park_events;
+            fds[nfds].revents = 0;
+            idx[nfds] = i;
+            nfds++;
+        }
+        if (p->park_deadline && (deadline == 0 || p->park_deadline < deadline))
+            deadline = p->park_deadline;
+    }
+
+    if (!block) {
+        timeout = 0;
+    } else if (deadline) {
+        now = mono_ns();
+        if (deadline <= now) {
+            timeout = 0;
+        } else {
+            uint64_t ms = (deadline - now + 999999ull) / 1000000ull;
+            /* Cap a very long sleep: poll wakes early, the deadline loop below
+             * leaves the sleeper parked, and the scheduler polls again. */
+            timeout = ms > 3600000ull ? 3600000 : (int)ms;
+        }
+    } else {
+        timeout = -1;                   /* only fd waiters: block indefinitely */
+    }
+
+    if (nfds > 0) {
+        int r;
+        do {
+            r = poll(fds, (nfds_t)nfds, timeout);
+        } while (r < 0 && errno == EINTR);
+        for (i = 0; i < nfds; i++)
+            if (fds[i].revents) {
+                S->procs[idx[i]]->io_blocked = 0;
+                woke++;
+            }
+    } else if (block && deadline) {
+        /* Pure sleepers, nothing to poll: wait out the nearest deadline. */
+        if (timeout > 0)
+            hp_sleep((uint32_t)(timeout / 1000),
+                     (uint32_t)((timeout % 1000) * 1000000));
+    }
+
+    /* Wake any sleeper whose deadline has now passed. */
+    now = mono_ns();
+    for (i = 0; i < S->nprocs; i++) {
+        proc *p = S->procs[i];
+
+        if (p && !p->done && p->io_blocked && p->park_deadline &&
+            now >= p->park_deadline) {
+            p->io_blocked = 0;
+            woke++;
+        }
+    }
+    return woke;
+}
+
 /* Round-robin the live processes until none is runnable, retiring each finished
  * child as soon as its round ends so its memory and slot free up for the next
- * spawn. A child spawned during a round is picked up on the next one. */
+ * spawn. A child spawned during a round is picked up on the next one.  A process
+ * parked on a blocking syscall (io_blocked) is skipped until poll_blocked finds
+ * its fd ready or its sleep deadline reached; when every live process is parked,
+ * the scheduler blocks in poll rather than spinning. */
 static void
 run_scheduler(sched *S)
 {
-    int any, i;
+    int live, ran, i;
 
-    do {
+    for (;;) {
+        ran = 0;
         for (i = 0; i < S->nprocs; i++) {
             proc *p = S->procs[i];
 
-            if (!p || p->done)
+            if (!p || p->done || p->io_blocked)
                 continue;
             proc_slice(S, p);
+            ran = 1;
             if (S->limited)
                 return;                 /* the whole run stops at the budget */
         }
         for (i = 1; i < S->nprocs; i++)         /* reclaim finished children */
             if (S->procs[i] && S->procs[i]->done)
                 retire_child(S, i);
-        any = 0;
+
+        live = 0;
         for (i = 0; i < S->nprocs; i++)
             if (S->procs[i] && !S->procs[i]->done) {
-                any = 1;
+                live = 1;
                 break;
             }
-    } while (any);
+        if (!live)
+            return;                     /* every process has exited */
+
+        /* If anything ran this round, more work is immediately available, so
+         * only harvest already-ready parked fds without waiting.  If nothing
+         * ran, every live process is I/O-parked: block until one is ready. */
+        poll_blocked(S, !ran);
+    }
 }
 
 /****************************************************************

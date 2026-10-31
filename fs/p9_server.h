@@ -28,6 +28,14 @@ void              p9_server_destroy(struct p9_server *s);
 int  p9_server_handle(struct p9_server *s, const uint8_t *req, uint32_t reqlen,
                       uint8_t *rx, uint32_t rxcap);
 
+/* Dispatch a concatenation of framed T-messages (the request batching path):
+ * each message runs through p9_server_handle on the same session, so a fid a
+ * Twalk binds is visible to a following message, and the framed R-messages are
+ * concatenated into rx.  A single message is a stream of one, identical to a
+ * bare p9_server_handle.  Returns the total reply length. */
+int  p9_server_handle_stream(struct p9_server *s, const uint8_t *req,
+                             uint32_t reqlen, uint8_t *rx, uint32_t rxcap);
+
 /* Open a server rooted at `root` and fill `out` with an in-process transport
  * that talks to it (a request is dispatched inline, the reply ready on return).
  * The ctx holds server state that must outlive every mount using it.  Returns 0

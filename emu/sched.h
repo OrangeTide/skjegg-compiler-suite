@@ -62,6 +62,12 @@ typedef struct proc {
     uint32_t fatal_pc;          /* the call site to root the fatal backtrace at */
     uint64_t insns;             /* instructions retired by this process */
     uint64_t insn_budget;       /* its instruction cap, 0 = unlimited */
+    int io_blocked;             /* parked on a blocking syscall (GPARK_RETRY); the
+                                 * scheduler skips its slices until park_fd is
+                                 * ready or park_deadline passes */
+    int park_fd;                /* host fd it waits on, or -1 (a pure sleeper) */
+    short park_events;          /* poll events it waits for (POLLIN) */
+    uint64_t park_deadline;     /* monotonic ns to wake a sleeper, 0 if none */
 } proc;
 
 typedef struct sched {

@@ -2756,6 +2756,13 @@ check-mips-emu: build/skj-run build/skj-tinc-mips build/skj-sc-mips \
                 $(MIPS_TESTS:tests/%.tc=build/mips/%) $(MIPS_SCM_TESTS:tests/%.scm=build/mips/%)
 	@sh tests/run-tests.sh ./build/skj-run build/mips
 
+## The cooperative blocking-read path: an echo guest fed buffered and delayed
+## stdin on every sandbox core, proving read() parks and re-runs correctly (see
+## tests/run-coop-read.sh).
+test-coop-read: build/skj-run build/coop_echo build/rv/coop_echo build/mips/coop_echo
+	@sh tests/run-coop-read.sh ./build/skj-run \
+	    cf=build/coop_echo rv=build/rv/coop_echo mips=build/mips/coop_echo
+
 ## ---------------------------------------------------------------
 ## Instruction-count benchmark
 ##
@@ -2832,7 +2839,7 @@ test-ops-emu: build/skj-run build/ops_test_cf
 		|| (echo "FAIL: ops_test (skj-run)"; exit 1)
 
 ## Every suite the in-tree emulator can run, no qemu involved.
-check-emu-all: check-emu check-rv-emu check-mips-emu \
+check-emu-all: check-emu check-rv-emu check-mips-emu test-coop-read \
                test-rv-irq test-rv-run test-guest-mmap \
                test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox \
                test-cf-sandbox test-rv-decode-cache \

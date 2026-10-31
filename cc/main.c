@@ -37,11 +37,12 @@ main(int argc, char **argv)
     const char *outpath;
     int preprocess_only;
     struct cpp *pp;
-    /* The whole translation unit after preprocessing lives here.  It is 1 MiB
+    /* The whole translation unit after preprocessing lives here.  It is 2 MiB
        (static, not on the stack) so a source that embeds a data blob as a byte
        array, like the sandbox demos' guest-image headers, fits; 64 KiB did
-       not. */
-    static char ppbuf[1u << 20];
+       not, and 1 MiB stopped fitting once the embedded Kobold child ELF crossed
+       ~170 KiB (xxd -i expands each byte to about six source bytes). */
+    static char ppbuf[1u << 21];
     int pplen;
     char linebuf[4096];
     int n;

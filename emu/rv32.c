@@ -2593,8 +2593,13 @@ step:
             if (insn == 0x00000073) {           /* ecall */
                 rv_trace_push(&cpu->trace, RV_TR_ECALL, cpu->pc, insn,
                               cpu->x[17], NULL);
-                if (cpu->ecall && cpu->ecall(cpu, cpu->ecall_ctx) == 0)
-                    break;
+                if (cpu->ecall) {
+                    int er = cpu->ecall(cpu, cpu->ecall_ctx);
+                    if (er == RV_ECALL_OK)
+                        break;              /* handled: advance past the ecall */
+                    if (er == RV_ECALL_RETRY)
+                        goto out;           /* parked: leave pc, re-run next time */
+                }
                 rv_trap(cpu, RV_CAUSE_ECALL_M, 0);
                 goto retire;
             }

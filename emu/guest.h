@@ -166,6 +166,20 @@ enum guest_sys {
     GSYS_SCHED_YIELD,
 };
 
+/* How a syscall that could not complete asks the core shim to yield the slice.
+ * GPARK_RETRY means the syscall did nothing and must be re-executed on the next
+ * slice (the shim rewinds the PC and commits no result); the scheduler parks the
+ * process until park_fd is ready or park_deadline passes.  GPARK_YIELD means the
+ * syscall completed normally (the shim commits its result and advances) but the
+ * slice should still end so siblings run this round.  Only the cooperative
+ * sandbox cores opt in (guest.can_park); the hardware-virtualization cores leave
+ * it clear and keep the plain blocking host behavior. */
+enum {
+    GPARK_NONE = 0,
+    GPARK_YIELD,
+    GPARK_RETRY,
+};
+
 /* The sandbox fd table.  A guest fd is an opaque INDEX into this table; the
  * host fd lives only in the entry and is never handed to the guest, so a guest
  * cannot name a host fd it was not given.  Each entry routes to a device
@@ -211,6 +225,16 @@ typedef struct guest {
     struct gfd fdtab[GUEST_MAX_FDS];
     int np9;                    /* bound 9p channels */
     struct guest_p9bind p9[GUEST_MAX_P9];
+
+    /* Cooperative blocking-syscall park (see the GPARK_* enum).  can_park is set
+     * by a sandbox core's ready() to opt in; the HV cores leave it 0. */
+    int can_park;               /* this core services parks; 0 = block on the host */
+    int park;                   /* GPARK_* result of the last syscall, else NONE */
+    int park_fd;                /* host fd to wait on (GPARK_RETRY read); -1 if none */
+    short park_events;          /* poll events to wait for (POLLIN) */
+    uint64_t park_deadline;     /* monotonic ns to wake a sleeper; 0 if none */
+    int sleeping;               /* a nanosleep is pending (its deadline is live) */
+    uint64_t sleep_deadline;    /* that sleep's absolute monotonic ns deadline */
 } guest;
 
 /* Service a 9p doorbell: find the server bound to channel `chan`, read the
