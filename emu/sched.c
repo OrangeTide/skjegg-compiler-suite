@@ -1012,6 +1012,7 @@ run_sandbox(const run_opts *o, const skj_cpu_ops *ops, int *status)
         if (!S.procs[i])
             continue;
         ops->free(S.procs[i]->cpu);
+        guest_fds_free(&S.procs[i]->g);     /* close host fds, remove scratch dir */
         guest_p9_free(&S.procs[i]->g);
         gm_free(&S.procs[i]->g.mem);
         free(S.procs[i]);

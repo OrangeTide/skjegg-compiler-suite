@@ -19,7 +19,7 @@ instructions at a time and reaps each as it exits, halts, or faults. One copy of
 the scheduler serves every core through the `skj_cpu_ops` vtable.
 
 Isolation is the default, not an afterthought. A freshly spawned process comes up
-with the empty scratch ramfs and nothing else, so it reaches the host only
+with its own empty scratch and nothing else, so it reaches the host only
 through a capability its parent deliberately hands it. This is the opposite of
 `fork`: nothing is inherited unless it is passed.
 
@@ -125,8 +125,9 @@ host-backed fd.
 
 A capability in this model is a mount: a `struct fs_mount` entry plus the backend
 handle its root fd names. The `SKJ_SPAWN_FLAG_SHARE_MOUNTS` request hands a child
-the parent's namespace. With the flag unset the child gets today's defaults (the
-scratch ramfs, and whatever the launcher granted the root).
+the parent's namespace. With the flag unset the child still gets its own scratch
+(a fresh per-sandbox host directory `skj-run` grants, see below) and nothing the
+parent held.
 
 Delivery is **host-mediated**, not a guest-side table copy, for two reasons.
 The guest's `fd_tab` is a `static` the host cannot read by symbol, and the
@@ -148,57 +149,62 @@ the parent), which the child does not share, so those mounts stay private to the
 process that holds them; they are recorded for an accurate count but not yet
 inherited.
 
-### Why not host-back every filesystem
+### Host-backing the filesystem where a host is present **(done)**
 
-A tempting answer to that limit is to move every backend's state to the host, so
-any mount could be shared. We considered it and decided against a wholesale
-conversion. The reasoning matters, so it is recorded here.
+When a host is present, as it always is under `skj-run` (the emulated tiers and
+the KVM/HVF ones alike), the host can own the filesystem and the guest needs
+almost no `fs/` code. The backends were most of a guest binary's size, so this
+is the main lever on guest size, and it is now the default for the `skj-run`
+userland. It is a per-deployment choice, not a wholesale conversion: the
+in-guest backends stay available for the hosts that need them.
 
-What it would buy: uniform sharing (every mount passable, not just the
-host-backed ones), smaller guests (the `fs/` backends are most of a guest
-binary's size, and host-backing drops the per-target `fs/` compile), and a
-uniform fd model where every descriptor is a handle to a host object.
+The mechanism is the capability-fd path that already existed for a `--mount`
+host directory (`hostcap`): the guest issues ordinary `openat`/`read`/`write`/
+`statx`/`getdents` on an opaque directory fd, and `skj-run` services them
+against the real host fd it holds. Two default mounts move onto it:
 
-What it would cost, and why it loses:
+- **scratch**, the spot a bare path resolves against, is an ephemeral host
+  directory `skj-run` grants per sandbox (`mkdtemp`, removed at teardown). Each
+  process gets its own, so it is as private as the in-guest ramfs it replaced,
+  with no cross-process shared state.
+- **bin:**, the tool images `jsh` reads, is served as a read-only host directory
+  (`--mount-ro`, which sets `FS_RO`). One host copy serves `jsh` and every
+  child, instead of a romfs image parsed into each guest's memory.
 
-- It breaks the standalone VM hosts. `fs/` runs *in the guest* precisely so the
-  Excelsior ColdFire and RISC-V hosts, which run the guest as the operating
-  system with no host underneath, have a filesystem at all. Host-backing assumes
-  a host is always present; those deployments need the in-guest ramfs and romfs.
-- It is slow where it hurts most. An in-guest ramfs read is a memory access;
-  host-backed, every read, write, and stat becomes a doorbell round trip. The 9P
-  batching work exists to cut round trips, and this would reintroduce them for
-  the hottest backend.
-- romfs loses its point: it ships a read-only image *into* a guest that may have
-  no host, so putting the image on the host defeats the use case.
-- A shared host-backed ramfs is cross-process mutable state that needs
-  concurrency semantics an isolated in-guest ramfs never did.
+The in-guest ramfs and romfs are kept behind `FS_WITH_RAM` and `FS_WITH_ROM` for
+the cases that still need them, and are compiled out of the `skj-run` build:
 
-The decision: keep the in-guest ramfs and romfs, and add a host-backed mount
-*kind* only for the cases that genuinely need cross-process sharing, a shared
-tmpfs and a shared host directory, served the way 9P already is (a host-side
-object the guest reaches by handle). The `fs/` switch is a vtable over backend
-kinds, so both coexist in one table, and the deployment chooses: skj-run can
-offer host-backed shared mounts, the VM hosts simply do not mount them. 9P is
-already the template; a host-backed filesystem is just "a mount served by a
-host-side service," so this generalizes one mechanism rather than relocating
-every backend. **(planned)**
+- The standalone VM hosts. `fs/` runs *in the guest* so the Excelsior ColdFire
+  and RISC-V hosts, which run the guest as the operating system with no host
+  underneath, have a filesystem at all. Those deployments keep the in-guest
+  ramfs and romfs; a bare-qemu guest likewise lands on the in-guest ramfs.
+- The cost of host-backing is a doorbell round trip per `open`/`read`/`write`/
+  `stat`, where an in-guest ramfs read is a memory access. That is fine for
+  scratch and for loading a program image, which is why those move; a backend on
+  a hot inner loop would not.
+
+So the `fs/` switch, a vtable over backend kinds, carries both forms, and the
+deployment chooses by what it links and what the launcher grants. This went
+through the capability-fd mechanism rather than a new 9P-style served kind, so
+it needs no 9P and no round-trip batching for scratch or bin.
 
 ## The userland **(done)**
 
 The userland that rides on this is a shell, `jsh`, and a set of small tools
 (`cat`, `echo`, `ls`, `rm`, `sleep`, `cp`, `mv`), reimplemented in C over
 skjegg's libc and the `fs/` layer. They live under `examples/` (`examples/jsh`
-and `examples/bin`) and run on the two freestanding VM tiers, RISC-V and
-ColdFire, the targets skj-run hosts with the in-guest `fs/`.
+and `examples/bin`) and run on every tier `skj-run` hosts, the emulated RISC-V
+and ColdFire cores and the KVM/HVF x86-64 and arm64 guests, with `skj-run`
+owning scratch and `bin:` host-side so the guest links only the `fs/` switch and
+the hostcap adapter.
 
 `jsh` is a Bourne-subset shell (variables, `if`/`while`/`for`/`case`, functions,
 `&&`/`||`, pipelines, redirection, command substitution). Its parser and
 execution are shared with the standalone build; only the process seam is
 retargeted here. The shell resolves a command name to a program image: a bare
-name is read from the `bin:` mount, which the launcher grants as a romfs of the
-tool images. It reads the image into a buffer, spawns a fresh sandbox for it
-with argv and an fd map, and waits on the handle.
+name is read from the `bin:` mount, which `skj-run` grants as a read-only host
+directory of the tool images (`--mount-ro`). It reads the image into a buffer,
+spawns a fresh sandbox for it with argv and an fd map, and waits on the handle.
 
 Because a child inherits no descriptors, pipelines and redirection build the fd
 map rather than mutating the shell's own fds. A redirect opens the target in the

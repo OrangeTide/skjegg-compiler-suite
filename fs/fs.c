@@ -10,7 +10,9 @@
 
 #include "fs.h"
 #include "fs_internal.h"
-#include "ramfs.h"
+#ifdef FS_WITH_RAM
+#include "ramfs.h"           /* in-guest scratch; omitted when the host grants one */
+#endif
 #ifdef FS_WITH_HOSTFS
 #include "hostfs.h"       /* hosted/dev only; the guest has no direct host fs */
 #endif
@@ -112,8 +114,10 @@ backend_for(const struct fs_mount *mt)
 {
     unsigned kind = mt->flags & FS_KIND_MASK;
     switch (kind) {
+#ifdef FS_WITH_RAM
     case FS_KIND_RAM:
         return &ramfs_backend;
+#endif
 #ifdef FS_WITH_DEV
     case FS_KIND_DEV:
         return &dev_backend;
@@ -855,10 +859,17 @@ fs_init(void)
             mt->cwd = -1;               /* -1 == use the root */
             cwd_path[i][0] = 0;
         }
-        /* Append the safe scratch ramfs and land on it: a --mount guest starts
-         * on the empty RAM disk and reaches the host only through a named grant.
-         * There is no ambient default here; host access is capability-only. */
-        scratch = ramfs_mount("scratch", 0);
+        /* Land on scratch, the default spot where a bare path resolves.  When
+         * the host grants an ephemeral "scratch" directory (skj-run does), it is
+         * already in the table as a confined host mount, so just select it and
+         * the guest needs no in-guest filesystem at all.  Only when no host
+         * scratch was granted, and only if the in-guest ramfs is compiled in,
+         * fall back to an in-memory scratch disk (the bare-qemu path). */
+        scratch = fs_mount_find("scratch");
+#ifdef FS_WITH_RAM
+        if (scratch < 0)
+            scratch = ramfs_mount("scratch", 0);
+#endif
         if (scratch >= 0)
             fs_cur_mount = scratch;
 #endif
@@ -875,8 +886,10 @@ fs_init(void)
      * fs/-interpose guest under bare qemu, where no launcher can grant a
      * --mount; it needs FS_WITH_AMBIENT and goes away once those migrate to a
      * capability mount. */
+#ifdef FS_WITH_RAM
     ramfs_mount("scratch", 0);         /* index 0: the safe empty scratch disk */
     fs_cur_mount = 0;
+#endif
 #ifdef FS_AMBIENT_DEFAULT
     {
         int h = ambient_mount("host", 0);

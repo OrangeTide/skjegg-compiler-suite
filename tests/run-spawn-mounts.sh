@@ -33,7 +33,7 @@ OUTDIR="${OUTDIR:?OUTDIR required}"
 RUN="${RUN:?RUN required}"
 NAME="${NAME:-test-spawn-mounts}"
 
-CFLAGS="-DSKJ_LIBC_FLOAT -DSKJ_FS_INTERPOSE -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_WITH_STREAMS -I$ROOT/fs"
+CFLAGS="-DSKJ_LIBC_FLOAT -DSKJ_FS_INTERPOSE -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_WITH_STREAMS -DFS_WITH_RAM -I$ROOT/fs"
 
 LIBC="$ROOT/libc/string.c $ROOT/libc/ctype.c $ROOT/libc/stdlib.c \
 $ROOT/libc/errno.c $ROOT/libc/malloc.c $ROOT/libc/sbrk.c \

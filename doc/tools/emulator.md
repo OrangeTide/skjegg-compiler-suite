@@ -794,7 +794,8 @@ case: `root:`, `Root:`) is a built-in selector alias for it, so a program can
 name the default drive without knowing its real mount name. The alias is
 resolved only after an exact `name:` match fails, so it never shadows a mount
 actually called `ROOT`, and it works whatever backend sits at index 0: the
-scratch ramfs in the no-grant default, or the first `--mount` grant otherwise.
+scratch mount in the default landing (a host directory under `skj-run`, or the
+in-guest ramfs in a `FS_WITH_RAM` build), or the first `--mount` grant otherwise.
 This is the DOS single-drive case. Almost every workload uses one drive and
 treats it as the root, the way `C:` is the only drive on most Windows and DOS
 programs, so `ROOT:` names it directly. It is a resolver convenience in `fs.c`,
@@ -808,8 +809,8 @@ The split is the key thing to keep straight. Almost the whole layer compiles
 | Piece | Where it runs | Files |
 |---|---|---|
 | The switch, resolver, fd space | guest | `fs/fs.c` |
-| ramfs (in-memory scratch) | guest | `fs/ramfs.c` |
-| romfs reader (read-only image) | guest | `fs/romfs.c` |
+| ramfs (in-memory scratch, optional, `FS_WITH_RAM`) | guest | `fs/ramfs.c` |
+| romfs reader (read-only image, optional, `FS_WITH_ROM`) | guest | `fs/romfs.c` |
 | devfs (null/zero/full) | guest | `fs/devfs.c` |
 | hostcap (confined host tree) | guest client, host kernel enforces | `fs/hostcap.c` |
 | 9P client (ninefs) and transport | guest | `fs/ninefs.c`, `fs/p9_guest.c` |
@@ -829,15 +830,21 @@ When skj-run loads the root program it runs `guest_install_mounts`
 runs. The guest's own `fs_init` then adopts that table. The command-line grants:
 
 ```
---mount NAME:DIR   a confined host directory (hostcap)
---rom   NAME:IMG   a read-only romfs image
---dev   NAME       a devfs mount (null/zero/full)
---9p    NAME:DIR   a host directory served over 9P
+--mount    NAME:DIR   a confined host directory (hostcap)
+--mount-ro NAME:DIR   the same, read-only (mutating ops return EROFS)
+--rom      NAME:IMG   a read-only romfs image parsed in the guest
+--dev      NAME       a devfs mount (null/zero/full)
+--9p       NAME:DIR   a host directory served over 9P
 ```
 
-With no grants the guest lands on an empty scratch ramfs, so a bare path stays
-in RAM and the host is reachable only through a mount that was explicitly
-granted. `fs_mount_aux` carries the extra per-mount parameters that do not fit
+Whenever the launcher grants a guest any mount, it also gives it its own
+`scratch`, an ephemeral host directory (one per sandbox, created with `mkdtemp`
+and removed at teardown) that is the spot a bare path resolves against. So a
+granted guest lands on a private host-owned scratch, and the host is otherwise
+reachable only through a mount that was explicitly granted. A guest launched with
+no grants keeps its own default landing: the in-guest ramfs when built with
+`FS_WITH_RAM`, or the `FS_AMBIENT_DEFAULT` ambient host for the bare-qemu test
+harnesses. `fs_mount_aux` carries the extra per-mount parameters that do not fit
 the 16-byte table entry: a romfs image's guest address and length, and a 9P
 channel's guest address.
 
@@ -846,19 +853,22 @@ channel's guest address.
 Two backends cross to the host, each through a capability rather than an ambient
 path:
 
-- **hostcap** (`--mount`). The launcher opens the granted directory on the host
-  and hands the guest only a capability fd for it; the host fd is never visible
-  to the guest. Every open under the mount is a host `openat` relative to that
-  fd with `RESOLVE_BENEATH` (a portable `cap_walk` floor stands in where the
-  kernel lacks it), so a `..`, an absolute path, or a climbing symlink cannot
-  escape the granted tree.
+- **hostcap** (`--mount`, `--mount-ro`). The launcher opens the granted
+  directory on the host and hands the guest only a capability fd for it; the host
+  fd is never visible to the guest. Every open under the mount is a host `openat`
+  relative to that fd with `RESOLVE_BENEATH` (a portable `cap_walk` floor stands
+  in where the kernel lacks it), so a `..`, an absolute path, or a climbing
+  symlink cannot escape the granted tree. `--mount-ro` adds `FS_RO`, so a
+  mutating op returns `EROFS`; the per-sandbox `scratch` directory and the
+  `skj-run` userland's read-only `bin:` are both served this way.
 - **9P** (`--9p`), described next, where the host side is a real file server the
   guest talks to over a protocol rather than a shared backend.
 
 `hostfs` and `ambientfs` are the unconfined or host-resident variants used by
-the hosted tools and the test harness, not by a sandboxed guest. The
-scratch-ramfs default and the capability-only host access are what make a bare
-`skj-run prog.elf` unable to see the host filesystem at all.
+the hosted tools and the test harness, not by a sandboxed guest. The private
+scratch default and the capability-only host access are what keep a bare
+`skj-run prog.elf` from seeing the host filesystem: it reaches only its own
+scratch directory and whatever was explicitly granted.
 
 ### How 9P works, and where each half lives
 

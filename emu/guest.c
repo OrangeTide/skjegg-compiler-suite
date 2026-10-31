@@ -27,6 +27,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <poll.h>
+#include <dirent.h>
 
 /****************************************************************
  * Sparse memory
@@ -563,6 +564,24 @@ guest_fds_free(guest *g)
     for (i = 0; i < GUEST_MAX_FDS; i++)
         if (g->fdtab[i].used)
             gfd_close(g, i);
+
+    /* Remove this sandbox's own ephemeral scratch directory (each sandbox gets
+       its own; see install_scratch).  Shallow cleanup: unlink the flat entries,
+       then rmdir. */
+    if (g->scratch_dir[0]) {
+        DIR *d = opendir(g->scratch_dir);
+        if (d) {
+            struct dirent *de;
+            while ((de = readdir(d))) {
+                if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+                    continue;
+                unlinkat(dirfd(d), de->d_name, 0);
+            }
+            closedir(d);
+        }
+        rmdir(g->scratch_dir);
+        g->scratch_dir[0] = 0;
+    }
 }
 
 /* Write one 16-byte fs_mount entry at table slot `slot`:
@@ -656,18 +675,53 @@ grant_record(struct guest_grant *rec, int *nrec, const char *name, int namelen,
     (*nrec)++;
 }
 
+/* Install an ephemeral host scratch directory as a confined mount at table slot
+ * `slot`, recording its path on the guest so guest_fds_free removes it.  Returns
+ * the next free slot: slot+1 on success, slot unchanged on failure or a full
+ * table.  Per-sandbox by design: the root and every spawned child each get their
+ * own fresh directory (a child does not inherit the parent's), so a bare path
+ * lands on an isolated scratch per process, matching the in-guest ramfs it
+ * replaces.  It is deliberately not recorded as an inheritable grant. */
+static int
+install_scratch(guest *g, uint32_t tbl, int slot)
+{
+    const char *tmp = getenv("TMPDIR");
+    char tmpl[64];
+    int hostfd, idx;
+
+    if (slot >= FS_MAX_MOUNTS)
+        return slot;
+    snprintf(tmpl, sizeof tmpl, "%s/skjrun-scratch-XXXXXX",
+             tmp && *tmp ? tmp : "/tmp");
+    if (!mkdtemp(tmpl))
+        return slot;
+    hostfd = open(tmpl, O_RDONLY | O_DIRECTORY);
+    idx = hostfd >= 0 ? gfd_alloc(g, GDEV_HOSTFS, hostfd) : -1;
+    if (idx < 0) {
+        if (hostfd >= 0)
+            close(hostfd);
+        rmdir(tmpl);
+        return slot;
+    }
+    write_mount_entry(g, tbl, slot, "scratch", 7, idx, (uint32_t)FS_KIND_HOST);
+    snprintf(g->scratch_dir, sizeof g->scratch_dir, "%s", tmpl);
+    return slot + 1;
+}
+
 void
 guest_install_mounts(guest *g, const char *elf_path, const run_opts *o,
                      struct guest_grant *rec, int *nrec)
 {
     uint32_t tbl, cnt_sym, cur_sym, aux_sym;
     int i, installed = 0;
-    int ngrants = o->nmounts + o->ndevs + o->nroms + o->np9s;
+    int ngrants = o->nmounts + o->nmounts_ro + o->ndevs + o->nroms + o->np9s;
 
     if (nrec)
         *nrec = 0;
     if (ngrants == 0)
-        return;
+        return;                         /* no grants: leave the guest's own
+                                           default landing (ramfs, or the
+                                           FS_AMBIENT_DEFAULT ambient host) alone */
 
     gfd_init(g);                        /* reserve 0/1/2 before any grant fd */
 
@@ -727,6 +781,45 @@ guest_install_mounts(guest *g, const char *elf_path, const run_opts *o,
         }
         write_mount_entry(g, tbl, installed, spec, nl, idx, (uint32_t)FS_KIND_HOST);
         grant_record(rec, nrec, spec, nl, (uint32_t)FS_KIND_HOST, hostfd);
+        installed++;
+    }
+
+    /* Read-only host mounts (--mount-ro): same as above with FS_RO set, so the
+       backend rejects every mutating op.  A read-only /bin served from a host
+       directory lands here; one host copy serves every sandbox. */
+    for (i = 0; i < o->nmounts_ro && installed < FS_MAX_MOUNTS; i++) {
+        const char *spec = o->mounts_ro[i];
+        const char *colon = strchr(spec, ':');
+        const char *dir;
+        int hostfd, idx, nl;
+
+        if (!colon) {
+            fprintf(stderr, "skj-run: bad --mount-ro '%s' (want name:hostdir)\n",
+                    spec);
+            continue;
+        }
+        nl = (int)(colon - spec);
+        if (nl <= 0 || nl > FS_NAME_MAX) {
+            fprintf(stderr, "skj-run: mount name in '%s' must be 1..%d bytes\n",
+                    spec, FS_NAME_MAX);
+            continue;
+        }
+        dir = colon + 1;
+        hostfd = open(dir, O_RDONLY | O_DIRECTORY);
+        if (hostfd < 0) {
+            fprintf(stderr, "skj-run: cannot mount '%s': %s\n", dir,
+                    strerror(errno));
+            continue;
+        }
+        idx = gfd_alloc(g, GDEV_HOSTFS, hostfd);
+        if (idx < 0) {
+            fprintf(stderr, "skj-run: fd table full mounting '%s'\n", dir);
+            close(hostfd);
+            continue;
+        }
+        write_mount_entry(g, tbl, installed, spec, nl, idx,
+                          (uint32_t)FS_KIND_HOST | FS_RO);
+        grant_record(rec, nrec, spec, nl, (uint32_t)FS_KIND_HOST | FS_RO, hostfd);
         installed++;
     }
 
@@ -834,6 +927,27 @@ guest_install_mounts(guest *g, const char *elf_path, const run_opts *o,
         installed++;
     }
 
+    /* Give this sandbox its own scratch, unless the caller named a "scratch"
+       mount of its own.  Per-sandbox and never inherited (see install_scratch),
+       so a bare path lands on an isolated directory per process. */
+    {
+        int have_scratch = 0, j;
+        for (j = 0; j < o->nmounts; j++)
+            if (strncmp(o->mounts[j], "scratch:", 8) == 0)
+                have_scratch = 1;
+        for (j = 0; j < o->nmounts_ro; j++)
+            if (strncmp(o->mounts_ro[j], "scratch:", 8) == 0)
+                have_scratch = 1;
+        for (j = 0; j < o->ndevs; j++)
+            if (strcmp(o->devs[j], "scratch") == 0)
+                have_scratch = 1;
+        for (j = 0; j < o->nroms; j++)
+            if (strncmp(o->roms[j], "scratch:", 8) == 0)
+                have_scratch = 1;
+        if (!have_scratch)
+            installed = install_scratch(g, tbl, installed);
+    }
+
     gm_store(&g->mem, cnt_sym, 4, g->big_endian, (uint32_t)installed);
     if (cur_sym)
         gm_store(&g->mem, cur_sym, 4, g->big_endian, 0);   /* default mount 0 */
@@ -891,9 +1005,8 @@ guest_install_grants_mem(guest *g, const uint8_t *img, long imglen,
                 continue;
             }
             write_mount_entry(g, tbl, installed, gr->name, gr->namelen, idx,
-                              (uint32_t)FS_KIND_HOST);
-            grant_record(rec, nrec, gr->name, gr->namelen,
-                         (uint32_t)FS_KIND_HOST, newfd);
+                              gr->kind);           /* preserve FS_RO and friends */
+            grant_record(rec, nrec, gr->name, gr->namelen, gr->kind, newfd);
             installed++;
             break;
         }
@@ -909,6 +1022,9 @@ guest_install_grants_mem(guest *g, const uint8_t *img, long imglen,
             break;
         }
     }
+
+    /* The child gets its own fresh scratch, never a share of the parent's. */
+    installed = install_scratch(g, tbl, installed);
 
     gm_store(&g->mem, cnt_sym, 4, g->big_endian, (uint32_t)installed);
     if (cur_sym)

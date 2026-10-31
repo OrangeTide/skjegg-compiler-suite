@@ -1531,7 +1531,7 @@ build/kpfree-cf/numfmt.o: libc/numfmt.c libc/fmt.h $(wildcard include/*.h) build
 ## the rv rules): the Kobold-side io_free.c shim plus the shared stat.c/fileops.c
 ## path ops, built with SKJ_FS_INTERPOSE and the temporary ambient host backend.
 KPFREE_CF_FS := -DSKJ_FS_INTERPOSE -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -Ifs
-FS_FREE_CC_CF := ./build/skj-cc -Iinclude -Ilibc -Ifs -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_AMBIENT_DEFAULT -DFS_WITH_DEV -DFS_WITH_ROM -DFS_WITH_9P -DFS_WITH_STREAMS
+FS_FREE_CC_CF := ./build/skj-cc -Iinclude -Ilibc -Ifs -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_AMBIENT_DEFAULT -DFS_WITH_DEV -DFS_WITH_ROM -DFS_WITH_9P -DFS_WITH_STREAMS -DFS_WITH_RAM
 build/kpfree-cf/io_free.o: kobold/io_free.c $(KP_HDRS_CF) $(FS_HDR) $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
 	./build/skj-cc $(KPFREE_CF_SKJFLAGS) -Iinclude -Ilibc $(KPFREE_CF_FS) -o $(@:.o=.s) kobold/io_free.c
 	./build/skj-as -o $@ $(@:.o=.s)
@@ -2558,7 +2558,7 @@ FS_HDR := fs/fs.h fs/fs_internal.h fs/ramfs.h fs/hostfs.h fs/ambientfs.h \
           fs/hostcap.h fs/devfs.h fs/romfs.h fs/ninefs.h fs/p9_server.h fs/p9_wire.h
 
 build/test_fs: tests/fs_test.c $(FS_SRC) $(FS_HDR) | build
-	$(CC) $(CFLAGS) -DFS_WITH_HOSTFS -DFS_WITH_DEV -DFS_WITH_ROM -DFS_WITH_9P -Ifs -o $@ tests/fs_test.c $(FS_SRC)
+	$(CC) $(CFLAGS) -DFS_WITH_HOSTFS -DFS_WITH_DEV -DFS_WITH_ROM -DFS_WITH_9P -DFS_WITH_RAM -Ifs -o $@ tests/fs_test.c $(FS_SRC)
 
 test-fs: build/test_fs
 	@./build/test_fs
@@ -2577,7 +2577,7 @@ build/skj-mkromfs: fs/mkromfs.c fs/romfs_build.c fs/romfs.h fs/fs.h | build
 ## FS_AMBIENT_DEFAULT is the documented temporary override that lands a no-mount
 ## guest on the ambient host instead, kept while the freestanding test harnesses
 ## still open host files by bare path under qemu.
-FS_FREE_CC := ./build/skj-cc-rv -Iinclude -Ilibc -Ifs -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_AMBIENT_DEFAULT -DFS_WITH_DEV -DFS_WITH_ROM -DFS_WITH_9P -DFS_WITH_STREAMS
+FS_FREE_CC := ./build/skj-cc-rv -Iinclude -Ilibc -Ifs -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_AMBIENT_DEFAULT -DFS_WITH_DEV -DFS_WITH_ROM -DFS_WITH_9P -DFS_WITH_STREAMS -DFS_WITH_RAM
 build/kpfree-rv/fs.o: fs/fs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
 	$(FS_FREE_CC) -o $(@:.o=.s) fs/fs.c
 	./build/skj-as-rv -o $@ $(@:.o=.s)
@@ -5999,27 +5999,27 @@ test-cf-spawn-pipe: build/skj-cc build/skj-as build/skj-ld build/start.o build/h
 ## packed into a romfs mounted at bin:, jsh resolves a bare command name there
 ## and spawns a fresh sandbox per command, wiring pipes and redirects through
 ## the spawn fd map.  rv and cf cover both freestanding VM tiers.
-test-rv-jsh: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv/start.o build/rv/va_rv.o build/rv/soft64_div.o build/rv/co_switch.o build/rv/setjmp.o build/skj-mkromfs build/skj-run
+test-rv-jsh: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-ar build/rv/start.o build/rv/va_rv.o build/rv/soft64_div.o build/rv/co_switch.o build/rv/setjmp.o build/skj-run
 	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
 	 ASM="$(CURDIR)/build/skj-as-rv -o" \
 	 LD="$(CURDIR)/build/skj-ld-rv -o" \
+	 AR="$(CURDIR)/build/skj-ar" \
 	 START="$(CURDIR)/build/rv/start.o" \
 	 HALF="$(CURDIR)/build/rv/va_rv.o $(CURDIR)/build/rv/soft64_div.o $(CURDIR)/build/rv/co_switch.o $(CURDIR)/build/rv/setjmp.o" \
 	 OUTDIR="$(CURDIR)/build/jsh-rv" \
 	 RUN="$(CURDIR)/build/skj-run" \
-	 MKROMFS="$(CURDIR)/build/skj-mkromfs" \
 	 NAME=test-rv-jsh \
 	 sh tests/run-jsh.sh
 
-test-cf-jsh: build/skj-cc build/skj-as build/skj-ld build/start.o build/half.o build/va_cf.o build/co_switch_cf.o build/setjmp_cf.o build/skj-mkromfs build/skj-run
+test-cf-jsh: build/skj-cc build/skj-as build/skj-ld build/skj-ar build/start.o build/half.o build/va_cf.o build/co_switch_cf.o build/setjmp_cf.o build/skj-run
 	@CCBIN="$(CURDIR)/build/skj-cc" \
 	 ASM="$(CURDIR)/build/skj-as -o" \
 	 LD="$(CURDIR)/build/skj-ld -o" \
+	 AR="$(CURDIR)/build/skj-ar" \
 	 START="$(CURDIR)/build/start.o" \
 	 HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o $(CURDIR)/build/co_switch_cf.o $(CURDIR)/build/setjmp_cf.o" \
 	 OUTDIR="$(CURDIR)/build/jsh-cf" \
 	 RUN="$(CURDIR)/build/skj-run" \
-	 MKROMFS="$(CURDIR)/build/skj-mkromfs" \
 	 NAME=test-cf-jsh \
 	 sh tests/run-jsh.sh
 
@@ -6032,32 +6032,32 @@ test-cf-jsh: build/skj-cc build/skj-as build/skj-ld build/start.o build/half.o b
 test-x86-64-jsh: build/skj-cc-x86-64 build/skj-as-x86-64 \
                  build/hv-x86_64/start.o build/hv-x86_64/syscall.o build/hv-x86_64/setjmp.o \
                  build/x86_64/half.o build/x86_64/va.o build/x86_64/soft64.o build/x86_64/co_switch.o \
-                 build/skj-mkromfs build/skj-run
+                 build/skj-run
 	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: x86-64 jsh (no accessible /dev/kvm)"; exit 0; fi; \
 	 CCBIN="$(CURDIR)/build/skj-cc-x86-64" \
 	 ASM="$(CURDIR)/build/skj-as-x86-64 -o" \
 	 LD="$(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none -o" \
+	 AR="ar" \
 	 START="$(CURDIR)/build/hv-x86_64/start.o" \
 	 HALF="$(CURDIR)/build/hv-x86_64/syscall.o $(CURDIR)/build/x86_64/va.o $(CURDIR)/build/x86_64/half.o $(CURDIR)/build/x86_64/soft64.o $(CURDIR)/build/x86_64/co_switch.o $(CURDIR)/build/hv-x86_64/setjmp.o" \
 	 OUTDIR="$(CURDIR)/build/jsh-x86_64" \
 	 RUN="$(CURDIR)/build/skj-run" \
-	 MKROMFS="$(CURDIR)/build/skj-mkromfs" \
 	 NAME=test-x86-64-jsh \
 	 sh tests/run-jsh.sh
 
 test-arm64-jsh: build/skj-cc-arm64 build/skj-as-aarch64 \
                 build/hv-arm64/start.o build/hv-arm64/syscall.o build/hv-arm64/setjmp.o \
                 build/arm64/va.o build/arm64/soft64.o build/arm64/co_switch.o \
-                build/skj-mkromfs build/skj-run
+                build/skj-run
 	@if [ "$$(uname -m)" = "aarch64" ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then B=; else B=1; fi; \
 	 CCBIN="$(CURDIR)/build/skj-cc-arm64" \
 	 ASM="$(CURDIR)/build/skj-as-aarch64 -o" \
 	 LD="$(A64_LD) -e _start -Ttext=0x100000 --build-id=none -o" \
+	 AR="ar" \
 	 START="$(CURDIR)/build/hv-arm64/start.o" \
 	 HALF="$(CURDIR)/build/hv-arm64/syscall.o $(CURDIR)/build/arm64/va.o $(CURDIR)/build/arm64/soft64.o $(CURDIR)/build/arm64/co_switch.o $(CURDIR)/build/hv-arm64/setjmp.o" \
 	 OUTDIR="$(CURDIR)/build/jsh-arm64" \
 	 RUN="$(CURDIR)/build/skj-run" \
-	 MKROMFS="$(CURDIR)/build/skj-mkromfs" \
 	 NAME=test-arm64-jsh \
 	 BUILD_ONLY="$$B" \
 	 sh tests/run-jsh.sh

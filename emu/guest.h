@@ -234,6 +234,8 @@ typedef struct guest {
     uint64_t park_deadline;     /* monotonic ns to wake a sleeper; 0 if none */
     int sleeping;               /* a nanosleep is pending (its deadline is live) */
     uint64_t sleep_deadline;    /* that sleep's absolute monotonic ns deadline */
+    char scratch_dir[64];       /* host-owned ephemeral scratch dir to remove at
+                                   teardown, "" if none (only the root owns it) */
 } guest;
 
 /* Service a 9p doorbell: find the server bound to channel `chan`, read the
@@ -261,6 +263,8 @@ typedef struct run_opts {
     int argc;
     const char *mounts[RUN_MAX_MOUNTS]; /* --mount name:hostdir grants */
     int nmounts;
+    const char *mounts_ro[RUN_MAX_MOUNTS]; /* --mount-ro name:hostdir grants (FS_RO) */
+    int nmounts_ro;
     const char *devs[RUN_MAX_MOUNTS];   /* --dev name grants (devfs)        */
     int ndevs;
     const char *roms[RUN_MAX_MOUNTS];   /* --rom name:image.img grants      */

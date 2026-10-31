@@ -6,6 +6,35 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.34.0
+
+#### Added
+- `skj-run --mount-ro NAME:DIR` grants a confined host directory read-only, so a
+  mutating operation returns `EROFS`. The `jsh` userland serves its tool images
+  (`bin:`) this way, and the per-sandbox scratch uses the same capability path.
+
+#### Changed
+- The `skj-run` userland no longer carries an in-guest filesystem for its default
+  mounts. `skj-run` owns them host-side through the confined capability path it
+  already used for `--mount`: `scratch`, the spot a bare path resolves against,
+  is an ephemeral host directory granted per sandbox, and `bin:` is served as a
+  read-only host directory. The in-guest ramfs and romfs are now compile-time
+  options (`FS_WITH_RAM`, `FS_WITH_ROM`) kept for the standalone VM tiers and
+  bare-qemu, and are compiled out of the `skj-run` build. The guest fs code there
+  is now just the mount switch and the hostcap adapter.
+- The `jsh` userland links against a `libc.a` archive instead of a list of loose
+  objects, so each program pulls only the archive members it references. With the
+  host-owned filesystem, the coreutil set shrank about 65% (each fd-using tool
+  from roughly 135 KB to 52 KB on RISC-V, and `sleep`, which opens no file, to
+  under 5 KB).
+- Each sandbox, whether the root or a spawned child, now gets its own fresh
+  scratch directory. Scratch is never shared across the process tree, matching
+  the per-process isolation the in-guest ramfs provided.
+
+#### Fixed
+- `run_sandbox` releases the root process's host fds and removes its scratch
+  directory at teardown, not only a reaped child's.
+
 ### 0.33.0
 
 #### Added

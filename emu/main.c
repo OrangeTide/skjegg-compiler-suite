@@ -58,6 +58,7 @@ usage(FILE *out)
         "  --max-insns N   stop after N instructions (default unlimited)\n"
         "  --gdb PORT      serve the GDB remote protocol on PORT\n"
         "  --mount NAME:DIR  grant the guest a confined host directory\n"
+        "  --mount-ro NAME:DIR  the same, read-only (mutating ops fail EROFS)\n"
         "  --dev NAME      grant the guest a devfs mount (null/zero/full)\n"
         "  --rom NAME:IMG  grant the guest a read-only romfs image\n"
         "  --9p NAME:DIR   serve a host directory to the guest over 9P2000\n"
@@ -245,6 +246,14 @@ main(int argc, char **argv)
                 return 2;
             }
             o.mounts[o.nmounts++] = argv[++i];
+            continue;
+        }
+        if (strcmp(a, "--mount-ro") == 0 && i + 1 < argc) {
+            if (o.nmounts_ro >= RUN_MAX_MOUNTS) {
+                fprintf(stderr, "skj-run: too many --mount-ro options\n");
+                return 2;
+            }
+            o.mounts_ro[o.nmounts_ro++] = argv[++i];
             continue;
         }
         if (strcmp(a, "--dev") == 0 && i + 1 < argc) {
