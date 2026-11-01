@@ -83,8 +83,9 @@ The initial stack frame the loader builds already carries the full Linux-style
 layout: `argc`, the `argv` pointers, a NULL, the `envp` pointers, a NULL, then a
 minimal auxv. Argument passing through spawn fills the `argv` vector; environment
 passing fills `envp` the same way **(planned)**. The crt delivers `argc`/`argv`
-(and sets `environ` for `getenv`) to `main` **(in progress; the rv crt dropped
-them historically)**.
+and sets `environ` (from the `envp` the loader laid down) for `getenv` and for
+the auxv walk the vDSO needs; every tier's crt does this now, the emulated and
+the HV ones alike.
 
 A process holds its own environment. There is no shared global environment and no
 cross-process `setenv`: a shell keeps its own `environ`, mutates it with
@@ -193,8 +194,8 @@ it needs no 9P and no round-trip batching for scratch or bin.
 The userland that rides on this is a shell, `jsh`, and a set of small tools
 (`cat`, `echo`, `ls`, `rm`, `sleep`, `cp`, `mv`), reimplemented in C over
 skjegg's libc and the `fs/` layer. They live under `examples/` (`examples/jsh`
-and `examples/bin`) and run on every tier `skj-run` hosts, the emulated RISC-V
-and ColdFire cores and the KVM/HVF x86-64 and arm64 guests, with `skj-run`
+and `examples/bin`) and run on every tier `skj-run` hosts, the emulated RISC-V,
+ColdFire, and MIPS cores and the KVM/HVF x86-64 and arm64 guests, with `skj-run`
 owning scratch and `bin:` host-side so the guest links only the `fs/` switch and
 the hostcap adapter.
 
@@ -218,6 +219,50 @@ private to the process that holds it (there is no system-wide process
 namespace), so only the shell that spawned a child can name it. `kill HANDLE`
 calls `SKJ_SYS_KILL` with the handle the shell printed when it backgrounded the
 job.
+
+## Injecting runtime: the vDSO and the system page **(done)**
+
+The host can hand a process a slice of runtime the way Linux hands a process its
+vDSO: `--vdso IMG` maps a small read-only image of pure leaf functions
+(`runtime/vdso.c`: `strlen`, `strcmp`, `memcpy`, `memset`) into the guest and
+advertises its export table through a private auxv tag, `AT_SKJ_VDSO` (`0x7001`,
+chosen out of the Linux `AT_*` range so a real libc ignores it). The guest finds
+it by walking its own auxv (`environ` to the NULL, then the auxv pairs) and calls
+a function through `table->fn[ordinal]`. No crt change is needed, only the
+`environ` the crt already sets. The image is the injection seam: the host decides
+what runtime a process sees by choosing the image it maps.
+
+Only **stateless** code goes in the image, so one copy is safe to share
+read-only across every sandbox. The stateful parts of libc (`malloc`, stdio,
+`errno`, the `fs/` layer) stay per process. The image is built once and shared,
+but the sharing mechanism differs by tier because the guest reaches memory
+differently. An emulated guest aliases the one host buffer through its software
+memory path (`gm_page`), read-only. An HV guest runs on real hardware through
+the hypervisor's own map, so the same buffer backs a read-only hypervisor memory
+slot (`KVM_MEM_READONLY`, or read-plus-execute under HVF) at a fixed guest
+address above RAM but inside the identity map. Either way a guest write faults,
+so one sandbox cannot corrupt the image another shares.
+
+The **system page** is the data counterpart, the vDSO's namesake win: a small
+block the host keeps updated and the guest reads with no syscall or doorbell,
+in the spirit of a QNX system page. It lives in the same shared image
+(`struct skj_vdso_sys`: a magic and version, a seqlock, the host page size and
+cpu count, monotonic and realtime nanosecond clocks, and reserved words for more
+such state) and is read-only to the guest. The scheduler refreshes the clock
+just before each process runs, writing the time into the backing buffer in the
+guest's byte order and driving the seqlock (odd, write, even). The guest is
+stopped at that point, so a write never races a read; the clock therefore
+advances at slice granularity, the tradeoff a trap-free read makes for freshness
+bounded by the quantum. A guest reads the clock two ways: the vDSO functions for
+monotonic and realtime nanoseconds, or directly through the page, whose address
+the export table carries so a guest can read the page size, cpu count, and the
+rest.
+
+The tag, the ABI struct, the ordinals (append-only, so the index never moves),
+and the system-page layout live in `include/skj_vdso.h`. The feature is exercised
+by `test-rv-vdso` on the emulated tier and `test-hv-x86-64-vdso` under KVM (with
+`test-hv-arm64-vdso` building the image everywhere and running it on an aarch64
+KVM host), all in `check-emu-all`.
 
 ## See also
 

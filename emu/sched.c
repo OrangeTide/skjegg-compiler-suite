@@ -483,6 +483,23 @@ proc_finish(sched *S, proc *p, const elf32_info *info, char **argv, int argc)
     if (p->g.mem.extern_base)
         p->g.mem.mmap_next = p->g.stack_top + GM_PAGE_SIZE;
 
+    /* Inject the vDSO (if one was given) before the stack is built, so the auxv
+     * can advertise it. The image is built once and shared read-only across
+     * every process: an emulated guest aliases it through gm_page, an HV guest
+     * maps it as a read-only hypervisor memory slot. The image is ELF32 for the
+     * ILP32 cores and ELF64 for the LP64 (HV) cores, matched to word64. */
+    if (S->o->vdso && S->vdso_state >= 0) {
+        if (S->vdso_state == 0)
+            S->vdso_state = guest_vdso_image(S->o->vdso, S->ops->word64,
+                                             &S->vdso_buf, &S->vdso_vaddr,
+                                             &S->vdso_size, &S->vdso_table,
+                                             &S->vdso_sys) == 0 ? 1 : -1;
+        if (S->vdso_state < 0)
+            return -1;
+        guest_vdso_attach(&p->g, S->vdso_buf, S->vdso_vaddr, S->vdso_size,
+                          S->vdso_table);
+    }
+
     so = *S->o;                 /* the child keeps the driver's sizes, its own argv */
     so.argv = argv;
     so.argc = argc;
@@ -818,6 +835,82 @@ mono_ns(void)
     return (uint64_t)sec * 1000000000ull + nsec;
 }
 
+static uint64_t
+real_ns(void)
+{
+    uint32_t sec = 0, nsec = 0;
+
+    hp_clock(1, &sec, &nsec);                   /* 1 = realtime */
+    return (uint64_t)sec * 1000000000ull + nsec;
+}
+
+/* Field offsets and size of struct skj_vdso_sys (include/skj_vdso.h).  The host
+ * avoids that guest header because its sibling struct skj_vdso carries
+ * pointer-width members; the system page is all fixed-width integers, so these
+ * mirror its layout.  Keep them in step with the header. */
+#define VDSO_SYS_SEQ      8u
+#define VDSO_SYS_MONO_NS  24u
+#define VDSO_SYS_REAL_NS  32u
+#define VDSO_SYS_SIZE     104u
+
+static void
+st32(uint8_t *p, uint32_t v, int be)
+{
+    int i;
+
+    for (i = 0; i < 4; i++)
+        p[be ? 3 - i : i] = (uint8_t)(v >> (8 * i));
+}
+
+static void
+st64(uint8_t *p, uint64_t v, int be)
+{
+    int i;
+
+    for (i = 0; i < 8; i++)
+        p[be ? 7 - i : i] = (uint8_t)(v >> (8 * i));
+}
+
+static uint32_t
+ld32(const uint8_t *p, int be)
+{
+    uint32_t v = 0;
+    int i;
+
+    for (i = 0; i < 4; i++)
+        v |= (uint32_t)p[be ? 3 - i : i] << (8 * i);
+    return v;
+}
+
+/* Refresh the vDSO system page's clock, so a guest reading it (through the
+ * SKJ_VDSO_MONO_NS / SKJ_VDSO_REAL_NS functions or the page directly) gets the
+ * time with no doorbell.  Called just before a process runs; the guest is
+ * stopped here, so the write cannot race a read, but the seqlock is still
+ * driven (odd, write, even) to honour the page's documented contract.  The
+ * clock advances at slice granularity, which is the fast path's tradeoff: no
+ * trap per read, freshness bounded by the quantum.  Fields are written in the
+ * guest's byte order, since the guest reads them with its own toolchain. */
+static void
+sched_update_sysinfo(sched *S)
+{
+    uint8_t *base;
+    uint32_t off, seq;
+    int be = S->ops->big_endian;
+
+    if (!S->vdso_buf || !S->vdso_sys)
+        return;
+    off = S->vdso_sys - S->vdso_vaddr;          /* offset into the shared image */
+    if (off + VDSO_SYS_SIZE > S->vdso_size)
+        return;
+    base = S->vdso_buf + off;
+
+    seq = ld32(base + VDSO_SYS_SEQ, be) + 1;     /* odd: a write is in flight */
+    st32(base + VDSO_SYS_SEQ, seq, be);
+    st64(base + VDSO_SYS_MONO_NS, mono_ns(), be);
+    st64(base + VDSO_SYS_REAL_NS, real_ns(), be);
+    st32(base + VDSO_SYS_SEQ, seq + 1, be);      /* even: the write is complete */
+}
+
 /* Wait for an I/O-parked process to become runnable.  Build a pollfd set from
  * every io_blocked process with a real fd, take the nearest sleep deadline as a
  * timeout, and poll.  When `block` is 0 the poll returns at once (timeout 0),
@@ -914,6 +1007,7 @@ run_scheduler(sched *S)
 
             if (!p || p->done || p->io_blocked)
                 continue;
+            sched_update_sysinfo(S);    /* refresh the doorbell-free clock */
             proc_slice(S, p);
             ran = 1;
             if (S->limited)
@@ -1017,6 +1111,7 @@ run_sandbox(const run_opts *o, const skj_cpu_ops *ops, int *status)
         gm_free(&S.procs[i]->g.mem);
         free(S.procs[i]);
     }
+    free(S.vdso_buf);                   /* the one shared vDSO image */
 #ifdef SKJ_DWARF_BACKTRACE
     if (S.bt_state == 1)
         arena_free(&S.bt_arena);

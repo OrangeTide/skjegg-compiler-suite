@@ -255,6 +255,19 @@ gm_page(guest_mem *m, uint32_t addr, int want_write)
         return m->extern_base + (addr & ~(GM_PAGE_SIZE - 1));
     }
 
+    /* The vDSO: one shared read-only host buffer aliased into this guest.  Reads
+     * and fetches return bytes from the shared buffer directly, so no page is
+     * committed here and no per-guest copy exists; a write faults read-only.
+     * The pages are not in dir/wdir, so gm_free never touches the shared buffer. */
+    if (m->vdso_host && addr >= m->vdso_vaddr
+        && addr - m->vdso_vaddr < m->vdso_size) {
+        if (want_write && !m->loading) {
+            gm_fault(m, addr, 1, "read-only");
+            return NULL;
+        }
+        return m->vdso_host + ((addr - m->vdso_vaddr) & ~(GM_PAGE_SIZE - 1));
+    }
+
     /* A committed page satisfies a read outright. A write to a committed page
      * in a writable region is recorded in wdir, so it too returns without the
      * region-protection re-check (the common case for the hot store path). */
@@ -1871,6 +1884,102 @@ poke32(guest *g, uint32_t addr, uint32_t val)
 
 #define AT_NULL     0
 #define AT_PAGESZ   6
+#define AT_SKJ_VDSO 0x7001          /* keep in step with include/skj_vdso.h */
+
+/* Build the shared vDSO buffer once from its ELF image: a flat host buffer
+ * holding the loadable segments laid out at their guest addresses, which every
+ * guest then aliases read-only.  The image is small and linked at a fixed guest
+ * address (runtime/vdso.c, vdso_rv.ld).  Two passes over elf32_load_raw: the
+ * first learns the address range (a no-op poke), the second fills the buffer.
+ * Returns 0 and sets *buf (caller owns, free once), *vaddr, *size (page-rounded)
+ * and *table (the exported skj_vdso_table address); -1 on any failure. */
+struct vdso_build {
+    uint8_t *buf;
+    uint32_t lo;
+    uint32_t size;
+};
+
+static void
+vdso_poke(void *ctx, uint32_t addr, uint8_t b)
+{
+    struct vdso_build *v = ctx;
+
+    if (v->buf && addr >= v->lo && addr - v->lo < v->size)
+        v->buf[addr - v->lo] = b;
+}
+
+int
+guest_vdso_image(const char *path, int word64, uint8_t **buf, uint32_t *vaddr,
+                 uint32_t *size, uint32_t *table, uint32_t *sysinfo)
+{
+    elf32_info info;
+    struct vdso_build v = { 0 };
+    uint32_t sz, t;
+
+    /* The LP64 (HV) guests carry an ELF64 image; the emulated ILP32 guests an
+     * ELF32 one.  Either way the result is a flat host buffer holding the
+     * segments at their guest addresses plus the exported table address.  The
+     * optional system-page symbol (skj_vdso_sysinfo) is 0 when an older image
+     * lacks it. */
+    if (word64) {
+        if (elf64_load_flat(path, buf, vaddr, size) != 0)
+            return -1;
+        t = elf64_symbol(path, "skj_vdso_table");
+        if (!t) {
+            fprintf(stderr, "skj-run: %s links no skj_vdso_table\n", path);
+            free(*buf);
+            return -1;
+        }
+        *table = t;
+        *sysinfo = elf64_symbol(path, "skj_vdso_sysinfo");
+        return 0;
+    }
+
+    if (elf32_load_raw(path, vdso_poke, &v, &info) == 0 || info.nsegments == 0) {
+        fprintf(stderr, "skj-run: cannot load vDSO image %s\n", path);
+        return -1;
+    }
+    sz = (info.hi - info.lo + GM_PAGE_SIZE - 1) & ~(GM_PAGE_SIZE - 1);
+    t = elf32_symbol(path, "skj_vdso_table");
+    if (!t) {
+        fprintf(stderr, "skj-run: %s links no skj_vdso_table\n", path);
+        return -1;
+    }
+    *sysinfo = elf32_symbol(path, "skj_vdso_sysinfo");
+    v.buf = calloc(1, sz);
+    if (!v.buf) {
+        fprintf(stderr, "skj-run: out of memory for the vDSO image\n");
+        return -1;
+    }
+    v.lo = info.lo;
+    v.size = sz;
+    elf32_load_raw(path, vdso_poke, &v, &info);   /* fill the buffer this time */
+
+    *buf = v.buf;
+    *vaddr = info.lo;
+    *size = sz;
+    *table = t;
+    return 0;
+}
+
+/* Alias the shared vDSO buffer read-only into this guest and record the table
+ * address the auxv will advertise.  The buffer is not owned by the guest. */
+void
+guest_vdso_attach(guest *g, uint8_t *buf, uint32_t vaddr, uint32_t size,
+                  uint32_t table)
+{
+    g->mem.vdso_host = buf;
+    g->mem.vdso_vaddr = vaddr;
+    g->mem.vdso_size = size;
+    /* An emulated guest runs the vDSO through gm_page, which aliases the shared
+     * buffer for the [vaddr, vaddr+size) region (see gm_page).  An extern-backed
+     * HV guest runs on real hardware instead: its vDSO is a read-only
+     * hypervisor memory slot the core maps from these same fields, so no gm
+     * region is needed (and gm_page's extern path would not consult one). */
+    if (!g->mem.extern_base)
+        gm_map(&g->mem, vaddr, size, GM_R | GM_X, "vdso");
+    g->vdso_base = table;
+}
 
 uint32_t
 guest_build_stack(guest *g, const run_opts *o)
@@ -1892,8 +2001,12 @@ guest_build_stack(guest *g, const run_opts *o)
     }
     sp &= ~15u;
 
-    /* auxv (two words), the envp NULL, the argv NULL, argv, argc */
-    sp -= 4 * (2 + 2 + 1 + 1 + (uint32_t)argc + 1);
+    /* argc, argv[], argv NULL, envp NULL, auxv (AT_PAGESZ pair, an optional
+       AT_SKJ_VDSO pair when a vDSO is injected, AT_NULL pair) */
+    {
+        uint32_t aux_pairs = g->vdso_base ? 3u : 2u;
+        sp -= 4 * (1 + (uint32_t)argc + 1 + 1 + 2u * aux_pairs);
+    }
     sp &= ~15u;
 
     {
@@ -1910,6 +2023,12 @@ guest_build_stack(guest *g, const run_opts *o)
         p += 4;
         poke32(g, p, GM_PAGE_SIZE);
         p += 4;
+        if (g->vdso_base) {
+            poke32(g, p, AT_SKJ_VDSO);
+            p += 4;
+            poke32(g, p, g->vdso_base);
+            p += 4;
+        }
         poke32(g, p, AT_NULL);
         p += 4;
         poke32(g, p, 0);
@@ -1949,11 +2068,12 @@ guest_build_stack64(guest *g, const run_opts *o)
     }
     sp &= ~15u;
 
-    /* argc + argv + argv NULL + envp NULL + auxv (AT_PAGESZ pair + AT_NULL
-     * pair = 4 words), 8 bytes each.  Keep the final sp 16-byte aligned by
-     * padding the slot count to an even number. */
+    /* argc + argv + argv NULL + envp NULL + auxv (AT_PAGESZ pair, an optional
+     * AT_SKJ_VDSO pair when a vDSO is injected, AT_NULL pair), 8 bytes each.
+     * Keep the final sp 16-byte aligned by padding the slot count to even. */
     {
-        uint32_t slots = 1 + (uint32_t)argc + 1 + 1 + 4;
+        uint32_t aux_pairs = g->vdso_base ? 3u : 2u;
+        uint32_t slots = 1 + (uint32_t)argc + 1 + 1 + 2u * aux_pairs;
         sp -= 8 * (slots + (slots & 1));
         sp &= ~15u;
     }
@@ -1972,6 +2092,12 @@ guest_build_stack64(guest *g, const run_opts *o)
         p += 8;
         poke64(g, p, GM_PAGE_SIZE);
         p += 8;
+        if (g->vdso_base) {
+            poke64(g, p, AT_SKJ_VDSO);
+            p += 8;
+            poke64(g, p, g->vdso_base);
+            p += 8;
+        }
         poke64(g, p, AT_NULL);
         p += 8;
         poke64(g, p, 0);

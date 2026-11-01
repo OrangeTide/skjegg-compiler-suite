@@ -54,6 +54,12 @@ void vmm_free(vmm *v);
  * Returns 0 on success. */
 int vmm_map(vmm *v, void *host, uint64_t gpa, size_t size);
 
+/* Map `size` bytes of host memory read-only at guest-physical `gpa`: the guest
+ * may read and execute it but a write faults out to the hypervisor. Used for
+ * the shared vDSO slot (one host buffer aliased into every VM). `gpa` is never
+ * 0, so this never builds page tables. Returns 0 on success. */
+int vmm_map_ro(vmm *v, void *host, uint64_t gpa, size_t size);
+
 vmm_vcpu *vmm_vcpu_new(vmm *v);
 void vmm_vcpu_free(vmm_vcpu *vcpu);
 

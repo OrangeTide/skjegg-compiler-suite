@@ -52,6 +52,8 @@
 	.globl renameat2
 	.globl fchmodat
 	.globl getdents64
+	.globl nanosleep
+	.globl sched_yield
 	.weak  exit
 	.globl _exit
 	.globl skj_spawnv
@@ -135,6 +137,22 @@ openat:
 close:
 __sys_close:
 	li	$v0, 4006		/* __NR_close */
+	syscall
+	SYSRET
+
+/* int nanosleep(const struct timespec *req, struct timespec *rem);  the sleep
+   coreutil parks the task for the requested interval.  Args pass through
+   $a0, $a1; the emulator maps #4166 to GSYS_NANOSLEEP. */
+nanosleep:
+	li	$v0, 4166		/* __NR_nanosleep (__NR_Linux + 166) */
+	syscall
+	SYSRET
+
+/* int sched_yield(void);  gives up the rest of the task's turn without
+   sleeping, so a spawned pipeline makes progress under the cooperative
+   scheduler.  No args; the emulator maps #4162 to GSYS_SCHED_YIELD. */
+sched_yield:
+	li	$v0, 4162		/* __NR_sched_yield (__NR_Linux + 162) */
 	syscall
 	SYSRET
 

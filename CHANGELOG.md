@@ -6,6 +6,30 @@ notes; the detail there is shallower than for recent releases.
 
 ## October 2026
 
+### 0.35.0
+
+#### Added
+- `skj-run --vdso IMG` injects a slice of runtime into every process, the way
+  Linux hands a process its vDSO. The image is a small read-only block of pure
+  leaf functions. The host advertises its export table through a private auxv
+  tag, and the guest walks its auxv to find it and calls functions through an
+  ordinal table. One image is built once and shared read-only across every
+  sandbox: an emulated guest aliases the one host buffer through its software
+  memory path, a hardware-virtualized guest backs a read-only hypervisor memory
+  slot with it. A guest write faults, so one sandbox cannot corrupt the image
+  another shares. Supported on the emulated RISC-V core and the x86-64 and arm64
+  KVM/HVF guests.
+- The vDSO image carries a system page the host keeps updated and the guest
+  reads with no syscall or doorbell, in the spirit of a QNX system page: a
+  monotonic and a realtime nanosecond clock the scheduler refreshes before each
+  slice, the host page size and cpu count, and reserved room for more such
+  state. A guest reads the clock through the vDSO functions or reads the page
+  directly, whose address the export table carries.
+- The `jsh` userland and its coreutils now run on the emulated MIPS tier too, so
+  the shell runs on all five targets `skj-run` hosts: RISC-V, ColdFire, MIPS,
+  and the x86-64 and arm64 hardware-virtualized guests. The MIPS runtime gained
+  the `nanosleep` and `sched_yield` wrappers the shell needs.
+
 ### 0.34.0
 
 #### Added

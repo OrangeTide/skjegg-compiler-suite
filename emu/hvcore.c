@@ -250,6 +250,17 @@ hv_ready(proc *p, uint32_t entry, uint32_t sp)
         cpu->halted = 1;
         return;
     }
+    /* The shared vDSO (if one was injected) lives in a read-only hypervisor
+     * memory slot above RAM, inside the identity-mapped 1 GiB.  guest_vdso_attach
+     * recorded the shared buffer, its guest address and size on the guest; one
+     * host buffer backs the slot in every VM. */
+    if (p->g.mem.vdso_host &&
+        vmm_map_ro(cpu->vm, p->g.mem.vdso_host, p->g.mem.vdso_vaddr,
+                   p->g.mem.vdso_size) != 0) {
+        fprintf(stderr, "skj-run: cannot map the vDSO slot\n");
+        cpu->halted = 1;
+        return;
+    }
     cpu->vcpu = vmm_vcpu_new(cpu->vm);
     if (!cpu->vcpu) {
         fprintf(stderr, "skj-run: VMM vcpu setup failed\n");

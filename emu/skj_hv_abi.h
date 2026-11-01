@@ -19,6 +19,11 @@
  * (x86-64) cover the first 1 GiB, so the doorbell sits above RAM but inside the
  * mapped range, where it is present but unbacked and therefore faults as MMIO. */
 #define SKJ_HV_RAM_SIZE   0x10000000u   /* 256 MiB */
+#define SKJ_HV_VDSO       0x20000000u   /* 512 MiB: shared read-only vDSO slot,
+                                           above RAM, below the doorbell, inside
+                                           the 1 GiB identity map.  The LP64 vDSO
+                                           images link here (runtime/vdso_*.ld);
+                                           keep those scripts in step. */
 #define SKJ_HV_DOORBELL   0x30000000u   /* 768 MiB: above RAM, below the 1 GiB map */
 
 /* The low-memory page-table frames (x86-64 long mode). Kept below the guest

@@ -4,6 +4,13 @@
  * elf32_info and the 32-bit guest-memory layer the sandbox shares.  Only the
  * file format is 64-bit. */
 
+#if defined(__APPLE__)
+# define _DARWIN_C_SOURCE
+#else
+# define _POSIX_C_SOURCE 200809L        /* posix_memalign */
+# define _DEFAULT_SOURCE
+#endif
+
 #include "elf64.h"
 
 #include <stdio.h>
@@ -243,6 +250,98 @@ elf64_load(guest *g, const char *path, elf32_info *info)
     rc = elf64_load_mem(g, b, size, info, path);
     free(b);
     return rc;
+}
+
+int
+elf64_load_flat(const char *path, uint8_t **buf, uint32_t *lo, uint32_t *size)
+{
+    elf32_info info;
+    long fsize;
+    uint8_t *b = slurp(path, &fsize);
+    uint64_t phoff;
+    uint32_t i, phnum, phentsize, plo = 0xFFFFFFFFu, phi = 0, span;
+    uint8_t *out;
+    int be, nseg = 0;
+
+    if (!b)
+        return -1;
+    if (read_header(path, b, fsize, &info) != 0) {
+        free(b);
+        return -1;
+    }
+    be = info.big_endian;
+    phoff = rd64(b + 32, be);
+    phentsize = rd16(b + 54, be);
+    phnum = rd16(b + 56, be);
+    if (phnum == 0 || phoff == 0) {
+        fprintf(stderr, "skj-run: %s has no program headers\n", path);
+        free(b);
+        return -1;
+    }
+
+    /* First pass: learn the mapped address range. */
+    for (i = 0; i < phnum; i++) {
+        const uint8_t *ph = b + phoff + (uint64_t)i * phentsize;
+        uint32_t vaddr, memsz, page_lo, page_hi;
+
+        if ((long)(phoff + (uint64_t)(i + 1) * phentsize) > fsize)
+            break;
+        if (rd32(ph + 0, be) != PT_LOAD)
+            continue;
+        vaddr = (uint32_t)rd64(ph + 16, be);
+        memsz = (uint32_t)rd64(ph + 40, be);
+        page_lo = vaddr & ~(GM_PAGE_SIZE - 1);
+        page_hi = (vaddr + memsz + GM_PAGE_SIZE - 1) & ~(GM_PAGE_SIZE - 1);
+        if (page_lo < plo)
+            plo = page_lo;
+        if (page_hi > phi)
+            phi = page_hi;
+        nseg++;
+    }
+    if (nseg == 0) {
+        fprintf(stderr, "skj-run: %s has no loadable segments\n", path);
+        free(b);
+        return -1;
+    }
+    span = phi - plo;
+    /* Page-align the buffer: a hypervisor memory slot (the HV vDSO) needs a
+       page-aligned host address.  posix_memalign's result is released with the
+       plain free() the caller uses. */
+    if (posix_memalign((void **)&out, GM_PAGE_SIZE, span) != 0) {
+        fprintf(stderr, "skj-run: out of memory for the vDSO image\n");
+        free(b);
+        return -1;
+    }
+    memset(out, 0, span);
+
+    /* Second pass: copy each segment's file bytes into the flat buffer. */
+    for (i = 0; i < phnum; i++) {
+        const uint8_t *ph = b + phoff + (uint64_t)i * phentsize;
+        uint32_t vaddr, filesz;
+        uint64_t offset;
+
+        if ((long)(phoff + (uint64_t)(i + 1) * phentsize) > fsize)
+            break;
+        if (rd32(ph + 0, be) != PT_LOAD)
+            continue;
+        offset = rd64(ph + 8, be);
+        vaddr = (uint32_t)rd64(ph + 16, be);
+        filesz = (uint32_t)rd64(ph + 32, be);
+        if ((long)(offset + filesz) > fsize) {
+            fprintf(stderr, "skj-run: %s: segment %u past end of file\n",
+                    path, i);
+            free(out);
+            free(b);
+            return -1;
+        }
+        memcpy(out + (vaddr - plo), b + offset, filesz);
+    }
+
+    free(b);
+    *buf = out;
+    *lo = plo;
+    *size = span;
+    return 0;
 }
 
 /* Resolve a global symbol's value from an in-memory ELF64 image, the ELF64

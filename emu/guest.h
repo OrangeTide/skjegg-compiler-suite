@@ -63,6 +63,13 @@ typedef struct guest_mem {
                                            is one buffer mapped into its vcpu;
                                            NULL for a sparse (page-committed) guest */
     uint32_t extern_size;
+    uint8_t *vdso_host;                 /* a shared read-only host buffer backing
+                                           [vdso_vaddr, vdso_vaddr+vdso_size); one
+                                           copy aliased into every guest, never
+                                           owned or freed by the guest.  NULL when
+                                           no vDSO is mapped */
+    uint32_t vdso_vaddr;
+    uint32_t vdso_size;
     int fault;                          /* set on the first bad access */
     uint32_t fault_addr;
     int fault_write;
@@ -236,6 +243,8 @@ typedef struct guest {
     uint64_t sleep_deadline;    /* that sleep's absolute monotonic ns deadline */
     char scratch_dir[64];       /* host-owned ephemeral scratch dir to remove at
                                    teardown, "" if none (only the root owns it) */
+    uint32_t vdso_base;         /* injected vDSO table address, 0 if none; the
+                                   auxv advertises it to the guest */
 } guest;
 
 /* Service a 9p doorbell: find the server bound to channel `chan`, read the
@@ -271,6 +280,7 @@ typedef struct run_opts {
     int nroms;
     const char *p9s[RUN_MAX_MOUNTS];    /* --9p name:hostdir grants         */
     int np9s;
+    const char *vdso;           /* --vdso PATH: a vDSO image to inject, or NULL */
     uint64_t mem_limit;
     uint32_t stack_size;
     uint32_t heap_size;
@@ -306,6 +316,23 @@ struct guest_grant {
  * so the root process can later hand its namespace to a child. */
 void guest_install_mounts(guest *g, const char *elf_path, const run_opts *o,
                           struct guest_grant *rec, int *nrec);
+
+/* Build the shared vDSO buffer once from its ELF image (pure leaf functions):
+ * a flat host buffer holding the loadable segments at their guest addresses,
+ * which every guest aliases read-only. Sets *buf (caller owns, free once),
+ * *vaddr, *size, and *table (the skj_vdso_table address). Returns 0 or -1. */
+int guest_vdso_image(const char *path, int word64, uint8_t **buf,
+                     uint32_t *vaddr, uint32_t *size, uint32_t *table,
+                     uint32_t *sysinfo);
+
+/* Point a guest at the shared vDSO buffer and record its table address in
+ * g->vdso_base, which guest_build_stack(64) advertises through the auxv tag
+ * AT_SKJ_VDSO. An emulated guest aliases it read-only through gm_page; an
+ * extern-backed HV guest leaves the gm_map to its core, which maps the buffer
+ * as a read-only hypervisor memory slot from the recorded fields. The buffer is
+ * shared, not owned by the guest. */
+void guest_vdso_attach(guest *g, uint8_t *buf, uint32_t vaddr, uint32_t size,
+                       uint32_t table);
 
 /* Install a recorded grant list into a freshly spawned child's guest, resolving
  * the child's fs_mounts table from its in-memory ELF image.  Each FS_KIND_HOST

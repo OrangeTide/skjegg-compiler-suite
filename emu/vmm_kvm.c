@@ -164,6 +164,23 @@ vmm_map(vmm *vm, void *host, uint64_t gpa, size_t size)
     return 0;
 }
 
+int
+vmm_map_ro(vmm *vm, void *host, uint64_t gpa, size_t size)
+{
+    struct kvm_userspace_memory_region region = {
+        .slot = vm->next_slot++,
+        .flags = KVM_MEM_READONLY,
+        .guest_phys_addr = gpa,
+        .memory_size = size,
+        .userspace_addr = (uint64_t)(uintptr_t)host,
+    };
+    /* The gpa is inside the 1 GiB identity map built for the base RAM slot, so
+       the guest page tables already translate it; only this read-only slot
+       backs it.  A write exits to the hypervisor, which the core treats as a
+       fault, so one guest cannot corrupt the vDSO another shares. */
+    return ioctl(vm->vm_fd, KVM_SET_USER_MEMORY_REGION, &region) < 0 ? -1 : 0;
+}
+
 vmm_vcpu *
 vmm_vcpu_new(vmm *vm)
 {

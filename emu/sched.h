@@ -123,6 +123,14 @@ typedef struct sched {
     const run_opts *o;
     const struct skj_cpu_ops *ops;
     struct gm_pool pool;            /* aggregate memory budget shared by all */
+    uint8_t *vdso_buf;              /* the one shared vDSO image, aliased RO into
+                                       every guest; built lazily, freed once */
+    uint32_t vdso_vaddr;
+    uint32_t vdso_size;
+    uint32_t vdso_table;
+    uint32_t vdso_sys;              /* guest address of the host-updated system
+                                       page in the vDSO image, 0 if absent */
+    int vdso_state;                 /* 0 untried, 1 ready, -1 unavailable */
     uint64_t insns;                 /* instructions retired across all processes */
     int limited;                    /* the global instruction budget was hit */
 #ifdef SKJ_DWARF_BACKTRACE

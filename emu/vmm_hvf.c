@@ -179,6 +179,18 @@ vmm_map(vmm *vm, void *host, uint64_t gpa, size_t size)
     return 0;
 }
 
+int
+vmm_map_ro(vmm *vm, void *host, uint64_t gpa, size_t size)
+{
+    (void)vm;
+    /* Read-and-execute only: the shared vDSO slot the guest runs but cannot
+     * write.  Its gpa is inside the identity-mapped 1 GiB, so the stage-1 map
+     * already translates it; a write faults out as a stage-2 data abort. */
+    if (hv_vm_map(host, gpa, size, HV_MEMORY_READ | HV_MEMORY_EXEC) != HV_SUCCESS)
+        return -1;
+    return 0;
+}
+
 vmm_vcpu *
 vmm_vcpu_new(vmm *vm)
 {

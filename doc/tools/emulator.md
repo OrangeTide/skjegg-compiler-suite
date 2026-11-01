@@ -758,6 +758,25 @@ run exits on the root's status. Each demo exercises spawn, the guarded map
 and release, the shared budget, and the scheduler resuming a child across
 many slices, on its own CPU core.
 
+### The vDSO and the system page
+
+`--vdso IMG` injects a slice of runtime into every process, the way Linux hands
+a process its vDSO. The image is a small read-only block of pure leaf functions
+(`runtime/vdso.c`), built once and shared across every sandbox: an emulated
+guest aliases the one host buffer read-only through `gm_page`, an HV guest backs
+a read-only hypervisor memory slot with it. The host advertises the image's
+export table through a private auxv tag, and the guest walks its auxv to find it
+and calls functions through an ordinal table.
+
+The image also carries a **system page** the scheduler keeps updated, a small
+block of host state the guest reads with no doorbell (monotonic and realtime
+clocks today, with room for more, QNX-style). `sched_update_sysinfo` refreshes
+the clock just before each slice, so it advances at slice granularity, the price
+of a trap-free read. The ABI (the tag, the table, the page layout, the ordinals)
+lives in `include/skj_vdso.h`; the full account is in
+[`process-model.md`](process-model.md), "Injecting runtime". Tests: `test-rv-vdso`
+and `test-hv-x86-64-vdso` (plus `test-hv-arm64-vdso`), in `check-emu-all`.
+
 ## The filesystem layer (`fs/`)
 
 A guest that does file I/O does not reach the host directly. It goes through

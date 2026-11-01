@@ -2851,7 +2851,8 @@ check-emu-all: check-emu check-rv-emu check-mips-emu test-coop-read \
                test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill \
                test-rv-spawn-mounts test-cf-spawn-mounts \
                test-rv-spawn-pipe test-cf-spawn-pipe \
-               test-rv-jsh test-cf-jsh test-x86-64-jsh test-arm64-jsh test-rv-decode-cache \
+               test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh \
+               test-rv-vdso test-hv-x86-64-vdso test-hv-arm64-vdso test-rv-decode-cache \
                test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp \
                check-rv32 \
                test-fpu-emu test-i64-emu test-ops-emu bench \
@@ -6023,6 +6024,18 @@ test-cf-jsh: build/skj-cc build/skj-as build/skj-ld build/skj-ar build/start.o b
 	 NAME=test-cf-jsh \
 	 sh tests/run-jsh.sh
 
+test-mips-jsh: build/skj-cc-mips build/skj-as-mips build/skj-ld-mips build/skj-ar build/mips/start.o build/mips/half.o build/mips/va_mips.o build/mips/soft64_div.o build/mips/co_switch.o build/mips/setjmp.o build/skj-run
+	@CCBIN="$(CURDIR)/build/skj-cc-mips" \
+	 ASM="$(CURDIR)/build/skj-as-mips -o" \
+	 LD="$(CURDIR)/build/skj-ld-mips -o" \
+	 AR="$(CURDIR)/build/skj-ar" \
+	 START="$(CURDIR)/build/mips/start.o" \
+	 HALF="$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/va_mips.o $(CURDIR)/build/mips/soft64_div.o $(CURDIR)/build/mips/co_switch.o $(CURDIR)/build/mips/setjmp.o" \
+	 OUTDIR="$(CURDIR)/build/jsh-mips" \
+	 RUN="$(CURDIR)/build/skj-run" \
+	 NAME=test-mips-jsh \
+	 sh tests/run-jsh.sh
+
 ## The LP64 hardware-virtualization tiers run jsh too: the same shell + coreutils
 ## over the fs-interpose libc, built by the x86-64 / arm64 toolchain, linked with
 ## the HV crt and seam (plus the LP64 setjmp), spawned per command under skj-run.
@@ -6061,6 +6074,99 @@ test-arm64-jsh: build/skj-cc-arm64 build/skj-as-aarch64 \
 	 NAME=test-arm64-jsh \
 	 BUILD_ONLY="$$B" \
 	 sh tests/run-jsh.sh
+
+## The vDSO injection seam: the host maps a small image of pure leaf functions
+## (runtime/vdso.c, linked at a fixed guest address) into a guest and advertises
+## its table through the auxv tag AT_SKJ_VDSO; the guest finds it by walking its
+## auxv and calls the functions through the export table.  One image is built
+## once and shared read-only across every sandbox: the emulated ILP32 cores
+## alias it through gm_page, the LP64 (HV) cores map it as a read-only
+## hypervisor memory slot.  Each tier builds the image with its own toolchain:
+## ELF32 at 0x50000000 for RISC-V, ELF64 at SKJ_HV_VDSO (0x20000000) for the HV
+## guests.
+build/rv/vdso.o: runtime/vdso.c include/skj_vdso.h build/skj-cc-rv build/skj-as-rv | build/rv
+	@./build/skj-cc-rv -Iinclude -o build/rv/vdso.s runtime/vdso.c
+	@./build/skj-as-rv -o $@ build/rv/vdso.s
+
+build/rv/vdso.elf: build/rv/vdso.o runtime/vdso_rv.ld build/skj-ld-rv
+	@./build/skj-ld-rv -T runtime/vdso_rv.ld -o $@ build/rv/vdso.o
+
+build/x86_64/vdso.o: runtime/vdso.c include/skj_vdso.h build/skj-cc-x86-64 $(X64_ASM_DEP) | build/x86_64
+	@./build/skj-cc-x86-64 -Iinclude -o build/x86_64/vdso.s runtime/vdso.c
+	@$(X64_ASM) $(X64_ASMFLAGS) -o $@ build/x86_64/vdso.s
+
+build/x86_64/vdso.elf: build/x86_64/vdso.o runtime/vdso_x86_64.ld
+	@$(X64_LD) -m elf_x86_64 -T runtime/vdso_x86_64.ld --build-id=none -o $@ build/x86_64/vdso.o
+
+build/arm64/vdso.o: runtime/vdso.c include/skj_vdso.h build/skj-cc-arm64 $(A64_ASM_DEP) | build/arm64
+	@./build/skj-cc-arm64 -Iinclude -o build/arm64/vdso.s runtime/vdso.c
+	@$(A64_AS) -o $@ build/arm64/vdso.s
+
+build/arm64/vdso.elf: build/arm64/vdso.o runtime/vdso_arm64.ld
+	@$(A64_LD) -T runtime/vdso_arm64.ld --build-id=none -o $@ build/arm64/vdso.o
+
+test-rv-vdso: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv/start.o \
+              build/rv/va_rv.o build/rv/soft64_div.o build/lib/riscv/libc.a \
+              build/rv/vdso.elf build/skj-run examples/vdso_test.c include/skj_vdso.h
+	@./build/skj-cc-rv -Iinclude -Ilibc -o build/rv/vdso_test.s examples/vdso_test.c
+	@./build/skj-as-rv -o build/rv/vdso_test.o build/rv/vdso_test.s
+	@./build/skj-ld-rv -o build/rv/vdso_test.elf build/rv/start.o build/rv/vdso_test.o \
+	    build/lib/riscv/libc.a build/rv/va_rv.o build/rv/soft64_div.o
+	@out=$$(./build/skj-run --vdso build/rv/vdso.elf build/rv/vdso_test.elf); \
+	 if [ "$$out" = "vdso ok" ]; then \
+	     echo "PASS: vDSO seam (rv): guest called host-injected leaf functions"; \
+	 else \
+	     echo "FAIL: test-rv-vdso got '$$out'"; exit 1; \
+	 fi
+
+## The same seam on the LP64 HV tier: the vDSO is an ELF64 image backing a
+## read-only hypervisor memory slot at SKJ_HV_VDSO, shared across every VM.  The
+## guest links the syscall seam's weak write plus getenv.o/string.o for environ
+## (the crt sets environ from the envp the scheduler laid down); no stdio or fs.
+test-hv-x86-64-vdso: build/skj-cc-x86-64 build/skj-as-x86-64 build/skj-run \
+                     build/hv-x86_64/start.o build/hv-x86_64/syscall.o \
+                     build/x86_64/vdso.elf examples/vdso_test.c libc/getenv.c \
+                     libc/string.c include/skj_vdso.h $(X64_ASM_DEP) | build/x86_64
+	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: hv x86-64 vdso (no accessible /dev/kvm)"; exit 0; fi; \
+	 ./build/skj-cc-x86-64 -Iinclude -Ilibc -o build/x86_64/vdso_test.s examples/vdso_test.c; \
+	 $(X64_ASM) $(X64_ASMFLAGS) -o build/x86_64/vdso_test.o build/x86_64/vdso_test.s; \
+	 ./build/skj-cc-x86-64 -Ilibc -o build/x86_64/vdso_getenv.s libc/getenv.c; \
+	 $(X64_ASM) $(X64_ASMFLAGS) -o build/x86_64/vdso_getenv.o build/x86_64/vdso_getenv.s; \
+	 ./build/skj-cc-x86-64 -Ilibc -o build/x86_64/vdso_string.s libc/string.c; \
+	 $(X64_ASM) $(X64_ASMFLAGS) -o build/x86_64/vdso_string.o build/x86_64/vdso_string.s; \
+	 $(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none \
+	     -o build/x86_64/vdso_test.elf build/hv-x86_64/start.o build/x86_64/vdso_test.o \
+	     build/x86_64/vdso_getenv.o build/x86_64/vdso_string.o build/hv-x86_64/syscall.o; \
+	 out=$$(./build/skj-run --vdso build/x86_64/vdso.elf build/x86_64/vdso_test.elf 2>/dev/null); \
+	 if [ "$$out" = "vdso ok" ]; then \
+	     echo "PASS: vDSO seam (hv x86-64): guest called host-injected leaf functions"; \
+	 else \
+	     echo "FAIL: test-hv-x86-64-vdso got '$$out'"; exit 1; \
+	 fi
+
+test-hv-arm64-vdso: build/skj-cc-arm64 build/skj-as-aarch64 build/skj-run \
+                    build/hv-arm64/start.o build/hv-arm64/syscall.o \
+                    build/arm64/vdso.elf examples/vdso_test.c libc/getenv.c \
+                    libc/string.c include/skj_vdso.h $(A64_ASM_DEP) | build/arm64
+	@./build/skj-cc-arm64 -Iinclude -Ilibc -o build/arm64/vdso_test.s examples/vdso_test.c; \
+	 $(A64_AS) -o build/arm64/vdso_test.o build/arm64/vdso_test.s; \
+	 ./build/skj-cc-arm64 -Ilibc -o build/arm64/vdso_getenv.s libc/getenv.c; \
+	 $(A64_AS) -o build/arm64/vdso_getenv.o build/arm64/vdso_getenv.s; \
+	 ./build/skj-cc-arm64 -Ilibc -o build/arm64/vdso_string.s libc/string.c; \
+	 $(A64_AS) -o build/arm64/vdso_string.o build/arm64/vdso_string.s; \
+	 $(A64_LD) -e _start -Ttext=0x100000 --build-id=none \
+	     -o build/arm64/vdso_test.elf build/hv-arm64/start.o build/arm64/vdso_test.o \
+	     build/arm64/vdso_getenv.o build/arm64/vdso_string.o build/hv-arm64/syscall.o; \
+	 if [ "$$(uname -m)" = "aarch64" ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then \
+	     out=$$(./build/skj-run --vdso build/arm64/vdso.elf build/arm64/vdso_test.elf 2>/dev/null); \
+	     if [ "$$out" = "vdso ok" ]; then \
+	         echo "PASS: vDSO seam (hv arm64): guest called host-injected leaf functions"; \
+	     else \
+	         echo "FAIL: test-hv-arm64-vdso got '$$out'"; exit 1; \
+	     fi; \
+	 else \
+	     echo "PASS: vDSO seam (hv arm64): built (run skipped, no aarch64 /dev/kvm)"; \
+	 fi
 
 ## The cross-language sandbox demo: a C root (skj-cc-rv) spawns two children,
 ## one built from C and one from Kobold-Pascal (skj-kpc -> skj-kp-rv ->
@@ -6962,4 +7068,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill test-rv-spawn-mounts test-cf-spawn-mounts test-rv-spawn-pipe test-cf-spawn-pipe test-rv-jsh test-cf-jsh test-x86-64-jsh test-arm64-jsh test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-preempt check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill test-rv-spawn-mounts test-cf-spawn-mounts test-rv-spawn-pipe test-cf-spawn-pipe test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh test-rv-vdso test-hv-x86-64-vdso test-hv-arm64-vdso test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-preempt check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE

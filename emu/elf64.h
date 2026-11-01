@@ -24,6 +24,14 @@ int elf64_probe_mem(const uint8_t *buf, long size, elf32_info *info);
 int elf64_load_mem(guest *g, const uint8_t *buf, long size, elf32_info *info,
                    const char *what);
 
+/* Load every PT_LOAD segment of an ELF64 image into a freshly allocated flat
+ * host buffer laid out at the segments' guest addresses (the ELF64 analogue of
+ * elf32_load_raw's two-pass buffer build).  Sets *buf (caller frees), *lo (the
+ * lowest page address) and *size (the page-rounded span).  Used to build the
+ * shared LP64 vDSO image the HV guests map read-only.  Returns 0 or -1. */
+int elf64_load_flat(const char *path, uint8_t **buf, uint32_t *lo,
+                    uint32_t *size);
+
 /* Resolve a global symbol's value from an in-memory ELF64 image (the ELF64
  * analogue of elf32_symbol_mem).  The HV guest lives under 4 GiB, so the value
  * is returned as a 32-bit address; 0 means not found. */
