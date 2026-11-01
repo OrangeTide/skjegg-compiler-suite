@@ -494,14 +494,17 @@ gfd_init(guest *g)
     if (g->fds_inited)
         return;
     for (i = 0; i < 3; i++) {
-        /* Give the sandbox its own dup of the real stdin/stdout/stderr, so its
-         * 0/1/2 are ordinary owned host fds with no special case: closing one
-         * in the guest closes only this sandbox's dup, never the shared
-         * terminal.  If the dup fails, fall back to the shared fd. */
-        int d = dup(i);
+        /* Give the sandbox its own dup of the host fds its 0/1/2 bind to
+         * (g->stdio, by default skj-run's own stdin/stdout/stderr; a host can
+         * point them at a connection's socket instead).  Dup'ing makes them
+         * ordinary owned host fds with no special case: closing one in the
+         * guest closes only this sandbox's dup, never the shared source.  If the
+         * dup fails, fall back to the source fd. */
+        int src = g->stdio[i];
+        int d = dup(src);
         g->fdtab[i].used = 1;
         g->fdtab[i].dev = GDEV_HOSTFS;
-        g->fdtab[i].host_fd = d >= 0 ? d : i;
+        g->fdtab[i].host_fd = d >= 0 ? d : src;
     }
     g->fds_inited = 1;
 }
@@ -1986,26 +1989,36 @@ guest_build_stack(guest *g, const run_opts *o)
 {
     uint32_t sp = g->stack_top;
     uint32_t str[64] = { 0 };
+    uint32_t env[64] = { 0 };
     int argc = o->argc;
+    int envc = o->envp ? o->envc : 0;
     int i;
 
     if (argc > (int)(sizeof(str) / sizeof(str[0])))
         argc = (int)(sizeof(str) / sizeof(str[0]));
+    if (envc > (int)(sizeof(env) / sizeof(env[0])))
+        envc = (int)(sizeof(env) / sizeof(env[0]));
 
-    /* strings, top down */
+    /* strings, top down: argv then envp */
     for (i = argc - 1; i >= 0; i--) {
         uint32_t len = (uint32_t)strlen(o->argv[i]) + 1;
         sp -= len;
         gm_write(&g->mem, sp, o->argv[i], len);
         str[i] = sp;
     }
+    for (i = envc - 1; i >= 0; i--) {
+        uint32_t len = (uint32_t)strlen(o->envp[i]) + 1;
+        sp -= len;
+        gm_write(&g->mem, sp, o->envp[i], len);
+        env[i] = sp;
+    }
     sp &= ~15u;
 
-    /* argc, argv[], argv NULL, envp NULL, auxv (AT_PAGESZ pair, an optional
-       AT_SKJ_VDSO pair when a vDSO is injected, AT_NULL pair) */
+    /* argc, argv[], argv NULL, envp[], envp NULL, auxv (AT_PAGESZ pair, an
+       optional AT_SKJ_VDSO pair when a vDSO is injected, AT_NULL pair) */
     {
         uint32_t aux_pairs = g->vdso_base ? 3u : 2u;
-        sp -= 4 * (1 + (uint32_t)argc + 1 + 1 + 2u * aux_pairs);
+        sp -= 4 * (1 + (uint32_t)argc + 1 + (uint32_t)envc + 1 + 2u * aux_pairs);
     }
     sp &= ~15u;
 
@@ -2017,6 +2030,8 @@ guest_build_stack(guest *g, const run_opts *o)
             poke32(g, p, str[i]);
         poke32(g, p, 0);            /* argv terminator */
         p += 4;
+        for (i = 0; i < envc; i++, p += 4)
+            poke32(g, p, env[i]);
         poke32(g, p, 0);            /* envp terminator */
         p += 4;
         poke32(g, p, AT_PAGESZ);
@@ -2054,26 +2069,37 @@ guest_build_stack64(guest *g, const run_opts *o)
 {
     uint32_t sp = g->stack_top;
     uint32_t str[64] = { 0 };
+    uint32_t env[64] = { 0 };
     int argc = o->argc;
+    int envc = o->envp ? o->envc : 0;
     int i;
 
     if (argc > (int)(sizeof(str) / sizeof(str[0])))
         argc = (int)(sizeof(str) / sizeof(str[0]));
+    if (envc > (int)(sizeof(env) / sizeof(env[0])))
+        envc = (int)(sizeof(env) / sizeof(env[0]));
 
-    for (i = argc - 1; i >= 0; i--) {   /* strings, top down */
+    for (i = argc - 1; i >= 0; i--) {   /* strings, top down: argv then envp */
         uint32_t len = (uint32_t)strlen(o->argv[i]) + 1;
         sp -= len;
         gm_write(&g->mem, sp, o->argv[i], len);
         str[i] = sp;
     }
+    for (i = envc - 1; i >= 0; i--) {
+        uint32_t len = (uint32_t)strlen(o->envp[i]) + 1;
+        sp -= len;
+        gm_write(&g->mem, sp, o->envp[i], len);
+        env[i] = sp;
+    }
     sp &= ~15u;
 
-    /* argc + argv + argv NULL + envp NULL + auxv (AT_PAGESZ pair, an optional
-     * AT_SKJ_VDSO pair when a vDSO is injected, AT_NULL pair), 8 bytes each.
-     * Keep the final sp 16-byte aligned by padding the slot count to even. */
+    /* argc + argv + argv NULL + envp[] + envp NULL + auxv (AT_PAGESZ pair, an
+     * optional AT_SKJ_VDSO pair when a vDSO is injected, AT_NULL pair), 8 bytes
+     * each.  Keep the final sp 16-byte aligned by padding the slot count even. */
     {
         uint32_t aux_pairs = g->vdso_base ? 3u : 2u;
-        uint32_t slots = 1 + (uint32_t)argc + 1 + 1 + 2u * aux_pairs;
+        uint32_t slots = 1 + (uint32_t)argc + 1 + (uint32_t)envc + 1
+                       + 2u * aux_pairs;
         sp -= 8 * (slots + (slots & 1));
         sp &= ~15u;
     }
@@ -2086,6 +2112,8 @@ guest_build_stack64(guest *g, const run_opts *o)
             poke64(g, p, str[i]);
         poke64(g, p, 0);                /* argv terminator */
         p += 8;
+        for (i = 0; i < envc; i++, p += 8)
+            poke64(g, p, env[i]);
         poke64(g, p, 0);                /* envp terminator */
         p += 8;
         poke64(g, p, AT_PAGESZ);

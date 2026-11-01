@@ -221,7 +221,60 @@ typedef struct skj_cpu_ops {
 
 /* The whole run: load the root image, install mounts, schedule to completion
  * (or serve GDB), print --stats, and report the status.  Returns 0 on a normal
- * run, -1 if the root image could not be loaded. */
+ * run, -1 if the root image could not be loaded.  It is a thin wrapper over the
+ * reusable scheduler below: a host that wants several process trees, or wants to
+ * bind a tree's stdio to a socket, or wants to interleave the scheduler with its
+ * own event loop, uses those directly instead. */
 int run_sandbox(const run_opts *o, const skj_cpu_ops *ops, int *status);
+
+/* One root process to add to a scheduler.  argv/envp/stdio may each be NULL: the
+ * argv then falls back to the run options' argv, the environment is empty, and
+ * 0/1/2 bind to skj-run's own.  argv/envp are the usual NUL-terminated string
+ * arrays (envp entries are "KEY=VALUE"); argc/envc give their lengths.  stdio is
+ * the three host fds {stdin, stdout, stderr}, e.g. a connection's socket. */
+typedef struct sched_root {
+    const char *path;           /* ELF image to load */
+    char **argv;                /* argv, or NULL for the run options' */
+    int argc;
+    char **envp;                /* environment, or NULL for none */
+    int envc;
+    const int *stdio;           /* host fds for 0/1/2, or NULL for skj-run's own */
+} sched_root;
+
+/* The reusable scheduler, for a host that drives it itself (a shell server
+ * binding each connection to its own sandbox tree, say).  Lifecycle:
+ *
+ *   sched_init(&S, o, ops);
+ *   sched_root r = { .path = img, .argv = av, .argc = ac,
+ *                    .envp = ev, .envc = ec, .stdio = conn_fds };
+ *   sched_add_root(&S, &r);                // one or more, each its own argv/env/fds
+ *   // then either the built-in loop:
+ *   sched_run(&S);
+ *   // or the host's own event loop:
+ *   for (;;) {
+ *       int ran, live = sched_step(&S, &ran);   // one round of slices
+ *       if (S.limited || !live) break;
+ *       int fds[SKJ_MAX_PROC]; short ev[SKJ_MAX_PROC]; uint64_t dl;
+ *       int n = sched_waits(&S, fds, ev, SKJ_MAX_PROC, &dl);
+ *       // poll fds (plus the host's own: a listen socket, timers) with a
+ *       // timeout from dl, then report readiness back:
+ *       //   sched_mark_ready(&S, fd)  for each ready guest fd
+ *       //   sched_wake_deadlines(&S)  after the poll returns
+ *   }
+ *   sched_destroy(&S);
+ *
+ * The cores and the shared memory pool are not thread-safe, so a server drives
+ * many scheds from one event loop, not from threads.  The HV cores do not park
+ * on blocking I/O (they spin-retry), so connection-bound shells run best on an
+ * emulated core. */
+void sched_init(sched *S, const run_opts *o, const skj_cpu_ops *ops);
+int  sched_add_root(sched *S, const sched_root *r);
+int  sched_step(sched *S, int *ran);
+int  sched_waits(sched *S, int *fds, short *events, int max,
+                 uint64_t *deadline_ns);
+void sched_mark_ready(sched *S, int fd);
+void sched_wake_deadlines(sched *S);
+void sched_run(sched *S);
+void sched_destroy(sched *S);
 
 #endif /* SKJ_SCHED_H */

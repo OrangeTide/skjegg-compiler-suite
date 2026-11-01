@@ -97,6 +97,16 @@ check "granted mount reads back"      42 ./build/skj-run --mount data:data confg
 check "escape above the mount denied"  7 ./build/skj-run --mount data:data escguest
 check "no grant: scratch default"     10 ./build/skj-run confguest
 
+# The vDSO: the vendored tree builds the image (vdso-rv.elf is in SKJ_ALL) and
+# skj-run injects it with --vdso.  The guest finds the table through environ
+# (so this also guards getenv.c being in the vendored libc), calls the leaf
+# functions, and reads the system page; vdso_test.c returns 0 only when every
+# check passes.  Asserting on the exit code, the channel this test trusts.
+echo "== building and running the vendored vDSO =="
+./build/skjcc -target riscv -Iskjegg/include -o vdsoguest "$REPO/examples/vdso_test.c"
+check "vDSO injected, table and system page valid" 0 \
+    ./build/skj-run --vdso build/vdso-rv.elf vdsoguest
+
 # The hardware-virtualization arches vendor too.  With --with emulator an HV arch
 # (x86-64 / aarch64) ships the HV core (hvcore.c + the KVM backend + the gdb stub)
 # and builds EMU_HV=1, alongside any emulated cores.  Build-only here: running an

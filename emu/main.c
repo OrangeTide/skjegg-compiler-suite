@@ -60,6 +60,7 @@ usage(FILE *out)
         "  --mount NAME:DIR  grant the guest a confined host directory\n"
         "  --mount-ro NAME:DIR  the same, read-only (mutating ops fail EROFS)\n"
         "  --vdso IMG      map a vDSO image of pure leaf functions, found via auxv\n"
+        "  --env KEY=VALUE  add an environment entry (repeatable)\n"
         "  --dev NAME      grant the guest a devfs mount (null/zero/full)\n"
         "  --rom NAME:IMG  grant the guest a read-only romfs image\n"
         "  --9p NAME:DIR   serve a host directory to the guest over 9P2000\n"
@@ -149,6 +150,7 @@ int
 main(int argc, char **argv)
 {
     run_opts o;
+    char *envv[64];                     /* --env entries, pointed at by o.envp */
     elf32_info info;
     int arch = GUEST_ARCH_NONE;
     int status = 0;
@@ -251,6 +253,15 @@ main(int argc, char **argv)
         }
         if (strcmp(a, "--vdso") == 0 && i + 1 < argc) {
             o.vdso = argv[++i];
+            continue;
+        }
+        if (strcmp(a, "--env") == 0 && i + 1 < argc) {
+            if (o.envc >= (int)(sizeof(envv) / sizeof(envv[0]))) {
+                fprintf(stderr, "skj-run: too many --env options\n");
+                return 2;
+            }
+            envv[o.envc++] = argv[++i];     /* a "KEY=VALUE" entry */
+            o.envp = envv;
             continue;
         }
         if (strcmp(a, "--mount-ro") == 0 && i + 1 < argc) {

@@ -774,8 +774,11 @@ clocks today, with room for more, QNX-style). `sched_update_sysinfo` refreshes
 the clock just before each slice, so it advances at slice granularity, the price
 of a trap-free read. The ABI (the tag, the table, the page layout, the ordinals)
 lives in `include/skj_vdso.h`; the full account is in
-[`process-model.md`](process-model.md), "Injecting runtime". Tests: `test-rv-vdso`
-and `test-hv-x86-64-vdso` (plus `test-hv-arm64-vdso`), in `check-emu-all`.
+[`process-model.md`](process-model.md), "Injecting runtime". Tests: `test-rv-vdso`,
+`test-cf-vdso` and `test-mips-vdso` on the emulated cores (ColdFire big-endian,
+MIPS little-endian, so they also prove the loader and the system-page writer
+honour the guest byte order), and `test-hv-x86-64-vdso` (plus `test-hv-arm64-vdso`)
+on the HV tier, all in `check-emu-all`.
 
 ## The filesystem layer (`fs/`)
 

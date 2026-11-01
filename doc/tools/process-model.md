@@ -79,13 +79,17 @@ model: there is no system-wide process namespace, and a "pid" is a spawn handle.
 
 ## Arguments and environment
 
-The initial stack frame the loader builds already carries the full Linux-style
-layout: `argc`, the `argv` pointers, a NULL, the `envp` pointers, a NULL, then a
-minimal auxv. Argument passing through spawn fills the `argv` vector; environment
-passing fills `envp` the same way **(planned)**. The crt delivers `argc`/`argv`
-and sets `environ` (from the `envp` the loader laid down) for `getenv` and for
-the auxv walk the vDSO needs; every tier's crt does this now, the emulated and
-the HV ones alike.
+The initial stack frame the loader builds carries the full Linux-style layout:
+`argc`, the `argv` pointers, a NULL, the `envp` pointers, a NULL, then a minimal
+auxv. A root gets its own `argv` and environment through `sched_add_root` (see
+"Embedding the scheduler"), which the CLI exposes as `--env KEY=VALUE`
+(repeatable); the stack builders write the `envp` pointers in the guest's own
+width and byte order, so this works on every tier, not just ILP32. The crt
+delivers `argc`/`argv` and sets `environ` (from the `envp` the loader laid down)
+for `getenv` and for the auxv walk the vDSO needs; every tier's crt does this,
+the emulated and the HV ones alike. A **spawned child** still inherits no
+environment; the spawn descriptor could carry one later, the way it grew `argv`
+and the fd map **(planned)**.
 
 A process holds its own environment. There is no shared global environment and no
 cross-process `setenv`: a shell keeps its own `environ`, mutates it with
@@ -260,9 +264,50 @@ rest.
 
 The tag, the ABI struct, the ordinals (append-only, so the index never moves),
 and the system-page layout live in `include/skj_vdso.h`. The feature is exercised
-by `test-rv-vdso` on the emulated tier and `test-hv-x86-64-vdso` under KVM (with
-`test-hv-arm64-vdso` building the image everywhere and running it on an aarch64
-KVM host), all in `check-emu-all`.
+by `test-rv-vdso`, `test-cf-vdso` and `test-mips-vdso` on the emulated tier (one
+per core: RISC-V and MIPS little-endian, ColdFire big-endian, so the loader and
+the byte-order-aware system-page writer are both exercised either way) and
+`test-hv-x86-64-vdso` under KVM (with `test-hv-arm64-vdso` building the image
+everywhere and running it on an aarch64 KVM host), all in `check-emu-all`.
+
+## Embedding the scheduler **(done)**
+
+`run_sandbox` runs one process tree to completion with its stdio bound to
+`skj-run`'s own terminal, and owns the poll loop. That is the CLI, not the only
+way in: the scheduler is a reusable object a host can drive itself, which is what
+a shell server (telnet, websockets) binding each connection to its own sandbox
+tree needs.
+
+The I/O scheduling is a single cooperative reactor. A blocking guest read parks
+the process on its host fd (`park_fd`, `POLLIN`); the scheduler skips it until a
+`poll()` over every parked fd says it is ready. A pipeline is exactly this: each
+stage parks on its pipe end, all in one `poll()`, and the ready one resumes. No
+threads, no per-process stall.
+
+The reusable API in `sched.h` exposes that machinery:
+
+- `sched_init` / `sched_destroy` bracket a scheduler over a core and the run
+  options.
+- `sched_add_root(S, &root)` loads a root from a `sched_root` spec. Each root
+  carries its own `argv`, its own environment, and the three host fds its
+  `0`/`1`/`2` bind to, a connection's socket rather than the terminal (any of
+  the three may be `NULL`: `argv` falls back to the run options', the
+  environment is empty, stdio is `skj-run`'s own). A host may add several
+  independent roots.
+- `sched_step` runs one round of slices and returns the live count; `sched_run`
+  is the built-in loop over it.
+- `sched_waits` hands out the parked fds and the nearest sleep deadline, so the
+  host's own `poll()` can watch them alongside its listening socket and timers;
+  `sched_mark_ready` and `sched_wake_deadlines` report readiness back.
+
+So a server runs one event loop over many scheduler instances (one per
+connection) plus its accept socket, stepping whichever tree a ready fd belongs
+to. Two constraints shape that design: the cores and the shared memory pool are
+single-threaded, so it is one event loop and not one thread per connection; and
+the HV cores spin-retry rather than park on blocking I/O, so connection-bound
+shells run best on an emulated core. A spawned child, unlike a root, still
+inherits no environment; that is the one piece of per-process state the spawn
+path does not yet carry.
 
 ## See also
 

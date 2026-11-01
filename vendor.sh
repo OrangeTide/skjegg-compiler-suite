@@ -487,15 +487,27 @@ if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || \
     # sched.c is the arch-neutral process sandbox every core's *_user.c binds to.
     cp "$S/fs/fs.h" "$S/fs/ninefs.h" "$S/fs/p9_wire.h" "$S/fs/wire.h" \
        "$S/fs/p9_server.c" "$S/fs/p9_server.h" "$DEST/fs/"
+    # The vDSO image source (pure leaf functions plus the host-updated system
+    # page) and its ABI header.  skj-run already supports --vdso through the emu
+    # base above; these let a consumer with the matching skj toolchain build the
+    # image.  The per-core linker script ships beside each core below.  The HV
+    # images are not built in a vendored tree (the x86-64/arm64 C toolchain is
+    # host-only), so their scripts are not shipped.
+    mkdir -p "$DEST/include"
+    cp "$S/runtime/vdso.c" "$DEST/runtime/"
+    cp "$S/include/skj_vdso.h" "$DEST/include/"
 fi
 if [ "$has_emu_cf" -eq 1 ]; then
     cp "$S/emu/coldfire.c" "$S/emu/coldfire.h" "$S/emu/cf_user.c" "$DEST/emu/"
+    cp "$S/runtime/vdso_cf.ld" "$DEST/runtime/"
 fi
 if [ "$has_emu_rv" -eq 1 ]; then
     cp "$S/emu/rv32.c" "$S/emu/rv32.h" "$S/emu/rv_user.c" "$DEST/emu/"
+    cp "$S/runtime/vdso_rv.ld" "$DEST/runtime/"
 fi
 if [ "$has_emu_mips" -eq 1 ]; then
     cp "$S/emu/mips32.c" "$S/emu/mips32.h" "$S/emu/mips_user.c" "$DEST/emu/"
+    cp "$S/runtime/vdso_mips.ld" "$DEST/runtime/"
 fi
 # The hardware-virtualization core: one body (hvcore.c) serves both x86-64 and
 # aarch64 guests, over the backend-neutral VMM seam (vmm.h) with one backend per
@@ -962,9 +974,11 @@ if [ "$has_driver" -eq 1 ]; then
         # The implemented hosted-libc set (mirrors tests/run-libc-tests.sh's
         # LIBC_DEFAULT): printf's float formatter (numfmt), buffered stdio
         # (stdio_core holds fflush, which the crt's fini.o pulls), and the
-        # file/dir ops (stat/fileops/dirent).  rng is RT_SRCS (runtime/); fini.o
-        # is force-linked by the driver, not archived.
-        _libc_srcs="string ctype stdlib printf numfmt stdio_core stdio assert malloc sbrk errno strerror rand strtod scanf coro threads stat fileops dirent"
+        # file/dir ops (stat/fileops/dirent).  getenv.c defines environ, which
+        # the crt fills from envp and the vDSO entry walk (and getenv) read; the
+        # emulated vDSO image finds its table only through it.  rng is RT_SRCS
+        # (runtime/); fini.o is force-linked by the driver, not archived.
+        _libc_srcs="string ctype stdlib printf numfmt stdio_core stdio assert malloc sbrk errno strerror rand strtod scanf coro threads stat fileops dirent getenv"
         _fs_srcs=""
         _libc_fsflags=""
         if [ "$has_sandbox" -eq 1 ]; then
@@ -1130,6 +1144,38 @@ if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || \
         printf '\t$(CC) $(CFLAGS) -DEMU_COLDFIRE=%s -DEMU_RV32=%s -DEMU_MIPS32=%s -DEMU_HV=%s%s -I$(SKJEGG)emu -I$(SKJEGG)fs -o $@ $(SKJ_EMU) -lm $(SKJ_EMU_LDLIBS)\n' \
             "$has_emu_cf" "$has_emu_rv" "$has_emu_mips" "$has_emu_hv" "$_emu_hv_flags"
     } >> "$MK"
+fi
+
+# The vDSO image, one per emulated core whose skj toolchain is also vendored.
+# vdso.c compiles to the image linked at a fixed guest VA; skj-run injects it
+# with --vdso.  A rule is emitted only when the core (emu-*) and its cc/as/ld
+# are all present, since the image is built with the target's own toolchain.
+# emit_vdso <tag> <cc> <as> <ld> <ldscript>
+emit_vdso() {
+    _vt=$1 _vcc=$2 _vas=$3 _vld=$4 _vlds=$5
+    {
+        printf '\nSKJ_VDSO += $(BUILD)/vdso-%s.elf\n' "$_vt"
+        printf 'SKJ_ALL += $(BUILD)/vdso-%s.elf\n' "$_vt"
+        printf '$(BUILD)/vdso-%s.o: $(SKJEGG)runtime/vdso.c $(SKJEGG)include/skj_vdso.h $(BUILD)/%s $(BUILD)/%s | $(BUILD)\n' \
+            "$_vt" "$_vcc" "$_vas"
+        printf '\t$(BUILD)/%s -I$(SKJEGG)include -o $(BUILD)/vdso-%s.s $(SKJEGG)runtime/vdso.c\n' "$_vcc" "$_vt"
+        printf '\t$(BUILD)/%s -o $@ $(BUILD)/vdso-%s.s\n' "$_vas" "$_vt"
+        printf '$(BUILD)/vdso-%s.elf: $(BUILD)/vdso-%s.o $(SKJEGG)runtime/%s $(BUILD)/%s\n' \
+            "$_vt" "$_vt" "$_vlds" "$_vld"
+        printf '\t$(BUILD)/%s -T $(SKJEGG)runtime/%s -o $@ $(BUILD)/vdso-%s.o\n' "$_vld" "$_vlds" "$_vt"
+    } >> "$MK"
+}
+if [ "$has_emu_cf" -eq 1 ] && [ "$has_cc" -eq 1 ] && [ "$has_cf" -eq 1 ] && \
+   [ "$has_as" -eq 1 ] && [ "$has_ld" -eq 1 ]; then
+    emit_vdso cf skj-cc skj-as skj-ld vdso_cf.ld
+fi
+if [ "$has_emu_rv" -eq 1 ] && [ "$has_cc" -eq 1 ] && [ "$has_rv" -eq 1 ] && \
+   [ "$has_as_rv" -eq 1 ] && [ "$has_ld_rv" -eq 1 ]; then
+    emit_vdso rv skj-cc-rv skj-as-rv skj-ld-rv vdso_rv.ld
+fi
+if [ "$has_emu_mips" -eq 1 ] && [ "$has_cc" -eq 1 ] && [ "$has_mips" -eq 1 ] && \
+   [ "$has_as_mips" -eq 1 ] && [ "$has_ld_mips" -eq 1 ]; then
+    emit_vdso mips skj-cc-mips skj-as-mips skj-ld-mips vdso_mips.ld
 fi
 
 # cross-compiled runtime objects

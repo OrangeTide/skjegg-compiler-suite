@@ -426,6 +426,9 @@ proc_alloc(sched *S)
     }
     gm_init(&p->g.mem, S->o->mem_limit);
     p->g.mem.pool = &S->pool;           /* share the aggregate memory budget */
+    p->g.stdio[0] = 0;                  /* 0/1/2 dup from skj-run's own by default; */
+    p->g.stdio[1] = 1;                  /* a host can rebind a root before it runs  */
+    p->g.stdio[2] = 2;
     p->g.arch = S->ops->arch;
     p->g.big_endian = S->ops->big_endian;
     p->g.quiet = S->o->quiet;
@@ -462,7 +465,8 @@ proc_discard(sched *S, proc *p)
  * seed the initial stack from argv, and ready the CPU. It already holds a table
  * slot; fill in its handle and return it. */
 static int
-proc_finish(sched *S, proc *p, const elf32_info *info, char **argv, int argc)
+proc_finish(sched *S, proc *p, const elf32_info *info,
+            char **argv, int argc, char **envp, int envc)
 {
     run_opts so;
     uint32_t stack_base, sp, heap_base;
@@ -500,9 +504,11 @@ proc_finish(sched *S, proc *p, const elf32_info *info, char **argv, int argc)
                           S->vdso_table);
     }
 
-    so = *S->o;                 /* the child keeps the driver's sizes, its own argv */
+    so = *S->o;                 /* keep the driver's sizes; take this root's argv/env */
     so.argv = argv;
     so.argc = argc;
+    so.envp = envp;
+    so.envc = envc;
     sp = S->ops->word64 ? guest_build_stack64(&p->g, &so)
                         : guest_build_stack(&p->g, &so);
 
@@ -516,7 +522,7 @@ proc_finish(sched *S, proc *p, const elf32_info *info, char **argv, int argc)
  * 0 (and frees p) on any rejection. */
 static int
 proc_accept(sched *S, proc *p, const elf32_info *info, const char *what,
-            char **argv, int argc)
+            char **argv, int argc, char **envp, int envc)
 {
     if (info->machine != S->ops->machine) {
         fprintf(stderr, "skj-run: %s is not a %s image\n", what, S->ops->name);
@@ -527,15 +533,16 @@ proc_accept(sched *S, proc *p, const elf32_info *info, const char *what,
                 what, S->ops->name);
         goto fail;
     }
-    return proc_finish(S, p, info, argv, argc);
+    return proc_finish(S, p, info, argv, argc, envp, envc);
 fail:
     proc_discard(S, p);
     return 0;
 }
 
-/* The root process, from a file. */
+/* The root process, from a file, with its own argv and environment. */
 static int
-proc_new_file(sched *S, const char *path)
+proc_new_file(sched *S, const char *path, char **argv, int argc,
+              char **envp, int envc)
 {
     proc *p = proc_alloc(S);
     elf32_info info;
@@ -547,7 +554,7 @@ proc_new_file(sched *S, const char *path)
         proc_discard(S, p);
         return 0;
     }
-    return proc_accept(S, p, &info, path, S->o->argv, S->o->argc);
+    return proc_accept(S, p, &info, path, argv, argc, envp, envc);
 }
 
 /* A spawned child, from an in-memory image. */
@@ -567,7 +574,9 @@ proc_new_mem(sched *S, const uint8_t *img, long len, const char *what,
         proc_discard(S, p);
         return 0;
     }
-    return proc_accept(S, p, &info, what, argv, argc);
+    /* A spawned child inherits no environment yet; the spawn descriptor could
+     * carry one later, the way it grew argv and the fd map. */
+    return proc_accept(S, p, &info, what, argv, argc, NULL, 0);
 }
 
 /****************************************************************
@@ -911,36 +920,81 @@ sched_update_sysinfo(sched *S)
     st32(base + VDSO_SYS_SEQ, seq + 1, be);      /* even: the write is complete */
 }
 
-/* Wait for an I/O-parked process to become runnable.  Build a pollfd set from
- * every io_blocked process with a real fd, take the nearest sleep deadline as a
- * timeout, and poll.  When `block` is 0 the poll returns at once (timeout 0),
- * just harvesting fds that are already ready; when 1 it blocks until something
- * is ready or the nearest deadline passes.  A process is unblocked when its fd
- * signals or its deadline has arrived.  Returns the number unblocked. */
-static int
-poll_blocked(sched *S, int block)
+/* Collect the wait set of the I/O-parked processes: each one's host fd into
+ * fds[] and its poll events into events[] (up to max entries), and the nearest
+ * sleep deadline into *deadline_ns (0 if none).  Returns the fd count.  A host
+ * driving the scheduler from its own event loop calls this, polls the fds
+ * alongside its own (a listen socket, a timer), and reports readiness back
+ * through sched_mark_ready / sched_wake_deadlines. */
+int
+sched_waits(sched *S, int *fds, short *events, int max, uint64_t *deadline_ns)
 {
-    struct pollfd fds[SKJ_MAX_PROC];
-    int idx[SKJ_MAX_PROC];              /* idx[k] = proc slot for fds[k] */
-    int nfds = 0, i, woke = 0;
-    uint64_t now, deadline = 0;         /* nearest future sleep deadline, 0 = none */
-    int timeout;
+    int n = 0, i;
+    uint64_t deadline = 0;
 
     for (i = 0; i < S->nprocs; i++) {
         proc *p = S->procs[i];
 
         if (!p || p->done || !p->io_blocked)
             continue;
-        if (p->park_fd >= 0) {
-            fds[nfds].fd = p->park_fd;
-            fds[nfds].events = p->park_events;
-            fds[nfds].revents = 0;
-            idx[nfds] = i;
-            nfds++;
+        if (p->park_fd >= 0 && n < max) {
+            fds[n] = p->park_fd;
+            events[n] = p->park_events;
+            n++;
         }
         if (p->park_deadline && (deadline == 0 || p->park_deadline < deadline))
             deadline = p->park_deadline;
     }
+    if (deadline_ns)
+        *deadline_ns = deadline;
+    return n;
+}
+
+/* Wake every process parked on host fd (there may be more than one, e.g. two
+ * readers of a pipe); the scheduler runs each again next round. */
+void
+sched_mark_ready(sched *S, int fd)
+{
+    int i;
+
+    for (i = 0; i < S->nprocs; i++) {
+        proc *p = S->procs[i];
+        if (p && !p->done && p->io_blocked && p->park_fd == fd)
+            p->io_blocked = 0;
+    }
+}
+
+/* Wake every sleeper whose deadline has passed (monotonic ns). */
+void
+sched_wake_deadlines(sched *S)
+{
+    uint64_t now = mono_ns();
+    int i;
+
+    for (i = 0; i < S->nprocs; i++) {
+        proc *p = S->procs[i];
+        if (p && !p->done && p->io_blocked && p->park_deadline &&
+            now >= p->park_deadline)
+            p->io_blocked = 0;
+    }
+}
+
+/* The scheduler's own poll over sched_waits: build a pollfd set, take the
+ * nearest sleep deadline as the timeout, and poll.  When `block` is 0 the poll
+ * returns at once (timeout 0), just harvesting fds already ready; when 1 it
+ * blocks until something is ready or the nearest deadline passes.  A host that
+ * runs its own event loop uses sched_waits + sched_mark_ready + the deadline
+ * wake directly instead of this. */
+static void
+poll_blocked(sched *S, int block)
+{
+    struct pollfd fds[SKJ_MAX_PROC];
+    int pfd[SKJ_MAX_PROC];
+    short pev[SKJ_MAX_PROC];
+    int nfds, i, timeout;
+    uint64_t now, deadline = 0;
+
+    nfds = sched_waits(S, pfd, pev, SKJ_MAX_PROC, &deadline);
 
     if (!block) {
         timeout = 0;
@@ -950,7 +1004,7 @@ poll_blocked(sched *S, int block)
             timeout = 0;
         } else {
             uint64_t ms = (deadline - now + 999999ull) / 1000000ull;
-            /* Cap a very long sleep: poll wakes early, the deadline loop below
+            /* Cap a very long sleep: poll wakes early, the deadline wake below
              * leaves the sleeper parked, and the scheduler polls again. */
             timeout = ms > 3600000ull ? 3600000 : (int)ms;
         }
@@ -960,14 +1014,17 @@ poll_blocked(sched *S, int block)
 
     if (nfds > 0) {
         int r;
+        for (i = 0; i < nfds; i++) {
+            fds[i].fd = pfd[i];
+            fds[i].events = pev[i];
+            fds[i].revents = 0;
+        }
         do {
             r = poll(fds, (nfds_t)nfds, timeout);
         } while (r < 0 && errno == EINTR);
         for (i = 0; i < nfds; i++)
-            if (fds[i].revents) {
-                S->procs[idx[i]]->io_blocked = 0;
-                woke++;
-            }
+            if (fds[i].revents)
+                sched_mark_ready(S, fds[i].fd);
     } else if (block && deadline) {
         /* Pure sleepers, nothing to poll: wait out the nearest deadline. */
         if (timeout > 0)
@@ -975,79 +1032,79 @@ poll_blocked(sched *S, int block)
                      (uint32_t)((timeout % 1000) * 1000000));
     }
 
-    /* Wake any sleeper whose deadline has now passed. */
-    now = mono_ns();
+    sched_wake_deadlines(S);
+}
+
+/* One scheduler round: give every runnable process a slice, then do the
+ * end-of-round bookkeeping.  Turn finished children into zombies (keeping their
+ * exit status for a wait), wake any parent blocked in wait() whose child has
+ * exited, and reap any zombie whose parent is gone or itself finished so an
+ * unwaited child does not leak its slot.  A child spawned this round is picked
+ * up on the next one.  Sets *ran to 1 if any process ran.  Returns the number
+ * of live (not done) processes; 0 means the run is over OR, if S->limited is
+ * set, the global instruction budget was hit mid-round (the round returns early
+ * then, before the bookkeeping) -- a caller distinguishes the two by S->limited. */
+int
+sched_step(sched *S, int *ran)
+{
+    int live = 0, i;
+
+    *ran = 0;
     for (i = 0; i < S->nprocs; i++) {
         proc *p = S->procs[i];
 
-        if (p && !p->done && p->io_blocked && p->park_deadline &&
-            now >= p->park_deadline) {
-            p->io_blocked = 0;
-            woke++;
+        if (!p || p->done || p->io_blocked)
+            continue;
+        sched_update_sysinfo(S);        /* refresh the doorbell-free clock */
+        proc_slice(S, p);
+        *ran = 1;
+        if (S->limited)
+            return 0;                   /* the whole run stops at the budget */
+    }
+    for (i = 1; i < S->nprocs; i++)
+        if (S->procs[i] && S->procs[i]->done)
+            zombify_child(S, i);
+    for (i = 0; i < S->nprocs; i++) {
+        proc *w = S->procs[i];
+        if (w && w->io_blocked && w->wait_slot >= 0) {
+            proc *c = S->procs[w->wait_slot];
+            if (!c || c->done)
+                w->io_blocked = 0;      /* re-run wait(): it reaps and returns */
         }
     }
-    return woke;
+    for (i = 1; i < S->nprocs; i++) {
+        proc *c = S->procs[i];
+        if (c && c->done) {
+            proc *par = (c->parent >= 0 && c->parent < S->nprocs)
+                        ? S->procs[c->parent] : 0;
+            if (!par || par->done)
+                reap_child(S, i);
+        }
+    }
+    for (i = 0; i < S->nprocs; i++)
+        if (S->procs[i] && !S->procs[i]->done) {
+            live = 1;
+            break;
+        }
+    return live;
 }
 
-/* Round-robin the live processes until none is runnable, retiring each finished
- * child as soon as its round ends so its memory and slot free up for the next
- * spawn. A child spawned during a round is picked up on the next one.  A process
- * parked on a blocking syscall (io_blocked) is skipped until poll_blocked finds
- * its fd ready or its sleep deadline reached; when every live process is parked,
- * the scheduler blocks in poll rather than spinning. */
-static void
-run_scheduler(sched *S)
+/* The built-in run loop: step, then wait on parked I/O, until no process is
+ * live or the global budget is hit.  A process parked on a blocking syscall is
+ * skipped until its fd is ready or its sleep deadline passes; when nothing ran
+ * this round every live process is parked, so poll_blocked blocks rather than
+ * spins.  A host embedding the scheduler can drive sched_step + sched_waits +
+ * sched_mark_ready from its own event loop instead of calling this. */
+void
+sched_run(sched *S)
 {
-    int live, ran, i;
-
     for (;;) {
-        ran = 0;
-        for (i = 0; i < S->nprocs; i++) {
-            proc *p = S->procs[i];
+        int ran, live = sched_step(S, &ran);
 
-            if (!p || p->done || p->io_blocked)
-                continue;
-            sched_update_sysinfo(S);    /* refresh the doorbell-free clock */
-            proc_slice(S, p);
-            ran = 1;
-            if (S->limited)
-                return;                 /* the whole run stops at the budget */
-        }
-        /* Turn finished children into zombies, keeping their exit status for a
-         * wait.  Then wake any parent blocked in wait() whose child has exited,
-         * so it re-runs the call and reaps it.  Finally reap any zombie whose
-         * parent is gone or itself finished, so an unwaited child does not leak
-         * its slot. */
-        for (i = 1; i < S->nprocs; i++)
-            if (S->procs[i] && S->procs[i]->done)
-                zombify_child(S, i);
-        for (i = 0; i < S->nprocs; i++) {
-            proc *w = S->procs[i];
-            if (w && w->io_blocked && w->wait_slot >= 0) {
-                proc *c = S->procs[w->wait_slot];
-                if (!c || c->done)
-                    w->io_blocked = 0;  /* re-run wait(): it reaps and returns */
-            }
-        }
-        for (i = 1; i < S->nprocs; i++) {
-            proc *c = S->procs[i];
-            if (c && c->done) {
-                proc *par = (c->parent >= 0 && c->parent < S->nprocs)
-                            ? S->procs[c->parent] : 0;
-                if (!par || par->done)
-                    reap_child(S, i);
-            }
-        }
-
-        live = 0;
-        for (i = 0; i < S->nprocs; i++)
-            if (S->procs[i] && !S->procs[i]->done) {
-                live = 1;
-                break;
-            }
+        if (S->limited)
+            return;                     /* budget hit mid-round */
         if (!live)
             return;                     /* every process has exited */
-
         /* If anything ran this round, more work is immediately available, so
          * only harvest already-ready parked fds without waiting.  If nothing
          * ran, every live process is I/O-parked: block until one is ready. */
@@ -1059,23 +1116,84 @@ run_scheduler(sched *S)
  * The run loop
  ****************************************************************/
 
+/* Set up an empty scheduler over a core and the run options.  A host then adds
+ * one or more roots with sched_add_root and drives it with sched_run (the whole
+ * run) or sched_step + the wait primitives (its own event loop). */
+void
+sched_init(sched *S, const run_opts *o, const skj_cpu_ops *ops)
+{
+    memset(S, 0, sizeof *S);
+    S->o = o;
+    S->ops = ops;
+    S->pool.limit = o->total_mem;       /* aggregate commit cap, 0 = unlimited */
+}
+
+/* Load a root process described by `r` and install its mounts.  Each root gets
+ * its own argv, environment, and stdio binding, so a host can run several
+ * independent trees under one scheduler, each bound to its own connection.  Any
+ * of r->argv / r->envp / r->stdio may be NULL: argv then falls back to the run
+ * options' argv, envp to an empty environment, and stdio to skj-run's own
+ * 0/1/2.  Returns the process handle (>0) or 0 if the image failed to load. */
+int
+sched_add_root(sched *S, const sched_root *r)
+{
+    char **argv = r->argv ? r->argv : S->o->argv;
+    int argc = r->argv ? r->argc : S->o->argc;
+    int h = proc_new_file(S, r->path, argv, argc, r->envp, r->envc);
+    proc *p;
+
+    if (h <= 0)
+        return 0;
+    p = proc_from_handle(S, (uint32_t)h);
+    if (!p)
+        return 0;
+    guest_install_mounts(&p->g, r->path, S->o, p->grants, &p->ngrants);
+    if (r->stdio) {
+        p->g.stdio[0] = r->stdio[0];
+        p->g.stdio[1] = r->stdio[1];
+        p->g.stdio[2] = r->stdio[2];
+    }
+    return h;
+}
+
+/* Free every process and the shared resources (vDSO image, backtrace reader). */
+void
+sched_destroy(sched *S)
+{
+    int i;
+
+    for (i = 0; i < S->nprocs; i++) {   /* the root, plus any child not yet retired */
+        if (!S->procs[i])
+            continue;
+        S->ops->free(S->procs[i]->cpu);
+        guest_fds_free(&S->procs[i]->g);    /* close host fds, remove scratch dir */
+        guest_p9_free(&S->procs[i]->g);
+        gm_free(&S->procs[i]->g.mem);
+        free(S->procs[i]);
+    }
+    free(S->vdso_buf);                  /* the one shared vDSO image */
+#ifdef SKJ_DWARF_BACKTRACE
+    if (S->bt_state == 1)
+        arena_free(&S->bt_arena);
+    free(S->bt_elf);
+#endif
+}
+
 int
 run_sandbox(const run_opts *o, const skj_cpu_ops *ops, int *status)
 {
     sched S;
+    sched_root root = { 0 };
     proc *rp;
-    int rc, i;
+    int rc;
 
-    memset(&S, 0, sizeof S);
-    S.o = o;
-    S.ops = ops;
-    S.pool.limit = o->total_mem;        /* aggregate commit cap, 0 = unlimited */
-
-    if (proc_new_file(&S, o->path) <= 0)        /* the root image failed to load */
+    sched_init(&S, o, ops);
+    root.path = o->path;                /* argv falls back to the run options; env */
+    root.envp = o->envp;                /* and stdio come from the CLI (--env / own) */
+    root.envc = o->envc;
+    if (sched_add_root(&S, &root) <= 0) /* the root image failed to load */
         return -1;
-
     rp = S.procs[0];
-    guest_install_mounts(&rp->g, o->path, o, rp->grants, &rp->ngrants);
 
     if (ops->gdb && o->gdb_port > 0) {
         /* Debug the root process under the GDB remote protocol instead of
@@ -1087,7 +1205,7 @@ run_sandbox(const run_opts *o, const skj_cpu_ops *ops, int *status)
         if (rp->g.exited)
             rp->g.exit_code = ecode;
     } else {
-        run_scheduler(&S);
+        sched_run(&S);
     }
 
     rc = rp->rc;
@@ -1102,20 +1220,6 @@ run_sandbox(const run_opts *o, const skj_cpu_ops *ops, int *status)
 
     *status = rc ? rc : rp->g.exit_code;
 
-    for (i = 0; i < S.nprocs; i++) {    /* the root, plus any child not yet retired */
-        if (!S.procs[i])
-            continue;
-        ops->free(S.procs[i]->cpu);
-        guest_fds_free(&S.procs[i]->g);     /* close host fds, remove scratch dir */
-        guest_p9_free(&S.procs[i]->g);
-        gm_free(&S.procs[i]->g.mem);
-        free(S.procs[i]);
-    }
-    free(S.vdso_buf);                   /* the one shared vDSO image */
-#ifdef SKJ_DWARF_BACKTRACE
-    if (S.bt_state == 1)
-        arena_free(&S.bt_arena);
-    free(S.bt_elf);
-#endif
+    sched_destroy(&S);
     return 0;
 }

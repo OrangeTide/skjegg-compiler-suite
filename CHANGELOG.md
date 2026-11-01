@@ -4,7 +4,32 @@ All notable changes to this project are recorded here, newest first, grouped by
 month. Releases up to and including 0.12.0 are reconstructed from their git tag
 notes; the detail there is shallower than for recent releases.
 
-## October 2026
+## November 2026
+
+### 0.36.0
+
+#### Added
+- The process scheduler is now a reusable, embeddable API. A host program can
+  drive many sandbox process trees from its own event loop, each tree bound to
+  its own input and output, which is what a shell server that runs one sandbox
+  per telnet or websocket connection needs. `sched_init`, `sched_add_root`,
+  `sched_step`, `sched_run`, and the wait and ready primitives are the surface,
+  and `run_sandbox` is now a thin wrapper over them, so the command line behaves
+  exactly as before. Each root carries its own argument vector, environment, and
+  standard file descriptors.
+- `skj-run --env KEY=VALUE` (repeatable) passes an environment to the guest. It
+  reaches `getenv` on every target, little-endian and big-endian, 32-bit and
+  64-bit, because the stack builder lays the environment pointers in the guest's
+  own width and byte order. The default is still an empty environment, so an
+  existing run is unchanged.
+- The vDSO now runs on all three emulated cores. ColdFire and MIPS join RISC-V,
+  and the x86-64 and arm64 hardware-virtualized guests already had it, so the
+  feature now spans every target `skj-run` hosts. ColdFire is big-endian and
+  MIPS little-endian, so the image loader and the system-page clock writer are
+  proven in both byte orders.
+- `vendor.sh` ships the vDSO image source and builds it for each emulated core
+  whose toolchain is vendored, so a consuming project gets a working `--vdso`
+  out of the box.
 
 ### 0.35.0
 

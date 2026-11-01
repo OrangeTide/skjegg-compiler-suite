@@ -228,6 +228,10 @@ typedef struct guest {
     uint32_t stack_top;
     int big_endian;
     int fds_inited;
+    int stdio[3];               /* host fds the sandbox's 0/1/2 dup from; default
+                                   {0,1,2} (skj-run's own), but a host embedding
+                                   the scheduler can bind them to a connection's
+                                   socket before the first fd use */
     struct gfd fdtab[GUEST_MAX_FDS];
     int np9;                    /* bound 9p channels */
     struct guest_p9bind p9[GUEST_MAX_P9];
@@ -270,6 +274,8 @@ typedef struct run_opts {
     const char *path;
     char **argv;                /* guest argv, argv[0] is the program */
     int argc;
+    char **envp;                /* guest environment ("KEY=VALUE"), or NULL for none */
+    int envc;                   /* number of envp entries */
     const char *mounts[RUN_MAX_MOUNTS]; /* --mount name:hostdir grants */
     int nmounts;
     const char *mounts_ro[RUN_MAX_MOUNTS]; /* --mount-ro name:hostdir grants (FS_RO) */
