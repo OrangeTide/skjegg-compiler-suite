@@ -6,6 +6,19 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.37.0
+
+#### Changed
+- The hardware-virtualization preemption timer is now per-vcpu, so several HV
+  sandboxes can run at once, each on its own host thread. A compute-bound guest
+  (one that never traps to a syscall) is bounded by a time-slice timer; that
+  timer was a single process-global interval timer delivered to an arbitrary
+  thread, so two sandboxes stomped each other's timer. Each vcpu now drives its
+  own timer, targeted at the thread that runs it (a per-thread `timer_create` on
+  Linux/KVM, a per-vcpu watcher thread on macOS/HVF). A host can run many
+  sandboxes in parallel, one per connection, by calling the sandbox entry on its
+  own threads. Single-sandbox behavior is unchanged.
+
 ### 0.36.0
 
 #### Added

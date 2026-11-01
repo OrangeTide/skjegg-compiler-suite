@@ -1137,6 +1137,10 @@ if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || \
             printf 'SKJ_EMU_LDLIBS := -framework Hypervisor\n'
             printf 'else\n'
             printf 'SKJ_EMU += $(SKJEGG)emu/vmm_kvm.c\n'
+            printf '# The KVM backend drives a per-vcpu preemption timer\n'
+            printf '# (timer_create) and uses pthread_sigmask: link pthread and\n'
+            printf '# rt (both empty on glibc 2.34+).\n'
+            printf 'SKJ_EMU_LDLIBS := -lpthread -lrt\n'
             printf 'endif\n'
         fi
         printf 'SKJ_ALL += $(BUILD)/skj-run\n'

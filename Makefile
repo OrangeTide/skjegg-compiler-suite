@@ -1787,6 +1787,10 @@ EMU_SRC += emu/vmm_hvf.c
 EMU_LDLIBS += -framework Hypervisor
 else
 EMU_SRC += emu/vmm_kvm.c
+## The KVM backend drives a per-vcpu preemption timer (timer_create) and uses
+## pthread_once/pthread_sigmask, so link pthread and rt.  -lrt is empty on glibc
+## 2.34+ (timer_* folded into libc); it keeps older hosts linking.
+EMU_LDLIBS += -lpthread -lrt
 endif
 EMU_HDR += emu/vmm.h emu/hvcore.h emu/skj_hv_abi.h
 ifeq ($(EMU_HV_GDB),1)
@@ -1978,6 +1982,32 @@ test-hv-preempt: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
 	 echo "$$out" | grep -q "instruction limit" || { \
 	     echo "FAIL: hv preempt (no instruction-limit stop: out='$$out' ec=$$ec)"; exit 1; }; \
 	 echo "PASS: hv preempt (the timer bounds a compute-bound guest; --max-insns stops it)"
+
+## Several HV sandboxes at once, each on its own host thread: the low-level seam
+## a shell server would use (one sandbox per connection).  The driver links the
+## emu objects (minus the CLI main) plus the compute-bound spin guest and calls
+## run_x86_64hv on NSANDBOX threads.  With a process-global preemption timer some
+## sandboxes would run away and the driver would hang (caught by `timeout`); with
+## the per-vcpu timer each is preempted and stops at the instruction limit.
+test-hv-parallel: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
+                  build/hv-x86_64/start.o build/hv-x86_64/syscall.o \
+                  tests/hv/parallel.c tests/hv/spin.c $(EMU_HDR) | build/hv-x86_64
+	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: test-hv-parallel (no accessible /dev/kvm)"; exit 0; fi; \
+	 ./build/skj-cc-x86-64 -o build/hv-x86_64/spin.s tests/hv/spin.c; \
+	 ./build/skj-as-x86-64 -o build/hv-x86_64/spin.o build/hv-x86_64/spin.s; \
+	 $(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none \
+	     -o build/hv-x86_64/spin.elf build/hv-x86_64/start.o \
+	     build/hv-x86_64/spin.o build/hv-x86_64/syscall.o; \
+	 $(CC) $(CFLAGS) $(EMU_FLAGS) -Iemu -o build/hv-x86_64/parallel \
+	     tests/hv/parallel.c $(filter-out emu/main.c,$(EMU_SRC)) \
+	     -lm $(EMU_LDLIBS) -lpthread; \
+	 out=$$(timeout 20 ./build/hv-x86_64/parallel build/hv-x86_64/spin.elf 2>/dev/null); ec=$$?; \
+	 if [ $$ec -eq 124 ]; then \
+	     echo "FAIL: hv parallel (a sandbox ran away; the per-vcpu timer did not preempt it)"; exit 1; fi; \
+	 case "$$out" in \
+	     "parallel ok:"*) echo "PASS: hv parallel ($$out)";; \
+	     *) echo "FAIL: test-hv-parallel got '$$out' (ec=$$ec)"; exit 1;; \
+	 esac
 
 ## The HV GDB stub (item 10): a debugger drives one x86-64 HV guest over the
 ## RSP.  gdb learns the architecture from the ELF (no target.xml), so the host's
@@ -2853,7 +2883,7 @@ check-emu-all: check-emu check-rv-emu check-mips-emu test-coop-read \
                test-rv-spawn-pipe test-cf-spawn-pipe \
                test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh \
                test-rv-vdso test-cf-vdso test-mips-vdso \
-               test-hv-x86-64-vdso test-hv-arm64-vdso \
+               test-hv-x86-64-vdso test-hv-arm64-vdso test-hv-parallel \
                test-rv-env test-cf-env test-hv-x86-64-env test-rv-decode-cache \
                test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp \
                check-rv32 \
@@ -7150,4 +7180,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill test-rv-spawn-mounts test-cf-spawn-mounts test-rv-spawn-pipe test-cf-spawn-pipe test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh test-rv-vdso test-cf-vdso test-mips-vdso test-hv-x86-64-vdso test-hv-arm64-vdso test-rv-env test-cf-env test-hv-x86-64-env test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-preempt check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill test-rv-spawn-mounts test-cf-spawn-mounts test-rv-spawn-pipe test-cf-spawn-pipe test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh test-rv-vdso test-cf-vdso test-mips-vdso test-hv-x86-64-vdso test-hv-arm64-vdso test-rv-env test-cf-env test-hv-x86-64-env test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-preempt test-hv-parallel check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE

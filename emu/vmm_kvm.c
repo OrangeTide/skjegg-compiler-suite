@@ -15,14 +15,21 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <signal.h>
+#include <signal.h>         /* also pthread_sigmask, under _GNU_SOURCE */
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/time.h>
+
+/* Some glibc versions omit this convenience macro for the thread-targeted
+ * timer id, though the union member is always present. */
+#ifndef sigev_notify_thread_id
+#define sigev_notify_thread_id _sigev_un._tid
+#endif
 
 #if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
 #define VMM_KVM_OK 1
@@ -56,6 +63,8 @@ struct vmm_vcpu {
     int vcpu_fd;
     struct kvm_run *run;
     size_t run_size;
+    timer_t ptimer;             /* per-vcpu preemption timer, created lazily */
+    int ptimer_created;
 };
 
 #if defined(__aarch64__)
@@ -268,6 +277,8 @@ vmm_vcpu_free(vmm_vcpu *vcpu)
 {
     if (!vcpu)
         return;
+    if (vcpu->ptimer_created)
+        timer_delete(vcpu->ptimer);
     if (vcpu->run && vcpu->run != MAP_FAILED)
         munmap(vcpu->run, vcpu->run_size);
     if (vcpu->vcpu_fd >= 0)
@@ -548,45 +559,61 @@ preempt_noop(int sig)
 void
 vmm_vcpu_arm_preempt(vmm_vcpu *vcpu, unsigned usec)
 {
-    static int installed = 0;
-    struct itimerval it;
-    sigset_t run_mask;
+    struct sigaction sa;
+    struct itimerspec its;
+    sigset_t block, run_mask;
     struct {
         struct kvm_signal_mask hdr;
         uint8_t set[8];                 /* the kernel's sigset is 8 bytes */
     } km;
 
-    if (!installed) {
-        struct sigaction sa;
-        sigset_t block;
+    /* Install the no-op handler.  Its disposition is process-wide, but setting
+     * it is a thread-safe syscall and idempotent (always the same handler), and
+     * arm is called once per vcpu, so an unconditional set needs no guard.  No
+     * SA_RESTART, so KVM_RUN returns EINTR; delivery alone is the signal. */
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = preempt_noop;
+    sigaction(VMM_PREEMPT_SIG, &sa, NULL);
 
-        memset(&sa, 0, sizeof sa);
-        sa.sa_handler = preempt_noop;   /* no SA_RESTART: KVM_RUN gets EINTR */
-        sigaction(VMM_PREEMPT_SIG, &sa, NULL);
-        /* Block it in the thread's own mask; KVM unblocks it only while the
-         * guest runs, so host-side syscalls are never interrupted. */
-        sigemptyset(&block);
-        sigaddset(&block, VMM_PREEMPT_SIG);
-        sigprocmask(SIG_BLOCK, &block, NULL);
-        installed = 1;
-    }
+    /* Block the preempt signal in THIS thread's mask (every vcpu thread must do
+     * so, not just the first): KVM unblocks it only while this vcpu's guest
+     * runs, so host-side syscalls on this thread are never interrupted. */
+    sigemptyset(&block);
+    sigaddset(&block, VMM_PREEMPT_SIG);
+    pthread_sigmask(SIG_BLOCK, &block, NULL);
 
-    /* The run mask lists the signals blocked during KVM_RUN: the thread's
+    /* The run mask lists the signals blocked during KVM_RUN: this thread's
      * current mask with the preempt signal cleared, so it (and only it) can
      * break into the guest. */
-    sigprocmask(SIG_BLOCK, NULL, &run_mask);
+    pthread_sigmask(SIG_BLOCK, NULL, &run_mask);
     sigdelset(&run_mask, VMM_PREEMPT_SIG);
     memset(&km, 0, sizeof km);
     km.hdr.len = sizeof km.set;
     memcpy(km.hdr.sigset, &run_mask, sizeof km.set);
     ioctl(vcpu->vcpu_fd, KVM_SET_SIGNAL_MASK, &km.hdr);
 
-    /* (Re)arm the process interval timer, or disarm it when usec is zero. */
-    memset(&it, 0, sizeof it);
-    it.it_interval.tv_sec = usec / 1000000u;
-    it.it_interval.tv_usec = usec % 1000000u;
-    it.it_value = it.it_interval;
-    setitimer(ITIMER_REAL, &it, NULL);
+    /* Create this vcpu's own timer lazily, from the thread that runs it, so the
+     * tick is delivered to this thread alone (SIGEV_THREAD_ID).  A per-process
+     * interval timer would be shared across every vcpu and delivered to an
+     * arbitrary thread, which breaks as soon as a second sandbox runs. */
+    if (!vcpu->ptimer_created) {
+        struct sigevent sev;
+
+        memset(&sev, 0, sizeof sev);
+        sev.sigev_notify = SIGEV_THREAD_ID;
+        sev.sigev_notify_thread_id = (int)syscall(SYS_gettid);
+        sev.sigev_signo = VMM_PREEMPT_SIG;
+        if (timer_create(CLOCK_MONOTONIC, &sev, &vcpu->ptimer) != 0)
+            return;                     /* best effort: no preemption facility */
+        vcpu->ptimer_created = 1;
+    }
+
+    /* (Re)arm this vcpu's periodic timer, or disarm it when usec is zero. */
+    memset(&its, 0, sizeof its);
+    its.it_interval.tv_sec = usec / 1000000u;
+    its.it_interval.tv_nsec = (long)(usec % 1000000u) * 1000;
+    its.it_value = its.it_interval;
+    timer_settime(vcpu->ptimer, 0, &its, NULL);
 }
 
 #else /* !VMM_KVM_OK : a host without KVM or an unsupported architecture */

@@ -108,10 +108,12 @@ void vmm_vcpu_debug_singlestep(vmm_vcpu *vcpu, int on);
  * every `usec` microseconds; the signal is blocked everywhere except inside the
  * guest run, so it interrupts only KVM_RUN (never host-side work or a guest
  * fault handler) and surfaces as a VMM_X_INTR exit, which the core treats as a
- * timeslice checkpoint.  The process-global parts (the signal handler and the
- * timer) are set up once; the per-vcpu run mask is set on every call.  Passing
- * usec == 0 disarms the timer.  A best-effort no-op where the host lacks the
- * facility.  See the HV core (emu/hvcore.c) for the slice policy. */
+ * timeslice checkpoint.  The timer is per-vcpu and its tick is delivered to the
+ * thread that runs the vcpu, so independent sandboxes on separate host threads
+ * do not share or stomp one timer (the signal handler, the one process-wide
+ * part, is installed once).  Passing usec == 0 disarms the timer.  A
+ * best-effort no-op where the host lacks the facility.  See the HV core
+ * (emu/hvcore.c) for the slice policy. */
 void vmm_vcpu_arm_preempt(vmm_vcpu *vcpu, unsigned usec);
 
 #endif /* SKJ_VMM_H */

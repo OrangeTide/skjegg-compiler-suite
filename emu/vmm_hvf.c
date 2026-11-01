@@ -24,12 +24,13 @@
 
 #include <Hypervisor/Hypervisor.h>
 
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/sysctl.h>
-#include <sys/time.h>
 
 /* AArch64 exception syndrome: the top six bits of ESR_EL2 are the exception
  * class, and the low 25 bits are the instruction-specific syndrome (ISS). */
@@ -73,14 +74,16 @@ struct vmm_vcpu {
     uint8_t mmio_data[8];       /* the doorbell load's result lands here */
 
     int stepping;               /* single-step armed via debug_singlestep */
-};
 
-/* The preemption timer fires a SIGALRM; the handler forces the running vcpu out
- * of hv_vcpu_run with hv_vcpus_exit, which surfaces as HV_EXIT_REASON_CANCELED.
- * Our sandbox drives a single vcpu, so one global handle suffices.  (A multi-
- * vcpu host would track a set here.) */
-static hv_vcpu_t g_preempt_vcpu;
-static volatile int g_preempt_armed;
+    /* Per-vcpu preemption watcher.  macOS has no timer_create/SIGEV_THREAD_ID,
+     * so each vcpu runs its own watcher thread that forces this vcpu (and only
+     * this one) out of hv_vcpu_run, so independent sandboxes on separate host
+     * threads do not share one timer.  One extra thread per HV vcpu, on the
+     * macOS dev/test tier; Linux/KVM uses a kernel timer and no extra thread. */
+    pthread_t ptimer_thread;
+    volatile int ptimer_running;
+    volatile unsigned ptimer_usec;      /* the slice in microseconds; 0 disarms */
+};
 
 /* ---- small register helpers ------------------------------------------- */
 
@@ -222,6 +225,10 @@ vmm_vcpu_free(vmm_vcpu *vcpu)
 {
     if (!vcpu)
         return;
+    if (vcpu->ptimer_running) {         /* stop and join the preemption watcher */
+        vcpu->ptimer_running = 0;
+        pthread_join(vcpu->ptimer_thread, NULL);
+    }
     hv_vcpu_destroy(vcpu->vcpu);
     free(vcpu);
 }
@@ -462,38 +469,38 @@ vmm_vcpu_debug_singlestep(vmm_vcpu *vcpu, int on)
 
 /* ---- preemption timer -------------------------------------------------- */
 
-static void
-preempt_tick(int sig)
+/* The watcher sleeps one slice, then kicks its vcpu out of hv_vcpu_run (which
+ * returns HV_EXIT_REASON_CANCELED, reported as VMM_X_INTR).  When disarmed it
+ * polls so a later arm or a stop is noticed promptly.  hv_vcpus_exit is
+ * thread-safe and names one vcpu, so no shared state is needed. */
+static void *
+preempt_watch(void *arg)
 {
-    (void)sig;
-    /* Kick the running vcpu out of hv_vcpu_run; it returns with
-     * HV_EXIT_REASON_CANCELED, which the run loop reports as VMM_X_INTR. */
-    if (g_preempt_armed)
-        hv_vcpus_exit(&g_preempt_vcpu, 1);
+    vmm_vcpu *vcpu = arg;
+
+    while (vcpu->ptimer_running) {
+        unsigned usec = vcpu->ptimer_usec;
+        unsigned nap = usec ? usec : 20000u;    /* poll at 20 ms when disarmed */
+        struct timespec ts;
+
+        ts.tv_sec = nap / 1000000u;
+        ts.tv_nsec = (long)(nap % 1000000u) * 1000;
+        nanosleep(&ts, NULL);
+        if (vcpu->ptimer_running && vcpu->ptimer_usec)
+            hv_vcpus_exit(&vcpu->vcpu, 1);
+    }
+    return NULL;
 }
 
 void
 vmm_vcpu_arm_preempt(vmm_vcpu *vcpu, unsigned usec)
 {
-    static int installed = 0;
-    struct itimerval it;
-
-    if (!installed) {
-        struct sigaction sa;
-        memset(&sa, 0, sizeof sa);
-        sa.sa_handler = preempt_tick;       /* no SA_RESTART needed: it only kicks */
-        sigaction(SIGALRM, &sa, NULL);
-        installed = 1;
+    vcpu->ptimer_usec = usec;           /* re-arm or (usec == 0) disarm */
+    if (!vcpu->ptimer_running) {
+        vcpu->ptimer_running = 1;
+        if (pthread_create(&vcpu->ptimer_thread, NULL, preempt_watch, vcpu) != 0)
+            vcpu->ptimer_running = 0;   /* best effort: no preemption facility */
     }
-
-    g_preempt_vcpu = vcpu->vcpu;
-    g_preempt_armed = usec != 0;
-
-    memset(&it, 0, sizeof it);
-    it.it_interval.tv_sec = usec / 1000000u;
-    it.it_interval.tv_usec = usec % 1000000u;
-    it.it_value = it.it_interval;
-    setitimer(ITIMER_REAL, &it, NULL);
 }
 
 #else /* !VMM_HVF_OK : Darwin on a non-arm64 host, or a non-Darwin build */
