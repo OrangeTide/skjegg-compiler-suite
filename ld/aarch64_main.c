@@ -1,0 +1,134 @@
+/* aarch64_main.c : skj-ld-arm64, the AArch64 ELF64 linker driver */
+
+#include "elf64_ld.h"
+#include "version.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+static void
+cleanup_ld(void *p)
+{
+    ld_free(p);
+}
+
+static void
+usage(FILE *out, int code)
+{
+    fprintf(out,
+            "usage: skj-ld-arm64 [-V] [-T script.ld] [-e entry] [-Map map]"
+            " -o output input.o [...]\n"
+            "\n"
+            "AArch64 static linker.  Reads ELFCLASS64 little-endian EM_AARCH64\n"
+            "relocatable objects and writes an ET_EXEC based at 0x400000 for\n"
+            "qemu-aarch64 user mode and the in-tree emulator (skj-run).\n");
+    exit(code);
+}
+
+int
+main(int argc, char **argv)
+{
+    const char *script_path;
+    const char *entry_override;
+    const char *output_path;
+    const char *map_path;
+    const char **inputs;
+    int ninputs;
+    struct linker ld;
+
+    util_set_progname("skj-ld-arm64");
+
+    script_path = NULL;
+    entry_override = NULL;
+    output_path = NULL;
+    map_path = NULL;
+    inputs = NULL;
+    ninputs = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-V") == 0) {
+            printf("skj-ld-arm64 %s\n", SKJ_VERSION);
+            return 0;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            usage(stdout, 0);
+        } else if (strcmp(argv[i], "-T") == 0) {
+            if (++i >= argc) usage(stderr, 1);
+            script_path = argv[i];
+        } else if (strcmp(argv[i], "-e") == 0) {
+            if (++i >= argc) usage(stderr, 1);
+            entry_override = argv[i];
+        } else if (strcmp(argv[i], "-o") == 0) {
+            if (++i >= argc) usage(stderr, 1);
+            output_path = argv[i];
+        } else if (strcmp(argv[i], "-Map") == 0) {
+            if (++i >= argc) usage(stderr, 1);
+            map_path = argv[i];
+        } else if (argv[i][0] == '-') {
+            die("unknown option: %s", argv[i]);
+        } else {
+            inputs = realloc(inputs, (size_t)(ninputs + 1) * sizeof(char *));
+            inputs[ninputs++] = argv[i];
+        }
+    }
+
+    if (!output_path || ninputs == 0)
+        usage(stderr, 1);
+
+    if (setjmp(util_die_env) != 0) {
+        free(inputs);
+        return 1;
+    }
+    util_die_active = 1;
+
+    memset(&ld, 0, sizeof(ld));
+    arena_init(&ld.arena);
+    ld.ehdr_size = 64;          /* ELF64 header + 56-byte program headers */
+    ld.phent_size = 56;
+    util_cleanup_push(cleanup_ld, &ld);
+
+    if (script_path) {
+        char *src = slurp(script_path);
+        ld_parse_script(&ld.arena, &ld.script, src);
+        free(src);
+    } else {
+        aarch64_default_script(&ld.arena, &ld.script);
+    }
+
+    if (entry_override)
+        ld.script.entry = entry_override;
+
+    /* Read the explicit objects; stash archives for symbol-driven pulls.  An
+       archive contributes only the members that resolve a still-undefined
+       symbol, so it is processed after the objects that reference into it. */
+    const char **archives = NULL;
+    int narchives = 0;
+    for (int i = 0; i < ninputs; i++) {
+        if (elf64_is_archive(inputs[i])) {
+            archives = realloc(archives,
+                               (size_t)(narchives + 1) * sizeof(char *));
+            archives[narchives++] = inputs[i];
+        } else {
+            elf64_read_object(&ld.arena, ld_add_object(&ld), inputs[i],
+                              EM_AARCH64);
+        }
+    }
+
+    /* pull archive members until a full pass adds nothing (a pulled member may
+       reference symbols only another archive provides, so loop over them all) */
+    elf64_archive_reset();
+    int pulled = 1;
+    while (pulled) {
+        pulled = 0;
+        for (int i = 0; i < narchives; i++)
+            pulled += elf64_read_archive(&ld, archives[i], EM_AARCH64);
+    }
+    free(archives);
+
+    aarch64_ld_link(&ld);
+    if (map_path)
+        ld_write_map(&ld, map_path);
+    elf64_write_exec(&ld, output_path, EM_AARCH64);
+
+    util_cleanup_run();
+    free(inputs);
+    return 0;
+}

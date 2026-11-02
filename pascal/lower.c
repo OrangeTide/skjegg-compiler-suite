@@ -724,6 +724,24 @@ type_bytes(const char *name)
     return 4;
 }
 
+/* Natural alignment of a record field: the largest power of two that is no
+   larger than the field and no larger than the record's {$A} cap.  A 4-byte
+   integer aligns to 4 even on LP64, while an 8-byte pointer, Int64 or real
+   stays 8-aligned where the ABI and the Mach-O static linker need it.  Keeping
+   the alignment to the field's own size (not the pointer width) is what makes
+   a record of integers size the same under ILP32 and LP64. */
+static int
+field_align(int fsz, int cap)
+{
+    int a = fsz >= 8 ? 8 : fsz >= 4 ? 4 : fsz >= 2 ? 2 : 1;
+
+    if (a > cap)
+        a = cap;
+    if (a < 1)
+        a = 1;
+    return a;
+}
+
 /* Whether a constant array bound can be evaluated now: every identifier in it
    is an already-registered constant.  A built-in call such as ord(...) checks
    only its argument (the callee name is not a constant). */
@@ -928,13 +946,18 @@ register_type(struct node *td)
     nf = 0;
     {
         int align = td->ival > 0 ? (int)td->ival : 4;
+        int ra = 1;             /* the record's own alignment (max field) */
+
         for (f = td->a; f; f = f->next) {
             if (f->kind == N_VARIANTPART) {
-                int vbase, max_vsize;
+                int vbase, max_vsize, varal = 1;
                 if (f->name) {
                     int tsz = type_bytes(f->sval);
-                    if (align > 1 && (off % align) != 0)
-                        off += align - (off % align);
+                    int fa = field_align(tsz, align);
+                    if (off % fa != 0)
+                        off += fa - (off % fa);
+                    if (fa > ra)
+                        ra = fa;
                     t->fields[nf].name = f->name;
                     t->fields[nf].type_name = f->sval;
                     t->fields[nf].offset = off;
@@ -942,8 +965,21 @@ register_type(struct node *td)
                     off += tsz;
                     nf++;
                 }
-                if (align > 1 && (off % align) != 0)
-                    off += align - (off % align);
+                /* The variant base must be aligned for the widest arm field,
+                   so every arm's fields land on their natural boundary. */
+                for (struct node *arm = f->a; arm;
+                    arm = arm->next)
+                    for (struct node *vf = arm->b;
+                        vf; vf = vf->next) {
+                        int fa = field_align(
+                            type_bytes(vf->sval), align);
+                        if (fa > varal)
+                            varal = fa;
+                    }
+                if (off % varal != 0)
+                    off += varal - (off % varal);
+                if (varal > ra)
+                    ra = varal;
                 vbase = off;
                 max_vsize = 0;
                 for (struct node *arm = f->a; arm;
@@ -952,10 +988,10 @@ register_type(struct node *td)
                     for (struct node *vf = arm->b;
                         vf; vf = vf->next) {
                         int fsz = type_bytes(vf->sval);
-                        if (align > 1 &&
-                            (arm_off % align) != 0)
-                            arm_off += align -
-                                (arm_off % align);
+                        int fa = field_align(fsz, align);
+                        if (arm_off % fa != 0)
+                            arm_off += fa -
+                                (arm_off % fa);
                         t->fields[nf].name =
                             vf->name;
                         t->fields[nf].type_name =
@@ -974,18 +1010,22 @@ register_type(struct node *td)
             }
             {
                 int fsz = type_bytes(f->sval);
+                int fa = field_align(fsz, align);
                 t->fields[nf].name = f->name;
                 t->fields[nf].type_name = f->sval;
-                if (align > 1 && (off % align) != 0)
-                    off += align - (off % align);
+                if (off % fa != 0)
+                    off += fa - (off % fa);
+                if (fa > ra)
+                    ra = fa;
                 t->fields[nf].offset = off;
                 t->fields[nf].size = fsz;
                 off += fsz;
                 nf++;
             }
         }
-        if (align > 1 && (off % align) != 0)
-            off += align - (off % align);
+        /* Pad the record to its own alignment so an array of it tiles. */
+        if (ra > 1 && (off % ra) != 0)
+            off += ra - (off % ra);
     }
     t->total_size = off;
 }

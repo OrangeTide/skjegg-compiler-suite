@@ -79,7 +79,8 @@ struct ld_input_sec {
 struct ld_reloc {
     uint32_t offset;
     int sym_idx;
-    int32_t addend;
+    int64_t addend;     /* Elf64_Rela r_addend is 64-bit; the 32-bit linkers
+                           read a 32-bit addend and truncate via (uint32_t) */
     int type;
     int section;
 };
@@ -213,6 +214,11 @@ struct linker {
     uint32_t entry_vaddr;
     struct ld_debug_sec debug[MAX_DEBUG_SECS];
     int ndebug;
+    /* ELF header + program-header-entry sizes, so ld_layout reserves the right
+       gap at the segment start.  0 means the ELF32 defaults (52 / 32); the
+       ELF64 linkers set 64 / 56. */
+    uint32_t ehdr_size;
+    uint32_t phent_size;
     struct arena arena;
 };
 

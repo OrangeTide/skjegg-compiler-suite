@@ -42,7 +42,9 @@ sed "s|^ORIGIN=.*|ORIGIN=\"$REPO/.git\"|" "$REPO/vendor.sh" > "$work/vendor.sh"
 
 echo "== vendoring riscv cc toolchain,runtime,sandbox,emulator (ref $ref) =="
 sh "$work/vendor.sh" -d "$work/skjegg" -u "$work" -r "$ref" \
-   --arch riscv --frontend cc --with toolchain,runtime,sandbox,emulator >/dev/null
+   --arch riscv --frontend cc addr2line \
+   as-x86-64 ld-x86-64 as-aarch64 ld-arm64 \
+   --with toolchain,runtime,sandbox,emulator >/dev/null
 
 cd "$work"
 cat > Makefile <<'MK'
@@ -107,6 +109,62 @@ echo "== building and running the vendored vDSO =="
 check "vDSO injected, table and system page valid" 0 \
     ./build/skj-run --vdso build/vdso-rv.elf vdsoguest
 
+# The symbolized fault backtrace: build a nested assert failure with -g and run
+# it.  skj-run exits 134 and, only when SKJ_DWARF_BACKTRACE is compiled in and
+# the DWARF reader is vendored, prints a backtrace naming the guest functions.
+# This guards the debugger-tier wiring (dwread.c + the flag), not just the build.
+echo "== building and running a symbolized fault backtrace =="
+./build/skjcc -target riscv -g -o aborts "$REPO/tests/debug/aborts.c"
+./build/skj-run aborts 2>aborts.err && bt_ec=0 || bt_ec=$?
+if [ "$bt_ec" = 134 ] && grep -q "backtrace:" aborts.err \
+   && grep -q "deep" aborts.err && grep -q "main" aborts.err; then
+    echo "PASS: symbolized fault backtrace (exit 134, names deep..main)"
+else
+    echo "FAIL: fault backtrace (exit $bt_ec)"; cat aborts.err; fail=1
+fi
+
+# The offline symbolizer: the vendored skj-addr2line reads the same DWARF the
+# backtrace uses, but from a static binary, so a consumer can resolve an address
+# without running the guest.  Take a statement address from the -g aborts ELF's
+# line table and assert the vendored skj-addr2line agrees with GNU addr2line on
+# function and source basename:line.  This guards that the addr2line component
+# vendors (dwread.c + the build rule) and links, and that the vendored driver
+# forwards -g so DWARF reaches the output at all.
+echo "== resolving an address with the vendored skj-addr2line =="
+a2l_addr=$(riscv64-linux-gnu-objdump --dwarf=decodedline aborts 2>/dev/null \
+    | awk '/aborts\.c/ && $3 ~ /^0x/ {print $3; exit}')
+a2l_skj=$(./build/skj-addr2line -f -e aborts "$a2l_addr" 2>/dev/null | sed 's:.*/::')
+a2l_gnu=$(riscv64-linux-gnu-addr2line -f -e aborts "$a2l_addr" 2>/dev/null | sed 's:.*/::')
+if [ -n "$a2l_addr" ] && [ "$a2l_skj" = "$a2l_gnu" ]; then
+    echo "PASS: skj-addr2line matches GNU at $a2l_addr ($(echo "$a2l_skj" | tr '\n' ' '))"
+else
+    echo "FAIL: skj-addr2line ($a2l_addr: skj[$a2l_skj] != gnu[$a2l_gnu])"; fail=1
+fi
+
+# The 64-bit ELF64 toolchains: the vendored assembler and linker pairs build
+# with no external binutils.  Assemble, link and run a committed fixture that
+# exercises the relocation forms each target emits; the program writes "ok" and
+# exits 42.  Guards the as-x86-64/ld-x86-64 and as-aarch64/ld-arm64 vendor
+# wiring (the shared ELF64 core, the per-tool sources, the skjegg.mk rules).
+echo "== vendored ELF64 toolchains assemble, link and run =="
+./build/skj-as-x86-64 -o x64.o "$REPO/tests/ld/hello_x86_64.s"
+./build/skj-ld-x86-64 -o x64prog x64.o
+# the guest exits 42 by design; keep set -e from aborting on it
+qemu-x86_64 ./x64prog >x64.out 2>/dev/null && x64_ec=0 || x64_ec=$?
+if [ "`cat x64.out`" = ok ] && [ "$x64_ec" = 42 ]; then
+    echo "PASS: vendored skj-as-x86-64 + skj-ld-x86-64 (ok, exit 42)"
+else
+    echo "FAIL: vendored x86-64 toolchain (out '`cat x64.out`', exit $x64_ec)"; fail=1
+fi
+./build/skj-as-aarch64 -o a64.o "$REPO/tests/ld/hello_arm64.s"
+./build/skj-ld-arm64 -o a64prog a64.o
+qemu-aarch64 ./a64prog >a64.out 2>/dev/null && a64_ec=0 || a64_ec=$?
+if [ "`cat a64.out`" = ok ] && [ "$a64_ec" = 42 ]; then
+    echo "PASS: vendored skj-as-aarch64 + skj-ld-arm64 (ok, exit 42)"
+else
+    echo "FAIL: vendored arm64 toolchain (out '`cat a64.out`', exit $a64_ec)"; fail=1
+fi
+
 # The hardware-virtualization arches vendor too.  With --with emulator an HV arch
 # (x86-64 / aarch64) ships the HV core (hvcore.c + the KVM backend + the gdb stub)
 # and builds EMU_HV=1, alongside any emulated cores.  Build-only here: running an
@@ -120,6 +178,35 @@ sh "$work/vendor.sh" -d "$work/hv/skjegg" -u "$work/hv" -r "$ref" \
   make all >hv-build.log 2>&1 ) \
   && echo "PASS: emulated+HV vendored tree builds (EMU_HV=1)" \
   || { echo "FAIL: emulated+HV vendored build"; cat "$work/hv/hv-build.log"; fail=1; }
+
+# The 64-bit cc backend + runtime: vendor the full x86-64 and AArch64 C targets
+# and drive the skjcc driver end to end with no external toolchain.  The vendored
+# tree builds skj-cc-x86-64/skj-cc-arm64, the assemblers and ELF64 linkers, and
+# self-hosts the crt and runtime helpers (skj-cc compiles va/half, skj-as
+# assembles them); a C program compiles, links and runs (returns 45).  Guards
+# the cc-backend copy, the SKJ_X64/SKJ_A64 vars, the emit_compiler calls and the
+# 64-bit driver-lib staging.
+echo "== vendoring x86-64,aarch64 cc backend + runtime (skjcc end to end) =="
+sh "$work/vendor.sh" -d "$work/cc64/skjegg" -u "$work/cc64" -r "$ref" \
+   --arch x86-64,aarch64 --frontend cc --with toolchain,runtime >/dev/null
+( cd "$work/cc64"
+  printf 'include skjegg/skjegg.mk\nbuild:\n\tmkdir -p build\nall: $(SKJ_ALL)\n' > Makefile
+  make all >cc64.log 2>&1 ) \
+  || { echo "FAIL: 64-bit cc vendored build"; cat "$work/cc64/cc64.log"; fail=1; }
+if [ -x "$work/cc64/build/skjcc" ]; then
+    printf 'int main(void){int s=0;for(int i=1;i<=9;i++)s+=i;return s;}\n' \
+        > "$work/cc64/ret.c"
+    ( cd "$work/cc64"
+      ./build/skjcc -target x86-64 -o rx64 ret.c
+      ./build/skjcc -target arm64 -o ra64 ret.c )
+    qemu-x86_64 "$work/cc64/rx64" >/dev/null 2>&1 && x64_ec=0 || x64_ec=$?
+    qemu-aarch64 "$work/cc64/ra64" >/dev/null 2>&1 && a64_ec=0 || a64_ec=$?
+    if [ "$x64_ec" = 45 ] && [ "$a64_ec" = 45 ]; then
+        echo "PASS: vendored skjcc builds and runs C for x86-64 and arm64 (exit 45)"
+    else
+        echo "FAIL: vendored skjcc (x86-64 exit $x64_ec, arm64 exit $a64_ec)"; fail=1
+    fi
+fi
 
 [ "$fail" = 0 ] || { echo "vendor-smoke: FAILED"; exit 1; }
 echo "vendor-smoke: a vendored sandbox tree builds and confines, end to end"

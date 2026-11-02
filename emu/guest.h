@@ -287,6 +287,9 @@ typedef struct run_opts {
     const char *p9s[RUN_MAX_MOUNTS];    /* --9p name:hostdir grants         */
     int np9s;
     const char *vdso;           /* --vdso PATH: a vDSO image to inject, or NULL */
+    const uint8_t *root_image;  /* --mem-root: the root ELF in memory, or NULL to
+                                   open path; path stays the diagnostic label */
+    long root_image_len;        /* its length in bytes (when root_image is set) */
     uint64_t mem_limit;
     uint32_t stack_size;
     uint32_t heap_size;
@@ -384,6 +387,16 @@ int run_rv32(const run_opts *o, int *status);
 int run_mips32(const run_opts *o, int *status);
 int run_x86_64hv(const run_opts *o, int *status);
 int run_arm64hv(const run_opts *o, int *status);
+
+/* The per-arch CPU vtable, for a host that drives the scheduler itself
+ * (sched_init/sched_add_root, see sched.h) rather than through run_*.  Each is
+ * defined only when its core is built in (EMU_COLDFIRE / EMU_RV32 / EMU_MIPS32 /
+ * EMU_HV), so call the one for an arch this build carries.  Never NULL. */
+const struct skj_cpu_ops *skj_ops_coldfire(void);
+const struct skj_cpu_ops *skj_ops_rv32(void);
+const struct skj_cpu_ops *skj_ops_mips32(void);
+const struct skj_cpu_ops *skj_ops_x86_64hv(void);
+const struct skj_cpu_ops *skj_ops_arm64hv(void);
 
 /* Shared stack image: writes argc/argv/envp/auxv and returns the stack
  * pointer the guest should start with.  The _64 variant uses 8-byte slots for

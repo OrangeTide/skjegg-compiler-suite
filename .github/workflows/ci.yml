@@ -12,10 +12,11 @@ permissions:
   contents: read
 
 jobs:
-  # The core job: the full qemu matrix, the emulator and toolchain sanitizer
-  # passes. This is the breadth check-all already spans (every front end x
+  # The core job: the full qemu matrix plus the cross-backend differential
+  # torture. This is the breadth check-all already spans (every front end x
   # backend, the IR-builder integration tests, the RV32 binutils-free
   # toolchain, the Excelsior codegen tiers, and the host/x86-64 Kobold tiers).
+  # The ASan+UBSan passes live in the separate `sanitizer` job below.
   build:
     # Pin the runner image rather than ubuntu-latest: the label migrates to
     # Ubuntu 26 from 2026-10-19, and a gradual rollout can land jobs of one run
@@ -82,6 +83,39 @@ jobs:
       # default qemu-aarch64 (no -L loader) is correct for the arm64 peer here.
       - name: Cross-backend differential torture
         run: make test-torture-diff
+
+  # The ASan+UBSan sanitizer passes, split out of the build job so the two long
+  # sequences run in parallel and each fits its own budget (the build job's
+  # matrix plus both sanitizer suites overran a single 40-minute job).  Needs
+  # the same toolchain/qemu/zig environment as build: check-san assembles and
+  # runs the ColdFire and Kobold corpora and builds the JIT drivers.
+  sanitizer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      MIPS_AS: mipsel-linux-gnu-as
+      MIPS_LD: mipsel-linux-gnu-ld
+      MIPS_OBJCOPY: mipsel-linux-gnu-objcopy
+      MIPS_OBJDUMP: mipsel-linux-gnu-objdump
+      MIPS_CC: mipsel-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install cross toolchains and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-m68k-linux-gnu binutils-m68k-linux-gnu \
+            gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-mipsel-linux-gnu binutils-mipsel-linux-gnu \
+            qemu-user \
+            llvm
+      - name: Install zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+      - name: Build all tools
+        run: make
 
       # The host-only emulator tests rebuilt with ASan+UBSan.  They run
       # natively with no qemu and cover the RV32 core, the guest allocator, the

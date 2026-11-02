@@ -256,7 +256,9 @@ ld_layout(struct linker *ld)
 
     /* advance region cursors past ELF/phdr headers (included in segment) */
     int nphdrs = sc->nphdrs > 0 ? sc->nphdrs : 1;
-    uint32_t headers_size = 52 + (uint32_t)nphdrs * 32;
+    uint32_t eh = ld->ehdr_size ? ld->ehdr_size : 52;
+    uint32_t pe = ld->phent_size ? ld->phent_size : 32;
+    uint32_t headers_size = eh + (uint32_t)nphdrs * pe;
     for (int i = 0; i < sc->nregions; i++)
         sc->regions[i].cursor = sc->regions[i].origin + headers_size;
 

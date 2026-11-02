@@ -557,6 +557,27 @@ proc_new_file(sched *S, const char *path, char **argv, int argc,
     return proc_accept(S, p, &info, path, argv, argc, envp, envc);
 }
 
+/* The root process, from an in-memory image, with its own argv and environment.
+ * The file sibling of this is proc_new_file; the difference is only the loader,
+ * so this is a true root too (proc_alloc defaults parent = -1 and no instruction
+ * budget).  `what` is the diagnostic label a path would otherwise supply. */
+static int
+proc_new_mem_root(sched *S, const uint8_t *img, long len, const char *what,
+                  char **argv, int argc, char **envp, int envc)
+{
+    proc *p = proc_alloc(S);
+    elf32_info info;
+
+    if (!p)
+        return 0;
+    if ((S->ops->word64 ? elf64_load_mem(&p->g, img, len, &info, what)
+                        : elf32_load_mem(&p->g, img, len, &info, what)) != 0) {
+        proc_discard(S, p);
+        return 0;
+    }
+    return proc_accept(S, p, &info, what, argv, argc, envp, envc);
+}
+
 /* A spawned child, from an in-memory image. */
 static int
 proc_new_mem(sched *S, const uint8_t *img, long len, const char *what,
@@ -1133,13 +1154,18 @@ sched_init(sched *S, const run_opts *o, const skj_cpu_ops *ops)
  * independent trees under one scheduler, each bound to its own connection.  Any
  * of r->argv / r->envp / r->stdio may be NULL: argv then falls back to the run
  * options' argv, envp to an empty environment, and stdio to skj-run's own
- * 0/1/2.  Returns the process handle (>0) or 0 if the image failed to load. */
+ * 0/1/2.  When r->image is set the image is loaded from that in-memory buffer
+ * (r->path then names it only in diagnostics), else it is opened from r->path.
+ * Returns the process handle (>0) or 0 if the image failed to load. */
 int
 sched_add_root(sched *S, const sched_root *r)
 {
     char **argv = r->argv ? r->argv : S->o->argv;
     int argc = r->argv ? r->argc : S->o->argc;
-    int h = proc_new_file(S, r->path, argv, argc, r->envp, r->envc);
+    int h = r->image
+            ? proc_new_mem_root(S, r->image, r->image_len, r->path,
+                                argv, argc, r->envp, r->envc)
+            : proc_new_file(S, r->path, argv, argc, r->envp, r->envc);
     proc *p;
 
     if (h <= 0)
@@ -1191,6 +1217,8 @@ run_sandbox(const run_opts *o, const skj_cpu_ops *ops, int *status)
     root.path = o->path;                /* argv falls back to the run options; env */
     root.envp = o->envp;                /* and stdio come from the CLI (--env / own) */
     root.envc = o->envc;
+    root.image = o->root_image;         /* --mem: load the root from memory, path */
+    root.image_len = o->root_image_len; /* then only labels it (fault/trace text)  */
     if (sched_add_root(&S, &root) <= 0) /* the root image failed to load */
         return -1;
     rp = S.procs[0];

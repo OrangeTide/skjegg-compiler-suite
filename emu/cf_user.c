@@ -335,3 +335,9 @@ run_coldfire(const run_opts *o, int *status)
 {
     return run_sandbox(o, &cf_ops, status);
 }
+
+const skj_cpu_ops *
+skj_ops_coldfire(void)
+{
+    return &cf_ops;
+}

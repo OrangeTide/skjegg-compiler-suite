@@ -451,3 +451,15 @@ run_arm64hv(const run_opts *o, int *status)
 {
     return run_sandbox(o, &hv_arm64_ops, status);
 }
+
+const skj_cpu_ops *
+skj_ops_x86_64hv(void)
+{
+    return &hv_x86_ops;
+}
+
+const skj_cpu_ops *
+skj_ops_arm64hv(void)
+{
+    return &hv_arm64_ops;
+}

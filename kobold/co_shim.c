@@ -172,36 +172,14 @@ uintptr_t kp_arena_base(struct kp_arena *a) { (void)a; return 0; }
 void *kp_arena_ptr(struct kp_arena *a, kp_gptr addr) { (void)a; return (void *)(uintptr_t)addr; }
 kp_gptr kp_arena_addr(struct kp_arena *a, const void *p) { (void)a; return (kp_gptr)(uintptr_t)p; }
 
-/* Map `len` bytes of read/write memory below 4 GB (see rt_host.c:rt_map_low): a
-   coroutine stack address must fit the 32-bit guest model, so x86-64 uses
-   MAP_32BIT, a 32-bit host is low by construction, and arm64 probes low hints. */
+/* Map `len` bytes of read/write memory for a coroutine stack (see
+   rt_host.c:rt_map_low): a coroutine stack address is a pointer-width guest
+   pointer on every target, so the stack can live wherever the kernel places an
+   anonymous mapping. */
 static void *co_map_low(size_t len)
 {
-#if SKJ_LP64
-    /* LP64: a coroutine stack address is a full 64-bit guest pointer, so the stack
-       can live anywhere; no low-memory constraint (mirrors rt_host.c:rt_map_low). */
     return mmap(NULL, len, PROT_READ | PROT_WRITE,
                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-#elif defined(MAP_32BIT)
-    return mmap(NULL, len, PROT_READ | PROT_WRITE,
-                MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
-#elif UINTPTR_MAX <= 0xffffffffULL
-    return mmap(NULL, len, PROT_READ | PROT_WRITE,
-                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-#else
-    static uintptr_t hint = 0x20000000;
-    while (hint + len <= 0x100000000ULL) {
-        uintptr_t at = hint;
-        void *p = mmap((void *)at, len, PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-        hint += (len + 0xffffffUL) & ~(uintptr_t)0xffffff;   /* advance 16MB */
-        if (p != MAP_FAILED && (uintptr_t)p == at)
-            return p;
-        if (p != MAP_FAILED)
-            munmap(p, len);
-    }
-    return MAP_FAILED;
-#endif
 }
 
 /* A reclaimable coroutine stack in the low 2 GB: a PROT_NONE guard page at the

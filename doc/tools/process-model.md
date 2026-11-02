@@ -287,13 +287,21 @@ threads, no per-process stall.
 The reusable API in `sched.h` exposes that machinery:
 
 - `sched_init` / `sched_destroy` bracket a scheduler over a core and the run
-  options.
+  options. The core is a `skj_cpu_ops` vtable, obtained from the per-arch getter
+  for the arch this build carries: `skj_ops_rv32`, `skj_ops_coldfire`,
+  `skj_ops_mips32`, `skj_ops_x86_64hv`, or `skj_ops_arm64hv` (`guest.h`). These
+  are how a host reaches a core without the CLI's `run_*` wrappers.
 - `sched_add_root(S, &root)` loads a root from a `sched_root` spec. Each root
   carries its own `argv`, its own environment, and the three host fds its
   `0`/`1`/`2` bind to, a connection's socket rather than the terminal (any of
   the three may be `NULL`: `argv` falls back to the run options', the
   environment is empty, stdio is `skj-run`'s own). A host may add several
-  independent roots.
+  independent roots. The image comes from a file at `path`, or, when the spec's
+  `image` field is set, from that in-memory ELF buffer (with `path` then only
+  labelling it in fault and trace messages). A host whose guest images are byte
+  buffers, from an object store or a just-finished compile, runs them directly
+  this way, with no temporary file. The CLI exposes it as `--mem-root`, which
+  reads the program into memory and runs it from there.
 - `sched_step` runs one round of slices and returns the live count; `sched_run`
   is the built-in loop over it.
 - `sched_waits` hands out the parked fds and the nearest sleep deadline, so the

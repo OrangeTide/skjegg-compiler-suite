@@ -110,14 +110,21 @@ notable instructions it does not, is inventoried per architecture:
 - x86-64: `as/INSTRUCTIONS-x86-64.md`
 - AArch64: `as/INSTRUCTIONS-aarch64.md`
 
-The in-tree linkers target the 32-bit platforms. **`skj-ld`** (ColdFire),
+The toolkit ships an in-tree linker for every target. **`skj-ld`** (ColdFire),
 **`skj-ld-rv`** (RISC-V), and **`skj-ld-mips`** (MIPS) read relocatable objects,
 parse a subset of GNU linker-script syntax (`MEMORY`, `PHDRS`, `SECTIONS`,
 symbol assignments, `/DISCARD/`), and write executable ELF32; the default
-built-in script targets the emulator's user-mode layout. The x86-64 and AArch64
-targets link with the platform's own linker, since there is no in-tree 64-bit
-linker. **`skj-ar`** is the archiver that builds the `libc.a` and runtime
-archives.
+built-in script targets the emulator's user-mode layout. **`skj-ld-x86-64`**
+and **`skj-ld-arm64`** are the 64-bit pair: they read the ELFCLASS64 objects the
+in-tree assemblers emit, pull members from `ar` archives, and write an ELF64
+`ET_EXEC`. The two share one ELF64 core over the same layout engine, script
+parser and archive reader, differing only in the machine id and the relocation
+set (x86-64 patches absolute and PC-relative byte fields, while AArch64 encodes
+the bit-packed instruction relocations). Executable addresses stay in the low
+4 GiB, so the 32-bit layout core is reused unchanged. With them, the whole
+64-bit compile path (`skjcc -target x86-64` / `-target arm64`) runs on in-tree
+tools, with no external assembler or linker. **`skj-ar`** is the archiver that
+builds the `libc.a` and runtime archives.
 
 ## Running and debugging
 
@@ -187,11 +194,14 @@ a stray build is skipped rather than reported.
 
 The cross toolchain the build expects is `m68k-linux-gnu-gcc`,
 `riscv64-linux-gnu-{as,ld}`, the `aarch64-linux-gnu` tools, a host `ld` (GNU
-binutils), and the matching `qemu-*` runners. The x86-64 and AArch64 output is
-assembled in-tree (`skj-as-x86-64` / `skj-as-aarch64`), so only a linker is
-needed for those targets, not an external assembler. The ColdFire
-`m68k-linux-gnu-as` and `-ld` are optional, since `skj-as` and `skj-ld` replace
-them.
+binutils), and the matching `qemu-*` runners. The x86-64 and AArch64 targets are
+assembled and linked in-tree (`skj-as-x86-64` / `skj-as-aarch64` and
+`skj-ld-x86-64` / `skj-ld-arm64`), so the `skjcc` driver needs no external
+assembler or linker for them. The `check-cc-*` and `check-libc-*` test suites
+still link those targets with the platform's own `ld` as an independent oracle,
+so GNU binutils stays a test dependency even though the driver does not need it.
+The ColdFire `m68k-linux-gnu-as` and `-ld` are optional, since `skj-as` and
+`skj-ld` replace them.
 
 ## Vendoring and versioning
 

@@ -60,6 +60,7 @@ usage(FILE *out)
         "  --mount NAME:DIR  grant the guest a confined host directory\n"
         "  --mount-ro NAME:DIR  the same, read-only (mutating ops fail EROFS)\n"
         "  --vdso IMG      map a vDSO image of pure leaf functions, found via auxv\n"
+        "  --mem-root      load the program image from memory, not by reopening it\n"
         "  --env KEY=VALUE  add an environment entry (repeatable)\n"
         "  --dev NAME      grant the guest a devfs mount (null/zero/full)\n"
         "  --rom NAME:IMG  grant the guest a read-only romfs image\n"
@@ -154,6 +155,8 @@ main(int argc, char **argv)
     elf32_info info;
     int arch = GUEST_ARCH_NONE;
     int status = 0;
+    int load_mem = 0;                   /* --mem: load the root image from memory */
+    uint8_t *root_buf = NULL;
     int i;
 
     memset(&o, 0, sizeof(o));
@@ -255,6 +258,10 @@ main(int argc, char **argv)
             o.vdso = argv[++i];
             continue;
         }
+        if (strcmp(a, "--mem-root") == 0) {
+            load_mem = 1;               /* load the root image from memory */
+            continue;
+        }
         if (strcmp(a, "--env") == 0 && i + 1 < argc) {
             if (o.envc >= (int)(sizeof(envv) / sizeof(envv[0]))) {
                 fprintf(stderr, "skj-run: too many --env options\n");
@@ -309,6 +316,31 @@ main(int argc, char **argv)
     o.path = argv[i];
     o.argv = argv + i;
     o.argc = argc - i;
+
+    /* --mem: read the root ELF into memory and run it from there, the way an
+     * embedding host whose images are byte buffers does (sched_root.image).  The
+     * path still names the file for arch detection below and labels diagnostics. */
+    if (load_mem) {
+        FILE *f = fopen(o.path, "rb");
+        long n;
+
+        if (!f || fseek(f, 0, SEEK_END) != 0 || (n = ftell(f)) < 0) {
+            fprintf(stderr, "skj-run: cannot read %s into memory\n", o.path);
+            if (f) fclose(f);
+            return 2;
+        }
+        rewind(f);
+        root_buf = malloc((size_t)n);
+        if (!root_buf || fread(root_buf, 1, (size_t)n, f) != (size_t)n) {
+            fprintf(stderr, "skj-run: cannot read %s into memory\n", o.path);
+            free(root_buf);
+            fclose(f);
+            return 2;
+        }
+        fclose(f);
+        o.root_image = root_buf;
+        o.root_image_len = n;
+    }
 
     if (arch == GUEST_ARCH_NONE) {
         /* Pick the loader by ELF class: ELF32 for the emulated 32-bit cores,
@@ -366,8 +398,10 @@ main(int argc, char **argv)
     default:
         fprintf(stderr, "skj-run: this build has no emulator for that "
                 "architecture\n");
+        free(root_buf);
         return 2;
     }
 
+    free(root_buf);
     return status;
 }

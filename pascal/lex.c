@@ -8,12 +8,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Default record field alignment: the target pointer width (4 on ILP32, 8 on
-   LP64). An LP64 record must align its pointer and 64-bit fields on 8-byte
-   boundaries, both so loads stay naturally aligned and so a pointer relocation
-   lands on an 8-aligned offset (the Mach-O static linker rejects an unaligned
-   one; GNU ld tolerates it, which is why the ILP32-era default of 4 went
-   unnoticed on LP64). {$A n} still overrides. */
+/* Maximum record field alignment: the target pointer width (4 on ILP32, 8 on
+   LP64). Each field is aligned to its own natural boundary capped by this (see
+   field_align in lower.c), so a 4-byte integer aligns to 4 on every target
+   while a pointer or 64-bit field on LP64 aligns to 8. The 8-byte cap matters
+   because an LP64 pointer relocation must land on an 8-aligned offset (the
+   Mach-O static linker rejects an unaligned one; GNU ld tolerates it). {$A n}
+   lowers the cap (e.g. {$A 1} packs). */
 int lex_align = SKJ_PTR_BYTES;
 int lex_rangechecks;
 int lex_overflowchecks;

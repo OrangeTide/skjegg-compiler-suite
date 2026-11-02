@@ -278,3 +278,9 @@ run_rv32(const run_opts *o, int *status)
 {
     return run_sandbox(o, &rv_ops, status);
 }
+
+const skj_cpu_ops *
+skj_ops_rv32(void)
+{
+    return &rv_ops;
+}

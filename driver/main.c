@@ -67,13 +67,13 @@ static const struct target targets[] = {
       "crt0.o", { "half.o", "va_mips.o", "soft64_div.o", NULL }, "libc.a" },
     { { "x86-64", "x86_64", NULL },
       "skj-cc-x86-64",
-      "as", { "--64", NULL },
-      "ld", { "-m", "elf_x86_64", NULL },
+      "skj-as-x86-64", { NULL },
+      "skj-ld-x86-64", { NULL },
       "crt0.o", { "half.o", "va.o", NULL }, NULL },
     { { "arm64", "aarch64", NULL },
       "skj-cc-arm64",
-      "as", { NULL },
-      "ld", { NULL },
+      "skj-as-aarch64", { NULL },
+      "skj-ld-arm64", { NULL },
       "crt0.o", { "va.o", NULL }, NULL },
 };
 #define NTARGETS ((int)(sizeof(targets) / sizeof(targets[0])))
@@ -270,6 +270,11 @@ main(int argc, char **argv)
                 if (++i >= argc) die("%s needs an argument", a);
                 cc_opts[ncc_opts++] = argv[i];
             }
+        } else if (strcmp(a, "-g") == 0) {
+            /* forward to the compile stage: skj-cc emits DWARF under -g, which
+               the assembler carries and the linker relocates into the output. */
+            if (ncc_opts + 1 >= MAXARGV) die("too many options");
+            cc_opts[ncc_opts++] = a;
         } else if (strcmp(a, "--version") == 0 || strcmp(a, "-V") == 0) {
             printf("skjcc %s\n", SKJ_VERSION);
             return 0;
@@ -277,7 +282,7 @@ main(int argc, char **argv)
             usage(stdout);
             return 0;
         } else if (a[0] == '-') {
-            /* ignore unknown -O/-g/-W... flags the backends do not consume */
+            /* ignore unknown -O/-W... flags the backends do not consume */
         } else if (has_suffix(a, ".c")) {
             if (nsrcs >= MAXARGV) die("too many inputs");
             srcs[nsrcs++] = a;

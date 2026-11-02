@@ -165,11 +165,17 @@ BE_A64_SEL := backend/regalloc_arm64.c backend/arm64_select.c backend/arm64_mc_t
 BE_X64_SEL := backend/regalloc_x86.c backend/x86_select.c backend/mc_text.c \
               backend/x86_aot.c
 TC_SRC  := tinc/lex.c tinc/parse.c tinc/lower.c tinc/main.c
-SRC     := $(IR_SRC) $(BE_CF) $(TC_SRC)
-SRC_RV  := $(IR_SRC) $(BE_RV) $(TC_SRC)
-SRC_MIPS := $(IR_SRC) $(BE_MIPS) $(TC_SRC)
-SRC_A64 := $(IR_SRC) $(BE_A64) $(TC_SRC)
-SRC_X64 := $(IR_SRC) $(BE_X64) $(TC_SRC)
+# The TinC sources per target, keyed by the tool-name suffix (rv, mips, arm64,
+# x86-64) so one pattern rule builds every cross target; SRC is the ColdFire
+# base (the bare build/skj-tinc).  tinc_def_<suffix> carries the LP64/width
+# defines the 64-bit targets need (the 32-bit ones need none).
+SRC             := $(IR_SRC) $(BE_CF) $(TC_SRC)
+tinc_src_rv     := $(IR_SRC) $(BE_RV) $(TC_SRC)
+tinc_src_mips   := $(IR_SRC) $(BE_MIPS) $(TC_SRC)
+tinc_src_arm64  := $(IR_SRC) $(BE_A64) $(TC_SRC)
+tinc_src_x86-64 := $(IR_SRC) $(BE_X64) $(TC_SRC)
+tinc_def_arm64  := -DSKJ_LP64=1
+tinc_def_x86-64 := -DX86_BITS=64 -DSKJ_LP64=1
 
 TESTS     := $(wildcard tests/*.tc)
 SCM_TESTS := $(wildcard tests/scm_*.scm)
@@ -189,6 +195,7 @@ TOOLS := build/skj-tinc build/skj-tinc-rv build/skj-tinc-mips build/skj-tinc-arm
          build/skj-mooc build/skj-pc build/skj-as build/skj-ld \
          build/skj-as-rv build/skj-ld-rv build/skj-as-mips build/skj-ld-mips build/skj-ar \
          build/skj-as-x86-64 build/skj-as-aarch64 build/skj-ld-aarch64 \
+         build/skj-ld-x86-64 build/skj-ld-arm64 \
          build/skj-cpp build/skj-cc build/skj-cc-x86-64 build/skj-cc-arm64 \
          build/skj-cc-rv build/skjcc build/skj-run \
          build/skj-addr2line build/skj-dbg \
@@ -216,20 +223,18 @@ help:
 	@grep -hoE '^(check|test)[A-Za-z0-9_-]*:' $(MAKEFILE_LIST) | sed 's/:$$//' \
 	    | sort -u | column | sed 's/^/  /'
 
+# Enabled once for the whole Makefile: it lets a pattern rule's prerequisites
+# reference the stem through $$(...) so the per-arch source list stays a real
+# prerequisite (rebuild on source change), not just a recipe argument.
+.SECONDEXPANSION:
+
 build/skj-tinc: $(SRC) ir/ir.h tinc/tinc.h | build
 	$(CC) $(CFLAGS) -Iir -Itinc -o $@ $(SRC)
 
-build/skj-tinc-rv: $(SRC_RV) ir/ir.h tinc/tinc.h | build
-	$(CC) $(CFLAGS) -Iir -Itinc -o $@ $(SRC_RV)
-
-build/skj-tinc-mips: $(SRC_MIPS) ir/ir.h tinc/tinc.h | build
-	$(CC) $(CFLAGS) -Iir -Itinc -o $@ $(SRC_MIPS)
-
-build/skj-tinc-arm64: $(SRC_A64) ir/ir.h tinc/tinc.h | build
-	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Iir -Itinc -o $@ $(SRC_A64)
-
-build/skj-tinc-x86-64: $(SRC_X64) ir/ir.h tinc/tinc.h | build
-	$(CC) $(CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -Iir -Itinc -o $@ $(SRC_X64)
+# The cross TinC tools (suffix rv, mips, arm64, x86-64): one pattern rule over
+# the tinc_src_<suffix> / tinc_def_<suffix> knobs above.
+build/skj-tinc-%: $$(tinc_src_$$*) ir/ir.h tinc/tinc.h | build
+	$(CC) $(CFLAGS) $(tinc_def_$*) -Iir -Itinc -o $@ $(tinc_src_$*)
 
 ## C preprocessor
 CPP_SRC := cpp/tok.c cpp/macro.c cpp/cond.c cpp/dir.c ir/util.c ir/arena.c
@@ -249,21 +254,30 @@ CC_SRC_MIPS := $(CC_FE) $(CC_CPP) $(IR_SRC) $(BE_MIPS)
 build/skj-cc: $(CC_SRC) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | build
 	$(CC) $(CFLAGS) -DCC_M68K $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC)
 
-build/skj-cc-x86-64: $(CC_SRC_X64) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h backend/mc.h backend/mc_text.h backend/x86_select.h | build
-	$(CC) $(CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -DCC_PSABI -DCC_STRUCT_ABI $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ibackend -o $@ $(CC_SRC_X64)
+# The cross C compilers, keyed by the tool-name suffix so one pattern rule
+# builds them all.  cc_src_<suffix> aliases the CC_SRC_* source lists (which
+# other rules also use); cc_flags_<suffix> is the target's defines and include
+# path.  arm64-macho is the arm64 cc fixed to the Darwin/Mach-O target
+# (-DSKJ_DARWIN), so Mach-O output can be generated and checked on a non-Darwin
+# host.  mips-sf is the PlayStation (R3051, no cop-1) soft-float build:
+# -DMIPS_SOFTFLOAT emits no cop-1 instruction and lowers every float op to a
+# runtime/softfloat.c call.  The backend headers are a wildcard prerequisite so
+# any of them triggers a rebuild of the relevant tools.
+cc_src_x86-64      := $(CC_SRC_X64)
+cc_src_arm64       := $(CC_SRC_A64)
+cc_src_arm64-macho := $(CC_SRC_A64)
+cc_src_rv          := $(CC_SRC_RV)
+cc_src_mips        := $(CC_SRC_MIPS)
+cc_src_mips-sf     := $(CC_SRC_MIPS)
+cc_flags_x86-64      := -DX86_BITS=64 -DSKJ_LP64=1 -DCC_PSABI -DCC_STRUCT_ABI $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ibackend
+cc_flags_arm64       := -DSKJ_LP64=1 -DCC_PSABI -DCC_ARM64 $(SKJ_INC_DEF) -Icc -Icpp -Iir
+cc_flags_arm64-macho := -DSKJ_LP64=1 -DCC_PSABI -DCC_ARM64 -DSKJ_DARWIN $(SKJ_INC_DEF) -Icc -Icpp -Iir
+cc_flags_rv          := -DCC_RISCV $(SKJ_INC_DEF) -Icc -Icpp -Iir
+cc_flags_mips        := -DCC_MIPS $(SKJ_INC_DEF) -Icc -Icpp -Iir
+cc_flags_mips-sf     := -DCC_MIPS -DMIPS_SOFTFLOAT $(SKJ_INC_DEF) -Icc -Icpp -Iir
 
-build/skj-cc-arm64: $(CC_SRC_A64) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h backend/arm64_mc.h backend/arm64_select.h backend/arm64_mc_text.h | build
-	$(CC) $(CFLAGS) -DSKJ_LP64=1 -DCC_PSABI -DCC_ARM64 $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_A64)
-
-# The same arm64 cc configured for the Darwin (Mach-O) target, for generating and
-# checking Mach-O output on a non-Darwin host.  The target is fixed at compile
-# time by -DSKJ_DARWIN; there is no run-time flavor flag (a native macOS build of
-# skj-cc-arm64 selects Darwin automatically).
-build/skj-cc-arm64-macho: $(CC_SRC_A64) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h backend/arm64_mc.h backend/arm64_select.h backend/arm64_mc_text.h | build
-	$(CC) $(CFLAGS) -DSKJ_LP64=1 -DCC_PSABI -DCC_ARM64 -DSKJ_DARWIN $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_A64)
-
-build/skj-cc-rv: $(CC_SRC_RV) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | build
-	$(CC) $(CFLAGS) -DCC_RISCV $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_RV)
+build/skj-cc-%: $$(cc_src_$$*) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h $(wildcard backend/*.h) | build
+	$(CC) $(CFLAGS) $(cc_flags_$*) -o $@ $(cc_src_$*)
 
 ## skjcc: the cross driver.  One command runs the per-target cc -> as -> ld
 ## pipeline and links the crt + runtime helpers from <libdir>/<target>/.  The
@@ -702,6 +716,17 @@ bootstrap-fpc: build/kpcom-rv.kpm | build
 ## three modes; see its header.  The x86 targets go in check-all, the rv/arm64
 ## ones in check-emu-all (they run under qemu).
 
+# Per-arch environments for run-kp-src-tests.sh.  The AOT path (host front end
+# emits a module, the target backend compiles and links it, the result runs) and
+# the freestanding path (skj assembler + linker over the no-libc crt) each take
+# the same block of variables at every call site; only KP_SRCDIR varies by
+# corpus.  Each recipe sets KP_SRCDIR (when not the default kp-src) and the
+# fragment, then runs the script.
+KP_AOT_ENV_x86_64 = MODE=aot FRONTEND=build/skj-kpc KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)"
+KP_AOT_ENV_rv = MODE=aot FRONTEND=build/skj-kpc-rv KPAOT=build/skj-kp-rv KPAOTLIB=build/libkpaot-rv.a KPAOTCC="$(RVJIT_CC)" KPAOTQEMU="$(QEMU_RV)"
+KP_AOT_ENV_arm64 = MODE=aot FRONTEND=build/skj-kpc-arm64 KPAOT=build/skj-kp-arm64 KPAOTLIB=build/libkpaot-arm64.a KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)"
+KP_FREE_ENV_rv = MODE=free FRONTEND=build/skj-kpc-rv KPRV=build/skj-kp-rv KPAS=build/skj-as-rv KPLD=build/skj-ld-rv KPCRT=build/kpfree-rv/kp_crt_rv.o KPLIB=build/libkpaot-rv-free.a QEMU="$(QEMU_RV)"
+
 ## Host smoke of the in-process front end: skj-kp-jit --emit-kpm turns each
 ## fixture into a module whose header is '.kpm 1'.  Proves kp_compile_pas works.
 check-kp-frontend: build/skj-kp-jit
@@ -715,19 +740,13 @@ check-kp-jit: build/skj-kp-jit
 ## Native front end emits a module, the x86-64 backend AOT-compiles and links it,
 ## the program runs; stdout must match the .expected file.
 check-kp-aot: build/skj-kpc build/skj-kp build/libkpaot.a
-	@MODE=aot FRONTEND=build/skj-kpc \
-	    KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
-	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
-	    sh tests/run-kp-src-tests.sh
+	@$(KP_AOT_ENV_x86_64) sh tests/run-kp-src-tests.sh
 
 ## Inline assembly in Kobold (asm('text')) is AOT only: the JIT does not
 ## assemble text.  This runs the asm fixture set through the native front end
 ## and the x86-64 backend AOT path, the same lane as check-kp-aot.
 check-kp-asm: build/skj-kpc build/skj-kp build/libkpaot.a
-	@KP_SRCDIR=tests/kp-asm MODE=aot FRONTEND=build/skj-kpc \
-	    KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
-	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
-	    sh tests/run-kp-src-tests.sh
+	@KP_SRCDIR=tests/kp-asm $(KP_AOT_ENV_x86_64) sh tests/run-kp-src-tests.sh
 
 ## The RV32 and AArch64 cross runs, under qemu.  JIT: the embedded front end JITs
 ## for the cross target in-process.  AOT: the host front end emits the module, the
@@ -739,17 +758,10 @@ check-kp-jit-arm64: build/skj-kp-jit-arm64
 	@MODE=jit JIT=build/skj-kp-jit-arm64 QEMU="$(A64_RUN)" sh tests/run-kp-src-tests.sh
 
 check-kp-aot-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
-	@MODE=aot FRONTEND=build/skj-kpc-rv \
-	    KPAOT=build/skj-kp-rv KPAOTLIB=build/libkpaot-rv.a \
-	    KPAOTCC="$(RVJIT_CC)" KPAOTQEMU="$(QEMU_RV)" \
-	    sh tests/run-kp-src-tests.sh
+	@$(KP_AOT_ENV_rv) sh tests/run-kp-src-tests.sh
 
 check-kp-aot-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP)
-	@MODE=aot FRONTEND=build/skj-kpc-arm64 \
-	    KPAOT=build/skj-kp-arm64 KPAOTLIB=build/libkpaot-arm64.a \
-	    KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" \
-	    KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
-	    sh tests/run-kp-src-tests.sh
+	@$(KP_AOT_ENV_arm64) sh tests/run-kp-src-tests.sh
 
 ## ---- the behavioral corpus (tests/kp-corpus) ----
 ## 63 real Kobold programs vendored from the upstream emit corpus, each with its
@@ -764,10 +776,7 @@ check-kp-aot-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.
 ## failforms/failmethod are included (their dst=-1 discard needed the reader fix).
 check-kp-corpus: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a
 	@QEMU= KP_SRCDIR=tests/kp-corpus MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-src-tests.sh
-	@KP_SRCDIR=tests/kp-corpus MODE=aot FRONTEND=build/skj-kpc \
-	    KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
-	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
-	    sh tests/run-kp-src-tests.sh
+	@KP_SRCDIR=tests/kp-corpus $(KP_AOT_ENV_x86_64) sh tests/run-kp-src-tests.sh
 
 ## check-kp-corpus-san: run the whole behavioral corpus through the instrumented JIT
 ## (GH_POISON + ASan/UBSan) and fail on any report.  This is the memory-safety gate for
@@ -790,17 +799,10 @@ check-kp-corpus-san: build/skj-kp-jit-san
 ## the work, qemu runs the small program (a cross JIT would emulate JITing the
 ## whole seed, far too slow for the whole corpus).
 check-kp-corpus-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
-	@KP_SRCDIR=tests/kp-corpus MODE=aot FRONTEND=build/skj-kpc-rv \
-	    KPAOT=build/skj-kp-rv KPAOTLIB=build/libkpaot-rv.a \
-	    KPAOTCC="$(RVJIT_CC)" KPAOTQEMU="$(QEMU_RV)" \
-	    sh tests/run-kp-src-tests.sh
+	@KP_SRCDIR=tests/kp-corpus $(KP_AOT_ENV_rv) sh tests/run-kp-src-tests.sh
 
 check-kp-corpus-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP)
-	@KP_SRCDIR=tests/kp-corpus MODE=aot FRONTEND=build/skj-kpc-arm64 \
-	    KPAOT=build/skj-kp-arm64 KPAOTLIB=build/libkpaot-arm64.a \
-	    KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" \
-	    KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
-	    sh tests/run-kp-src-tests.sh
+	@KP_SRCDIR=tests/kp-corpus $(KP_AOT_ENV_arm64) sh tests/run-kp-src-tests.sh
 
 ## The ColdFire corpus runs the hosted AOT path under qemu-m68k: skj-kp-cf emits
 ## big-endian m68k asm from the agnostic seed, the glibc m68k gcc assembles and
@@ -1253,31 +1255,17 @@ check-kp-stdlib-free-cf: build/skj-kpc-cf build/skj-kp-cf build/skj-as build/skj
 ## entry argument vector and the read seam are checked on the no-libc tier too.
 check-kp-io: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a
 	@QEMU= KP_SRCDIR=tests/kp-io MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-src-tests.sh
-	@KP_SRCDIR=tests/kp-io MODE=aot FRONTEND=build/skj-kpc \
-	    KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
-	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
-	    sh tests/run-kp-src-tests.sh
+	@KP_SRCDIR=tests/kp-io $(KP_AOT_ENV_x86_64) sh tests/run-kp-src-tests.sh
 
 check-kp-io-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
-	@KP_SRCDIR=tests/kp-io MODE=aot FRONTEND=build/skj-kpc-rv \
-	    KPAOT=build/skj-kp-rv KPAOTLIB=build/libkpaot-rv.a \
-	    KPAOTCC="$(RVJIT_CC)" KPAOTQEMU="$(QEMU_RV)" \
-	    sh tests/run-kp-src-tests.sh
+	@KP_SRCDIR=tests/kp-io $(KP_AOT_ENV_rv) sh tests/run-kp-src-tests.sh
 
 check-kp-io-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP)
-	@KP_SRCDIR=tests/kp-io MODE=aot FRONTEND=build/skj-kpc-arm64 \
-	    KPAOT=build/skj-kp-arm64 KPAOTLIB=build/libkpaot-arm64.a \
-	    KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" \
-	    KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
-	    sh tests/run-kp-src-tests.sh
+	@KP_SRCDIR=tests/kp-io $(KP_AOT_ENV_arm64) sh tests/run-kp-src-tests.sh
 
 check-kp-io-free: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
                   build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a
-	@KP_SRCDIR=tests/kp-io MODE=free FRONTEND=build/skj-kpc-rv \
-	    KPRV=build/skj-kp-rv KPAS=build/skj-as-rv KPLD=build/skj-ld-rv \
-	    KPCRT=build/kpfree-rv/kp_crt_rv.o KPLIB=build/libkpaot-rv-free.a \
-	    QEMU="$(QEMU_RV)" \
-	    sh tests/run-kp-src-tests.sh
+	@KP_SRCDIR=tests/kp-io $(KP_FREE_ENV_rv) sh tests/run-kp-src-tests.sh
 
 ## ---- the include-file corpus (tests/kp-inc) ----
 ## Programs that pull in a {$I ...} include file, the last input kind: the
@@ -1291,31 +1279,17 @@ check-kp-io-free: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv build/skj-ld-
 ## module before codegen).
 check-kp-inc: build/skj-kp-jit build/skj-kpc build/skj-kp build/libkpaot.a
 	@QEMU= KP_SRCDIR=tests/kp-inc MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-src-tests.sh
-	@KP_SRCDIR=tests/kp-inc MODE=aot FRONTEND=build/skj-kpc \
-	    KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
-	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
-	    sh tests/run-kp-src-tests.sh
+	@KP_SRCDIR=tests/kp-inc $(KP_AOT_ENV_x86_64) sh tests/run-kp-src-tests.sh
 
 check-kp-inc-rv: build/skj-kpc-rv build/skj-kp-rv build/libkpaot-rv.a
-	@KP_SRCDIR=tests/kp-inc MODE=aot FRONTEND=build/skj-kpc-rv \
-	    KPAOT=build/skj-kp-rv KPAOTLIB=build/libkpaot-rv.a \
-	    KPAOTCC="$(RVJIT_CC)" KPAOTQEMU="$(QEMU_RV)" \
-	    sh tests/run-kp-src-tests.sh
+	@KP_SRCDIR=tests/kp-inc $(KP_AOT_ENV_rv) sh tests/run-kp-src-tests.sh
 
 check-kp-inc-arm64: build/skj-kpc-arm64 build/skj-kp-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP)
-	@KP_SRCDIR=tests/kp-inc MODE=aot FRONTEND=build/skj-kpc-arm64 \
-	    KPAOT=build/skj-kp-arm64 KPAOTLIB=build/libkpaot-arm64.a \
-	    KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" \
-	    KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
-	    sh tests/run-kp-src-tests.sh
+	@KP_SRCDIR=tests/kp-inc $(KP_AOT_ENV_arm64) sh tests/run-kp-src-tests.sh
 
 check-kp-inc-free: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
                    build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a
-	@KP_SRCDIR=tests/kp-inc MODE=free FRONTEND=build/skj-kpc-rv \
-	    KPRV=build/skj-kp-rv KPAS=build/skj-as-rv KPLD=build/skj-ld-rv \
-	    KPCRT=build/kpfree-rv/kp_crt_rv.o KPLIB=build/libkpaot-rv-free.a \
-	    QEMU="$(QEMU_RV)" \
-	    sh tests/run-kp-src-tests.sh
+	@KP_SRCDIR=tests/kp-inc $(KP_FREE_ENV_rv) sh tests/run-kp-src-tests.sh
 
 ## ---- the freestanding guest runtime tier (downstream hosts, e.g. boris) ----
 ## libkpaot-rv-free.a is the re-bottoming of the hosted libkpaot-rv.a for a host
@@ -1339,9 +1313,6 @@ check-kp-inc-free: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv build/skj-ld
 # the RISC-V ILP32 psABI, which the hand-written .S pieces below also use.
 KPFREE_RV_SKJFLAGS := -DKP_FREESTANDING -DKP_REAL=double -Ikobold -Iir
 
-build/kpfree-rv:
-	mkdir -p build/kpfree-rv
-
 build/kpfree-rv/%.o: kobold/%.c $(KP_HDRS_RV) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
 	./build/skj-cc-rv $(KPFREE_RV_SKJFLAGS) -o $(@:.o=.s) $<
 	./build/skj-as-rv -o $@ $(@:.o=.s)
@@ -1353,18 +1324,13 @@ build/kpfree-rv/soft64.o: runtime/soft64.c build/skj-cc-rv build/skj-as-rv Makef
 	./build/skj-cc-rv $(KPFREE_RV_SKJFLAGS) -DSOFT64_NO_MULSHIFT -o $(@:.o=.s) runtime/soft64.c
 	./build/skj-as-rv -o $@ $(@:.o=.s)
 
-# The RNG generators and their guest-facing glue (runtime/, not kobold/).
-build/kpfree-rv/rng.o: runtime/rng.c runtime/rng.h build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	./build/skj-cc-rv $(KPFREE_RV_SKJFLAGS) -o $(@:.o=.s) runtime/rng.c
-	./build/skj-as-rv -o $@ $(@:.o=.s)
-
-build/kpfree-rv/rng_glue.o: runtime/rng_glue.c runtime/rng.h build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	./build/skj-cc-rv $(KPFREE_RV_SKJFLAGS) -o $(@:.o=.s) runtime/rng_glue.c
-	./build/skj-as-rv -o $@ $(@:.o=.s)
-
-# The park / yield glue (Sleep / Yield over the nanosleep / sched_yield seam).
-build/kpfree-rv/sched_glue.o: runtime/sched_glue.c build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	./build/skj-cc-rv $(KPFREE_RV_SKJFLAGS) -o $(@:.o=.s) runtime/sched_glue.c
+# The other runtime/ sources the archive pulls in with the plain freestanding
+# flags: the RNG generators and their guest-facing glue (rng, rng_glue) and the
+# park / yield glue (sched_glue, Sleep / Yield over nanosleep / sched_yield).
+# One pattern rule covers them; soft64.o keeps its explicit rule above for the
+# -DSOFT64_NO_MULSHIFT it needs, and an explicit rule wins over this pattern.
+build/kpfree-rv/%.o: runtime/%.c $(wildcard runtime/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	./build/skj-cc-rv $(KPFREE_RV_SKJFLAGS) -o $(@:.o=.s) $<
 	./build/skj-as-rv -o $@ $(@:.o=.s)
 
 build/kpfree-rv/kp_crt_rv.o: kobold/kp_crt_rv.S runtime/crt_entry_rv.S build/skj-as-rv | build/kpfree-rv
@@ -1388,25 +1354,14 @@ build/kpfree-rv/co_switch_rv.o: runtime/co_switch_rv.S build/skj-as-rv | build/k
 build/kpfree-rv/io_free_rv.o: runtime/io_free_rv.S runtime/syscall_rv.S build/skj-as-rv | build/kpfree-rv
 	./build/skj-as-rv -o $@ $<
 
-# libc's buffered-stream core backs the freestanding console I/O, so the Kobold
-# runtime and the C runtime share one stdio buffering layer.  It builds on the
-# write/read seam only (no malloc, no printf engine), so it links in alone.
-build/kpfree-rv/stdio_core.o: libc/stdio_core.c libc/stdio_impl.h $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	./build/skj-cc-rv -Iinclude -Ilibc -o $(@:.o=.s) libc/stdio_core.c
-	./build/skj-as-rv -o $@ $(@:.o=.s)
-
-## strtod + ctype: io_free.c's real parse (scan_real) is shared from libc's strtod.
-build/kpfree-rv/strtod.o: libc/strtod.c $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	./build/skj-cc-rv -Iinclude -Ilibc -o $(@:.o=.s) libc/strtod.c
-	./build/skj-as-rv -o $@ $(@:.o=.s)
-
-build/kpfree-rv/ctype.o: libc/ctype.c $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	./build/skj-cc-rv -Iinclude -Ilibc -o $(@:.o=.s) libc/ctype.c
-	./build/skj-as-rv -o $@ $(@:.o=.s)
-
-## numfmt: the libgcc-free number formatters io_free.c shares with libc's printf.
-build/kpfree-rv/numfmt.o: libc/numfmt.c libc/fmt.h $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	./build/skj-cc-rv -Iinclude -Ilibc -o $(@:.o=.s) libc/numfmt.c
+# The plain libc/ sources the freestanding archive pulls in with the libc
+# include path only (no FS flags): stdio_core (the buffered-stream core the
+# Kobold and C runtimes share), strtod and ctype (io_free.c's scan_real path),
+# numfmt (the libgcc-free formatters), and sbrk below.  One pattern rule covers
+# them; stat.c and fileops.c come from libc/ too but keep explicit rules with
+# the FS flags, which take precedence over this pattern.
+build/kpfree-rv/%.o: libc/%.c $(wildcard include/*.h) $(wildcard libc/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	./build/skj-cc-rv -Iinclude -Ilibc -o $(@:.o=.s) $<
 	./build/skj-as-rv -o $@ $(@:.o=.s)
 
 ## io_free.c's file-metadata ops (kpf_exists/size/isdir/delete/rename/mkdir) need
@@ -1430,9 +1385,7 @@ build/kpfree-rv/fileops.o: libc/fileops.c $(FS_HDR) $(wildcard include/*.h) $(wi
 ## The brk-bump both runtimes share: rt_free.c's gheap grows through __libc_sbrk
 ## (libc/sbrk.c), the same source libc's malloc uses.  skj-cc-rv defines
 ## __skj_ilp32__, so sbrk.c takes its brk path, not the LP64 fixed-region one.
-build/kpfree-rv/sbrk.o: libc/sbrk.c $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	./build/skj-cc-rv -Iinclude -Ilibc -o $(@:.o=.s) libc/sbrk.c
-	./build/skj-as-rv -o $@ $(@:.o=.s)
+## Built by the libc/%.o pattern rule above.
 
 KPFREE_RV_ARCHIVE := build/kpfree-rv/rt_free.o build/kpfree-rv/io_free.o build/kpfree-rv/kp_io.o \
                      build/kpfree-rv/io_free_rv.o build/kpfree-rv/sbrk.o \
@@ -1475,9 +1428,6 @@ KP_HDRS_CF := kobold/str.h kobold/dynarr.h kobold/map.h kobold/obj.h kobold/ghea
 # carry over; strict-ColdFire is implicit (the backend targets ColdFire/m68k).
 KPFREE_CF_SKJFLAGS := -DKP_FREESTANDING -DKP_REAL=double -Ikobold -Iir
 
-build/kpfree-cf:
-	mkdir -p build/kpfree-cf
-
 build/kpfree-cf/%.o: kobold/%.c $(KP_HDRS_CF) build/skj-cc build/skj-as Makefile | build/kpfree-cf
 	./build/skj-cc $(KPFREE_CF_SKJFLAGS) -o $(@:.o=.s) $<
 	./build/skj-as -o $@ $(@:.o=.s)
@@ -1506,24 +1456,12 @@ build/kpfree-cf/kp_crt_cf.o: kobold/kp_crt_cf.S runtime/crt_entry_cf.S build/skj
 build/kpfree-cf/io_free_cf.o: runtime/io_free_cf.S runtime/syscall_cf.S build/skj-as | build/kpfree-cf
 	./build/skj-as -o $@ $<
 
-# libc's buffered-stream core backs the freestanding console I/O (see the rv rule
-# above); it builds on the write/read seam only.
-build/kpfree-cf/stdio_core.o: libc/stdio_core.c libc/stdio_impl.h $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	./build/skj-cc -Iinclude -Ilibc -o $(@:.o=.s) libc/stdio_core.c
-	./build/skj-as -o $@ $(@:.o=.s)
-
-# strtod + ctype: io_free.c's real parse (scan_real) is shared from libc's strtod.
-build/kpfree-cf/strtod.o: libc/strtod.c $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	./build/skj-cc -Iinclude -Ilibc -o $(@:.o=.s) libc/strtod.c
-	./build/skj-as -o $@ $(@:.o=.s)
-
-build/kpfree-cf/ctype.o: libc/ctype.c $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	./build/skj-cc -Iinclude -Ilibc -o $(@:.o=.s) libc/ctype.c
-	./build/skj-as -o $@ $(@:.o=.s)
-
-## numfmt: the libgcc-free number formatters io_free.c shares with libc's printf.
-build/kpfree-cf/numfmt.o: libc/numfmt.c libc/fmt.h $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	./build/skj-cc -Iinclude -Ilibc -o $(@:.o=.s) libc/numfmt.c
+# The plain libc/ sources for the cf archive (the sibling of the rv libc/%.o
+# pattern rule): stdio_core, strtod, ctype, numfmt, and sbrk below, all with the
+# libc include path only.  stat.c and fileops.c keep explicit FS-flag rules,
+# which take precedence over this pattern.
+build/kpfree-cf/%.o: libc/%.c $(wildcard include/*.h) $(wildcard libc/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	./build/skj-cc -Iinclude -Ilibc -o $(@:.o=.s) $<
 	./build/skj-as -o $@ $(@:.o=.s)
 
 ## io_free.c's file-metadata ops need struct stat and stat/mkdir (see the rv rule).
@@ -1541,48 +1479,21 @@ build/kpfree-cf/stat.o: libc/stat.c $(FS_HDR) $(wildcard include/*.h) $(wildcard
 build/kpfree-cf/fileops.o: libc/fileops.c $(FS_HDR) $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
 	./build/skj-cc -Iinclude -Ilibc $(KPFREE_CF_FS) -o $(@:.o=.s) libc/fileops.c
 	./build/skj-as -o $@ $(@:.o=.s)
-build/kpfree-cf/fs.o: fs/fs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/fs.c
+# The fs/ layer objects for the cf freestanding archive (the sibling of the rv
+# fs/%.o pattern rule): one source per target stem, full FS feature set, skj-as.
+build/kpfree-cf/%.o: fs/%.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	$(FS_FREE_CC_CF) -o $(@:.o=.s) $<
 	./build/skj-as -o $@ $(@:.o=.s)
-build/kpfree-cf/ramfs.o: fs/ramfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/ramfs.c
-	./build/skj-as -o $@ $(@:.o=.s)
-build/kpfree-cf/ambientfs.o: fs/ambientfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/ambientfs.c
-	./build/skj-as -o $@ $(@:.o=.s)
-build/kpfree-cf/devfs.o: fs/devfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/devfs.c
-	./build/skj-as -o $@ $(@:.o=.s)
-build/kpfree-cf/romfs.o: fs/romfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/romfs.c
-	./build/skj-as -o $@ $(@:.o=.s)
-build/kpfree-cf/ninefs.o: fs/ninefs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/ninefs.c
-	./build/skj-as -o $@ $(@:.o=.s)
-build/kpfree-cf/p9_guest.o: fs/p9_guest.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/p9_guest.c
-	./build/skj-as -o $@ $(@:.o=.s)
-build/kpfree-cf/hostcap.o: fs/hostcap.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	$(FS_FREE_CC_CF) -o $(@:.o=.s) fs/hostcap.c
-	./build/skj-as -o $@ $(@:.o=.s)
-## The shared brk-bump (see the rv rule above): rt_free.c's gheap over __libc_sbrk.
-build/kpfree-cf/sbrk.o: libc/sbrk.c $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	./build/skj-cc -Iinclude -Ilibc -o $(@:.o=.s) libc/sbrk.c
-	./build/skj-as -o $@ $(@:.o=.s)
+## The shared brk-bump (see the rv rule above): rt_free.c's gheap over
+## __libc_sbrk.  Built by the libc/%.o pattern rule above.
 
-# The RNG generators and their guest-facing glue (runtime/, not kobold/), and the
-# park / yield glue, over the ColdFire time/rng/yield syscall wrappers now in
-# syscall_cf.S.  The rv tier's siblings are above.
-build/kpfree-cf/rng.o: runtime/rng.c runtime/rng.h build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	./build/skj-cc $(KPFREE_CF_SKJFLAGS) -o $(@:.o=.s) runtime/rng.c
-	./build/skj-as -o $@ $(@:.o=.s)
-
-build/kpfree-cf/rng_glue.o: runtime/rng_glue.c runtime/rng.h build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	./build/skj-cc $(KPFREE_CF_SKJFLAGS) -o $(@:.o=.s) runtime/rng_glue.c
-	./build/skj-as -o $@ $(@:.o=.s)
-
-build/kpfree-cf/sched_glue.o: runtime/sched_glue.c build/skj-cc build/skj-as Makefile | build/kpfree-cf
-	./build/skj-cc $(KPFREE_CF_SKJFLAGS) -o $(@:.o=.s) runtime/sched_glue.c
+# The other runtime/ sources for the cf archive (the sibling of the rv
+# runtime/%.o pattern rule): the RNG generators and glue (rng, rng_glue) and the
+# park / yield glue (sched_glue), over the ColdFire time/rng/yield syscall
+# wrappers in syscall_cf.S.  soft64.o keeps its explicit rule above and wins
+# over this pattern.
+build/kpfree-cf/%.o: runtime/%.c $(wildcard runtime/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	./build/skj-cc $(KPFREE_CF_SKJFLAGS) -o $(@:.o=.s) $<
 	./build/skj-as -o $@ $(@:.o=.s)
 
 KPFREE_CF_ARCHIVE := build/kpfree-cf/rt_free.o build/kpfree-cf/io_free.o build/kpfree-cf/kp_io.o \
@@ -1611,11 +1522,7 @@ build/libkpaot-cf-free.a: $(KPFREE_CF_ARCHIVE) | build/kpfree-cf
 ## qemu-riscv32 (which trivially provides that seam); stdout must match .expected.
 check-kp-free: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
                build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a
-	@MODE=free FRONTEND=build/skj-kpc-rv \
-	    KPRV=build/skj-kp-rv KPAS=build/skj-as-rv KPLD=build/skj-ld-rv \
-	    KPCRT=build/kpfree-rv/kp_crt_rv.o KPLIB=build/libkpaot-rv-free.a \
-	    QEMU="$(QEMU_RV)" \
-	    sh tests/run-kp-src-tests.sh
+	@$(KP_FREE_ENV_rv) sh tests/run-kp-src-tests.sh
 
 ## The ColdFire freestanding kp AOT path, run on the in-tree emulator (qemu does
 ## not model CFV4e).  skj-kp-cf emits big-endian ColdFire asm from the one
@@ -1723,14 +1630,8 @@ check-jit-rv-disasm: build/skj-jit-rv
 	 EXCLUDE="$(RV_EXCLUDE) cc_t077_inline_asm" sh tests/run-jit-disasm.sh
 
 
-build/skj-cc-mips: $(CC_SRC_MIPS) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | build
-	$(CC) $(CFLAGS) -DCC_MIPS $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_MIPS)
-
-## The PlayStation (R3051, no coprocessor 1) soft-float C compiler: the same
-## sources with -DMIPS_SOFTFLOAT, which emits no cop-1 instruction and lowers
-## every float op to a runtime/softfloat.c call.
-build/skj-cc-mips-sf: $(CC_SRC_MIPS) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h | build
-	$(CC) $(CFLAGS) -DCC_MIPS -DMIPS_SOFTFLOAT $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC_MIPS)
+# skj-cc-mips and skj-cc-mips-sf are built by the build/skj-cc-%: pattern rule
+# above (cc_src_mips / cc_flags_mips and the -sf soft-float variant).
 
 ## skj-run emulator driver
 #
@@ -1891,9 +1792,6 @@ test-vmm: build/vmm_selftest build/vmm_selftest_guest.bin
 ## (runtime/syscall_x86_64_hv.S) and run under skj-run on real KVM.  The guest
 ## links at 1 MiB, above the long-mode page tables; linking stays external GNU
 ## ld, since the in-tree linker is ELF32.  Skips cleanly without /dev/kvm.
-build/hv-x86_64:
-	mkdir -p $@
-
 build/hv-x86_64/start.o: runtime/start_x86_64_hv.S $(X64_ASM_DEP) | build/hv-x86_64
 	$(X64_ASM) $(X64_ASMFLAGS) -o $@ $<
 
@@ -1930,9 +1828,6 @@ test-hv-x86-64: build/skj-run build/hv-x86_64/hello.elf build/hv-x86_64/hello_c.
 ## one: the arm64 crt and the doorbell syscall seam, a C guest built by
 ## skj-cc-arm64.  It can only run on an aarch64 KVM host, so this verifies the
 ## build on any host and runs the guest only where KVM can.
-build/hv-arm64:
-	mkdir -p $@
-
 build/hv-arm64/start.o: runtime/start_arm64_hv.S $(A64_ASM_DEP) | build/hv-arm64
 	$(A64_AS) -o $@ $<
 
@@ -2179,17 +2074,11 @@ AS_RV_SRC := as/rv_main.c as/asm_lex.c as/asm_obj.c as/rv_parse.c \
              as/rv_encode.c as/rv_macro.c as/rv_elf.c dwarf/dwarf.c \
              ir/util.c ir/arena.c
 
-build/skj-as-rv: $(AS_RV_SRC) as/rv.h as/asm_lex.h as/asm_obj.h dwarf/dwarf.h | build
-	$(CC) $(CFLAGS) -Ias -Iir -Idwarf -o $@ $(AS_RV_SRC)
-
 ## MIPS I assembler (shares the lexer + object helpers with skj-as)
 ## Built up in steps; step 2 encodes the instruction set.  See doc/tools/mips.md.
 AS_MIPS_SRC := as/mips_main.c as/asm_lex.c as/asm_obj.c as/mips_parse.c \
                as/mips_encode.c as/mips_elf.c as/mips_sched.c dwarf/dwarf.c \
                ir/util.c ir/arena.c
-
-build/skj-as-mips: $(AS_MIPS_SRC) as/mips.h as/asm_lex.h as/asm_obj.h dwarf/dwarf.h | build
-	$(CC) $(CFLAGS) -Ias -Iir -Idwarf -o $@ $(AS_MIPS_SRC)
 
 ## x86-64 assembler (shares the lexer + object helpers with skj-as).  Reads the
 ## GNU .intel_syntax noprefix the x86-64 backends emit; no DWARF (the bounded
@@ -2198,9 +2087,6 @@ AS_X64_SRC := as/x86_64_main.c as/asm_lex.c as/asm_obj.c as/x86_64_parse.c \
               as/x86_64_encode.c as/x86_64_elf.c \
               ir/util.c ir/arena.c
 
-build/skj-as-x86-64: $(AS_X64_SRC) as/x86_64.h as/asm_lex.h as/asm_obj.h | build
-	$(CC) $(CFLAGS) -Ias -Iir -o $@ $(AS_X64_SRC)
-
 ## AArch64 assembler (shares the lexer + object helpers with skj-as).  Reads the
 ## native GNU as syntax the arm64 backends emit.  On the Mach-O (Darwin) path it
 ## also consumes .file/.loc and emits __DWARF line info, so it links dwarf/.
@@ -2208,14 +2094,26 @@ AS_A64_SRC := as/aarch64_main.c as/asm_lex.c as/asm_obj.c as/aarch64_parse.c \
               as/aarch64_encode.c as/aarch64_elf.c as/aarch64_macho.c \
               dwarf/dwarf.c ir/util.c ir/arena.c
 
-build/skj-as-aarch64: $(AS_A64_SRC) as/aarch64.h as/asm_lex.h as/asm_obj.h dwarf/dwarf.h | build
-	$(CC) $(CFLAGS) -Ias -Iir -Idwarf -o $@ $(AS_A64_SRC)
+# Every cross assembler shares the lexer and object helpers and compiles with
+# -Ias -Iir; the ISAs that carry DWARF line info add -Idwarf, and the Mach-O
+# variant adds -DSKJ_DARWIN.  Key the source list and the extra flags by the
+# tool-name suffix and build them all with one pattern rule.  aarch64 is the
+# ELF assembler, aarch64-macho the same sources fixed to the Darwin/Mach-O
+# output (-DSKJ_DARWIN) for cross use on a non-Darwin host.  The x86-64
+# assembler carries no DWARF (its bounded input has no .loc).  The bare
+# build/skj-as (ColdFire) keeps its own rule.
+as_src_rv             := $(AS_RV_SRC)
+as_src_mips           := $(AS_MIPS_SRC)
+as_src_x86-64         := $(AS_X64_SRC)
+as_src_aarch64        := $(AS_A64_SRC)
+as_src_aarch64-macho  := $(AS_A64_SRC)
+as_flags_rv            := -Idwarf
+as_flags_mips          := -Idwarf
+as_flags_aarch64       := -Idwarf
+as_flags_aarch64-macho := -Idwarf -DSKJ_DARWIN
 
-# The same assembler configured for the Darwin (Mach-O) target, for cross use on
-# a non-Darwin host.  The output format is fixed at compile time by -DSKJ_DARWIN;
-# a native macOS build of skj-as-aarch64 selects Mach-O automatically.
-build/skj-as-aarch64-macho: $(AS_A64_SRC) as/aarch64.h as/asm_lex.h as/asm_obj.h dwarf/dwarf.h | build
-	$(CC) $(CFLAGS) -DSKJ_DARWIN -Ias -Iir -Idwarf -o $@ $(AS_A64_SRC)
+build/skj-as-%: $$(as_src_$$*) as/asm_lex.h as/asm_obj.h $(wildcard as/*.h) $(wildcard dwarf/*.h) | build
+	$(CC) $(CFLAGS) $(as_flags_$*) -Ias -Iir -o $@ $(as_src_$*)
 
 ## skj-ld linker
 LD_SRC := ld/main.c ld/elf_read.c ld/script.c ld/link.c ld/elf_write.c ld/mapfile.c ld/archive.c ir/util.c ir/arena.c
@@ -2228,17 +2126,23 @@ LD_RV_SRC := ld/rv_main.c ld/rv_elf_read.c ld/rv_link.c ld/rv_elf_write.c \
              ld/rv_archive.c ld/link.c ld/script.c ld/mapfile.c \
              ir/util.c ir/arena.c
 
-build/skj-ld-rv: $(LD_RV_SRC) ld/ld.h ld/rv_ld.h ld/mapfile.h | build
-	$(CC) $(CFLAGS) -Ild -Iir -o $@ $(LD_RV_SRC)
-
 ## MIPS I linker (shares layout core, script parser and mapfile reader).
 ## REL relocations with the o32 HI16/LO16 addend carry-pairing.  See doc/tools/mips.md.
 LD_MIPS_SRC := ld/mips_main.c ld/mips_elf_read.c ld/mips_link.c \
                ld/mips_elf_write.c ld/mips_psexe_write.c ld/mips_archive.c \
                ld/link.c ld/script.c ld/mapfile.c ir/util.c ir/arena.c
 
-build/skj-ld-mips: $(LD_MIPS_SRC) ld/ld.h ld/mips_ld.h ld/mapfile.h | build
-	$(CC) $(CFLAGS) -Ild -Iir -o $@ $(LD_MIPS_SRC)
+## x86-64 ELF64 linker (shares the layout core, script parser and mapfile
+## reader; the ELF64 reader/writer are shared with the AArch64 linker).
+LD_X64_SRC := ld/x86_64_main.c ld/elf64_read.c ld/x86_64_link.c \
+              ld/elf64_write.c ld/elf64_archive.c ld/link.c ld/script.c \
+              ld/mapfile.c ir/util.c ir/arena.c
+
+## AArch64 ELF64 linker (shares the ELF64 core with the x86-64 linker; only the
+## machine id and the relocation set differ).
+LD_A64_SRC := ld/aarch64_main.c ld/elf64_read.c ld/aarch64_link.c \
+              ld/elf64_write.c ld/elf64_archive.c ld/link.c ld/script.c \
+              ld/mapfile.c ir/util.c ir/arena.c
 
 ## Mach-O linker for the Darwin arm64 target: reads the MH_OBJECT relocatables
 ## skj-as-aarch64 writes, binds libSystem imports through stubs and a __got, and
@@ -2246,8 +2150,19 @@ build/skj-ld-mips: $(LD_MIPS_SRC) ld/ld.h ld/mips_ld.h ld/mapfile.h | build
 LD_MACHO_SRC := ld/macho_main.c ld/macho_read.c ld/macho_link.c \
                 ld/macho_sha256.c ir/util.c ir/arena.c
 
-build/skj-ld-aarch64: $(LD_MACHO_SRC) ld/macho_ld.h | build
-	$(CC) $(CFLAGS) -Ild -Iir -o $@ $(LD_MACHO_SRC)
+# Every cross linker compiles the same way (-Ild -Iir); only its source list
+# differs.  Key those by the tool-name suffix and build them all with one
+# pattern rule.  arm64 is the ELF64 linker (LD_A64_SRC), aarch64 the Mach-O one
+# (LD_MACHO_SRC); the two targets keep distinct suffixes.  ld headers are a
+# wildcard prerequisite.  The bare build/skj-ld (ColdFire) keeps its own rule.
+ld_src_rv      := $(LD_RV_SRC)
+ld_src_mips    := $(LD_MIPS_SRC)
+ld_src_x86-64  := $(LD_X64_SRC)
+ld_src_arm64   := $(LD_A64_SRC)
+ld_src_aarch64 := $(LD_MACHO_SRC)
+
+build/skj-ld-%: $$(ld_src_$$*) $(wildcard ld/*.h) | build
+	$(CC) $(CFLAGS) -Ild -Iir -o $@ $(ld_src_$*)
 
 ## skj-ar: a minimal ar(1) archive tool (create with symbol index, list,
 ## extract).  Generic over the object machine and byte order, so one tool
@@ -2281,6 +2196,18 @@ build/%: build/%.o build/start.o build/skj-ld
 
 build:
 	mkdir -p build
+
+# Every build/<subdir> below is used only as an order-only prerequisite and is
+# created the same way.  One multi-target rule replaces the two-line mkdir rule
+# each used to carry.  Add a new scratch subdir to this list, not as its own
+# rule.  (build itself stays separate above: much of the tree hangs off it.)
+BUILD_DIRS := build/kpfree-rv build/kpfree-cf build/hv-x86_64 build/hv-arm64 \
+	build/rv build/mips build/cf build/san build/arm64 build/x86_64 build/rv32 \
+	build/rv-skj build/sandbox build/spawn-argv build/spawn-wait build/spawn-kill \
+	build/env-test build/xlang-sandbox build/sandbox-mips build/sandbox-cf \
+	build/mips-nr build/mips-asm build/cf-asm build/rv-asm build/x86-asm build/arm64-asm
+$(BUILD_DIRS):
+	mkdir -p $@
 
 build/version.h: FORCE | build
 	@printf '#ifndef SKJ_VERSION_H\n#define SKJ_VERSION_H\n#define SKJ_VERSION "%s"\n#endif\n' '$(VERSION)' > $@.tmp
@@ -2331,9 +2258,6 @@ build/rv/start.o: runtime/start_rv.S runtime/crt_entry_rv.S runtime/syscall_rv.S
 build/rv/%: build/rv/%.o build/rv/start.o
 	$(RV_LD) -m elf32lriscv -o $@ build/rv/start.o $<
 
-build/rv:
-	mkdir -p build/rv
-
 check-rv: build/skj-tinc-rv build/skj-sc-rv $(RV_TESTS:tests/%.tc=build/rv/%) $(RV_SCM_TESTS:tests/%.scm=build/rv/%)
 	@sh tests/run-tests.sh "$(QEMU_RV)" build/rv
 
@@ -2368,9 +2292,6 @@ build/mips/start_psx.o: runtime/start_psx.S | build/mips
 
 build/mips/%: build/mips/%.o build/mips/start.o
 	$(MIPS_LD) -o $@ build/mips/start.o $<
-
-build/mips:
-	mkdir -p build/mips
 
 check-mips: build/skj-tinc-mips build/skj-sc-mips $(MIPS_TESTS:tests/%.tc=build/mips/%) $(MIPS_SCM_TESTS:tests/%.scm=build/mips/%)
 	@sh tests/run-tests.sh "$(QEMU_MIPS)" build/mips
@@ -2608,29 +2529,12 @@ build/skj-mkromfs: fs/mkromfs.c fs/romfs_build.c fs/romfs.h fs/fs.h | build
 ## guest on the ambient host instead, kept while the freestanding test harnesses
 ## still open host files by bare path under qemu.
 FS_FREE_CC := ./build/skj-cc-rv -Iinclude -Ilibc -Ifs -DFS_WITH_AMBIENT -DFS_WITH_HOSTCAP -DFS_AMBIENT_DEFAULT -DFS_WITH_DEV -DFS_WITH_ROM -DFS_WITH_9P -DFS_WITH_STREAMS -DFS_WITH_RAM
-build/kpfree-rv/fs.o: fs/fs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	$(FS_FREE_CC) -o $(@:.o=.s) fs/fs.c
-	./build/skj-as-rv -o $@ $(@:.o=.s)
-build/kpfree-rv/ramfs.o: fs/ramfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	$(FS_FREE_CC) -o $(@:.o=.s) fs/ramfs.c
-	./build/skj-as-rv -o $@ $(@:.o=.s)
-build/kpfree-rv/ambientfs.o: fs/ambientfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	$(FS_FREE_CC) -o $(@:.o=.s) fs/ambientfs.c
-	./build/skj-as-rv -o $@ $(@:.o=.s)
-build/kpfree-rv/hostcap.o: fs/hostcap.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	$(FS_FREE_CC) -o $(@:.o=.s) fs/hostcap.c
-	./build/skj-as-rv -o $@ $(@:.o=.s)
-build/kpfree-rv/devfs.o: fs/devfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	$(FS_FREE_CC) -o $(@:.o=.s) fs/devfs.c
-	./build/skj-as-rv -o $@ $(@:.o=.s)
-build/kpfree-rv/romfs.o: fs/romfs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	$(FS_FREE_CC) -o $(@:.o=.s) fs/romfs.c
-	./build/skj-as-rv -o $@ $(@:.o=.s)
-build/kpfree-rv/ninefs.o: fs/ninefs.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	$(FS_FREE_CC) -o $(@:.o=.s) fs/ninefs.c
-	./build/skj-as-rv -o $@ $(@:.o=.s)
-build/kpfree-rv/p9_guest.o: fs/p9_guest.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
-	$(FS_FREE_CC) -o $(@:.o=.s) fs/p9_guest.c
+# The fs/ layer objects for the rv freestanding archive all build the same way:
+# one source per target stem, compiled with the full FS feature set and
+# assembled with skj-as-rv.  One pattern rule covers them (the generic
+# kobold/%.c rule above does not match, since fs/ and kobold/ share no basename).
+build/kpfree-rv/%.o: fs/%.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	$(FS_FREE_CC) -o $(@:.o=.s) $<
 	./build/skj-as-rv -o $@ $(@:.o=.s)
 
 check-fs-free: build/kpfree-rv/fs.o build/kpfree-rv/ramfs.o build/kpfree-rv/ambientfs.o build/kpfree-rv/hostcap.o build/kpfree-rv/devfs.o build/kpfree-rv/romfs.o build/kpfree-rv/ninefs.o build/kpfree-rv/p9_guest.o
@@ -2748,9 +2652,6 @@ test-torture-diff: $(TORTURE_DIFF_DEPS)
 ## target and the qemu tier stays as an independent oracle.
 ## ---------------------------------------------------------------
 CF_RT_CFLAGS := -std=c99 -O2 -Wall -ffreestanding -mcpu=5475
-
-build/cf:
-	mkdir -p build/cf
 
 build/cf/%.o: runtime/%.c | build/cf
 	$(M68K_CC) $(CF_RT_CFLAGS) -c -o $@ $<
@@ -2883,6 +2784,7 @@ check-emu-all: check-emu check-rv-emu check-mips-emu test-coop-read \
                test-rv-spawn-pipe test-cf-spawn-pipe \
                test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh \
                test-rv-vdso test-cf-vdso test-mips-vdso \
+               test-rv-mem-root test-sched-embed \
                test-hv-x86-64-vdso test-hv-arm64-vdso test-hv-parallel \
                test-rv-env test-cf-env test-hv-x86-64-env test-rv-decode-cache \
                test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp \
@@ -2901,9 +2803,6 @@ check-emu-all: check-emu check-rv-emu check-mips-emu test-coop-read \
 ## is covered too, run against the already-built cross ELF (a guest ELF is
 ## unaffected by host sanitizers).  Not part of check-emu-all: it needs a
 ## sanitizer-capable host compiler, so it is opt-in.
-build/san:
-	mkdir -p build/san
-
 build/san/test_rv_run: tests/test_rv_run.c emu/rv32.c emu/rv32.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Iemu -o $@ tests/test_rv_run.c emu/rv32.c -lm
 
@@ -3372,9 +3271,6 @@ build/arm64/soft64.o: runtime/soft64.c | build/arm64
 build/arm64/%: build/arm64/%.o build/arm64/start.o
 	$(A64_LD) -o $@ build/arm64/start.o $<
 
-build/arm64:
-	mkdir -p build/arm64
-
 check-arm64: build/skj-tinc-arm64 build/skj-sc-arm64 $(A64_TESTS:tests/%.tc=build/arm64/%) $(A64_SCM_TESTS:tests/%.scm=build/arm64/%)
 	@sh tests/run-tests.sh "$(QEMU_A64)" build/arm64
 
@@ -3403,39 +3299,26 @@ build/x86_64/va.o: runtime/va_x86_64.c | build/x86_64
 build/x86_64/%: build/x86_64/%.o build/x86_64/start.o
 	$(X64_LD) -m elf_x86_64 -o $@ build/x86_64/start.o $<
 
-build/x86_64:
-	mkdir -p build/x86_64
-
 check-x86-64: build/skj-tinc-x86-64 build/skj-sc-x86-64 $(X64_TESTS:tests/%.tc=build/x86_64/%) $(X64_SCM_TESTS:tests/%.scm=build/x86_64/%)
 	@sh tests/run-tests.sh "$(QEMU_X64)" build/x86_64
 
-## TinScheme compiler
-SC_SRC := scheme/lex.c scheme/parse.c scheme/print.c scheme/main.c scheme/gc.c \
-          scheme/lower.c $(IR_SRC) $(BE_CF)
-SC_SRC_RV := scheme/lex.c scheme/parse.c scheme/print.c scheme/main.c scheme/gc.c \
-             scheme/lower.c $(IR_SRC) $(BE_RV)
-SC_SRC_MIPS := scheme/lex.c scheme/parse.c scheme/print.c scheme/main.c scheme/gc.c \
-               scheme/lower.c $(IR_SRC) $(BE_MIPS)
-SC_SRC_A64 := scheme/lex.c scheme/parse.c scheme/print.c scheme/main.c scheme/gc.c \
-              scheme/lower.c $(IR_SRC) $(BE_A64)
+## TinScheme compiler.  The front end plus IR is shared; only the backend and
+## the width defines vary, so the per-arch source lists are keyed by the
+## tool-name suffix and one pattern rule builds every cross target.
+SC_FE         := scheme/lex.c scheme/parse.c scheme/print.c scheme/main.c scheme/gc.c scheme/lower.c $(IR_SRC)
+SC_SRC        := $(SC_FE) $(BE_CF)
+sc_src_rv     := $(SC_FE) $(BE_RV)
+sc_src_mips   := $(SC_FE) $(BE_MIPS)
+sc_src_arm64  := $(SC_FE) $(BE_A64)
+sc_src_x86-64 := $(SC_FE) $(BE_X64)
+sc_def_arm64  := -DSKJ_LP64=1
+sc_def_x86-64 := -DX86_BITS=64 -DSKJ_LP64=1
 
 build/skj-sc: $(SC_SRC) scheme/scheme.h scheme/gc.h ir/ir.h | build
 	$(CC) $(CFLAGS) -Ischeme -Iir -o $@ $(SC_SRC)
 
-build/skj-sc-rv: $(SC_SRC_RV) scheme/scheme.h scheme/gc.h ir/ir.h | build
-	$(CC) $(CFLAGS) -Ischeme -Iir -o $@ $(SC_SRC_RV)
-
-build/skj-sc-mips: $(SC_SRC_MIPS) scheme/scheme.h scheme/gc.h ir/ir.h | build
-	$(CC) $(CFLAGS) -Ischeme -Iir -o $@ $(SC_SRC_MIPS)
-
-build/skj-sc-arm64: $(SC_SRC_A64) scheme/scheme.h scheme/gc.h ir/ir.h | build
-	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Ischeme -Iir -o $@ $(SC_SRC_A64)
-
-SC_SRC_X64 := scheme/lex.c scheme/parse.c scheme/print.c scheme/main.c scheme/gc.c \
-              scheme/lower.c $(IR_SRC) $(BE_X64)
-
-build/skj-sc-x86-64: $(SC_SRC_X64) scheme/scheme.h scheme/gc.h ir/ir.h | build
-	$(CC) $(CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -Ischeme -Iir -o $@ $(SC_SRC_X64)
+build/skj-sc-%: $$(sc_src_$$*) scheme/scheme.h scheme/gc.h ir/ir.h | build
+	$(CC) $(CFLAGS) $(sc_def_$*) -Ischeme -Iir -o $@ $(sc_src_$*)
 
 ## TinScheme codegen tests (.scm -> .s via skj-sc)
 build/scm_%.s: tests/scm_%.scm build/skj-sc | build
@@ -3616,9 +3499,6 @@ RV32_LOAD := emu/elf32.c emu/elf64.c emu/guest.c emu/hostplat.c fs/p9_server.c
 ## gdbclient speaks the GDB remote protocol over a socket, and the POSIX
 ## headers for that are hidden by -std=c99.
 RV32_SOCK_CFLAGS := $(subst -std=c99,-std=gnu99,$(CFLAGS))
-
-build/rv32:
-	mkdir -p build/rv32
 
 ## The unit suites need the core and the flat test machine, nothing else.
 $(RV32_UNIT:%=build/rv32/%): build/rv32/%: tests/rv32/%.c $(RV32_CORE) \
@@ -3919,18 +3799,18 @@ build/skj-pc: $(PC_SRC) pascal/pascal.h ir/ir.h | build
 
 ## ---- Native host Pascal compilers (x86-64, aarch64) ----
 ## The front end is backend-agnostic; each host target is a separate binary
-## linked with that target's shared selector, mirroring skj-cc.  PC_LP64 tells
-## the front end the target is LP64, so it emits the 64-bit address opcodes
-## (IR_LEA64, IR_LDL64, IR_LD64, ...) the IR reserves for a 64-bit pointer.
-PC_FE      := pascal/lex.c pascal/parse.c pascal/lower.c pascal/main.c
-PC_SRC_X64 := $(PC_FE) $(IR_SRC) $(BE_X64_SEL)
-PC_SRC_A64 := $(PC_FE) $(IR_SRC) $(BE_A64_SEL)
+## linked with that target's shared selector, mirroring skj-cc.  -DSKJ_LP64
+## tells the front end the target is LP64, so it emits the 64-bit address
+## opcodes (IR_LEA64, IR_LDL64, IR_LD64, ...) the IR reserves for a 64-bit
+## pointer.  Keyed by the tool-name suffix and built by one pattern rule.
+PC_FE         := pascal/lex.c pascal/parse.c pascal/lower.c pascal/main.c
+pc_src_x86-64 := $(PC_FE) $(IR_SRC) $(BE_X64_SEL)
+pc_src_arm64  := $(PC_FE) $(IR_SRC) $(BE_A64_SEL)
+pc_flags_x86-64 := -DX86_BITS=64 -DSKJ_LP64=1 -Ipascal -Iir -Ibackend
+pc_flags_arm64  := -DSKJ_LP64=1 -Ipascal -Iir -Ibackend
 
-build/skj-pc-x86-64: $(PC_SRC_X64) pascal/pascal.h ir/ir.h backend/mc_text.h backend/x86_select.h | build
-	$(CC) $(CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -Ipascal -Iir -Ibackend -o $@ $(PC_SRC_X64)
-
-build/skj-pc-arm64: $(PC_SRC_A64) pascal/pascal.h ir/ir.h backend/arm64_mc.h backend/arm64_select.h backend/arm64_mc_text.h | build
-	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Ipascal -Iir -Ibackend -o $@ $(PC_SRC_A64)
+build/skj-pc-%: $$(pc_src_$$*) pascal/pascal.h ir/ir.h $(wildcard backend/*.h) | build
+	$(CC) $(CFLAGS) $(pc_flags_$*) -o $@ $(pc_src_$*)
 
 ## Host Pascal runtime (native libc): x86-64 built by the host cc, aarch64 by
 ## the cross cc for running under qemu.
@@ -4789,6 +4669,29 @@ test-rv-sandbox-io: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-ru
 DRIVER_LIB_CF   := build/lib/coldfire/crt0.o build/lib/coldfire/half.o build/lib/coldfire/va_cf.o build/lib/coldfire/fini.o build/lib/coldfire/libc.a
 DRIVER_LIB_RV   := build/lib/riscv/crt0.o build/lib/riscv/va_rv.o build/lib/riscv/soft64_div.o build/lib/riscv/fini.o build/lib/riscv/libc.a
 DRIVER_LIB_MIPS := build/lib/mips/crt0.o build/lib/mips/half.o build/lib/mips/va_mips.o build/lib/mips/soft64_div.o build/lib/mips/fini.o build/lib/mips/libc.a
+## The 64-bit hosted targets have no libc archive (dev/test tier); the driver
+## links the crt and runtime helpers only.
+DRIVER_LIB_X64  := build/lib/x86-64/crt0.o build/lib/x86-64/half.o build/lib/x86-64/va.o
+DRIVER_LIB_A64  := build/lib/arm64/crt0.o build/lib/arm64/va.o
+
+## The skjcc driver end to end on the 64-bit targets, with no external
+## toolchain: the driver runs skj-cc-x86-64/skj-cc-arm64, skj-as-x86-64/
+## skj-as-aarch64 and the in-tree ELF64 linkers skj-ld-x86-64/skj-ld-arm64,
+## then the crt + runtime helpers.  The program returns 45; x86-64 runs
+## natively or under qemu-x86_64, arm64 under qemu-aarch64.
+test-cc-driver-x86-64: build/skjcc $(DRIVER_LIB_X64) | build
+	@./build/skjcc -target x86-64 -o build/drv_x86_64 tests/ld/driver_ret.c
+	@$(QEMU_X64) ./build/drv_x86_64; ec=$$?; \
+	 if [ "$$ec" = 45 ]; then \
+	     echo "PASS: skjcc -target x86-64 (cc -> skj-as-x86-64 -> skj-ld-x86-64, exit 45)"; \
+	 else echo "FAIL: skjcc -target x86-64 driver (exit $$ec)"; exit 1; fi
+
+test-cc-driver-arm64: build/skjcc $(DRIVER_LIB_A64) | build
+	@./build/skjcc -target arm64 -o build/drv_arm64 tests/ld/driver_ret.c
+	@$(QEMU_A64) ./build/drv_arm64; ec=$$?; \
+	 if [ "$$ec" = 45 ]; then \
+	     echo "PASS: skjcc -target arm64 (cc -> skj-as-aarch64 -> skj-ld-arm64, exit 45)"; \
+	 else echo "FAIL: skjcc -target arm64 driver (exit $$ec)"; exit 1; fi
 
 ## Guest libc file I/O + argv (continuing the sandbox openat work): a C program
 ## built through the skjcc driver (crt + libc) slurps an input file with the
@@ -4971,19 +4874,26 @@ test-cf-dirs: build/skjcc $(DRIVER_LIB_CF) build/skj-run
 ## confinement runs through cap_walk on Linux as well as the openat2 default.
 FS_CAP_RUN ?= build/skj-run
 
+# Per-arch toolchain + runtime-object environment for the freestanding libc
+# test suites (CCBIN/ASM/LD/START/HALF).  Both the check-libc-<arch> suites and
+# the fs-interpose fs-cap/dev/rom/9p tests use the same per-arch values; each
+# call site adds its own QEMU, OUTDIR, TEST and FS_* toggles.  The ColdFire
+# fragment sets only HALF and leans on run-libc-tests.sh's defaults (skj-cc,
+# skj-as, m68k-linux-gnu-ld, build/start.o), as the recipes did before.
+LIBC_ENV_cf = HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o $(CURDIR)/build/co_switch_cf.o"
+LIBC_ENV_rv = CCBIN="$(CURDIR)/build/skj-cc-rv" ASM="$(RV_AS) -march=rv32imfd_zfh -mabi=ilp32 -o" LD="$(RV_LD) -m elf32lriscv -o" START="$(CURDIR)/build/rv/start.o" HALF="$(CURDIR)/build/rv/va_rv.o $(CURDIR)/build/rv/soft64_div.o $(CURDIR)/build/rv/co_switch.o"
+LIBC_ENV_mips = CCBIN="$(CURDIR)/build/skj-cc-mips" ASM="$(MIPS_AS) -march=mips1 -EL -o" LD="$(MIPS_LD) -o" START="$(CURDIR)/build/mips/start.o" HALF="$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/va_mips.o $(CURDIR)/build/mips/soft64_div.o $(CURDIR)/build/mips/co_switch.o"
+LIBC_ENV_x86_64 = CCBIN="$(CURDIR)/build/skj-cc-x86-64" ASM="$(X64_ASM) $(X64_ASMFLAGS) -o" LD="$(X64_LD) -m elf_x86_64 -o" START="$(CURDIR)/build/x86_64/start_sysv.o" HALF="$(CURDIR)/build/x86_64/half.o $(CURDIR)/build/x86_64/va.o $(CURDIR)/build/x86_64/soft64.o $(CURDIR)/build/x86_64/co_switch.o"
+LIBC_ENV_arm64 = CCBIN="$(CURDIR)/build/skj-cc-arm64" ASM="$(A64_AS) -o" LD="$(A64_LD) -o" START="$(CURDIR)/build/arm64/start_aapcs.o" HALF="$(CURDIR)/build/arm64/va.o $(CURDIR)/build/arm64/soft64.o $(CURDIR)/build/arm64/co_switch.o"
+
 test-rv-fs-cap: build/skj-cc-rv build/rv/start.o build/rv/va_rv.o build/rv/soft64_div.o build/rv/co_switch.o $(FS_CAP_RUN)
 	@rm -rf build/fs-cap-rv
 	@mkdir -p build/fs-cap-rv/data
 	@printf 'capability-granted\n' > build/fs-cap-rv/data/seed.txt
 	@printf 'ESCAPED\n' > build/fs-cap-rv/escape.txt
-	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
-	 ASM="$(RV_AS) -march=rv32imfd_zfh -mabi=ilp32 -o" \
-	 LD="$(RV_LD) -m elf32lriscv -o" \
+	@$(LIBC_ENV_rv) \
 	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --mount data:$(CURDIR)/build/fs-cap-rv/data" \
-	 START="$(CURDIR)/build/rv/start.o" \
-	 HALF="$(CURDIR)/build/rv/va_rv.o $(CURDIR)/build/rv/soft64_div.o $(CURDIR)/build/rv/co_switch.o" \
-	 OUTDIR="$(CURDIR)/build/fs-cap-rv" \
-	 TEST="$(CURDIR)/tests/fs-cap/capguest.c" \
+	 OUTDIR="$(CURDIR)/build/fs-cap-rv" TEST="$(CURDIR)/tests/fs-cap/capguest.c" \
 	 FS_INTERPOSE=1 EXPECT=42 \
 	 sh tests/run-libc-tests.sh
 
@@ -4992,10 +4902,9 @@ test-cf-fs-cap: build/skj-cc build/skj-as build/start.o build/half.o build/va_cf
 	@mkdir -p build/fs-cap-cf/data
 	@printf 'capability-granted\n' > build/fs-cap-cf/data/seed.txt
 	@printf 'ESCAPED\n' > build/fs-cap-cf/escape.txt
-	@OUTDIR="$(CURDIR)/build/fs-cap-cf" \
+	@$(LIBC_ENV_cf) \
 	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --mount data:$(CURDIR)/build/fs-cap-cf/data" \
-	 HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o $(CURDIR)/build/co_switch_cf.o" \
-	 TEST="$(CURDIR)/tests/fs-cap/capguest.c" \
+	 OUTDIR="$(CURDIR)/build/fs-cap-cf" TEST="$(CURDIR)/tests/fs-cap/capguest.c" \
 	 FS_INTERPOSE=1 EXPECT=42 \
 	 sh tests/run-libc-tests.sh
 
@@ -5004,14 +4913,9 @@ test-mips-fs-cap: build/skj-cc-mips build/mips/start.o build/mips/half.o build/m
 	@mkdir -p build/fs-cap-mips/data
 	@printf 'capability-granted\n' > build/fs-cap-mips/data/seed.txt
 	@printf 'ESCAPED\n' > build/fs-cap-mips/escape.txt
-	@CCBIN="$(CURDIR)/build/skj-cc-mips" \
-	 ASM="$(MIPS_AS) -march=mips1 -EL -o" \
-	 LD="$(MIPS_LD) -o" \
+	@$(LIBC_ENV_mips) \
 	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --mount data:$(CURDIR)/build/fs-cap-mips/data" \
-	 START="$(CURDIR)/build/mips/start.o" \
-	 HALF="$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/va_mips.o $(CURDIR)/build/mips/soft64_div.o $(CURDIR)/build/mips/co_switch.o" \
-	 OUTDIR="$(CURDIR)/build/fs-cap-mips" \
-	 TEST="$(CURDIR)/tests/fs-cap/capguest.c" \
+	 OUTDIR="$(CURDIR)/build/fs-cap-mips" TEST="$(CURDIR)/tests/fs-cap/capguest.c" \
 	 FS_INTERPOSE=1 EXPECT=42 \
 	 sh tests/run-libc-tests.sh
 
@@ -5022,24 +4926,18 @@ test-mips-fs-cap: build/skj-cc-mips build/mips/start.o build/mips/half.o build/m
 test-rv-fs-dev: build/skj-cc-rv build/rv/start.o build/rv/va_rv.o build/rv/soft64_div.o build/rv/co_switch.o $(FS_CAP_RUN)
 	@rm -rf build/fs-dev-rv
 	@mkdir -p build/fs-dev-rv
-	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
-	 ASM="$(RV_AS) -march=rv32imfd_zfh -mabi=ilp32 -o" \
-	 LD="$(RV_LD) -m elf32lriscv -o" \
+	@$(LIBC_ENV_rv) \
 	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --dev dev" \
-	 START="$(CURDIR)/build/rv/start.o" \
-	 HALF="$(CURDIR)/build/rv/va_rv.o $(CURDIR)/build/rv/soft64_div.o $(CURDIR)/build/rv/co_switch.o" \
-	 OUTDIR="$(CURDIR)/build/fs-dev-rv" \
-	 TEST="$(CURDIR)/tests/fs-dev/devguest.c" \
+	 OUTDIR="$(CURDIR)/build/fs-dev-rv" TEST="$(CURDIR)/tests/fs-dev/devguest.c" \
 	 FS_INTERPOSE=1 FS_DEV=1 EXPECT=42 \
 	 sh tests/run-libc-tests.sh
 
 test-cf-fs-dev: build/skj-cc build/skj-as build/start.o build/half.o build/va_cf.o build/co_switch_cf.o $(FS_CAP_RUN)
 	@rm -rf build/fs-dev-cf
 	@mkdir -p build/fs-dev-cf
-	@OUTDIR="$(CURDIR)/build/fs-dev-cf" \
+	@$(LIBC_ENV_cf) \
 	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --dev dev" \
-	 HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o $(CURDIR)/build/co_switch_cf.o" \
-	 TEST="$(CURDIR)/tests/fs-dev/devguest.c" \
+	 OUTDIR="$(CURDIR)/build/fs-dev-cf" TEST="$(CURDIR)/tests/fs-dev/devguest.c" \
 	 FS_INTERPOSE=1 FS_DEV=1 EXPECT=42 \
 	 sh tests/run-libc-tests.sh
 
@@ -5052,14 +4950,9 @@ test-rv-fs-rom: build/skj-cc-rv build/rv/start.o build/rv/va_rv.o build/rv/soft6
 	@printf 'hello romfs' > build/fs-rom-rv/seed/greet
 	@printf 'nested' > build/fs-rom-rv/seed/sub/inner
 	@./build/skj-mkromfs build/fs-rom-rv/seed build/fs-rom-rv/rom.img
-	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
-	 ASM="$(RV_AS) -march=rv32imfd_zfh -mabi=ilp32 -o" \
-	 LD="$(RV_LD) -m elf32lriscv -o" \
+	@$(LIBC_ENV_rv) \
 	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --rom rom:$(CURDIR)/build/fs-rom-rv/rom.img" \
-	 START="$(CURDIR)/build/rv/start.o" \
-	 HALF="$(CURDIR)/build/rv/va_rv.o $(CURDIR)/build/rv/soft64_div.o $(CURDIR)/build/rv/co_switch.o" \
-	 OUTDIR="$(CURDIR)/build/fs-rom-rv" \
-	 TEST="$(CURDIR)/tests/fs-rom/romguest.c" \
+	 OUTDIR="$(CURDIR)/build/fs-rom-rv" TEST="$(CURDIR)/tests/fs-rom/romguest.c" \
 	 FS_INTERPOSE=1 FS_ROM=1 EXPECT=42 \
 	 sh tests/run-libc-tests.sh
 
@@ -5069,10 +4962,9 @@ test-cf-fs-rom: build/skj-cc build/skj-as build/start.o build/half.o build/va_cf
 	@printf 'hello romfs' > build/fs-rom-cf/seed/greet
 	@printf 'nested' > build/fs-rom-cf/seed/sub/inner
 	@./build/skj-mkromfs build/fs-rom-cf/seed build/fs-rom-cf/rom.img
-	@OUTDIR="$(CURDIR)/build/fs-rom-cf" \
+	@$(LIBC_ENV_cf) \
 	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --rom rom:$(CURDIR)/build/fs-rom-cf/rom.img" \
-	 HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o $(CURDIR)/build/co_switch_cf.o" \
-	 TEST="$(CURDIR)/tests/fs-rom/romguest.c" \
+	 OUTDIR="$(CURDIR)/build/fs-rom-cf" TEST="$(CURDIR)/tests/fs-rom/romguest.c" \
 	 FS_INTERPOSE=1 FS_ROM=1 EXPECT=42 \
 	 sh tests/run-libc-tests.sh
 
@@ -5084,14 +4976,9 @@ test-rv-fs-9p: build/skj-cc-rv build/rv/start.o build/rv/va_rv.o build/rv/soft64
 	@rm -rf build/fs-9p-rv
 	@mkdir -p build/fs-9p-rv/data
 	@printf '9p-seed\n' > build/fs-9p-rv/data/seed.txt
-	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
-	 ASM="$(RV_AS) -march=rv32imfd_zfh -mabi=ilp32 -o" \
-	 LD="$(RV_LD) -m elf32lriscv -o" \
+	@$(LIBC_ENV_rv) \
 	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --9p data:$(CURDIR)/build/fs-9p-rv/data" \
-	 START="$(CURDIR)/build/rv/start.o" \
-	 HALF="$(CURDIR)/build/rv/va_rv.o $(CURDIR)/build/rv/soft64_div.o $(CURDIR)/build/rv/co_switch.o" \
-	 OUTDIR="$(CURDIR)/build/fs-9p-rv" \
-	 TEST="$(CURDIR)/tests/fs-9p/p9guest.c" \
+	 OUTDIR="$(CURDIR)/build/fs-9p-rv" TEST="$(CURDIR)/tests/fs-9p/p9guest.c" \
 	 FS_INTERPOSE=1 FS_9P=1 EXPECT=42 \
 	 sh tests/run-libc-tests.sh
 
@@ -5099,10 +4986,9 @@ test-cf-fs-9p: build/skj-cc build/skj-as build/start.o build/half.o build/va_cf.
 	@rm -rf build/fs-9p-cf
 	@mkdir -p build/fs-9p-cf/data
 	@printf '9p-seed\n' > build/fs-9p-cf/data/seed.txt
-	@OUTDIR="$(CURDIR)/build/fs-9p-cf" \
+	@$(LIBC_ENV_cf) \
 	 QEMU="$(CURDIR)/$(FS_CAP_RUN) --9p data:$(CURDIR)/build/fs-9p-cf/data" \
-	 HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o $(CURDIR)/build/co_switch_cf.o" \
-	 TEST="$(CURDIR)/tests/fs-9p/p9guest.c" \
+	 OUTDIR="$(CURDIR)/build/fs-9p-cf" TEST="$(CURDIR)/tests/fs-9p/p9guest.c" \
 	 FS_INTERPOSE=1 FS_9P=1 EXPECT=42 \
 	 sh tests/run-libc-tests.sh
 
@@ -5776,6 +5662,19 @@ RV_EXCLUDE        := $(VARARGS_EXCLUDE)
 # (RISC-V) or where a double vararg is not supported (MIPS soft-float).
 VA_STDARG_EXCLUDE := cc_t081_varargs_stdarg
 
+# C-compiler test suite runner.  Every cross-target check-cc-* suite invokes
+# tests/run-cc-tests.sh with the same eight environment variables; only the
+# values differ.  $(strip) neutralises the whitespace $(call) leaves around
+# positional arguments, and also folds the double space an empty *FLAGS var
+# leaves in an assembler command.  Argument order:
+#   1 CCBIN  2 ASM  3 LD  4 QEMU  5 START  6 HALF  7 OUTDIR  8 EXCLUDE  9 EXTRAENV
+define run_cc_suite
+	@$(strip $(9)) CCBIN="$(strip $(1))" ASM="$(strip $(2))" LD="$(strip $(3))" \
+	 QEMU="$(strip $(4))" START="$(strip $(5))" HALF="$(strip $(6))" \
+	 OUTDIR="$(strip $(7))" EXCLUDE="$(strip $(8))" \
+	 sh tests/run-cc-tests.sh
+endef
+
 check-cc: build/skj-cc build/skj-as build/start.o build/half.o build/va_cf.o
 	@OUTDIR="$(CURDIR)/build/cc-cf" EXCLUDE="$(CF_EXCLUDE)" \
 	 HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o" \
@@ -5784,49 +5683,24 @@ check-cc: build/skj-cc build/skj-as build/start.o build/half.o build/va_cf.o
 ## C compiler tests on x86-64 (skj-cc-x86-64, qemu-x86_64).  This is where
 ## native single-precision float rounding is actually exercised.
 check-cc-x86-64: build/skj-cc-x86-64 build/x86_64/start_sysv.o build/x86_64/half.o build/x86_64/va.o
-	@CCBIN="$(CURDIR)/build/skj-cc-x86-64" \
-	 ASM="$(X64_ASM) $(X64_ASMFLAGS) -o" \
-	 LD="$(X64_LD) -m elf_x86_64 -o" \
-	 QEMU="$(QEMU_X64)" \
-	 START="$(CURDIR)/build/x86_64/start_sysv.o" \
-	 HALF="$(CURDIR)/build/x86_64/half.o $(CURDIR)/build/x86_64/va.o" \
-	 OUTDIR="$(CURDIR)/build/cc-x86_64" \
-	 sh tests/run-cc-tests.sh
+	$(call run_cc_suite,$(CURDIR)/build/skj-cc-x86-64,$(X64_ASM) $(X64_ASMFLAGS) -o,$(X64_LD) -m elf_x86_64 -o,$(QEMU_X64),$(CURDIR)/build/x86_64/start_sysv.o,$(CURDIR)/build/x86_64/half.o $(CURDIR)/build/x86_64/va.o,$(CURDIR)/build/cc-x86_64,)
 
 ## C compiler tests on arm64 (skj-cc-arm64, qemu-aarch64).  _Float16 is a
 ## native fcvt here, so no half.o is linked (HALF empty).
 check-cc-arm64: build/skj-cc-arm64 build/arm64/start_aapcs.o build/arm64/va.o
-	@CCBIN="$(CURDIR)/build/skj-cc-arm64" \
-	 ASM="$(A64_AS) -o" \
-	 LD="$(A64_LD) -o" \
-	 QEMU="$(QEMU_A64)" \
-	 START="$(CURDIR)/build/arm64/start_aapcs.o" \
-	 HALF="$(CURDIR)/build/arm64/va.o" \
-	 OUTDIR="$(CURDIR)/build/cc-arm64" \
-	 sh tests/run-cc-tests.sh
+	$(call run_cc_suite,$(CURDIR)/build/skj-cc-arm64,$(A64_AS) -o,$(A64_LD) -o,$(QEMU_A64),$(CURDIR)/build/arm64/start_aapcs.o,$(CURDIR)/build/arm64/va.o,$(CURDIR)/build/cc-arm64,)
 
 ## C compiler tests on RISC-V (skj-cc-rv, qemu-riscv32).  The RV backend has
 ## hardware float (RV32FD) plus Zfh for _Float16, so the full cc suite runs;
 ## the test objects assemble as rv32imfd_zfh (start.o stays rv32im, a subset
 ## the linker merges).
 check-cc-rv: build/skj-cc-rv build/rv/start.o build/rv/va_rv.o
-	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
-	 ASM="$(RV_AS) -march=rv32imfd_zfh -mabi=ilp32 -o" \
-	 LD="$(RV_LD) -m elf32lriscv -o" \
-	 QEMU="$(QEMU_RV)" \
-	 START="$(CURDIR)/build/rv/start.o" \
-	 HALF="$(CURDIR)/build/rv/va_rv.o" \
-	 OUTDIR="$(CURDIR)/build/cc-rv" \
-	 EXCLUDE="$(RV_EXCLUDE)" \
-	 sh tests/run-cc-tests.sh
+	$(call run_cc_suite,$(CURDIR)/build/skj-cc-rv,$(RV_AS) -march=rv32imfd_zfh -mabi=ilp32 -o,$(RV_LD) -m elf32lriscv -o,$(QEMU_RV),$(CURDIR)/build/rv/start.o,$(CURDIR)/build/rv/va_rv.o,$(CURDIR)/build/cc-rv,$(RV_EXCLUDE))
 
 ## The same C suite, but assembled and linked entirely by the in-tree RV32
 ## toolchain (skj-as-rv + skj-ld-rv) over a skj-assembled crt, run under
 ## qemu-riscv32.  This is the end-to-end check that skj-as-rv/skj-ld-rv can
 ## build a full program with its runtime, not just match GNU as byte-for-byte.
-build/rv-skj:
-	mkdir -p build/rv-skj
-
 build/rv-skj/start.o: runtime/start_rv.S build/skj-as-rv | build/rv-skj
 	./build/skj-as-rv -o $@ $<
 
@@ -5840,15 +5714,7 @@ build/rv-skj/%.o: runtime/%.c build/skj-as-rv | build/rv-skj
 	$(RV_CC) $(RV_SKJ_RT_CFLAGS) -c -o $@ $<
 
 check-cc-rv-skj: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv-skj/start.o build/rv-skj/va_rv.o
-	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
-	 ASM="$(CURDIR)/build/skj-as-rv -o" \
-	 LD="$(CURDIR)/build/skj-ld-rv -o" \
-	 QEMU="$(QEMU_RV)" \
-	 START="$(CURDIR)/build/rv-skj/start.o" \
-	 HALF="$(CURDIR)/build/rv-skj/va_rv.o" \
-	 OUTDIR="$(CURDIR)/build/cc-rv-skj" \
-	 EXCLUDE="$(RV_EXCLUDE)" \
-	 sh tests/run-cc-tests.sh
+	$(call run_cc_suite,$(CURDIR)/build/skj-cc-rv,$(CURDIR)/build/skj-as-rv -o,$(CURDIR)/build/skj-ld-rv -o,$(QEMU_RV),$(CURDIR)/build/rv-skj/start.o,$(CURDIR)/build/rv-skj/va_rv.o,$(CURDIR)/build/cc-rv-skj,$(RV_EXCLUDE))
 
 ## The RV32 process sandbox: skj-run runs a root guest that spawns a child
 ## from an embedded image, under an aggregate memory budget the scheduler
@@ -5861,9 +5727,6 @@ check-cc-rv-skj: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv-skj/st
 ## rv_run reason contract (the QUANTUM scheduler resuming a child over many
 ## slices).  The unit tests test-rv-run and test-guest-mmap pin the same
 ## primitives in isolation.
-build/sandbox:
-	mkdir -p build/sandbox
-
 build/sandbox/sys.o: tests/sandbox/sys.S build/skj-as-rv | build/sandbox
 	./build/skj-as-rv -o $@ $<
 
@@ -5893,9 +5756,6 @@ test-rv-sandbox: build/sandbox/parent.elf build/skj-run
 ## an argv vector through the size-prefixed spawn request, and the child echoes
 ## what it received.  This pins argv passing across the spawn boundary and the
 ## crt delivering argc/argv to main, the groundwork for the jsh userland.
-build/spawn-argv:
-	mkdir -p build/spawn-argv
-
 build/spawn-argv/child.o: tests/spawn-argv/child.c build/skj-cc-rv build/skj-as-rv | build/spawn-argv
 	./build/skj-cc-rv -o build/spawn-argv/child.s $<
 	./build/skj-as-rv -o $@ build/spawn-argv/child.s
@@ -5922,9 +5782,6 @@ test-rv-spawn-argv: build/spawn-argv/parent.elf build/skj-run
 ## reads back its status.  The parent reaches wait() before the child runs, so
 ## this pins the park/wake path and the zombie-then-reap flow as well as the
 ## status round-trip.
-build/spawn-wait:
-	mkdir -p build/spawn-wait
-
 build/spawn-wait/child.o: tests/spawn-wait/child.c build/skj-cc-rv build/skj-as-rv | build/spawn-wait
 	./build/skj-cc-rv -o build/spawn-wait/child.s $<
 	./build/skj-as-rv -o $@ build/spawn-wait/child.s
@@ -5950,9 +5807,6 @@ test-rv-spawn-wait: build/spawn-wait/parent.elf build/skj-run
 ## SKJ_SYS_KILL: a C root spawns a child, kills it with a chosen status before
 ## it runs, then waits and reads that status back.  Pins kill setting a wait
 ## status and the kill/wait/reap flow; the child must never run.
-build/spawn-kill:
-	mkdir -p build/spawn-kill
-
 build/spawn-kill/child.o: tests/spawn-kill/child.c build/skj-cc-rv build/skj-as-rv | build/spawn-kill
 	./build/skj-cc-rv -o build/spawn-kill/child.s $<
 	./build/skj-as-rv -o $@ build/spawn-kill/child.s
@@ -6165,6 +6019,47 @@ test-rv-vdso: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv/start.o \
 	     echo "FAIL: test-rv-vdso got '$$out'"; exit 1; \
 	 fi
 
+## The in-memory root seam: skj-run --mem-root reads the ELF into a buffer and runs
+## it from there (sched_root.image), the way an embedding host whose guest images
+## are byte buffers does, rather than opening the path.  Prove it behaves exactly
+## like the file path: same stdout, same exit, on one guest run both ways.
+test-rv-mem-root: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv/start.o \
+                  build/rv/va_rv.o build/rv/soft64_div.o build/lib/riscv/libc.a \
+                  build/skj-run tests/mem-root/hello.c | build/rv
+	@./build/skj-cc-rv -Ilibc -o build/rv/memroot.s tests/mem-root/hello.c
+	@./build/skj-as-rv -o build/rv/memroot.o build/rv/memroot.s
+	@./build/skj-ld-rv -o build/rv/memroot.elf build/rv/start.o build/rv/memroot.o \
+	    build/lib/riscv/libc.a build/rv/va_rv.o build/rv/soft64_div.o
+	@pf=$$(./build/skj-run build/rv/memroot.elf 2>&1); pe=$$?; \
+	 mf=$$(./build/skj-run --mem-root build/rv/memroot.elf 2>&1); me=$$?; \
+	 if [ "$$mf" = "mem-root ok" ] && [ "$$mf" = "$$pf" ] && [ "$$me" = "0" ] && [ "$$me" = "$$pe" ]; then \
+	     echo "PASS: in-memory root (--mem) matches the file path"; \
+	 else \
+	     echo "FAIL: test-rv-mem-root path='$$pf'($$pe) mem='$$mf'($$me)"; exit 1; \
+	 fi
+
+## The embedding seam a complex host (boris, smolmoo) uses directly: get the
+## arch's ops from the public getter (skj_ops_rv32), init a scheduler, add a root
+## from an in-memory image, run it, read the exit through S.procs[].  No
+## run_sandbox, no CLI.  Links the emu objects (minus the CLI main) plus the
+## driver; reuses build/rv/memroot.elf from test-rv-mem-root as the guest.
+test-sched-embed: build/skj-run tests/sched_embed.c tests/mem-root/hello.c $(EMU_HDR) \
+                  build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv/start.o \
+                  build/rv/va_rv.o build/rv/soft64_div.o build/lib/riscv/libc.a | build/rv
+	@./build/skj-cc-rv -Ilibc -o build/rv/memroot.s tests/mem-root/hello.c
+	@./build/skj-as-rv -o build/rv/memroot.o build/rv/memroot.s
+	@./build/skj-ld-rv -o build/rv/memroot.elf build/rv/start.o build/rv/memroot.o \
+	    build/lib/riscv/libc.a build/rv/va_rv.o build/rv/soft64_div.o
+	@$(CC) $(CFLAGS) $(EMU_FLAGS) -Iemu -o build/rv/sched_embed \
+	    tests/sched_embed.c $(filter-out emu/main.c,$(EMU_SRC)) \
+	    -lm $(EMU_LDLIBS) -lpthread
+	@out=$$(./build/rv/sched_embed build/rv/memroot.elf 2>&1); \
+	 if echo "$$out" | grep -qx "mem-root ok" && echo "$$out" | grep -qx "embed ok"; then \
+	     echo "PASS: embedding API (ops getter + in-memory root) drives a guest"; \
+	 else \
+	     echo "FAIL: test-sched-embed got '$$out'"; exit 1; \
+	 fi
+
 ## The same emulated-tier seam on the other two ILP32 cores.  ColdFire is
 ## big-endian, MIPS little-endian, so these also prove the loader and the
 ## system-page writer honour the guest byte order.  The driver (skjcc) builds
@@ -6277,9 +6172,6 @@ test-hv-x86-64-env: build/skj-cc-x86-64 build/skj-as-x86-64 build/skj-run \
 	     echo "PASS: env passing (hv x86-64): LP64 guest read its injected environment"; \
 	 else echo "FAIL: test-hv-x86-64-env got '$$out'"; exit 1; fi
 
-build/env-test:
-	@mkdir -p $@
-
 ## The cross-language sandbox demo: a C root (skj-cc-rv) spawns two children,
 ## one built from C and one from Kobold-Pascal (skj-kpc -> skj-kp-rv ->
 ## skj-as-rv -> skj-ld-rv over the freestanding crt + libkpaot-rv-free.a).  All
@@ -6288,9 +6180,6 @@ build/env-test:
 ## language-specific in the runtime.  This is the companion of test-rv-sandbox,
 ## making the "one IR, many front ends, one runtime" claim concrete across two
 ## source languages at once.  Both children run the same sum 1..99 = 4950.
-build/xlang-sandbox:
-	mkdir -p build/xlang-sandbox
-
 build/xlang-sandbox/sys.o: tests/xlang-sandbox/sys.S build/skj-as-rv | build/xlang-sandbox
 	./build/skj-as-rv -o $@ $<
 
@@ -6334,9 +6223,6 @@ test-rv-xlang-sandbox: build/xlang-sandbox/parent.elf build/skj-run
 ## toolchain and run under skj-run's MIPS core.  Proves the process sandbox
 ## (spawn, the round-robin scheduler, the guarded map/unmap, and the shared
 ## memory budget) is at parity with the RISC-V core.  The runner is shared.
-build/sandbox-mips:
-	mkdir -p build/sandbox-mips
-
 build/sandbox-mips/sys.o: tests/sandbox-mips/sys.S build/skj-as-mips | build/sandbox-mips
 	./build/skj-as-mips -o $@ $<
 
@@ -6367,9 +6253,6 @@ test-mips-sandbox: build/sandbox-mips/parent.elf build/skj-run
 ## services its TRAP #0 syscalls inside its run wrapper, so it drives the one
 ## shared scheduler the same as rv and MIPS; this exercises its half of the
 ## process sandbox (spawn, map/unmap, the shared budget).
-build/sandbox-cf:
-	mkdir -p build/sandbox-cf
-
 build/sandbox-cf/sys.o: tests/sandbox-cf/sys.S build/skj-as | build/sandbox-cf
 	./build/skj-as -o $@ $<
 
@@ -6415,15 +6298,7 @@ build/rv-skj/start_psabi_cc.o: runtime/start_rv_psabi_cc.S build/skj-as-rv | bui
 	./build/skj-as-rv -o $@ $<
 
 check-cc-rv-psabi: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/rv-skj/start_psabi_cc.o build/rv-skj/va_rv.o
-	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
-	 ASM="$(CURDIR)/build/skj-as-rv -o" \
-	 LD="$(CURDIR)/build/skj-ld-rv -o" \
-	 QEMU="$(QEMU_RV)" \
-	 START="$(CURDIR)/build/rv-skj/start_psabi_cc.o" \
-	 HALF="$(CURDIR)/build/rv-skj/va_rv.o" \
-	 OUTDIR="$(CURDIR)/build/cc-rv-psabi" \
-	 EXCLUDE="$(RV_EXCLUDE)" \
-	 sh tests/run-cc-tests.sh
+	$(call run_cc_suite,$(CURDIR)/build/skj-cc-rv,$(CURDIR)/build/skj-as-rv -o,$(CURDIR)/build/skj-ld-rv -o,$(QEMU_RV),$(CURDIR)/build/rv-skj/start_psabi_cc.o,$(CURDIR)/build/rv-skj/va_rv.o,$(CURDIR)/build/cc-rv-psabi,$(RV_EXCLUDE))
 
 ## psABI interop proof: a skj-cc-rv main calls a gcc-built RV32 function
 ## (i64 and int arguments, i64 result) and the whole program is linked by
@@ -6472,6 +6347,16 @@ build/lib/mips/crt0.o: build/mips/start.o
 build/lib/mips/half.o: build/mips/half.o
 	@mkdir -p $(@D) && cp $< $@
 build/lib/mips/va_mips.o: build/mips/va_mips.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/x86-64/crt0.o: build/x86_64/start_sysv.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/x86-64/half.o: build/x86_64/half.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/x86-64/va.o: build/x86_64/va.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/arm64/crt0.o: build/arm64/start_aapcs.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/arm64/va.o: build/arm64/va.o
 	@mkdir -p $(@D) && cp $< $@
 
 ## soft64 divide helpers (__udivdi3/__umoddi3/...) the rv/mips crts do not carry
@@ -6651,40 +6536,21 @@ test-cc-driver: build/skjcc \
 ## runs under qemu (exit 42).  Same per-target env as the check-cc-* suites.
 ## See tests/run-libc-tests.sh.
 check-libc-cf: build/skj-cc build/skj-as build/start.o build/half.o build/va_cf.o build/co_switch_cf.o
-	@OUTDIR="$(CURDIR)/build/libc-cf" \
-	 HALF="$(CURDIR)/build/half.o $(CURDIR)/build/va_cf.o $(CURDIR)/build/co_switch_cf.o" \
+	@$(LIBC_ENV_cf) OUTDIR="$(CURDIR)/build/libc-cf" \
 	 FS_INTERPOSE=1 FS_AMBIENT_DEFAULT=1 \
 	 sh tests/run-libc-tests.sh
 
 check-libc-rv: build/skj-cc-rv build/rv/start.o build/rv/va_rv.o build/rv/soft64_div.o build/rv/co_switch.o
-	@CCBIN="$(CURDIR)/build/skj-cc-rv" \
-	 ASM="$(RV_AS) -march=rv32imfd_zfh -mabi=ilp32 -o" \
-	 LD="$(RV_LD) -m elf32lriscv -o" \
-	 QEMU="$(QEMU_RV)" \
-	 START="$(CURDIR)/build/rv/start.o" \
-	 HALF="$(CURDIR)/build/rv/va_rv.o $(CURDIR)/build/rv/soft64_div.o $(CURDIR)/build/rv/co_switch.o" \
-	 OUTDIR="$(CURDIR)/build/libc-rv" \
+	@$(LIBC_ENV_rv) QEMU="$(QEMU_RV)" OUTDIR="$(CURDIR)/build/libc-rv" \
 	 FS_INTERPOSE=1 FS_AMBIENT_DEFAULT=1 \
 	 sh tests/run-libc-tests.sh
 
 check-libc-mips: build/skj-cc-mips build/mips/start.o build/mips/half.o build/mips/va_mips.o build/mips/soft64_div.o build/mips/co_switch.o
-	@CCBIN="$(CURDIR)/build/skj-cc-mips" \
-	 ASM="$(MIPS_AS) -march=mips1 -EL -o" \
-	 LD="$(MIPS_LD) -o" \
-	 QEMU="$(QEMU_MIPS)" \
-	 START="$(CURDIR)/build/mips/start.o" \
-	 HALF="$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/va_mips.o $(CURDIR)/build/mips/soft64_div.o $(CURDIR)/build/mips/co_switch.o" \
-	 OUTDIR="$(CURDIR)/build/libc-mips" \
+	@$(LIBC_ENV_mips) QEMU="$(QEMU_MIPS)" OUTDIR="$(CURDIR)/build/libc-mips" \
 	 sh tests/run-libc-tests.sh
 
 check-libc-x86-64: build/skj-cc-x86-64 build/x86_64/start_sysv.o build/x86_64/half.o build/x86_64/va.o build/x86_64/soft64.o build/x86_64/co_switch.o
-	@CCBIN="$(CURDIR)/build/skj-cc-x86-64" \
-	 ASM="$(X64_ASM) $(X64_ASMFLAGS) -o" \
-	 LD="$(X64_LD) -m elf_x86_64 -o" \
-	 QEMU="$(QEMU_X64)" \
-	 START="$(CURDIR)/build/x86_64/start_sysv.o" \
-	 HALF="$(CURDIR)/build/x86_64/half.o $(CURDIR)/build/x86_64/va.o $(CURDIR)/build/x86_64/soft64.o $(CURDIR)/build/x86_64/co_switch.o" \
-	 OUTDIR="$(CURDIR)/build/libc-x86_64" \
+	@$(LIBC_ENV_x86_64) QEMU="$(QEMU_X64)" OUTDIR="$(CURDIR)/build/libc-x86_64" \
 	 sh tests/run-libc-tests.sh
 
 ## The freestanding C libc running under the VMM: the same libc sources, built
@@ -6729,13 +6595,7 @@ check-libc-hv-arm64: build/skj-cc-arm64 build/skj-as-aarch64 \
 	 sh tests/run-libc-tests.sh
 
 check-libc-arm64: build/skj-cc-arm64 build/arm64/start_aapcs.o build/arm64/va.o build/arm64/soft64.o build/arm64/co_switch.o
-	@CCBIN="$(CURDIR)/build/skj-cc-arm64" \
-	 ASM="$(A64_AS) -o" \
-	 LD="$(A64_LD) -o" \
-	 QEMU="$(firstword $(QEMU_A64))" \
-	 START="$(CURDIR)/build/arm64/start_aapcs.o" \
-	 HALF="$(CURDIR)/build/arm64/va.o $(CURDIR)/build/arm64/soft64.o $(CURDIR)/build/arm64/co_switch.o" \
-	 OUTDIR="$(CURDIR)/build/libc-arm64" \
+	@$(LIBC_ENV_arm64) QEMU="$(firstword $(QEMU_A64))" OUTDIR="$(CURDIR)/build/libc-arm64" \
 	 sh tests/run-libc-tests.sh
 
 ## check-libc aggregates only the targets that pass today: RISC-V, x86-64, and
@@ -6783,15 +6643,7 @@ test-cc-rv-psabi-archive: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/
 ## like RISC-V, so the psABI-only tests are excluded; half.o supplies
 ## _Float16 (MIPS I has no hardware half).
 check-cc-mips: build/skj-cc-mips build/mips/start.o build/mips/half.o build/mips/va_mips.o
-	@CCBIN="$(CURDIR)/build/skj-cc-mips" \
-	 ASM="$(MIPS_AS) -march=mips1 -EL -o" \
-	 LD="$(MIPS_LD) -o" \
-	 QEMU="$(QEMU_MIPS)" \
-	 START="$(CURDIR)/build/mips/start.o" \
-	 HALF="$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/va_mips.o" \
-	 OUTDIR="$(CURDIR)/build/cc-mips" \
-	 EXCLUDE="$(MIPS_EXCLUDE)" \
-	 sh tests/run-cc-tests.sh
+	$(call run_cc_suite,$(CURDIR)/build/skj-cc-mips,$(MIPS_AS) -march=mips1 -EL -o,$(MIPS_LD) -o,$(QEMU_MIPS),$(CURDIR)/build/mips/start.o,$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/va_mips.o,$(CURDIR)/build/cc-mips,$(MIPS_EXCLUDE))
 
 ## skj-as-mips validation: the encoding golden-master against GNU as (the
 ## .set noreorder enc_*.s fixtures, byte-for-byte), runnable programs under
@@ -6809,15 +6661,7 @@ check-mipsas: build/skj-as-mips build/skj-ld-mips
 ## binutils-free MIPS toolchain, including the delay-slot scheduler, on real
 ## backend output.  The counterpart of check-cc-rv-skj.
 check-cc-mips-skj: build/skj-cc-mips build/skj-as-mips build/skj-ld-mips build/mips/start.o build/mips/half.o build/mips/va_mips.o
-	@CCBIN="$(CURDIR)/build/skj-cc-mips" \
-	 ASM="$(CURDIR)/build/skj-as-mips -o" \
-	 LD="$(CURDIR)/build/skj-ld-mips -o" \
-	 QEMU="$(QEMU_MIPS)" \
-	 START="$(CURDIR)/build/mips/start.o" \
-	 HALF="$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/va_mips.o" \
-	 OUTDIR="$(CURDIR)/build/cc-mips-skj" \
-	 EXCLUDE="$(MIPS_EXCLUDE)" \
-	 sh tests/run-cc-tests.sh
+	$(call run_cc_suite,$(CURDIR)/build/skj-cc-mips,$(CURDIR)/build/skj-as-mips -o,$(CURDIR)/build/skj-ld-mips -o,$(QEMU_MIPS),$(CURDIR)/build/mips/start.o,$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/va_mips.o,$(CURDIR)/build/cc-mips-skj,$(MIPS_EXCLUDE))
 
 ## Archive (.a) support end to end: skj-ar builds a GNU archive with a symbol
 ## index, and skj-ld-mips pulls the members that resolve undefined symbols
@@ -7009,53 +6853,19 @@ build/mips-nr/start.o: runtime/start_mips.S | build/mips-nr
 build/mips-nr/%: build/mips-nr/%.o build/mips-nr/start.o
 	$(MIPS_LD) -o $@ build/mips-nr/start.o $<
 
-build/mips-nr:
-	mkdir -p build/mips-nr
-
-build/mips-asm:
-	mkdir -p build/mips-asm
-
-build/cf-asm:
-	mkdir -p build/cf-asm
-
-build/rv-asm:
-	mkdir -p build/rv-asm
-
-build/x86-asm:
-	mkdir -p build/x86-asm
-
-build/arm64-asm:
-	mkdir -p build/arm64-asm
-
 check-mips-noreorder: build/skj-tinc-mips build/skj-sc-mips $(MIPS_TESTS:tests/%.tc=build/mips-nr/%) $(MIPS_SCM_TESTS:tests/%.scm=build/mips-nr/%)
 	@sh tests/run-tests.sh "$(QEMU_MIPS)" build/mips-nr
 
 ## The C compiler suite under the noreorder scheduler (int, float, i64,
 ## _Float16 coverage).  Same tools, SKJ_MIPS_NOREORDER exported.
 check-cc-mips-noreorder: build/skj-cc-mips build/mips/start.o build/mips/half.o build/mips/va_mips.o
-	@SKJ_MIPS_NOREORDER=1 CCBIN="$(CURDIR)/build/skj-cc-mips" \
-	 ASM="$(MIPS_AS) -march=mips1 -EL -o" \
-	 LD="$(MIPS_LD) -o" \
-	 QEMU="$(QEMU_MIPS)" \
-	 START="$(CURDIR)/build/mips/start.o" \
-	 HALF="$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/va_mips.o" \
-	 OUTDIR="$(CURDIR)/build/cc-mips-nr" \
-	 EXCLUDE="$(MIPS_EXCLUDE)" \
-	 sh tests/run-cc-tests.sh
+	$(call run_cc_suite,$(CURDIR)/build/skj-cc-mips,$(MIPS_AS) -march=mips1 -EL -o,$(MIPS_LD) -o,$(QEMU_MIPS),$(CURDIR)/build/mips/start.o,$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/va_mips.o,$(CURDIR)/build/cc-mips-nr,$(MIPS_EXCLUDE),SKJ_MIPS_NOREORDER=1)
 
 ## The C compiler suite compiled soft-float: skj-cc-mips-sf emits no cop-1
 ## instruction and the programs link softfloat.o beside half.o.  The float
 ## tests (t054/t057/t060/t070) exercise the soft-float path end to end.
 check-cc-mips-sf: build/skj-cc-mips-sf build/mips/start.o build/mips/half.o build/mips/softfloat.o
-	@CCBIN="$(CURDIR)/build/skj-cc-mips-sf" \
-	 ASM="$(MIPS_AS) -march=mips1 -EL -o" \
-	 LD="$(MIPS_LD) -o" \
-	 QEMU="$(QEMU_MIPS)" \
-	 START="$(CURDIR)/build/mips/start.o" \
-	 HALF="$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/softfloat.o" \
-	 OUTDIR="$(CURDIR)/build/cc-mips-sf" \
-	 EXCLUDE="$(MIPS_EXCLUDE) $(VA_STDARG_EXCLUDE)" \
-	 sh tests/run-cc-tests.sh
+	$(call run_cc_suite,$(CURDIR)/build/skj-cc-mips-sf,$(MIPS_AS) -march=mips1 -EL -o,$(MIPS_LD) -o,$(QEMU_MIPS),$(CURDIR)/build/mips/start.o,$(CURDIR)/build/mips/half.o $(CURDIR)/build/mips/softfloat.o,$(CURDIR)/build/cc-mips-sf,$(MIPS_EXCLUDE) $(VA_STDARG_EXCLUDE))
 
 ## The whole PlayStation soft-float tier.
 check-mips-sf: test-softfloat test-fpu-mips-sf test-f32-mips-sf check-cc-mips-sf
@@ -7111,6 +6921,27 @@ check-aarch64as: build/skj-as-aarch64
 	@SKJ=./build/skj-as-aarch64 GAS=aarch64-linux-gnu-as \
 	 sh tests/run-aarch64as-tests.sh
 
+## ELF64 linkers end to end: assemble a fixture with the in-tree ELF64
+## assembler, link it with the in-tree ELF64 linker, and run the result (x86-64
+## natively or under qemu-x86_64; AArch64 under qemu-aarch64).  The fixtures
+## cover the PC-relative, absolute-32 and absolute-64 relocation forms each
+## target emits; the program writes "ok" and exits 42.
+test-ld-x86-64: build/skj-as-x86-64 build/skj-ld-x86-64 | build
+	@./build/skj-as-x86-64 -o build/ld_hello_x86_64.o tests/ld/hello_x86_64.s
+	@./build/skj-ld-x86-64 -o build/ld_hello_x86_64 build/ld_hello_x86_64.o
+	@out=`$(QEMU_X64) ./build/ld_hello_x86_64`; ec=$$?; \
+	 if [ "$$out" = ok ] && [ "$$ec" = 42 ]; then \
+	     echo "PASS: skj-ld-x86-64 links a runnable ET_EXEC (ok, exit 42)"; \
+	 else echo "FAIL: skj-ld-x86-64 (out '$$out', exit $$ec)"; exit 1; fi
+
+test-ld-arm64: build/skj-as-aarch64 build/skj-ld-arm64 | build
+	@./build/skj-as-aarch64 -o build/ld_hello_arm64.o tests/ld/hello_arm64.s
+	@./build/skj-ld-arm64 -o build/ld_hello_arm64 build/ld_hello_arm64.o
+	@out=`$(QEMU_A64) ./build/ld_hello_arm64`; ec=$$?; \
+	 if [ "$$out" = ok ] && [ "$$ec" = 42 ]; then \
+	     echo "PASS: skj-ld-arm64 links a runnable ET_EXEC (ok, exit 42)"; \
+	 else echo "FAIL: skj-ld-arm64 (out '$$out', exit $$ec)"; exit 1; fi
+
 ## Full qemu matrix across every supported architecture: the per-language
 ## suites, plus the IR-builder integration tests (fpu / i64 / unsigned ops).
 ## ColdFire (qemu-m68k), RISC-V (qemu-riscv32, hardware float), x86-64
@@ -7148,7 +6979,8 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 \
            test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 \
            test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 \
-           check-rvas check-x86-64as check-aarch64as check-cc-rv-skj \
+           check-rvas check-x86-64as check-aarch64as test-ld-x86-64 test-ld-arm64 \
+           test-cc-driver-x86-64 test-cc-driver-arm64 check-cc-rv-skj \
            test-cc-rv-loc test-kp-rv-loc test-kp-rv-dwarf test-kp-rv-trap-backtrace test-pc-loc test-moo-loc test-tinc-loc \
            test-dwarf-line test-rv-stt-func test-rv-debug-sections \
            test-rv-debug-link test-rv-addr2line test-rv-backtrace test-rv-abort-backtrace \
@@ -7180,4 +7012,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill test-rv-spawn-mounts test-cf-spawn-mounts test-rv-spawn-pipe test-cf-spawn-pipe test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh test-rv-vdso test-cf-vdso test-mips-vdso test-hv-x86-64-vdso test-hv-arm64-vdso test-rv-env test-cf-env test-hv-x86-64-env test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-preempt test-hv-parallel check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill test-rv-spawn-mounts test-cf-spawn-mounts test-rv-spawn-pipe test-cf-spawn-pipe test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh test-rv-vdso test-cf-vdso test-mips-vdso test-rv-mem-root test-sched-embed test-hv-x86-64-vdso test-hv-arm64-vdso test-rv-env test-cf-env test-hv-x86-64-env test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as test-ld-x86-64 test-ld-arm64 test-cc-driver-x86-64 test-cc-driver-arm64 check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-preempt test-hv-parallel check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE

@@ -59,12 +59,20 @@ Example:
 Flat components (the axes expand to these; still accepted directly, so an
 older update-skjegg.sh keeps working):
 
-Backends:  coldfire  riscv  mips
+Backends:  coldfire  riscv  mips  x86-64  arm64
+             (x86-64/arm64 are the LP64 cc backends; pair with their toolchain
+              and runtime for a self-contained 64-bit C target)
 Frontends: tinc  scheme  moo  pascal  cc
-Tools:     as  ld  as-rv  ld-rv  as-mips  ld-mips  ar  cpp
+Tools:     as  ld  as-rv  ld-rv  as-mips  ld-mips  ar  cpp  addr2line
+           as-x86-64  ld-x86-64  as-aarch64  ld-arm64
              (as-rv/ld-rv: the RISC-V RV32 toolchain; as-mips/ld-mips: the
               MIPS I toolchain, ld-mips writes ELF and PlayStation PS-EXE;
-              ar: a target-neutral archive tool for any of the linkers)
+              ar: a target-neutral archive tool for any of the linkers;
+              addr2line: the offline DWARF symbolizer, maps a backtrace's
+              addresses back to file:line, independent of any backend;
+              as-x86-64/ld-x86-64 and as-aarch64/ld-arm64: the 64-bit ELF64
+              assembler and linker pairs, so a consumer assembles and links
+              x86-64 or AArch64 objects with no external binutils)
 Emulators: emu-cf  emu-rv  emu-mips
              (skj-run; any mix, or none.  emu-cf is the ColdFire core,
               emu-rv the RV32 core, emu-mips the little-endian MIPS I core.)
@@ -122,8 +130,8 @@ for _a in $_archs; do
         cf|coldfire|m68k)   COMPONENTS="$COMPONENTS coldfire" ;;
         rv|rv32|riscv)      COMPONENTS="$COMPONENTS riscv" ;;
         mips|mipsel)        COMPONENTS="$COMPONENTS mips" ;;
-        x86-64|x86_64|amd64) COMPONENTS="$COMPONENTS hv-x86" ;;
-        aarch64|arm64)      COMPONENTS="$COMPONENTS hv-arm64" ;;
+        x86-64|x86_64|amd64) COMPONENTS="$COMPONENTS x86-64" ;;
+        aarch64|arm64)      COMPONENTS="$COMPONENTS arm64" ;;
         *) die "unknown --arch: $_a (coldfire riscv mips x86-64 aarch64)" ;;
     esac
 done
@@ -146,12 +154,15 @@ for _w in $_features; do
             _sel coldfire && COMPONENTS="$COMPONENTS as ld"
             _sel riscv    && COMPONENTS="$COMPONENTS as-rv ld-rv"
             _sel mips     && COMPONENTS="$COMPONENTS as-mips ld-mips"
+            _sel x86-64   && COMPONENTS="$COMPONENTS as-x86-64 ld-x86-64"
+            _sel arm64    && COMPONENTS="$COMPONENTS as-aarch64 ld-arm64"
             COMPONENTS="$COMPONENTS ar" ;;
         emulator|emu)
             _sel coldfire && COMPONENTS="$COMPONENTS emu-cf"
             _sel riscv    && COMPONENTS="$COMPONENTS emu-rv"
             _sel mips     && COMPONENTS="$COMPONENTS emu-mips"
-            { _sel hv-x86 || _sel hv-arm64; } && COMPONENTS="$COMPONENTS emu-hv" ;;
+            { _sel x86-64 || _sel arm64 || _sel hv-x86 || _sel hv-arm64; } \
+                && COMPONENTS="$COMPONENTS emu-hv" ;;
         runtime)  COMPONENTS="$COMPONENTS ar" ;;
         sandbox)  COMPONENTS="$COMPONENTS ar sandbox" ;;   # the confined libc needs ar
         cpp)      COMPONENTS="$COMPONENTS cpp" ;;
@@ -178,19 +189,22 @@ fi
 
 # ---- parse and validate components ----
 
-has_cf=0 has_rv=0 has_mips=0
+has_cf=0 has_rv=0 has_mips=0 has_x64_be=0 has_a64_be=0
 has_tinc=0 has_scheme=0 has_moo=0 has_pascal=0 has_cc=0
 has_as=0 has_ld=0 has_cpp=0
 has_as_rv=0 has_ld_rv=0
 has_as_mips=0 has_ld_mips=0 has_ar=0
+has_as_x64=0 has_ld_x64=0 has_as_a64=0 has_ld_a64=0
 has_emu_cf=0 has_emu_rv=0 has_emu_mips=0 has_emu_hv=0
 has_hv_x86=0 has_hv_arm64=0
-has_kp=0 has_sandbox=0
+has_kp=0 has_sandbox=0 has_addr2line=0
 
 for comp in $COMPONENTS; do
     case "$comp" in
         coldfire) has_cf=1 ;;
         riscv)    has_rv=1 ;;
+        x86-64)   has_x64_be=1 ;;
+        arm64)    has_a64_be=1 ;;
         mips)     has_mips=1 ;;
         tinc)     has_tinc=1 ;;
         scheme)   has_scheme=1 ;;
@@ -203,6 +217,10 @@ for comp in $COMPONENTS; do
         ld-rv)    has_ld_rv=1 ;;
         as-mips)  has_as_mips=1 ;;
         ld-mips)  has_ld_mips=1 ;;
+        as-x86-64) has_as_x64=1 ;;
+        ld-x86-64) has_ld_x64=1 ;;
+        as-aarch64) has_as_a64=1 ;;
+        ld-arm64) has_ld_a64=1 ;;
         ar)       has_ar=1 ;;
         cpp)      has_cpp=1 ;;
         emu-cf)   has_emu_cf=1 ;;
@@ -213,12 +231,13 @@ for comp in $COMPONENTS; do
         emu-hv)   has_emu_hv=1 ;;
         kp|kobold) has_kp=1 ;;
         sandbox)  has_sandbox=1 ;;
+        addr2line) has_addr2line=1 ;;
         *)        die "unknown component: $comp" ;;
     esac
 done
 
 has_fe=$((has_tinc + has_scheme + has_moo + has_pascal + has_cc))
-has_be=$((has_cf + has_rv + has_mips))
+has_be=$((has_cf + has_rv + has_mips + has_x64_be + has_a64_be))
 
 if [ "$has_fe" -gt 0 ] && [ "$has_be" -eq 0 ]; then
     die "frontends require at least one backend"
@@ -234,14 +253,16 @@ fi
 # runs the binutils-free skj-as*/skj-ld* pipeline (the ColdFire path uses
 # skj-as/skj-ld, not m68k-linux-gnu-as/ld).  Stage a target's crt/runtime only
 # when its whole in-tree toolchain is present.
-drv_cf=0 drv_rv=0 drv_mips=0
+drv_cf=0 drv_rv=0 drv_mips=0 drv_x64=0 drv_a64=0
 if [ "$has_cc" -eq 1 ]; then
     [ "$has_cf" -eq 1 ]   && [ "$has_as" -eq 1 ]      && [ "$has_ld" -eq 1 ]      && drv_cf=1
     [ "$has_rv" -eq 1 ]   && [ "$has_as_rv" -eq 1 ]   && [ "$has_ld_rv" -eq 1 ]   && drv_rv=1
     [ "$has_mips" -eq 1 ] && [ "$has_as_mips" -eq 1 ] && [ "$has_ld_mips" -eq 1 ] && drv_mips=1
+    [ "$has_x64_be" -eq 1 ] && [ "$has_as_x64" -eq 1 ] && [ "$has_ld_x64" -eq 1 ] && drv_x64=1
+    [ "$has_a64_be" -eq 1 ] && [ "$has_as_a64" -eq 1 ] && [ "$has_ld_a64" -eq 1 ] && drv_a64=1
 fi
 has_driver=0
-[ $((drv_cf + drv_rv + drv_mips)) -gt 0 ] && has_driver=1
+[ $((drv_cf + drv_rv + drv_mips + drv_x64 + drv_a64)) -gt 0 ] && has_driver=1
 
 # The hosted libc (printf/malloc/stdio/... plus the coroutine primitive and the
 # cooperative threads.h subset over it) ships
@@ -322,6 +343,29 @@ if [ "$has_mips" -eq 1 ]; then
     cp "$S/backend/mips_emit.c" "$S/backend/regalloc_mips.c" "$DEST/backend/"
     cp "$S/runtime/start_mips.S" "$S/runtime/start_psx.S" \
        "$S/runtime/half.c" "$S/runtime/softfloat.c" "$DEST/runtime/"
+fi
+# The 64-bit (LP64) cc backends: the shared instruction selector over the GAS
+# text sink.  x86-64 adds the AOT sink and half.c (_Float16 softfloat, via the
+# SysV register ABI); AArch64 has a native fcvt and needs no half helper.  The
+# SysV crt (start_x86_64_sysv.s) and AAPCS crt (start_arm64_aapcs.S), and the
+# varargs helper per ABI, round out the hosted dev/test runtime these targets
+# link (there is no libc on this tier).
+if [ "$has_x64_be" -eq 1 ]; then
+    mkdir -p "$DEST/backend" "$DEST/runtime"
+    cp "$S/backend/regalloc_x86.c" "$S/backend/x86_select.c" \
+       "$S/backend/mc_text.c" "$S/backend/x86_aot.c" \
+       "$S/backend/mc.h" "$S/backend/mc_text.h" "$S/backend/x86_select.h" \
+       "$DEST/backend/"
+    cp "$S/runtime/start_x86_64_sysv.s" "$S/runtime/va_x86_64.c" \
+       "$S/runtime/half.c" "$DEST/runtime/"
+fi
+if [ "$has_a64_be" -eq 1 ]; then
+    mkdir -p "$DEST/backend" "$DEST/runtime"
+    cp "$S/backend/regalloc_arm64.c" "$S/backend/arm64_select.c" \
+       "$S/backend/arm64_mc_text.c" \
+       "$S/backend/arm64_mc.h" "$S/backend/arm64_select.h" \
+       "$S/backend/arm64_mc_text.h" "$DEST/backend/"
+    cp "$S/runtime/start_arm64_aapcs.S" "$S/runtime/va_aarch64.c" "$DEST/runtime/"
 fi
 
 # frontends
@@ -419,7 +463,8 @@ fi
 # ColdFire assembler (as), the RISC-V one (as-rv) and the MIPS one (as-mips);
 # each front end plus its standalone tool is taken separately, like the two
 # emulator cores.
-if [ "$has_as" -eq 1 ] || [ "$has_as_rv" -eq 1 ] || [ "$has_as_mips" -eq 1 ]; then
+if [ "$has_as" -eq 1 ] || [ "$has_as_rv" -eq 1 ] || [ "$has_as_mips" -eq 1 ] \
+   || [ "$has_as_x64" -eq 1 ] || [ "$has_as_a64" -eq 1 ]; then
     mkdir -p "$DEST/as" "$DEST/dwarf"
     cp "$S/as/asm_lex.c" "$S/as/asm_obj.c" \
        "$S/as/asm_lex.h" "$S/as/asm_obj.h" "$DEST/as/"
@@ -438,15 +483,39 @@ if [ "$has_as_mips" -eq 1 ]; then               # MIPS front end + tool
     cp "$S/as/mips_parse.c" "$S/as/mips_encode.c" "$S/as/mips_elf.c" \
        "$S/as/mips_sched.c" "$S/as/mips.h" "$S/as/mips_main.c" "$DEST/as/"
 fi
+if [ "$has_as_x64" -eq 1 ]; then                # x86-64 front end + tool
+    cp "$S/as/x86_64_parse.c" "$S/as/x86_64_encode.c" "$S/as/x86_64_elf.c" \
+       "$S/as/x86_64.h" "$S/as/x86_64_main.c" "$DEST/as/"
+fi
+if [ "$has_as_a64" -eq 1 ]; then                # AArch64 front end + tool
+    cp "$S/as/aarch64_parse.c" "$S/as/aarch64_encode.c" "$S/as/aarch64_elf.c" \
+       "$S/as/aarch64_macho.c" "$S/as/aarch64.h" "$S/as/aarch64_main.c" \
+       "$DEST/as/"
+fi
 
 # linker.  The layout core, script parser and mapfile reader (link/script/
 # mapfile) are shared by the ColdFire linker (ld), the RISC-V one (ld-rv) and
 # the MIPS one (ld-mips); each target's ELF I/O plus its tool is taken
 # separately.
-if [ "$has_ld" -eq 1 ] || [ "$has_ld_rv" -eq 1 ] || [ "$has_ld_mips" -eq 1 ]; then
+if [ "$has_ld" -eq 1 ] || [ "$has_ld_rv" -eq 1 ] || [ "$has_ld_mips" -eq 1 ] \
+   || [ "$has_ld_x64" -eq 1 ] || [ "$has_ld_a64" -eq 1 ]; then
     mkdir -p "$DEST/ld"
     cp "$S/ld/script.c" "$S/ld/link.c" "$S/ld/mapfile.c" \
        "$S/ld/ld.h" "$S/ld/mapfile.h" "$DEST/ld/"
+fi
+# The ELF64 reader, writer and ar support are shared by the x86-64 linker
+# (ld-x86-64) and the AArch64 one (ld-arm64); each tool's relocation applier and
+# driver come separately.
+if [ "$has_ld_x64" -eq 1 ] || [ "$has_ld_a64" -eq 1 ]; then
+    mkdir -p "$DEST/ld"
+    cp "$S/ld/elf64_read.c" "$S/ld/elf64_write.c" "$S/ld/elf64_archive.c" \
+       "$S/ld/elf64_ld.h" "$DEST/ld/"
+fi
+if [ "$has_ld_x64" -eq 1 ]; then                # x86-64 reloc applier + tool
+    cp "$S/ld/x86_64_link.c" "$S/ld/x86_64_main.c" "$DEST/ld/"
+fi
+if [ "$has_ld_a64" -eq 1 ]; then                # AArch64 reloc applier + tool
+    cp "$S/ld/aarch64_link.c" "$S/ld/aarch64_main.c" "$DEST/ld/"
 fi
 if [ "$has_ld" -eq 1 ]; then                    # ColdFire ELF I/O + tool
     cp "$S/ld/elf_read.c" "$S/ld/elf_write.c" "$S/ld/archive.c" \
@@ -503,10 +572,12 @@ if [ "$has_emu_cf" -eq 1 ]; then
 fi
 if [ "$has_emu_rv" -eq 1 ]; then
     cp "$S/emu/rv32.c" "$S/emu/rv32.h" "$S/emu/rv_user.c" "$DEST/emu/"
+    cp "$S/emu/rv_gdb.c" "$S/emu/rv_gdb.h" "$DEST/emu/"     # --gdb PORT stub
     cp "$S/runtime/vdso_rv.ld" "$DEST/runtime/"
 fi
 if [ "$has_emu_mips" -eq 1 ]; then
     cp "$S/emu/mips32.c" "$S/emu/mips32.h" "$S/emu/mips_user.c" "$DEST/emu/"
+    cp "$S/emu/mips_gdb.c" "$S/emu/mips_gdb.h" "$DEST/emu/"  # --gdb PORT stub
     cp "$S/runtime/vdso_mips.ld" "$DEST/runtime/"
 fi
 # The hardware-virtualization core: one body (hvcore.c) serves both x86-64 and
@@ -521,6 +592,22 @@ if [ "$has_emu_hv" -eq 1 ]; then
        "$S/emu/vmm.h" "$S/emu/vmm_kvm.c" "$S/emu/vmm_hvf.c" \
        "$S/emu/hv_gdb.c" "$S/emu/hv_gdb.h" \
        "$S/emu/skj_hv_abi.h" "$DEST/emu/"
+fi
+# The DWARF line/symbol reader behind the symbolized fault backtrace on the
+# emulated cores (gated by SKJ_DWARF_BACKTRACE in rv/cf/mips_user.c).  It needs
+# only ir/arena (copied above), not dwarf/dwarf.c.
+if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || [ "$has_emu_mips" -eq 1 ]; then
+    mkdir -p "$DEST/dwarf"
+    cp "$S/dwarf/dwread.c" "$S/dwarf/dwread.h" "$DEST/dwarf/"
+fi
+# skj-addr2line: the offline symbolizer, for resolving a backtrace's addresses
+# or inspecting symbols by hand against a guest ELF.  It is the standalone CLI
+# over the same DWARF reader, so it brings dwread (shared with the backtrace
+# above; the cp is idempotent) and needs only ir/arena+util (copied above).
+if [ "$has_addr2line" -eq 1 ]; then
+    mkdir -p "$DEST/dwarf"
+    cp "$S/dwarf/addr2line_main.c" "$S/dwarf/dwread.c" "$S/dwarf/dwread.h" \
+       "$DEST/dwarf/"
 fi
 
 # Kobold-Pascal AOT path (kobold).  The front end kpcom is in-tree Pascal source
@@ -580,11 +667,18 @@ fi
 # fit the pipeline, so any of them pulls it
 if [ "$has_as" -eq 1 ] || [ "$has_ld" -eq 1 ] || [ "$has_ar" -eq 1 ] \
    || [ "$has_as_rv" -eq 1 ] || [ "$has_ld_rv" -eq 1 ] \
-   || [ "$has_as_mips" -eq 1 ] || [ "$has_ld_mips" -eq 1 ]; then
+   || [ "$has_as_mips" -eq 1 ] || [ "$has_ld_mips" -eq 1 ] \
+   || [ "$has_as_x64" -eq 1 ] || [ "$has_ld_x64" -eq 1 ] \
+   || [ "$has_as_a64" -eq 1 ] || [ "$has_ld_a64" -eq 1 ]; then
     cp "$S/doc/tools/toolchain.md" "$DEST/doc/"
 fi
-if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || [ "$has_emu_mips" -eq 1 ]; then
-    cp "$S/doc/tools/emulator.md" "$DEST/doc/"
+# The emulator (skj-run): how to run guests and embed the scheduler, how the
+# --gdb debugger and the symbolized fault backtrace work.  Any core pulls all
+# three, since the debugger and backtrace ride in the same skj-run.
+if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || [ "$has_emu_mips" -eq 1 ] \
+   || [ "$has_emu_hv" -eq 1 ]; then
+    cp "$S/doc/tools/emulator.md" "$S/doc/tools/process-model.md" \
+       "$S/doc/tools/debugger.md" "$DEST/doc/"
 fi
 if [ "$has_libc" -eq 1 ]; then
     cp "$S/doc/tools/libc.md" "$DEST/doc/"
@@ -720,6 +814,12 @@ fi
 if [ "$has_mips" -eq 1 ]; then
     printf 'SKJ_MIPS := $(SKJEGG)backend/regalloc_mips.c $(SKJEGG)backend/mips_emit.c\n' >> "$MK"
 fi
+if [ "$has_x64_be" -eq 1 ]; then
+    printf 'SKJ_X64 := $(SKJEGG)backend/regalloc_x86.c $(SKJEGG)backend/x86_select.c $(SKJEGG)backend/mc_text.c $(SKJEGG)backend/x86_aot.c\n' >> "$MK"
+fi
+if [ "$has_a64_be" -eq 1 ]; then
+    printf 'SKJ_A64 := $(SKJEGG)backend/regalloc_arm64.c $(SKJEGG)backend/arm64_select.c $(SKJEGG)backend/arm64_mc_text.c\n' >> "$MK"
+fi
 
 if [ "$has_tinc" -eq 1 ]; then
     cat >> "$MK" <<'MK'
@@ -803,6 +903,35 @@ SKJ_LD_MIPS_LIB := $(SKJEGG)ld/mips_elf_read.c $(SKJEGG)ld/mips_link.c \
                    $(SKJEGG)ld/script.c $(SKJEGG)ld/mapfile.c
 MK
 fi
+if [ "$has_as_x64" -eq 1 ]; then
+    cat >> "$MK" <<'MK'
+SKJ_AS_X64_LIB := $(SKJEGG)as/asm_lex.c $(SKJEGG)as/asm_obj.c \
+                  $(SKJEGG)as/x86_64_parse.c $(SKJEGG)as/x86_64_encode.c \
+                  $(SKJEGG)as/x86_64_elf.c
+MK
+fi
+if [ "$has_as_a64" -eq 1 ]; then
+    cat >> "$MK" <<'MK'
+SKJ_AS_A64_LIB := $(SKJEGG)as/asm_lex.c $(SKJEGG)as/asm_obj.c \
+                  $(SKJEGG)as/aarch64_parse.c $(SKJEGG)as/aarch64_encode.c \
+                  $(SKJEGG)as/aarch64_elf.c $(SKJEGG)as/aarch64_macho.c \
+                  $(SKJEGG)dwarf/dwarf.c
+MK
+fi
+if [ "$has_ld_x64" -eq 1 ]; then
+    cat >> "$MK" <<'MK'
+SKJ_LD_X64_LIB := $(SKJEGG)ld/elf64_read.c $(SKJEGG)ld/x86_64_link.c \
+                  $(SKJEGG)ld/elf64_write.c $(SKJEGG)ld/elf64_archive.c \
+                  $(SKJEGG)ld/link.c $(SKJEGG)ld/script.c $(SKJEGG)ld/mapfile.c
+MK
+fi
+if [ "$has_ld_a64" -eq 1 ]; then
+    cat >> "$MK" <<'MK'
+SKJ_LD_A64_LIB := $(SKJEGG)ld/elf64_read.c $(SKJEGG)ld/aarch64_link.c \
+                  $(SKJEGG)ld/elf64_write.c $(SKJEGG)ld/elf64_archive.c \
+                  $(SKJEGG)ld/link.c $(SKJEGG)ld/script.c $(SKJEGG)ld/mapfile.c
+MK
+fi
 
 # compiler binary rules (frontend x backend)
 printf '\nSKJ_ALL :=\n' >> "$MK"
@@ -867,6 +996,16 @@ if [ "$has_cc" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
     emit_compiler skj-cc-mips-sf SKJ_CC SKJ_MIPS \
         "-DCC_MIPS -DMIPS_SOFTFLOAT $cc_inc" '$(SKJ_CPP_LIB)'
 fi
+if [ "$has_cc" -eq 1 ] && [ "$has_x64_be" -eq 1 ]; then
+    # LP64, SysV psABI, struct-by-value ABI; the selector needs backend/ headers.
+    emit_compiler skj-cc-x86-64 SKJ_CC SKJ_X64 \
+        "-DX86_BITS=64 -DSKJ_LP64=1 -DCC_PSABI -DCC_STRUCT_ABI -I\$(SKJEGG)backend $cc_inc" \
+        '$(SKJ_CPP_LIB)'
+fi
+if [ "$has_cc" -eq 1 ] && [ "$has_a64_be" -eq 1 ]; then
+    emit_compiler skj-cc-arm64 SKJ_CC SKJ_A64 \
+        "-DSKJ_LP64=1 -DCC_PSABI -DCC_ARM64 $cc_inc" '$(SKJ_CPP_LIB)'
+fi
 
 # tool binary rules
 if [ "$has_cpp" -eq 1 ]; then
@@ -918,11 +1057,48 @@ if [ "$has_ld_mips" -eq 1 ]; then
         printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)ld -I$(SKJEGG)ir -o $@ $(SKJEGG)ld/mips_main.c $(SKJ_LD_MIPS_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
     } >> "$MK"
 fi
+if [ "$has_as_x64" -eq 1 ]; then
+    {
+        printf '\nSKJ_ALL += $(BUILD)/skj-as-x86-64\n'
+        printf '$(BUILD)/skj-as-x86-64: $(SKJEGG)as/x86_64_main.c $(SKJ_AS_X64_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c | $(BUILD)\n'
+        printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)as -I$(SKJEGG)ir -o $@ $(SKJEGG)as/x86_64_main.c $(SKJ_AS_X64_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
+    } >> "$MK"
+fi
+if [ "$has_ld_x64" -eq 1 ]; then
+    {
+        printf '\nSKJ_ALL += $(BUILD)/skj-ld-x86-64\n'
+        printf '$(BUILD)/skj-ld-x86-64: $(SKJEGG)ld/x86_64_main.c $(SKJ_LD_X64_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c | $(BUILD)\n'
+        printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)ld -I$(SKJEGG)ir -o $@ $(SKJEGG)ld/x86_64_main.c $(SKJ_LD_X64_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
+    } >> "$MK"
+fi
+if [ "$has_as_a64" -eq 1 ]; then
+    {
+        printf '\nSKJ_ALL += $(BUILD)/skj-as-aarch64\n'
+        printf '$(BUILD)/skj-as-aarch64: $(SKJEGG)as/aarch64_main.c $(SKJ_AS_A64_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c | $(BUILD)\n'
+        printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)as -I$(SKJEGG)ir -I$(SKJEGG)dwarf -o $@ $(SKJEGG)as/aarch64_main.c $(SKJ_AS_A64_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
+    } >> "$MK"
+fi
+if [ "$has_ld_a64" -eq 1 ]; then
+    {
+        printf '\nSKJ_ALL += $(BUILD)/skj-ld-arm64\n'
+        printf '$(BUILD)/skj-ld-arm64: $(SKJEGG)ld/aarch64_main.c $(SKJ_LD_A64_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c | $(BUILD)\n'
+        printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)ld -I$(SKJEGG)ir -o $@ $(SKJEGG)ld/aarch64_main.c $(SKJ_LD_A64_LIB) $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
+    } >> "$MK"
+fi
 if [ "$has_ar" -eq 1 ]; then
     {
         printf '\nSKJ_ALL += $(BUILD)/skj-ar\n'
         printf '$(BUILD)/skj-ar: $(SKJEGG)ar/main.c $(SKJEGG)ld/mapfile.c $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c | $(BUILD)\n'
         printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)ld -I$(SKJEGG)ir -o $@ $(SKJEGG)ar/main.c $(SKJEGG)ld/mapfile.c $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
+    } >> "$MK"
+fi
+if [ "$has_addr2line" -eq 1 ]; then
+    # The offline DWARF symbolizer: resolve a guest address (or a backtrace) to
+    # function + file:line against the program's own ELF.
+    {
+        printf '\nSKJ_ALL += $(BUILD)/skj-addr2line\n'
+        printf '$(BUILD)/skj-addr2line: $(SKJEGG)dwarf/addr2line_main.c $(SKJEGG)dwarf/dwread.c $(SKJEGG)ir/arena.c $(SKJEGG)ir/util.c | $(BUILD)\n'
+        printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)dwarf -I$(SKJEGG)ir -o $@ $(SKJEGG)dwarf/addr2line_main.c $(SKJEGG)dwarf/dwread.c $(SKJEGG)ir/arena.c $(SKJEGG)ir/util.c\n'
     } >> "$MK"
 fi
 
@@ -1034,6 +1210,37 @@ if [ "$has_driver" -eq 1 ]; then
             drv_lib="$drv_lib \$(BUILD)/lib/mips/soft64_div.o \$(BUILD)/lib/mips/libc.a \$(BUILD)/lib/mips/fini.o"
         fi
     fi
+    if [ "$drv_x64" -eq 1 ]; then
+        # Self-hosted: skj-as-x86-64 assembles the SysV crt; skj-cc-x86-64 plus
+        # skj-as-x86-64 build the varargs (va) and _Float16 (half) helpers.  No
+        # external compiler on this hosted tier (there is no libc to archive).
+        {
+            printf '\n$(BUILD)/lib/x86-64/crt0.o: $(SKJEGG)runtime/start_x86_64_sysv.s $(BUILD)/skj-as-x86-64 | $(BUILD)\n'
+            printf '\t@mkdir -p $(@D)\n'
+            printf '\t$(BUILD)/skj-as-x86-64 -o $@ $(SKJEGG)runtime/start_x86_64_sysv.s\n'
+            printf '$(BUILD)/lib/x86-64/va.o: $(SKJEGG)runtime/va_x86_64.c $(BUILD)/skj-cc-x86-64 $(BUILD)/skj-as-x86-64 | $(BUILD)\n'
+            printf '\t@mkdir -p $(@D)\n'
+            printf '\t$(BUILD)/skj-cc-x86-64 -o $(BUILD)/lib/x86-64/va.s $(SKJEGG)runtime/va_x86_64.c\n'
+            printf '\t$(BUILD)/skj-as-x86-64 -o $@ $(BUILD)/lib/x86-64/va.s\n'
+            printf '$(BUILD)/lib/x86-64/half.o: $(SKJEGG)runtime/half.c $(BUILD)/skj-cc-x86-64 $(BUILD)/skj-as-x86-64 | $(BUILD)\n'
+            printf '\t@mkdir -p $(@D)\n'
+            printf '\t$(BUILD)/skj-cc-x86-64 -o $(BUILD)/lib/x86-64/half.s $(SKJEGG)runtime/half.c\n'
+            printf '\t$(BUILD)/skj-as-x86-64 -o $@ $(BUILD)/lib/x86-64/half.s\n'
+        } >> "$MK"
+        drv_lib="$drv_lib \$(BUILD)/lib/x86-64/crt0.o \$(BUILD)/lib/x86-64/half.o \$(BUILD)/lib/x86-64/va.o"
+    fi
+    if [ "$drv_a64" -eq 1 ]; then
+        {
+            printf '\n$(BUILD)/lib/arm64/crt0.o: $(SKJEGG)runtime/start_arm64_aapcs.S $(BUILD)/skj-as-aarch64 | $(BUILD)\n'
+            printf '\t@mkdir -p $(@D)\n'
+            printf '\t$(BUILD)/skj-as-aarch64 -o $@ $(SKJEGG)runtime/start_arm64_aapcs.S\n'
+            printf '$(BUILD)/lib/arm64/va.o: $(SKJEGG)runtime/va_aarch64.c $(BUILD)/skj-cc-arm64 $(BUILD)/skj-as-aarch64 | $(BUILD)\n'
+            printf '\t@mkdir -p $(@D)\n'
+            printf '\t$(BUILD)/skj-cc-arm64 -o $(BUILD)/lib/arm64/va.s $(SKJEGG)runtime/va_aarch64.c\n'
+            printf '\t$(BUILD)/skj-as-aarch64 -o $@ $(BUILD)/lib/arm64/va.s\n'
+        } >> "$MK"
+        drv_lib="$drv_lib \$(BUILD)/lib/arm64/crt0.o \$(BUILD)/lib/arm64/va.o"
+    fi
     {
         printf '\nSKJ_ALL += $(BUILD)/skjcc\n'
         printf '$(BUILD)/skjcc: $(SKJEGG)driver/main.c%s | $(BUILD)\n' "$drv_lib"
@@ -1106,21 +1313,30 @@ fi
 if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || \
    [ "$has_emu_mips" -eq 1 ] || [ "$has_emu_hv" -eq 1 ]; then
     _emu_src='$(SKJEGG)emu/main.c $(SKJEGG)emu/guest.c $(SKJEGG)emu/elf32.c $(SKJEGG)emu/elf64.c $(SKJEGG)emu/hostplat.c $(SKJEGG)emu/sched.c $(SKJEGG)fs/p9_server.c'
+    # Extra flags: the per-core gdb stubs (--gdb PORT) and the DWARF backtrace.
+    _emu_flags=""
     if [ "$has_emu_cf" -eq 1 ]; then
         _emu_src="$_emu_src \$(SKJEGG)emu/coldfire.c \$(SKJEGG)emu/cf_user.c"
     fi
     if [ "$has_emu_rv" -eq 1 ]; then
-        _emu_src="$_emu_src \$(SKJEGG)emu/rv32.c \$(SKJEGG)emu/rv_user.c"
+        _emu_src="$_emu_src \$(SKJEGG)emu/rv32.c \$(SKJEGG)emu/rv_user.c \$(SKJEGG)emu/rv_gdb.c"
+        _emu_flags="$_emu_flags -DSKJ_RV_GDB"
     fi
     if [ "$has_emu_mips" -eq 1 ]; then
-        _emu_src="$_emu_src \$(SKJEGG)emu/mips32.c \$(SKJEGG)emu/mips_user.c"
+        _emu_src="$_emu_src \$(SKJEGG)emu/mips32.c \$(SKJEGG)emu/mips_user.c \$(SKJEGG)emu/mips_gdb.c"
+        _emu_flags="$_emu_flags -DSKJ_MIPS_GDB"
     fi
     # The HV core is one shared body plus the gdb stub; the VMM backend itself
     # is picked by host OS below, since it cannot be chosen at vendoring time.
-    _emu_hv_flags=""
     if [ "$has_emu_hv" -eq 1 ]; then
         _emu_src="$_emu_src \$(SKJEGG)emu/hvcore.c \$(SKJEGG)emu/hv_gdb.c"
-        _emu_hv_flags=" -DSKJ_HV_GDB"
+        _emu_flags="$_emu_flags -DSKJ_HV_GDB"
+    fi
+    # The symbolized fault backtrace on the emulated cores: the DWARF reader plus
+    # the arena it uses, and the flag that turns the code on in *_user.c.
+    if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || [ "$has_emu_mips" -eq 1 ]; then
+        _emu_src="$_emu_src \$(SKJEGG)dwarf/dwread.c \$(SKJEGG)ir/arena.c"
+        _emu_flags="$_emu_flags -DSKJ_DWARF_BACKTRACE -I\$(SKJEGG)dwarf -I\$(SKJEGG)ir"
     fi
     {
         printf '\n# skj-run: the guest runner.  The architectures compiled in\n'
@@ -1146,7 +1362,7 @@ if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || \
         printf 'SKJ_ALL += $(BUILD)/skj-run\n'
         printf '$(BUILD)/skj-run: $(SKJ_EMU) | $(BUILD)\n'
         printf '\t$(CC) $(CFLAGS) -DEMU_COLDFIRE=%s -DEMU_RV32=%s -DEMU_MIPS32=%s -DEMU_HV=%s%s -I$(SKJEGG)emu -I$(SKJEGG)fs -o $@ $(SKJ_EMU) -lm $(SKJ_EMU_LDLIBS)\n' \
-            "$has_emu_cf" "$has_emu_rv" "$has_emu_mips" "$has_emu_hv" "$_emu_hv_flags"
+            "$has_emu_cf" "$has_emu_rv" "$has_emu_mips" "$has_emu_hv" "$_emu_flags"
     } >> "$MK"
 fi
 

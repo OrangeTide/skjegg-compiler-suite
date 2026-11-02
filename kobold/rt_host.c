@@ -45,38 +45,15 @@ static void rt_oom(const char *what)
     exit(70);
 }
 
-/* Map `len` bytes of read/write memory below 4 GB, so an address fits the 32-bit
-   guest model.  x86-64 has MAP_32BIT; a 32-bit host is low by construction; any
-   other 64-bit host (arm64) has neither, so probe fixed low hints until one lands
-   below 4 GB and stays there.  Mirrors jit/jit_arena.c:kp_map_low, inlined here to
-   keep this runtime independent of the JIT library. */
+/* Map `len` bytes of read/write memory for the guest heap.  A guest address is
+   pointer-width on every target (64-bit under LP64, 32-bit on rv32/ColdFire), so
+   it names a full host pointer and the heap can live wherever the kernel places
+   an anonymous mapping.  A 32-bit host is low by construction; no target needs a
+   low-memory constraint.  Mirrors jit/jit_arena.c:kp_map_low. */
 static void *rt_map_low(size_t len)
 {
-#if SKJ_LP64
-    /* LP64: guest addresses are full 64-bit host pointers, so the heap can live
-       anywhere; no low-memory constraint. */
     return mmap(NULL, len, PROT_READ | PROT_WRITE,
                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-#elif defined(MAP_32BIT)
-    return mmap(NULL, len, PROT_READ | PROT_WRITE,
-                MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
-#elif UINTPTR_MAX <= 0xffffffffULL
-    return mmap(NULL, len, PROT_READ | PROT_WRITE,
-                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-#else
-    static uintptr_t hint = 0x10000000;
-    while (hint + len <= 0x100000000ULL) {
-        uintptr_t at = hint;
-        void *p = mmap((void *)at, len, PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-        hint += (len + 0xffffffUL) & ~(uintptr_t)0xffffff;   /* advance 16MB */
-        if (p != MAP_FAILED && (uintptr_t)p == at)
-            return p;
-        if (p != MAP_FAILED)
-            munmap(p, len);
-    }
-    return MAP_FAILED;
-#endif
 }
 
 /* The core's memory source: reserve the low region on first use, then grow the

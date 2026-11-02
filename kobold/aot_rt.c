@@ -295,37 +295,13 @@ void kpd_close(int h)
 
 #define KP_STACK_BYTES ((size_t)8u << 20)   /* 8 MiB guest execution stack */
 
-/* Map the execution stack below 4 GB, so an address-of-local fits the 32-bit guest
-   address model.  Mirrors rt_host.c:rt_map_low (x86-64 MAP_32BIT; a 32-bit host is
-   low already; arm64 probes fixed low hints), with its own hint base so it does not
-   fight the guest heap's probe region. */
+/* Map the execution stack.  An address-of-local is a pointer-width guest pointer
+   on every target, so the stack can live wherever the kernel places an anonymous
+   mapping; mirrors rt_host.c:rt_map_low. */
 static void *aot_map_low(size_t len)
 {
-#if SKJ_LP64
-    /* LP64: guest addresses are full 64-bit host pointers, so the execution stack
-       can live anywhere; no low-memory constraint. */
     return mmap(NULL, len, PROT_READ | PROT_WRITE,
                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-#elif defined(MAP_32BIT)
-    return mmap(NULL, len, PROT_READ | PROT_WRITE,
-                MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
-#elif UINTPTR_MAX <= 0xffffffffULL
-    return mmap(NULL, len, PROT_READ | PROT_WRITE,
-                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-#else
-    static uintptr_t hint = 0x30000000;
-    while (hint + len <= 0x100000000ULL) {
-        uintptr_t at = hint;
-        void *p = mmap((void *)at, len, PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-        hint += (len + 0xffffffUL) & ~(uintptr_t)0xffffff;   /* advance 16MB */
-        if (p != MAP_FAILED && (uintptr_t)p == at)
-            return p;
-        if (p != MAP_FAILED)
-            munmap(p, len);
-    }
-    return MAP_FAILED;
-#endif
 }
 
 /* ISO C does not define a function-pointer-to-void* cast; route it through a union

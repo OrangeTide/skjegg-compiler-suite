@@ -233,7 +233,12 @@ int run_sandbox(const run_opts *o, const skj_cpu_ops *ops, int *status);
  * arrays (envp entries are "KEY=VALUE"); argc/envc give their lengths.  stdio is
  * the three host fds {stdin, stdout, stderr}, e.g. a connection's socket. */
 typedef struct sched_root {
-    const char *path;           /* ELF image to load */
+    const char *path;           /* ELF image to load, or its label when image is set */
+    const uint8_t *image;       /* an in-memory ELF image; when set, load it instead
+                                   of opening path, which is then only a diagnostic
+                                   label (fault/trace messages).  A host whose guest
+                                   images are byte buffers, not files, uses this. */
+    long image_len;             /* the image's length in bytes (when image is set) */
     char **argv;                /* argv, or NULL for the run options' */
     int argc;
     char **envp;                /* environment, or NULL for none */
@@ -244,7 +249,7 @@ typedef struct sched_root {
 /* The reusable scheduler, for a host that drives it itself (a shell server
  * binding each connection to its own sandbox tree, say).  Lifecycle:
  *
- *   sched_init(&S, o, ops);
+ *   sched_init(&S, o, skj_ops_rv32());     // the arch's vtable, see guest.h
  *   sched_root r = { .path = img, .argv = av, .argc = ac,
  *                    .envp = ev, .envc = ec, .stdio = conn_fds };
  *   sched_add_root(&S, &r);                // one or more, each its own argv/env/fds

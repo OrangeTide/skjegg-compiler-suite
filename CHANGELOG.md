@@ -6,6 +6,61 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.38.0
+
+#### Added
+- Two in-tree ELF64 static linkers, `skj-ld-x86-64` and `skj-ld-arm64`, so the
+  64-bit targets no longer need an external `ld`. They read the ELFCLASS64
+  relocatable objects the in-tree assemblers emit, pull members from `ar`
+  archives, and write a runnable `ET_EXEC`. Both share one ELF64 core over the
+  existing layout engine, the script parser and the mapfile reader, differing
+  only in the machine id and the relocation set: x86-64 patches absolute and
+  PC-relative byte fields, while arm64 encodes the bit-packed instruction
+  relocations (the 26-bit branch, the conditional branch, the ADRP page split
+  and the ADD low-12). Executable addresses stay in the low 4 GiB, so the
+  32-bit layout core is reused unchanged. `skjcc -target x86-64` and
+  `-target arm64` now link with these, so the whole 64-bit compile-to-executable
+  path runs on in-tree tools with no external assembler or linker.
+- The scheduler can load a process-tree root from an in-memory ELF image, not
+  only a file path. A host that already holds a guest executable in memory (a
+  freshly built image, a buffer received over a connection) hands the bytes to
+  `sched_add_root` through `image` and `image_len` on the root spec, and
+  `skj-run --mem-root` drives it from the command line. This is the portable
+  path a host reaches for instead of a non-portable in-memory file descriptor.
+- Per-arch accessors for the CPU operation vtables (`skj_ops_rv32`,
+  `skj_ops_coldfire`, `skj_ops_mips32`, `skj_ops_x86_64hv`, `skj_ops_arm64hv`),
+  so a host embedding the scheduler can obtain a core's ops without reaching
+  into emulator internals.
+
+#### Fixed
+- `skjcc -g` now emits debug information. The driver silently dropped `-g`
+  along with the optimization and warning flags it does not forward, so a `-g`
+  build through the driver produced a binary with no `.debug_*` sections at all,
+  only symbol names. The flag now reaches the compile stage, so a driver-built
+  `-g` program carries DWARF that `skj-addr2line` and a fault backtrace resolve
+  to file and line.
+- Compact Pascal record fields now align to their own natural boundary rather
+  than to the target pointer width. On the LP64 targets (x86-64 and arm64) a
+  4-byte `integer` field was aligned to 8, so a record of integers sized larger
+  than it should and its field offsets diverged from the 32-bit targets. Each
+  field now aligns to a power of two no larger than the field, capped by the
+  `{$A}` alignment, so an integer field aligns to 4 on every target while a
+  pointer, `Int64` or real still aligns to 8 where the ABI needs it.
+
+#### Changed
+- `vendor.sh` can ship more of the debugging tier: the gdb stubs, the symbolized
+  fault backtrace and their docs, and `skj-addr2line` (the offline DWARF
+  symbolizer) as a selectable `addr2line` component, so a consuming project can
+  debug a guest and resolve a backtrace's addresses without the host toolchain.
+- `vendor.sh` can ship the whole 64-bit C target. `--arch x86-64` and
+  `--arch aarch64` select the LP64 cc backend (parallel to the 32-bit arches),
+  `--with toolchain` adds the ELF64 assembler and linker (`as-x86-64`/`ld-x86-64`
+  and `as-aarch64`/`ld-arm64`), and `--with runtime` stages the crt and
+  varargs/`_Float16` helpers, so a vendored `skjcc -target x86-64` or
+  `-target arm64` compiles, assembles and links C with no external toolchain.
+  The runtime is self-hosted: the vendored build compiles the helpers with
+  `skj-cc-*` and assembles them with the in-tree assemblers.
+
 ### 0.37.0
 
 #### Changed
