@@ -31,28 +31,13 @@ int kp_co_cancelling_g(void);
 /****************************************************************
  * Console I/O
  *
- * The console seam (io_write_str/int/char, io_flush, io_halt, and the whole
+ * The whole console seam (io_write_str/int/char/real, io_flush, io_halt, and the
  * read side) is the shared POSIX-fd implementation in kobold/kp_io.c, used by
- * this hosted runtime and the freestanding io_free.c alike.  Only io_write_real
- * is defined per tier: the host libc renders "%g" here, numfmt.c does on the
- * freestanding tier (byte-identical output).  Its bytes go straight to the fd
- * with write(), like every other console write in kp_io.c, so the hosted
- * program's output never interleaves a buffered stdio stream with those raw
- * writes.  `real` is f64 printed with a plain "%g" (the dialect has no
- * field-width formatting).
+ * this hosted runtime and the freestanding io_free.c alike.  Real output goes
+ * through the shared __fmt_greal (libc/numfmt.c) there, the same libgcc-free "%g"
+ * renderer the freestanding tier and the C libc use, so this tier no longer
+ * renders "%g" with the host libc.
  ****************************************************************/
-
-void io_write_real(int fd, double x)
-{
-    char buf[40];
-    int n = snprintf(buf, sizeof buf, "%g", x);
-
-    if (n > 0) {
-        if (n > (int)sizeof buf)
-            n = (int)sizeof buf;
-        { ssize_t r = write(fd, buf, (size_t)n); (void)r; }
-    }
-}
 
 /****************************************************************
  * Float ABI bridge (rv32 only)

@@ -14,8 +14,12 @@
 
 #define PKT_MAX     8192            /* packet payload buffer (PacketSize below) */
 #define BP_MAX      64              /* host-side software breakpoints */
+#define WP_MAX      16              /* host-side write watchpoints */
+#define WATCH_MAXLEN 16             /* longest watched range we shadow */
 #define NGPR        32
-#define NREG        (NGPR + 1)      /* x0-x31 plus pc */
+#define RV_FP0      33              /* regnum of f0 (ft0), after the 33 GPRs+pc */
+#define RV_FCSR     65              /* regnum of fcsr */
+#define NREG_ALL    66              /* x0-x31, pc, f0-f31, fcsr */
 #define IRQ_STRIDE  4096            /* steps between interrupt-byte polls */
 
 /* The target description gdb reads over qXfer, so a plain `gdb-multiarch
@@ -61,7 +65,48 @@ static const char target_xml[] =
     "    <reg name=\"t6\" bitsize=\"32\"/>\n"
     "    <reg name=\"pc\" bitsize=\"32\" type=\"code_ptr\" regnum=\"32\"/>\n"
     "  </feature>\n"
+    "  <feature name=\"org.gnu.gdb.riscv.fpu\">\n"
+    "    <reg name=\"ft0\" bitsize=\"64\" type=\"ieee_double\" regnum=\"33\"/>\n"
+    "    <reg name=\"ft1\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft2\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft3\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft4\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft5\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft6\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft7\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs0\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs1\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fa0\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fa1\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fa2\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fa3\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fa4\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fa5\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fa6\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fa7\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs2\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs3\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs4\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs5\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs6\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs7\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs8\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs9\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs10\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs11\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft8\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft9\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft10\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft11\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fcsr\" bitsize=\"32\" regnum=\"65\"/>\n"
+    "  </feature>\n"
     "</target>\n";
+
+struct watchpoint {
+    uint32_t addr;
+    uint32_t len;
+    uint8_t shadow[WATCH_MAXLEN];   /* watched bytes as of the last run start */
+};
 
 struct gdb {
     int fd;                 /* the accepted connection */
@@ -70,6 +115,10 @@ struct gdb {
     guest *g;
     uint32_t bp[BP_MAX];
     int nbp;
+    struct watchpoint wp[WP_MAX];
+    int nwp;
+    int watch_hit;          /* the last stop was a write watchpoint */
+    uint32_t watch_addr;    /* its address (valid when watch_hit) */
 };
 
 /****************************************************************
@@ -245,23 +294,80 @@ get_u32_hex(const char *p, uint32_t *out)
     return 0;
 }
 
-static uint32_t
-reg_get(rv_cpu *cpu, int n)
+/* Little-endian u64 -> 16 lowercase hex chars appended at *p. */
+static void
+put_u64_hex(char **p, uint64_t v)
 {
-    if (n < NGPR)
-        return rv_get_x(cpu, n);
-    if (n == NGPR)
-        return rv_get_pc(cpu);
+    int i;
+    for (i = 0; i < 8; i++) {        /* byte 0 first (little-endian) */
+        unsigned b = (unsigned)(v >> (8 * i)) & 0xff;
+        *(*p)++ = hexdig(b >> 4);
+        *(*p)++ = hexdig(b & 0xf);
+    }
+}
+
+/* Read a little-endian u64 from 16 hex chars; returns 0 on success. */
+static int
+get_u64_hex(const char *p, uint64_t *out)
+{
+    uint64_t v = 0;
+    int i;
+    for (i = 0; i < 8; i++) {
+        int hi = hexval(p[2 * i]), lo = hexval(p[2 * i + 1]);
+        if (hi < 0 || lo < 0)
+            return -1;
+        v |= (uint64_t)((hi << 4) | lo) << (8 * i);
+    }
+    *out = v;
     return 0;
 }
 
+/* Byte width of register n in the g/G stream and p/P packets. */
+static int
+reg_width(int n)
+{
+    return (n >= RV_FP0 && n < RV_FP0 + 32) ? 8 : 4;
+}
+
+/* Append register n in target (little-endian) byte order; out-of-range is a
+   no-op.  The 32 FP registers are the full 64-bit D-extension view (cpu->f);
+   the integer registers, pc and fcsr are 32-bit. */
 static void
-reg_set(rv_cpu *cpu, int n, uint32_t v)
+emit_reg(char **w, struct gdb *s, int n)
 {
     if (n < NGPR)
-        rv_set_x(cpu, n, v);
+        put_u32_hex(w, rv_get_x(s->cpu, n));
     else if (n == NGPR)
-        rv_set_pc(cpu, v);
+        put_u32_hex(w, rv_get_pc(s->cpu));
+    else if (n >= RV_FP0 && n < RV_FP0 + 32)
+        put_u64_hex(w, s->cpu->f[n - RV_FP0]);
+    else if (n == RV_FCSR)
+        put_u32_hex(w, s->cpu->fcsr);
+}
+
+/* Set register n from hex at h (width per reg_width); returns 0 on success. */
+static int
+set_reg(struct gdb *s, int n, const char *h)
+{
+    uint32_t v32;
+    uint64_t v64;
+
+    if (n < NGPR) {
+        if (get_u32_hex(h, &v32)) return -1;
+        rv_set_x(s->cpu, n, v32);
+    } else if (n == NGPR) {
+        if (get_u32_hex(h, &v32)) return -1;
+        rv_set_pc(s->cpu, v32);
+    } else if (n >= RV_FP0 && n < RV_FP0 + 32) {
+        if (get_u64_hex(h, &v64)) return -1;
+        s->cpu->f[n - RV_FP0] = v64;
+    } else if (n == RV_FCSR) {
+        if (get_u32_hex(h, &v32)) return -1;
+        s->cpu->fcsr = v32;
+    } else {
+        return -1;
+    }
+    return 0;
 }
 
 /* True if `addr` lies in a mapped region. */
@@ -292,17 +398,18 @@ stop_signal(struct gdb *s)
     return 5;                       /* SIGTRAP: step done or breakpoint */
 }
 
-/* Send the stop reply for the current state: S<sig>, or W<code> when the guest
-   has exited. */
+/* Send the stop reply for the current state: W<code> when the guest has exited,
+   a T<sig>watch:<addr>; when a write watchpoint fired, else S<sig>. */
 static int
 send_stop(struct gdb *s)
 {
-    char buf[8];
-    if (s->g->exited) {
+    char buf[32];
+    if (s->g->exited)
         snprintf(buf, sizeof buf, "W%02x", s->g->exit_code & 0xff);
-    } else {
+    else if (s->watch_hit)
+        snprintf(buf, sizeof buf, "T%02xwatch:%x;", 5, s->watch_addr);
+    else
         snprintf(buf, sizeof buf, "S%02x", stop_signal(s));
-    }
     return send_packet(s, buf);
 }
 
@@ -316,6 +423,37 @@ is_breakpoint(struct gdb *s, uint32_t pc)
     return 0;
 }
 
+/* Snapshot the current bytes of every active watchpoint range.  Taken at the
+   start of each run so a memory write by the debugger (M packet) between stops
+   does not read back as a guest write. */
+static void
+watch_snapshot(struct gdb *s)
+{
+    int i;
+    uint32_t j;
+    for (i = 0; i < s->nwp; i++)
+        for (j = 0; j < s->wp[i].len; j++)
+            s->wp[i].shadow[j] = gm_read8(&s->g->mem, s->wp[i].addr + j);
+}
+
+/* If a watched range changed since the snapshot, record the hit (for the stop
+   reply), refresh the shadow so the next run starts clean, and return 1. */
+static int
+watch_check(struct gdb *s)
+{
+    int i;
+    uint32_t j;
+    for (i = 0; i < s->nwp; i++)
+        for (j = 0; j < s->wp[i].len; j++)
+            if (gm_read8(&s->g->mem, s->wp[i].addr + j) != s->wp[i].shadow[j]) {
+                s->watch_hit = 1;
+                s->watch_addr = s->wp[i].addr;
+                watch_snapshot(s);
+                return 1;
+            }
+    return 0;
+}
+
 /* Continue: single-step until a breakpoint, exit, fault/halt, or an interrupt
    byte on the socket.  Returns 1 if the guest exited, else 0 (stopped). */
 static int
@@ -323,6 +461,8 @@ do_continue(struct gdb *s)
 {
     uint32_t steps = 0;
 
+    s->watch_hit = 0;
+    watch_snapshot(s);
     for (;;) {
         if (s->g->exited || s->cpu->halted)
             return s->g->exited ? 1 : 0;
@@ -330,6 +470,8 @@ do_continue(struct gdb *s)
             return s->g->exited ? 1 : 0;
         if (s->g->exited)
             return 1;
+        if (s->nwp && watch_check(s))   /* a watched range was written */
+            return 0;
         if (is_breakpoint(s, rv_get_pc(s->cpu)))
             return 0;
         if (((++steps) & (IRQ_STRIDE - 1)) == 0 && interrupt_pending(s->fd))
@@ -402,8 +544,8 @@ handle_packet(struct gdb *s, const char *p)
     case 'g': {                         /* read all registers */
         char *w = out;
         int i;
-        for (i = 0; i < NREG; i++)
-            put_u32_hex(&w, reg_get(s->cpu, i));
+        for (i = 0; i < NREG_ALL; i++)
+            emit_reg(&w, s, i);
         *w = '\0';
         return send_packet(s, out) == 0;
     }
@@ -411,12 +553,11 @@ handle_packet(struct gdb *s, const char *p)
     case 'G': {                         /* write all registers */
         const char *h = p + 1;
         int i;
-        for (i = 0; i < NREG; i++) {
-            uint32_t v;
-            if (strlen(h) < 8 || get_u32_hex(h, &v))
+        for (i = 0; i < NREG_ALL; i++) {
+            int bytes = reg_width(i);
+            if ((int)strlen(h) < bytes * 2 || set_reg(s, i, h))
                 break;
-            reg_set(s->cpu, i, v);
-            h += 8;
+            h += bytes * 2;
         }
         return send_packet(s, "OK") == 0;
     }
@@ -424,9 +565,9 @@ handle_packet(struct gdb *s, const char *p)
     case 'p': {                         /* read one register */
         char *w = out;
         long n = strtol(p + 1, NULL, 16);
-        if (n < 0 || n > NGPR)
+        if (n < 0 || n >= NREG_ALL)
             return send_packet(s, "E01") == 0;
-        put_u32_hex(&w, reg_get(s->cpu, (int)n));
+        emit_reg(&w, s, (int)n);
         *w = '\0';
         return send_packet(s, out) == 0;
     }
@@ -434,10 +575,8 @@ handle_packet(struct gdb *s, const char *p)
     case 'P': {                         /* write one register: P n=val */
         const char *eq = strchr(p, '=');
         long n = strtol(p + 1, NULL, 16);
-        uint32_t v;
-        if (!eq || n < 0 || n > NGPR || get_u32_hex(eq + 1, &v))
+        if (!eq || n < 0 || n >= NREG_ALL || set_reg(s, (int)n, eq + 1))
             return send_packet(s, "E01") == 0;
-        reg_set(s->cpu, (int)n, v);
         return send_packet(s, "OK") == 0;
     }
 
@@ -491,12 +630,13 @@ handle_packet(struct gdb *s, const char *p)
     case 's': {                         /* single step [addr] */
         if (p[1])
             rv_set_pc(s->cpu, (uint32_t)strtoul(p + 1, NULL, 16));
+        s->watch_hit = 0;               /* a step stop is not a watch hit */
         if (!s->g->exited && !s->cpu->halted)
             rv_step(s->cpu);
         return send_stop(s) == 0;
     }
 
-    case 'Z':                           /* insert breakpoint: Z0,addr,kind */
+    case 'Z':                           /* insert bp (Z0) or write watch (Z2) */
         if (p[1] == '0') {
             uint32_t addr = (uint32_t)strtoul(p + 3, NULL, 16);
             if (!is_breakpoint(s, addr)) {
@@ -506,15 +646,44 @@ handle_packet(struct gdb *s, const char *p)
             }
             return send_packet(s, "OK") == 0;
         }
-        return send_packet(s, "") == 0; /* hardware/watch not supported */
+        if (p[1] == '2') {              /* Z2,addr,kind — kind is the length */
+            char *end;
+            uint32_t addr = (uint32_t)strtoul(p + 3, &end, 16);
+            uint32_t len = (*end == ',') ? (uint32_t)strtoul(end + 1, NULL, 16) : 1;
+            int i;
+            if (len == 0 || len > WATCH_MAXLEN)
+                return send_packet(s, "E01") == 0; /* gdb falls back to sw watch */
+            for (i = 0; i < s->nwp; i++)
+                if (s->wp[i].addr == addr && s->wp[i].len == len)
+                    return send_packet(s, "OK") == 0;
+            if (s->nwp >= WP_MAX)
+                return send_packet(s, "E01") == 0;
+            s->wp[s->nwp].addr = addr;
+            s->wp[s->nwp].len = len;
+            s->nwp++;
+            return send_packet(s, "OK") == 0;
+        }
+        return send_packet(s, "") == 0; /* Z1/Z3/Z4 unsupported */
 
-    case 'z':                           /* remove breakpoint: z0,addr,kind */
+    case 'z':                           /* remove bp (z0) or write watch (z2) */
         if (p[1] == '0') {
             uint32_t addr = (uint32_t)strtoul(p + 3, NULL, 16);
             int i;
             for (i = 0; i < s->nbp; i++)
                 if (s->bp[i] == addr) {
                     s->bp[i] = s->bp[--s->nbp];
+                    break;
+                }
+            return send_packet(s, "OK") == 0;
+        }
+        if (p[1] == '2') {
+            char *end;
+            uint32_t addr = (uint32_t)strtoul(p + 3, &end, 16);
+            uint32_t len = (*end == ',') ? (uint32_t)strtoul(end + 1, NULL, 16) : 1;
+            int i;
+            for (i = 0; i < s->nwp; i++)
+                if (s->wp[i].addr == addr && s->wp[i].len == len) {
+                    s->wp[i] = s->wp[--s->nwp];
                     break;
                 }
             return send_packet(s, "OK") == 0;

@@ -4,11 +4,13 @@
  * a debugger (gdb learns the architecture from the ELF, so no target
  * description is sent), and drives one process under the RSP subset the other
  * cores serve: `?`, `g`/`G`, `m`/`M`, `c`, `s`, `Z0`/`z0` software breakpoints,
- * the raw Ctrl-C interrupt byte, and `qSupported`.
+ * `Z2`/`z2` write watchpoints, the raw Ctrl-C interrupt byte, and `qSupported`.
  *
- * Breakpoints are kept in a host-side table checked while single-stepping the
- * vcpu through the VMM, so guest memory is never patched.  The doorbell MMIO is
- * serviced transparently during stepping, so a guest's syscalls still run. */
+ * Breakpoints and watchpoints are kept in host-side tables checked while
+ * single-stepping the vcpu through the VMM, so guest memory is never patched: a
+ * watchpoint is a snapshot of the watched bytes compared after each step.  The
+ * doorbell MMIO is serviced transparently during stepping, so a guest's
+ * syscalls still run. */
 
 #ifndef SKJ_HV_GDB_H
 #define SKJ_HV_GDB_H

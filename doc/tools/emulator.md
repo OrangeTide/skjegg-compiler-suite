@@ -44,7 +44,11 @@ Fixes land here, not there. Two have landed already: `REMS.L`/`REMU.L`
 wrote the quotient into `Dq` as well as the remainder into `Dr`, which
 is the 68020 pair form rather than the ColdFire split, and it masked a
 matching `skj-as` bug (a two-operand `divs.l` was encoded with `Dr = 0`,
-which real hardware reads as a remainder instruction).
+which real hardware reads as a remainder instruction). The debug-support
+instructions `PULSE` (an unprivileged processor-status pulse, which decodes in
+the same group-4 slot as `TAS` and was mis-taken for it), `WDDATA` (write to the
+debug data port), and `WDEBUG` (the supervisor-only debug-register write) are
+decoded rather than rejected as illegal.
 
 ## Layout
 
@@ -1152,7 +1156,8 @@ x86-64 guest. A null-deref guest triple-faults into a KVM shutdown (the
 long-mode guest installs no interrupt table), so there is no debuggable fault
 frame as on the emulated cores. `make test-hv-gdb` drives it end to end (break,
 registers, memory, exit) and skips when `/dev/kvm` is absent or inaccessible, or
-gdb is not installed.
+gdb is not installed; `make test-hv-gdb-fpwatch` additionally covers the
+floating-point registers in the g-packet and a `Z2` write watchpoint.
 
 The tier is at parity with the emulated sandboxes. File I/O works the same way:
 the libc fd model routes through the shared `fs/` layer, and the ambient backend
@@ -1192,7 +1197,9 @@ Current limits of this tier:
   though `tests/archtest.c` now shows the shape of one for RV32 and
   both cores support it.
 - The `--gdb` remote stub covers rv32, MIPS and the HV cores (x86-64
-  and aarch64), not ColdFire yet.
+  and aarch64), not ColdFire yet. Each carries the integer and
+  floating-point registers and `Z2` write watchpoints (not read/access
+  watchpoints or hardware breakpoints).
   gdb's prologue-only MIPS unwind of CFI-less skj-cc code stops short
   of the full call chain (skj-run's own DWARF backtrace walks it).
 - `skj-as` has no `rems`/`remu` mnemonic, so a front end cannot ask for

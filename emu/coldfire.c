@@ -756,6 +756,12 @@ static void exec_group4(cf_cpu *cpu, uint16_t op)
         return;
     }
 
+    /* PULSE : 0100 1010 1100 1100 — an unprivileged debug aid that drives a
+     * unique value on the PST pins.  There are no PST pins here, so it is a
+     * NOP.  Must precede TAS, whose 0x4AC0 mask would otherwise capture it. */
+    if (op == 0x4ACC)
+        return;
+
     /* TAS <ea> : 0100 1010 11 eee rrr */
     if ((op & 0xFFC0) == 0x4AC0) {
         int mode = (op >> 3) & 7;
@@ -1235,9 +1241,8 @@ static void exec_group4(cf_cpu *cpu, uint16_t op)
         return;
     }
 
-    /* TODO: PULSE (0x4ACC), WDDATA (0xFB..), WDEBUG (0xFBC.)
-     * are privileged debug instructions. User-mode execution should
-     * raise CF_VEC_PRIVILEGE, not CF_VEC_ILLEGAL. */
+    /* PULSE (0x4ACC) is handled near HALT above; WDDATA/WDEBUG (0xFBxx) are
+     * line-F opcodes handled in exec_groupF. */
 
 illegal:
     cf_exception(cpu, CF_VEC_ILLEGAL);
@@ -2174,6 +2179,31 @@ static void exec_groupF(cf_cpu *cpu, uint16_t op)
 {
     /* CP ID is in the opword bits 11-9 */
     int cp_id = (op >> 9) & 7;
+
+    /* Debug-unit writes occupy the 0xFBxx opword space (cp-id 5), not the FPU
+     * (cp-id 1).  WDDATA.sz <ea> (size field != 3) copies a source operand to
+     * the DDATA port; WDEBUG.L <ea> (size field == 3) copies two long words to
+     * the debug control registers.  No debug module exists here, so both are
+     * NOPs that only need to consume their operands and advance the PC past the
+     * effective-address extension words.  WDDATA is unprivileged; WDEBUG is
+     * supervisor-only and faults in user mode (the group-4 TODO called all the
+     * debug instructions privileged, but only WDEBUG is). */
+    if ((op & 0xFF00) == 0xFB00) {
+        int mode = (op >> 3) & 7;
+        int reg = op & 7;
+
+        if ((op & 0x00C0) == 0x00C0) {          /* WDEBUG.L <ea> */
+            if (!is_supervisor(cpu)) {
+                cf_exception(cpu, CF_VEC_PRIVILEGE);
+                return;
+            }
+            fetch16(cpu);                       /* the command extension word */
+            decode_ea(cpu, mode, reg, SZ_LONG); /* consume EA extensions */
+        } else {                                /* WDDATA.sz <ea> */
+            ea_read(cpu, mode, reg, decode_size((op >> 6) & 3));
+        }
+        return;
+    }
 
     if (cp_id != 1) {
         cf_exception(cpu, CF_VEC_LINE_F);

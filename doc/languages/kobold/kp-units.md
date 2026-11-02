@@ -564,12 +564,23 @@ same name ahead of it with `-U` or `KOBOLD_UNITS`.
 The units, by tier:
 
 - `io.files`: whole-file (`ReadFile`/`WriteFile`) and handle (`Open`/`Create`/`ReadLine`/
-  `WriteLine`/`Close`) text I/O, plus the file-metadata and path operations: `Exists`,
+  `ReadChar`/`WriteLine`/`Close`) text I/O, plus the file-metadata and path operations: `Exists`,
   `FileSize` (an `Int64`), `IsDir`, `DeleteFile`, `RenameFile`, `MakeDir`, `RemoveDir`. Each
   metadata/path call is a thin wrapper over an external cdecl into the runtime, which reaches
   the host through the libc `stat`/`fileops` helpers (statx and the `*at` syscall forms on the
   freestanding tier). `FileSize` and the predicates return a sentinel on a missing path
   (`-1` size, `false` predicate) rather than failing.
+- `io.textfile`: the classic ISO/Turbo Pascal text-file verbs over a `TextFile` value, for
+  programs that want the familiar idiom rather than `io.files`'s own surface: `Assign` binds a
+  name, `Reset` opens it for reading and `Rewrite` creates it for writing, then `Read` takes one
+  raw character, `ReadLn` a whole line, and `Write`/`WriteLn` output; `Eof` and `Eoln` are the
+  look-ahead end-of-file and end-of-line tests (so `while not Eof(f) do Read(f, c)` visits each
+  character once, true before the first `Read` on an empty file), and `CloseFile` finishes. It is
+  a thin shim over `io.files`, reading through its `ReadChar` with one character of look-ahead, so
+  the descriptors, buffering, and the `kpf_` seam stay single-sourced there. The dialect has no
+  `IOResult`, so `Reset`/`Rewrite` record the open outcome and `IOOk` reports it. The verbs are
+  reached through the `textfile` qualifier, since `Read`/`Write`/`ReadLn`/`WriteLn` also name
+  console builtins.
 - `io.dirs`: directory enumeration.
 - `io.console`: the standard input and output as typed functions: `Eof` (the sticky
   end-of-input latch), `ReadLine`/`ReadChar`, `WriteStr`/`WriteLine`/`WriteChar`, and the real

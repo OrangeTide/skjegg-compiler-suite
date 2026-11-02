@@ -228,14 +228,17 @@ targets.
   - The seam is already one. moo, pascal, and the libc all reach the host
     through the crt's bare `write`/`read`/`exit` (see the seam note above);
     only `__libc_sbrk` is libc-private. No collapse was needed.
-  - The formatters do not converge. The shared `__vformat` engine now has the
-    floating conversions f/e/g (the one real libc gap, closed this phase in
-    `libc/printf.c`, pinned by `tests/libc_phase_e.c`). But the runtime
-    formatters stay bespoke by design: each carries domain semantics the
-    generic engine does not (Pascal shortstring output, the MOO error-name
-    table and scientific float style). Only plain integer-to-decimal overlaps,
-    which is too small to share
-    across the ABI and arena boundaries.
+  - The number formatters converge where it is libgcc-free to. The shared
+    `__vformat` engine has the floating conversions f/e/g (closed this phase in
+    `libc/printf.c`, pinned by `tests/libc_phase_e.c`), and the two libgcc-free
+    core formatters live in `libc/numfmt.c` (`__fmt_udec` for unsigned decimal
+    and `__fmt_greal` for a finite `%g` real) and are shared across the ABI
+    boundary: the C libc's `%g` path AND the Kobold runtime's `writeln`/`readln`
+    numeric output (`io_write_int`/`io_write_real`) call them, so a C program and
+    a Kobold program built against the same libc print a number identically (see
+    `doc/abi/README.md`). What stays bespoke is the format *framing* each runtime
+    wraps around those digits (Pascal shortstring output, the MOO error-name
+    table), not the digit conversions themselves.
   - The mem functions were left as they are. `runtime/pascal_rt.c` defines
     `memset`/`memmove` because the Pascal codegen emits calls to them; those
     are the canonical copies for the Pascal tiers, which link no libc. The

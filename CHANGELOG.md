@@ -6,6 +6,44 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.39.0
+
+#### Added
+- The gdb remote stubs report the floating-point registers. The RISC-V stub
+  advertises the 32 `f` registers and `fcsr` in its target description, the MIPS
+  stub appends the 32 FP registers and `fcsr`/`fir` to its `g` packet, and the
+  HV stub returns the x86-64 SSE / AArch64 SIMD register file, so a debugger can
+  read float state on every tier, not only the integer registers.
+- The gdb remote stubs honour write watchpoints (`Z2`/`z2`). A `watch`
+  expression now stops the guest when the watched address is written, on the
+  RISC-V, MIPS and HV stubs.
+- A spawned child's fault backtrace is symbolized against the child's own ELF
+  image, not the root process's. Each process keeps its own DWARF reader, so a
+  crash in a program a guest spawned resolves to that program's file and line.
+- Kobold gains `io.textfile`, a unit that provides the classic Pascal file
+  verbs (`Assign`, `Reset`, `Rewrite`, `Read`, `ReadLn`, `Write`, `WriteLn`,
+  `Eof`, `Eoln`, `CloseFile`) over the shared POSIX file seam, including a
+  character-level `Read` built on a one-character look-ahead.
+
+#### Changed
+- Kobold console number output routes through the shared C-runtime formatters
+  (`__fmt_udec` and `__fmt_greal` in `libc/numfmt.c`). The per-tier number
+  formatting in `kp_io.c` is gone, so a Kobold program and a C program print an
+  integer or a real the same way, with no libgcc 64-bit-divide or
+  double-to-u64 helper pulled on the freestanding tier.
+- The documentation set is swept current with the shipped debugger, the LP64
+  migration, the shared number formatter, the ColdFire control-register decode,
+  and the Pascal record field alignment.
+
+#### Fixed
+- Kobold console real output spells the non-finite values. A positive or
+  negative infinity now prints as `inf` or `-inf` and a NaN as `nan`, rather
+  than a garbage digit string from feeding a non-finite value to the finite
+  formatter.
+- The ColdFire core implements the `PULSE`, `WDDATA` and `WDEBUG` debug
+  instructions instead of faulting on them, so code that emits them runs under
+  the emulator.
+
 ### 0.38.0
 
 #### Added

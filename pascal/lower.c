@@ -520,7 +520,7 @@ find_captures(struct node *decl, int outer_start,
  * Function return tracking
  ****************************************************************/
 
-static char *cur_func_name;
+static const char *cur_func_name;
 static int ret_slot;
 static int ret_is_i64;          /* the current function returns an Int64 */
 static int ret_is_float;        /* the current function returns a real */
@@ -5223,7 +5223,7 @@ lower_function(struct node *decl, int is_func,
     struct node *p, *d, *block;
     int nparams, saved_nsyms, saved_nslots, saved_slot_cap;
     int *saved_slot_sizes;
-    char *saved_func_name;
+    const char *saved_func_name;
     int saved_ret_slot, saved_exit_label, saved_nloops, saved_nwith;
     int saved_ret_is_i64, saved_ret_is_float, saved_ret_fw, saved_ret_is_str;
     int saved_ret_is_compound, saved_ret_ptr_slot;

@@ -321,7 +321,7 @@ check-jit: build/skj-jit
 ## A driver's main.c links against this; skj-kp-jit is the generic runner and
 ## skj-kp-patrol a host that adds an opaque handle type.
 KP_RT  := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kobold/map.c kobold/rt_host.c \
-          kobold/co_shim.c runtime/co_switch_x86.S kobold/kp_host.c kobold/kp_io.c \
+          kobold/co_shim.c runtime/co_switch_x86.S kobold/kp_host.c kobold/kp_io.c libc/numfmt.c \
           runtime/rng.c runtime/rng_glue.c runtime/sched_glue.c \
           jit/jit_common.c jit/jit_arena.c jit/jit_x86.c jit/emit_x86.c jit/code.c \
           jit/call_guest_x86.S \
@@ -487,7 +487,7 @@ build/skj-kp-patrol: kobold/patrol_main.c $(KP_RT) build/kp_co.o $(KP_HDRS) Make
 ## holds without MAP_32BIT.  Built with RVJIT_CC (zig's bundled rv32 libc, since the
 ## rv64 toolchain has no ilp32 multilib) and run under qemu-riscv32.
 KP_RT_RV := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kobold/map.c kobold/rt_host.c \
-            kobold/co_shim.c runtime/co_switch_rv.S kobold/kp_host.c kobold/kp_io.c \
+            kobold/co_shim.c runtime/co_switch_rv.S kobold/kp_host.c kobold/kp_io.c libc/numfmt.c \
             runtime/rng.c runtime/rng_glue.c runtime/sched_glue.c \
             jit/jit_common.c jit/jit_arena.c jit/jit_rv.c jit/emit_rv.c jit/code.c \
             jit/call_guest_rv.S jit/rv_jit_i64.S \
@@ -513,7 +513,7 @@ build/skj-kp-jit-rv: kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c $(KP_
 ## rt_host.c/co_shim.c).  Cross-built with the arm64 toolchain and run under
 ## qemu-aarch64, which executes the JIT-generated code.
 KP_RT_A64 := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kobold/map.c kobold/rt_host.c \
-             kobold/co_shim.c runtime/co_switch_arm64.S kobold/kp_host.c kobold/kp_io.c \
+             kobold/co_shim.c runtime/co_switch_arm64.S kobold/kp_host.c kobold/kp_io.c libc/numfmt.c \
              runtime/rng.c runtime/rng_glue.c runtime/sched_glue.c \
              jit/jit_common.c jit/jit_arena.c jit/jit_arm64.c jit/emit_arm64.c jit/code.c \
              jit/call_guest_arm64.S \
@@ -580,7 +580,7 @@ check-kp: build/skj-kp
 ## link rather than through a binding table.
 ## co.c is vendored and builds with -Wall -Wextra but not -Wpedantic, so it is taken
 ## from the shared build/kp_co.o rule rather than recompiled here.
-KP_AOT_RT := kobold/aot_rt.c kobold/kp_host.c kobold/kp_io.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
+KP_AOT_RT := kobold/aot_rt.c kobold/kp_host.c kobold/kp_io.c libc/numfmt.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
              kobold/map.c kobold/rt_host.c kobold/co_shim.c \
              runtime/rng.c runtime/rng_glue.c runtime/sched_glue.c \
              runtime/co_switch_x86.S jit/call_guest_x86.S
@@ -633,7 +633,7 @@ build/skj-kp-cf: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_CF) kobold/kpm.h 
 ## stack-ABI 64-bit multiply and shifts the guest reaches through the skj_jit_*
 ## names (the register-ABI __divdi3 family and all FP math come from the toolchain
 ## runtime library at link).  arm64 needs neither: i64 and doubles are native.
-KP_AOT_RT_RV := kobold/aot_rt.c kobold/kp_host.c kobold/kp_io.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
+KP_AOT_RT_RV := kobold/aot_rt.c kobold/kp_host.c kobold/kp_io.c libc/numfmt.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
                 kobold/map.c kobold/rt_host.c kobold/co_shim.c \
                 runtime/co_switch_rv.S jit/call_guest_rv.S jit/rv_jit_i64.S \
                 kobold/rv_i64_aot_alias.S
@@ -647,7 +647,7 @@ build/libkpaot-rv.a: $(KP_AOT_RT_RV) build/kp_co_rv.o $(KP_HDRS_RV) runtime/i64_
 	@rm -f $@
 	$(AR) rcs $@ build/aot-rv/*.o build/kp_co_rv.o
 
-KP_AOT_RT_A64 := kobold/aot_rt.c kobold/kp_host.c kobold/kp_io.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
+KP_AOT_RT_A64 := kobold/aot_rt.c kobold/kp_host.c kobold/kp_io.c libc/numfmt.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
                  kobold/map.c kobold/rt_host.c kobold/co_shim.c \
                  runtime/rng.c runtime/rng_glue.c runtime/sched_glue.c \
                  runtime/co_switch_arm64.S jit/call_guest_arm64.S
@@ -670,7 +670,7 @@ build/libkpaot-arm64.a: $(KP_AOT_RT_A64) build/kp_co_a64_lp64.o $(KP_HDRS_A64) M
 ## the parameterless entry.  Unlike the freestanding libkpaot-cf-free.a (a no-libc
 ## boris tier over skj-run), this links against glibc and runs under qemu-m68k, which
 ## is what the behavioral corpus (tests/kp-corpus) needs for its emit* externals.
-KP_AOT_RT_CF := kobold/aot_rt.c kobold/kp_host.c kobold/kp_io.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
+KP_AOT_RT_CF := kobold/aot_rt.c kobold/kp_host.c kobold/kp_io.c libc/numfmt.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
                 kobold/map.c kobold/rt_host.c kobold/co_shim.c \
                 runtime/co_switch_cf.S jit/call_guest_cf.S
 build/libkpaot-cf.a: $(KP_AOT_RT_CF) build/kp_co_cf.o $(KP_HDRS) Makefile | build
@@ -862,6 +862,12 @@ build/kp-files/io/files.kpm: kobold/lib/io/files.pas build/skj-kpc | build
 	@mkdir -p build/kp-files/io
 	./build/skj-kpc --emit-kpm $< > $@
 
+## io.textfile uses io.files, so it compiles with -U pointing at the directory
+## whose io/ holds files.kpm.
+build/kp-files/io/textfile.kpm: kobold/lib/io/textfile.pas build/kp-files/io/files.kpm build/skj-kpc | build
+	@mkdir -p build/kp-files/io
+	./build/skj-kpc -U build/kp-files --emit-kpm $< > $@
+
 check-kp-files: build/skj-kp-jit build/skj-kpc build/skj-kpc-rv build/skj-kp build/libkpaot.a \
                 build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
                 build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a \
@@ -899,6 +905,49 @@ check-kp-files: build/skj-kp-jit build/skj-kpc build/skj-kpc-rv build/skj-kp bui
 	 cmp -s build/kp-files/free-rv.out tests/kp-files/filesrt.expected \
 	    || { echo "FAIL kp-files (free-rv)"; cat build/kp-files/rv.err build/kp-files/free-rv.err build/kp-files/free-rv.out; exit 1; }
 	@echo "kp-files: 1 passed (jit, aot, free-rv)"
+
+## The classic Pascal file verbs (io.textfile) over the same three tiers as
+## check-kp-files: io.textfile is a thin unit over io.files, so both unit modules
+## link into the program.  The freestanding runner does not walk `.uses`, so the
+## rv32 tier compiles the program and both units width-4 and links them together.
+check-kp-textfile: build/skj-kp-jit build/skj-kpc build/skj-kpc-rv build/skj-kp build/libkpaot.a \
+                   build/skj-kp-rv build/skj-as-rv build/skj-ld-rv \
+                   build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a \
+                   build/kp-files/io/files.kpm build/kp-files/io/textfile.kpm
+	@cp tests/kp-files/textfilert.pas build/kp-files/textfilert.pas
+	@rm -f build/kp-files/tf.txt
+	@./build/skj-kp-jit build/kp-files/textfilert.pas $(CURDIR)/build/kp-files/tf.txt \
+	    > build/kp-files/tf-jit.out 2>build/kp-files/tf-jit.err; \
+	 cmp -s build/kp-files/tf-jit.out tests/kp-files/textfilert.expected \
+	    || { echo "FAIL kp-textfile (jit)"; cat build/kp-files/tf-jit.err build/kp-files/tf-jit.out; exit 1; }
+	@./build/skj-kpc -U build/kp-files --emit-kpm build/kp-files/textfilert.pas \
+	    > build/kp-files/textfilert.kpm 2>build/kp-files/tf-emit.err
+	@rm -f build/kp-files/tf.txt
+	@KOBOLD_UNITS=$(CURDIR)/build/kp-files KPAOT=build/skj-kp KPAOTLIB=build/libkpaot.a \
+	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
+	    sh kobold/aot-run.sh build/kp-files/textfilert.kpm $(CURDIR)/build/kp-files/tf.txt \
+	    > build/kp-files/tf-aot.out 2>build/kp-files/tf-aot.err; \
+	 cmp -s build/kp-files/tf-aot.out tests/kp-files/textfilert.expected \
+	    || { echo "FAIL kp-textfile (aot)"; cat build/kp-files/tf-aot.err build/kp-files/tf-aot.out; exit 1; }
+	@# freestanding rv32: re-emit the program and both units width-4 and link them.
+	@./build/skj-kpc-rv --emit-kpm kobold/lib/io/files.pas > build/kp-files/io/files-32.kpm 2>build/kp-files/tf-rv.err
+	@./build/skj-kpc-rv -U build/kp-files --emit-kpm kobold/lib/io/textfile.pas > build/kp-files/io/textfile-32.kpm 2>>build/kp-files/tf-rv.err
+	@./build/skj-kpc-rv -U build/kp-files --emit-kpm build/kp-files/textfilert.pas > build/kp-files/textfilert-32.kpm 2>>build/kp-files/tf-rv.err
+	@./build/skj-kp-rv build/kp-files/io/files-32.kpm -o build/kp-files/tf_files_rv.s 2>>build/kp-files/tf-rv.err
+	@./build/skj-as-rv -o build/kp-files/tf_files_rv.o build/kp-files/tf_files_rv.s 2>>build/kp-files/tf-rv.err
+	@./build/skj-kp-rv build/kp-files/io/textfile-32.kpm -o build/kp-files/tf_textfile_rv.s 2>>build/kp-files/tf-rv.err
+	@./build/skj-as-rv -o build/kp-files/tf_textfile_rv.o build/kp-files/tf_textfile_rv.s 2>>build/kp-files/tf-rv.err
+	@./build/skj-kp-rv build/kp-files/textfilert-32.kpm -o build/kp-files/textfilert_rv.s 2>>build/kp-files/tf-rv.err
+	@./build/skj-as-rv -o build/kp-files/textfilert_rv.o build/kp-files/textfilert_rv.s 2>>build/kp-files/tf-rv.err
+	@./build/skj-ld-rv -o build/kp-files/textfilert_rv.elf build/kpfree-rv/kp_crt_rv.o \
+	    build/kp-files/textfilert_rv.o build/kp-files/tf_textfile_rv.o build/kp-files/tf_files_rv.o \
+	    build/libkpaot-rv-free.a 2>>build/kp-files/tf-rv.err
+	@rm -f build/kp-files/tf.txt
+	@$(QEMU_RV) build/kp-files/textfilert_rv.elf $(CURDIR)/build/kp-files/tf.txt \
+	    > build/kp-files/tf-free-rv.out 2>build/kp-files/tf-free-rv.err; \
+	 cmp -s build/kp-files/tf-free-rv.out tests/kp-files/textfilert.expected \
+	    || { echo "FAIL kp-textfile (free-rv)"; cat build/kp-files/tf-rv.err build/kp-files/tf-free-rv.err build/kp-files/tf-free-rv.out; exit 1; }
+	@echo "kp-textfile: 1 passed (jit, aot, free-rv)"
 
 build/kp-dirs/io/dirs.kpm: kobold/lib/io/dirs.pas build/skj-kpc | build
 	@mkdir -p build/kp-dirs/io
@@ -1935,13 +1984,45 @@ test-hv-gdb: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
 	     -ex "continue" build/debug/xloc.elf >build/debug/xg.out 2>&1; \
 	 wait $$rp 2>/dev/null; \
 	 ok=1; \
-	 grep -q "Breakpoint 1, 0x0000000000100060 in main" build/debug/xg.out || { echo "FAIL: no break at main"; ok=0; }; \
-	 grep -q "<main+4>" build/debug/xg.out || { echo "FAIL: register packet wrong pc"; ok=0; }; \
-	 grep -q "0x100060.*0x53" build/debug/xg.out || { echo "FAIL: memory packet did not read guest code"; ok=0; }; \
+	 grep -qE "Breakpoint 1, 0x[0-9a-f]+ in main" build/debug/xg.out || { echo "FAIL: no break at main"; ok=0; }; \
+	 grep -q "<main+" build/debug/xg.out || { echo "FAIL: register packet wrong pc"; ok=0; }; \
+	 grep -qE "<main\+[0-9]+>:[[:space:]]+0x53" build/debug/xg.out || { echo "FAIL: memory packet did not read guest code"; ok=0; }; \
 	 grep -q "exited with code 05" build/debug/xg.out || { echo "FAIL: loc did not exit 05"; ok=0; }; \
 	 if [ $$ok = 1 ]; then \
 	     echo "PASS: gdb drives the skj-run HV x86-64 RSP stub (break, regs, mem, exit)"; \
 	 else cat build/debug/xg.out; exit 1; fi
+
+## FP (SSE) registers and a write watchpoint over the HV x86-64 stub: an xmm
+## register round-trips through g/G, and a Z2 watchpoint on a global stops the
+## guest at the write (snapshot/compare while single-stepping the vcpu).
+test-hv-gdb-fpwatch: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
+                     build/hv-x86_64/start.o build/hv-x86_64/syscall.o
+	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: test-hv-gdb-fpwatch (no accessible /dev/kvm)"; exit 0; fi; \
+	 if ! command -v $(HV_GDB) >/dev/null 2>&1; then \
+	     echo "SKIP: test-hv-gdb-fpwatch ($(HV_GDB) not found)"; exit 0; fi; \
+	 mkdir -p build/debug; \
+	 ./build/skj-cc-x86-64 -g -o build/debug/xwatch.s tests/debug/watch.c; \
+	 ./build/skj-as-x86-64 -o build/debug/xwatch.o build/debug/xwatch.s; \
+	 $(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none \
+	     -o build/debug/xwatch.elf build/hv-x86_64/start.o build/debug/xwatch.o \
+	     build/hv-x86_64/syscall.o; \
+	 port=$$((20000 + ($$$$ + 4) % 20000)); \
+	 ./build/skj-run --gdb $$port build/debug/xwatch.elf >/dev/null 2>build/debug/xw.err & rp=$$!; \
+	 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+	     grep -q listening build/debug/xw.err 2>/dev/null && break; sleep 0.2; done; \
+	 $(HV_GDB) -q -nx -batch -ex "set pagination off" \
+	     -ex "target remote 127.0.0.1:$$port" -ex "break main" -ex "continue" \
+	     -ex "set \$$xmm0.v2_int64[0] = 42" -ex "print \$$xmm0.v2_int64[0]" \
+	     -ex "watch *(int *)&gcounter" -ex "continue" build/debug/xwatch.elf \
+	     >build/debug/xw.out 2>&1; \
+	 kill $$rp 2>/dev/null; wait $$rp 2>/dev/null; \
+	 ok=1; \
+	 grep -q "= 42" build/debug/xw.out || { echo "FAIL: xmm register did not round-trip"; ok=0; }; \
+	 grep -qiE "watchpoint" build/debug/xw.out || { echo "FAIL: watchpoint not set"; ok=0; }; \
+	 grep -q "New value = 1" build/debug/xw.out || { echo "FAIL: watchpoint did not fire on write"; ok=0; }; \
+	 if [ $$ok = 1 ]; then \
+	     echo "PASS: HV x86-64 stub serves SSE registers and a write watchpoint"; \
+	 else cat build/debug/xw.out; exit 1; fi
 
 ## Native macOS (Mach-O) target smoke (0.29.0 strand 3, Phase 1).  skj-cc-arm64
 ## emits Mach-O-assemblable AArch64 (the Darwin flavor: _-prefixed symbols, Mach-O
@@ -2203,7 +2284,7 @@ build:
 # rule.  (build itself stays separate above: much of the tree hangs off it.)
 BUILD_DIRS := build/kpfree-rv build/kpfree-cf build/hv-x86_64 build/hv-arm64 \
 	build/rv build/mips build/cf build/san build/arm64 build/x86_64 build/rv32 \
-	build/rv-skj build/sandbox build/spawn-argv build/spawn-wait build/spawn-kill \
+	build/rv-skj build/sandbox build/spawn-argv build/spawn-wait build/spawn-kill build/spawn-backtrace \
 	build/env-test build/xlang-sandbox build/sandbox-mips build/sandbox-cf \
 	build/mips-nr build/mips-asm build/cf-asm build/rv-asm build/x86-asm build/arm64-asm
 $(BUILD_DIRS):
@@ -2780,6 +2861,7 @@ check-emu-all: check-emu check-rv-emu check-mips-emu test-coop-read \
                test-rv-irq test-rv-run test-guest-mmap \
                test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox \
                test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill \
+               test-rv-spawn-backtrace \
                test-rv-spawn-mounts test-cf-spawn-mounts \
                test-rv-spawn-pipe test-cf-spawn-pipe \
                test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh \
@@ -4565,6 +4647,34 @@ test-rv-gdb: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-run build
 	     echo "PASS: gdb-multiarch drives the skj-run RSP stub (break, fault backtrace, exit)"; \
 	 else cat build/debug/g1.out build/debug/g2.out; exit 1; fi
 
+## FP registers in the target description and write watchpoints (Z2), driven
+## through the RISC-V stub with gdb-multiarch: a 64-bit FP register round-trips
+## through p/P, and a write watchpoint on a global stops the guest at the write.
+test-rv-gdb-fpwatch: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-run build/rv/start.o
+	@if ! command -v $(RV_GDB) >/dev/null 2>&1; then \
+	     echo "SKIP: test-rv-gdb-fpwatch ($(RV_GDB) not found)"; exit 0; fi; \
+	 mkdir -p build/debug; \
+	 ./build/skj-cc-rv -g -o build/debug/watch.s tests/debug/watch.c; \
+	 ./build/skj-as-rv -o build/debug/watch.o build/debug/watch.s; \
+	 ./build/skj-ld-rv -o build/debug/watch.elf build/rv/start.o build/debug/watch.o; \
+	 port=$$((20000 + ($$$$ + 2) % 20000)); \
+	 ./build/skj-run --gdb $$port build/debug/watch.elf >/dev/null 2>build/debug/w.err & rp=$$!; \
+	 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+	     grep -q listening build/debug/w.err 2>/dev/null && break; sleep 0.2; done; \
+	 $(RV_GDB) -q -nx -batch -ex "set pagination off" \
+	     -ex "target remote 127.0.0.1:$$port" -ex "break main" -ex "continue" \
+	     -ex "set \$$ft0 = 2.5" -ex "print \$$ft0" -ex "print \$$fcsr" \
+	     -ex "watch *(int *)&gcounter" -ex "continue" build/debug/watch.elf \
+	     >build/debug/w.out 2>&1; \
+	 kill $$rp 2>/dev/null; wait $$rp 2>/dev/null; \
+	 ok=1; \
+	 grep -q "2.5" build/debug/w.out || { echo "FAIL: FP register \$$ft0 did not round-trip"; ok=0; }; \
+	 grep -qiE "watchpoint" build/debug/w.out || { echo "FAIL: watchpoint not set"; ok=0; }; \
+	 grep -q "New value = 1" build/debug/w.out || { echo "FAIL: watchpoint did not fire on write"; ok=0; }; \
+	 if [ $$ok = 1 ]; then \
+	     echo "PASS: RISC-V stub serves FP registers and a write watchpoint"; \
+	 else cat build/debug/w.out; exit 1; fi
+
 ## The MIPS twin of test-rv-gdb, driven through the MIPS stub (emu/mips_gdb.c)
 ## with gdb-multiarch as the oracle: a break at main, the clean exit code, and a
 ## SIGSEGV whose faulting frame (level3) and its caller (level2) symbolize.  gdb
@@ -4611,6 +4721,33 @@ test-mips-gdb: build/skj-cc-mips build/skj-as-mips build/skj-ld-mips build/skj-r
 	     echo "PASS: gdb-multiarch drives the skj-run MIPS RSP stub (break, fault frame, exit)"; \
 	 else cat build/debug/mg1.out build/debug/mg2.out; exit 1; fi
 
+## The MIPS twin of test-rv-gdb-fpwatch: an FP register round-trips through the
+## stub's p/P (gdb's o32 f0-f31 at regnums 38-69) and a write watchpoint fires.
+test-mips-gdb-fpwatch: build/skj-cc-mips build/skj-as-mips build/skj-ld-mips build/skj-run build/mips/start.o
+	@if ! command -v $(MIPS_GDB) >/dev/null 2>&1; then \
+	     echo "SKIP: test-mips-gdb-fpwatch ($(MIPS_GDB) not found)"; exit 0; fi; \
+	 mkdir -p build/debug; \
+	 ./build/skj-cc-mips -g -o build/debug/mwatch.s tests/debug/watch.c; \
+	 ./build/skj-as-mips -o build/debug/mwatch.o build/debug/mwatch.s; \
+	 ./build/skj-ld-mips -o build/debug/mwatch.elf build/mips/start.o build/debug/mwatch.o; \
+	 port=$$((20000 + ($$$$ + 3) % 20000)); \
+	 ./build/skj-run --gdb $$port build/debug/mwatch.elf >/dev/null 2>build/debug/mw.err & rp=$$!; \
+	 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+	     grep -q listening build/debug/mw.err 2>/dev/null && break; sleep 0.2; done; \
+	 $(MIPS_GDB) -q -nx -batch -ex "set pagination off" \
+	     -ex "target remote 127.0.0.1:$$port" -ex "break main" -ex "continue" \
+	     -ex "set \$$f0 = 2.5" -ex "print \$$f0" \
+	     -ex "watch *(int *)&gcounter" -ex "continue" build/debug/mwatch.elf \
+	     >build/debug/mw.out 2>&1; \
+	 kill $$rp 2>/dev/null; wait $$rp 2>/dev/null; \
+	 ok=1; \
+	 grep -q "2.5" build/debug/mw.out || { echo "FAIL: FP register \$$f0 did not round-trip"; ok=0; }; \
+	 grep -qiE "watchpoint" build/debug/mw.out || { echo "FAIL: watchpoint not set"; ok=0; }; \
+	 grep -q "New value = 1" build/debug/mw.out || { echo "FAIL: watchpoint did not fire on write"; ok=0; }; \
+	 if [ $$ok = 1 ]; then \
+	     echo "PASS: MIPS stub serves FP registers and a write watchpoint"; \
+	 else cat build/debug/mw.out; exit 1; fi
+
 ## skj-dbg end to end (item 6b): the in-tree debugger launches skj-run --gdb,
 ## connects over the RSP, and drives break / continue / backtrace, symbolizing
 ## through the shared DWARF reader.  Self-contained (no external gdb).
@@ -4635,6 +4772,36 @@ test-rv-dbg: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-run build
 	 if [ $$ok = 1 ]; then \
 	     echo "PASS: skj-dbg break/continue/backtrace over the RSP, DWARF-symbolized"; \
 	 else cat build/debug/dbg1.out build/debug/dbg2.out; exit 1; fi
+
+## Multi-sandbox debugging: two debugger+sandbox pairs at once.  A sandbox is one
+## gdb process; debugging several means running several skj-run --gdb instances,
+## each on its own port with its own debugger attached.  The stub binds the port
+## it is handed and keeps all its state per connection (no process-global state),
+## so concurrent instances do not interfere.  This runs two skj-dbg sessions in
+## parallel on distinct ports -- a breakpoint session and a crash-backtrace
+## session -- and checks each still gets its own correct, symbolized result.
+test-rv-dbg-multi: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-run build/skj-dbg build/rv/start.o
+	@mkdir -p build/debug
+	@./build/skj-cc-rv -g -o build/debug/loc.s tests/debug/loc.c
+	@./build/skj-as-rv -o build/debug/loc.o build/debug/loc.s
+	@./build/skj-ld-rv -o build/debug/loc.elf build/rv/start.o build/debug/loc.o
+	@./build/skj-cc-rv -g -o build/debug/crash.s tests/debug/crash.c
+	@./build/skj-as-rv -o build/debug/crash.o build/debug/crash.s
+	@./build/skj-ld-rv -o build/debug/crash.elf build/rv/start.o build/debug/crash.o
+	@./build/skj-dbg --port 21877 --run ./build/skj-run -ex "break main" -ex "continue" \
+	     build/debug/loc.elf >build/debug/multi1.out 2>&1 & p1=$$!; \
+	 ./build/skj-dbg --port 21879 --run ./build/skj-run -ex "continue" -ex "backtrace" \
+	     build/debug/crash.elf >build/debug/multi2.out 2>&1 & p2=$$!; \
+	 wait $$p1; wait $$p2; \
+	 ok=1; \
+	 grep -q "breakpoint at .*main at .*loc.c:" build/debug/multi1.out || { echo "FAIL: instance 1 break not symbolized"; ok=0; }; \
+	 grep -q "stopped in main at .*loc.c:" build/debug/multi1.out || { echo "FAIL: instance 1 did not stop in main"; ok=0; }; \
+	 grep -q "SIGSEGV.*in level3 at .*crash.c:" build/debug/multi2.out || { echo "FAIL: instance 2 no symbolized SIGSEGV"; ok=0; }; \
+	 bt=`grep '^#' build/debug/multi2.out | sed 's/.*0x[0-9a-f]* *//; s/ at .*//' | grep -E 'level|main' | tr '\n' ' '`; \
+	 if [ "$$bt" != "level3 level2 level1 main " ]; then echo "FAIL: instance 2 bt order [$$bt]"; ok=0; fi; \
+	 if [ $$ok = 1 ]; then \
+	     echo "PASS: two concurrent skj-dbg sessions on distinct sandbox instances"; \
+	 else cat build/debug/multi1.out build/debug/multi2.out; exit 1; fi
 
 ## Sandbox file I/O (openat): a guest opens a real host file through the RV32
 ## sandbox's openat/read/write/close and copies it to stdout.  This is the
@@ -5829,6 +5996,39 @@ build/spawn-kill/parent.elf: build/spawn-kill/parent.o build/rv-skj/start.o buil
 test-rv-spawn-kill: build/spawn-kill/parent.elf build/skj-run
 	@sh tests/run-spawn-kill.sh "$(CURDIR)/build/skj-run" "$(CURDIR)/build/spawn-kill/parent.elf"
 
+## Multi-process DWARF symbolization: a root spawns a child (built -g, embedded)
+## that faults in a named function.  skj-run now retains each process's own ELF
+## image, so the child's fault backtrace ("[proc 2]") is symbolized, not raw
+## addresses.  The child image carries DWARF; the assertion checks a real frame
+## name appears below the "[proc 2] backtrace:" header.
+build/spawn-backtrace/child.o: tests/spawn-backtrace/child.c build/skj-cc-rv build/skj-as-rv | build/spawn-backtrace
+	./build/skj-cc-rv -g -o build/spawn-backtrace/child.s $<
+	./build/skj-as-rv -o $@ build/spawn-backtrace/child.s
+
+build/spawn-backtrace/child.elf: build/spawn-backtrace/child.o build/rv-skj/start.o build/skj-ld-rv
+	./build/skj-ld-rv -o $@ build/rv-skj/start.o build/spawn-backtrace/child.o
+
+build/spawn-backtrace/child_image.h: build/spawn-backtrace/child.elf
+	printf 'static const unsigned char child_img[] = {\n' > $@
+	xxd -i < build/spawn-backtrace/child.elf >> $@
+	printf '};\n#define CHILD_IMG_LEN %uu\n' "$$(wc -c < build/spawn-backtrace/child.elf)" >> $@
+
+build/spawn-backtrace/parent.o: tests/spawn-backtrace/parent.c build/spawn-backtrace/child_image.h build/skj-cc-rv build/skj-as-rv | build/spawn-backtrace
+	./build/skj-cc-rv -Ibuild/spawn-backtrace -o build/spawn-backtrace/parent.s $<
+	./build/skj-as-rv -o $@ build/spawn-backtrace/parent.s
+
+build/spawn-backtrace/parent.elf: build/spawn-backtrace/parent.o build/rv-skj/start.o build/skj-ld-rv
+	./build/skj-ld-rv -o $@ build/rv-skj/start.o build/spawn-backtrace/parent.o
+
+test-rv-spawn-backtrace: build/spawn-backtrace/parent.elf build/skj-run
+	@./build/skj-run build/spawn-backtrace/parent.elf \
+	    >build/spawn-backtrace/out 2>build/spawn-backtrace/err; \
+	 grep -q "\[proc 2\] backtrace:" build/spawn-backtrace/err \
+	    || { echo "FAIL: no child (proc 2) backtrace"; cat build/spawn-backtrace/err; exit 1; }; \
+	 grep -qE '  (crash|main)( at |$$)' build/spawn-backtrace/err \
+	    || { echo "FAIL: child backtrace not symbolized"; cat build/spawn-backtrace/err; exit 1; }; \
+	 echo "PASS: spawned child fault is DWARF-symbolized ([proc 2] backtrace)"
+
 ## SKJ_SPAWN_FLAG_SHARE_MOUNTS: a root granted a --mount spawns a child that
 ## inherits the mount and reads a seeded file through it.  The runner builds
 ## both guests with the fs/-interpose libc, embeds the child in the parent, and
@@ -6988,12 +7188,12 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            test-cf-addr2line test-mips-addr2line test-mips-backtrace \
            test-cf-wild-backtrace test-cf-abort-backtrace \
            test-kp-cf-dwarf test-kp-cf-trap-backtrace \
-           test-rv-dbg test-rv-gdb test-mips-gdb test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-cf-selfhost test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc check-selfhost-all test-help \
+           test-rv-dbg test-rv-dbg-multi test-rv-gdb test-rv-gdb-fpwatch test-mips-gdb test-mips-gdb-fpwatch test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-cf-selfhost test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc check-selfhost-all test-help \
            check-cc-rv-psabi test-cc-rv-psabi-interop \
            test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive \
            test-cc-rv-psabi-struct test-cc-driver check-libc \
            check-kp \
-           check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-corpus check-kp-corpus-cf check-kp-multi check-kp-files check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-inc
+           check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-corpus check-kp-corpus-cf check-kp-multi check-kp-files check-kp-textfile check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-inc
 	@echo "All architecture test suites passed."
 
 clean:
@@ -7012,4 +7212,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill test-rv-spawn-mounts test-cf-spawn-mounts test-rv-spawn-pipe test-cf-spawn-pipe test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh test-rv-vdso test-cf-vdso test-mips-vdso test-rv-mem-root test-sched-embed test-hv-x86-64-vdso test-hv-arm64-vdso test-rv-env test-cf-env test-hv-x86-64-env test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as test-ld-x86-64 test-ld-arm64 test-cc-driver-x86-64 test-cc-driver-arm64 check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-preempt test-hv-parallel check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill test-rv-spawn-backtrace test-rv-spawn-mounts test-cf-spawn-mounts test-rv-spawn-pipe test-cf-spawn-pipe test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh test-rv-vdso test-cf-vdso test-mips-vdso test-rv-mem-root test-sched-embed test-hv-x86-64-vdso test-hv-arm64-vdso test-rv-env test-cf-env test-hv-x86-64-env test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as test-ld-x86-64 test-ld-arm64 test-cc-driver-x86-64 test-cc-driver-arm64 check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-textfile check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-gdb-fpwatch test-hv-preempt test-hv-parallel check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE

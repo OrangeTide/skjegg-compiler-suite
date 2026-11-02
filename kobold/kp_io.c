@@ -11,10 +11,12 @@
    for a following readln.  Any larger buffering, or a general ungetc, is an
    application concern, not a runtime one.
 
-   int, char, and string output are formatted here (decimal digits inline); real
-   output is io_write_real, which each tier defines over its own %g renderer.
-   Real input uses the tier's strtod (libc/strtod.c freestanding, the host libc
-   hosted), a decimal-float scan either way. */
+   Numeric output routes through the shared C-runtime formatters (libc/numfmt.c):
+   io_write_int through __fmt_udec and io_write_real through __fmt_greal, the same
+   libgcc-free renderers the C libc's %g path uses, so a Kobold program and a C
+   program built against the same libc print a number identically.  Real input
+   uses the tier's strtod (libc/strtod.c freestanding, the host libc hosted), a
+   decimal-float scan either way. */
 
 #include "kp_io.h"
 
@@ -35,6 +37,14 @@ extern double strtod(const char *s, char **end);   /* libc/strtod.c */
 #include <stdlib.h>     /* exit, strtod */
 #define KP_IO_EXIT(c) exit(c)
 #endif
+
+/* The libgcc-free number formatters shared with the C libc's %g path (libc/
+   numfmt.c).  __fmt_udec writes an unsigned value's decimal digits (most
+   significant first, no NUL, no sign); __fmt_greal renders a finite, non-negative
+   double like "%g".  Declared here because this file carries no -Ilibc; keep in
+   step with libc/fmt.h. */
+extern int __fmt_udec(char *out, uint64_t v);
+extern int __fmt_greal(char *out, double v, int sig, int alt, int upper);
 
 /****************************************************************
  * Output (over the write seam, one call per value; no buffering)
@@ -62,26 +72,51 @@ io_write_char(int fd, int ch)
     out_bytes(fd, &c, 1);
 }
 
-/* A decimal integer formatted into a stack buffer, no heap string.  INT_MIN is
-   safe: the magnitude is taken in unsigned. */
+/* A decimal integer: the sign here, the magnitude's digits from the shared
+   __fmt_udec (numfmt.c).  INT_MIN is safe: the magnitude is taken in unsigned. */
 void
 io_write_int(int fd, int v)
 {
-    char out[12], tmp[12];
-    int j = 0, t = 0;
+    char out[12];
+    int j = 0;
     unsigned int m = v < 0 ? 0u - (unsigned int)v : (unsigned int)v;
 
     if (v < 0)
         out[j++] = '-';
-    if (m == 0)
-        tmp[t++] = '0';
-    while (m) {
-        tmp[t++] = (char)('0' + m % 10u);
-        m /= 10u;
-    }
-    while (t > 0)
-        out[j++] = tmp[--t];
+    j += __fmt_udec(out + j, (uint64_t)m);
     out_bytes(fd, out, j);
+}
+
+/* real printed like C's "%g" (six significant digits): the sign and the NaN /
+   infinity spellings here, the finite magnitude through the shared __fmt_greal
+   (numfmt.c), the same renderer the C libc's %g uses.  The dialect has no
+   field-width formatting.  The bytes go straight to the fd like every other
+   console write, so a hosted program never interleaves a buffered stdio stream
+   with them.  NaN and infinity are detected without <float.h> (absent on the
+   freestanding tier) by IEEE identities, like the NaN test the C libc shares:
+   `v != v` is NaN, and a positive value that equals its own double is infinity
+   (no finite positive v satisfies v + v == v). */
+static int
+fmt_g(double v, char *out)
+{
+    int n = 0;
+
+    if (v != v) { out[0] = 'n'; out[1] = 'a'; out[2] = 'n'; return 3; }
+    if (v < 0.0) { out[n++] = '-'; v = -v; }
+    if (v > 0.0 && v + v == v) {    /* infinity */
+        out[n++] = 'i'; out[n++] = 'n'; out[n++] = 'f';
+        return n;
+    }
+    return n + __fmt_greal(out + n, v, 6, 0, 0);
+}
+
+void
+io_write_real(int fd, double x)
+{
+    char buf[40];
+    int n = fmt_g(x, buf);
+
+    out_bytes(fd, buf, n);
 }
 
 void io_flush(int fd) { (void)fd; }     /* unbuffered: nothing to flush */

@@ -116,9 +116,12 @@
  * TODO
  * ----
  *
- * [x] call functions (no positional parameters yet; the body runs as a list)
- * [ ] variables, both global and local
- * [ ] important built-ins: export, set, break, continue, eval, exec, dot, colon, ...
+ * [x] call functions, with positional parameters ($1..$9, $@, $#, $0) swapped
+ *     for the call's arguments and a local-variable frame per call
+ * [x] variables, both global and local (the `local` built-in declares names in
+ *     the current function frame)
+ * [ ] remaining built-ins: export, set, eval, exec, dot (.), colon (:), test/[
+ *     (break, continue, return, local and kill are done)
  *
  * References
  * ----------
@@ -285,7 +288,9 @@ fdplan_init(struct fdplan *p)
 #define MAXVARNAME 32
 #define MAXLINE 2048
 #define MAXARGS  64
-// TODO: for job control: #define MAXJOBS 10
+/* No job table (jobs/fg/bg): `cmd &` runs fire-and-forget, reaped at the
+ * prompt (POSIX) or at shell exit (the skj-run sandbox, which has no process
+ * suspension, so stop/resume job control does not apply). */
 
 #ifndef _PATH_BSHELL
 #define _PATH_BSHELL    "/bin/sh"
@@ -536,7 +541,7 @@ static const char * const builtin_list[] = {
     [B_BREAK] = "break", [B_CONTINUE] = "continue",
     [B_RETURN] = "return", [B_LOCAL] = "local",
     [B_KILL] = "kill",
-/* TODO:
+/* Not yet implemented:
  * [B_COLON] = ":",
  * [B_DOT] = ".",
  * [B_EXPORT] = "export",
@@ -544,11 +549,6 @@ static const char * const builtin_list[] = {
  * [B_EXEC] = "exec",
  * [B_TEST] = "test",
  * [B_BRACKET] = "[", // but not bash's "[[" syntax
- * [B_BREAK] = "break",
- * [B_CONTINUE] = "continue",
- * [B_RETURN] = "return",
- * [B_] = "",
- * [B_] = "",
  */
 };
 static char linebuf[MAXLINE];
@@ -2321,14 +2321,13 @@ capture_command(const char *text)
  * - $NAME, ${NAME} — expand variable
  * - $? — last exit status
  * - $$ — shell pid
- * - $0-$9 — positional parameters (TODO)
+ * - $0-$9, ${N} — positional parameters ($0 is the shell or function name)
+ * - $#, ${#} — number of positional parameters
+ * - $@ / $* — all positional parameters (field-split when unquoted; emitted
+ *   directly rather than through a single value, since they span several words)
+ * - $(cmd) — command substitution; $((expr)) — arithmetic
+ * - $NAME, ${NAME} — shell variable
  * - Everything else — copy through
- *
- * TODO:
- * $# — number of positional parameters
- * $@ / $*** — all positional parameters (tricky — these expand to multiple words, which means expand_string returning a single string isn't sufficient)
- * $0-$9 — positional parameters
- * $(cmd) — command substitution (big feature, needs pipe+fork+read)
  *
  * Returns arena-allocated expanded string.
  */
@@ -2632,7 +2631,9 @@ lookup_builtin(const char *cmd)
             return i;
         }
     }
-    // TODO: look for functions
+    /* Functions are not built-ins: execute_tree resolves a defined function
+     * (findfunc) after this returns -1, so a function shadows an external
+     * command but not a built-in. */
     return -1;
 }
 
@@ -2651,7 +2652,7 @@ try_builtin(char *argv[])
         if (argv[1]) {
             if (chdir(argv[1]) < 0) {
                 perror(argv[1]);
-                last_status = 1; // TODO: test that this trick works
+                last_status = 1;
             }
         } else {
             puts("usage: cd <directory>");

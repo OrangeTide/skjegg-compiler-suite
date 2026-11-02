@@ -18,6 +18,41 @@ static int proc_new_mem(sched *S, const uint8_t *img, long len,
 static void reap_child(sched *S, int slot);
 static proc *proc_from_handle(sched *S, uint32_t handle);
 
+#ifdef SKJ_DWARF_BACKTRACE
+/* Retain a copy of a process's ELF image so its own DWARF can symbolize a fault
+ * in it, long after the loader's buffer is gone (a spawned child's image is
+ * freed right after loading).  Only an accepted process keeps one; a failed
+ * copy just leaves the process unsymbolized. */
+static void
+bt_retain_image(proc *p, const uint8_t *img, long len)
+{
+    if (len <= 0)
+        return;
+    p->bt_image = malloc((size_t)len);
+    if (p->bt_image) {
+        memcpy(p->bt_image, img, (size_t)len);
+        p->bt_image_len = len;
+    }
+}
+
+/* Release a process's retained image and its built reader.  Idempotent: the
+ * cleared state makes a second call a no-op, so the zombie, reap, and shutdown
+ * paths can each call it. */
+static void
+bt_free(proc *p)
+{
+    if (p->bt_state == 1)
+        arena_free(&p->bt_arena);
+    free(p->bt_image);
+    p->bt_image = NULL;
+    p->bt_image_len = 0;
+    p->bt_state = 0;
+}
+#else
+#define bt_retain_image(p, img, len)    ((void)0)
+#define bt_free(p)                      ((void)0)
+#endif
+
 /****************************************************************
  * Memory bus
  *
@@ -458,6 +493,7 @@ proc_discard(sched *S, proc *p)
     guest_fds_free(&p->g);
     guest_p9_free(&p->g);
     gm_free(&p->g.mem);
+    bt_free(p);
     free(p);
 }
 
@@ -567,6 +603,7 @@ proc_new_mem_root(sched *S, const uint8_t *img, long len, const char *what,
 {
     proc *p = proc_alloc(S);
     elf32_info info;
+    int h;
 
     if (!p)
         return 0;
@@ -575,7 +612,10 @@ proc_new_mem_root(sched *S, const uint8_t *img, long len, const char *what,
         proc_discard(S, p);
         return 0;
     }
-    return proc_accept(S, p, &info, what, argv, argc, envp, envc);
+    h = proc_accept(S, p, &info, what, argv, argc, envp, envc);
+    if (h > 0)
+        bt_retain_image(p, img, len);
+    return h;
 }
 
 /* A spawned child, from an in-memory image. */
@@ -585,6 +625,7 @@ proc_new_mem(sched *S, const uint8_t *img, long len, const char *what,
 {
     proc *p = proc_alloc(S);
     elf32_info info;
+    int h;
 
     if (!p)
         return 0;
@@ -597,7 +638,10 @@ proc_new_mem(sched *S, const uint8_t *img, long len, const char *what,
     }
     /* A spawned child inherits no environment yet; the spawn descriptor could
      * carry one later, the way it grew argv and the fd map. */
-    return proc_accept(S, p, &info, what, argv, argc, NULL, 0);
+    h = proc_accept(S, p, &info, what, argv, argc, NULL, 0);
+    if (h > 0)
+        bt_retain_image(p, img, len);
+    return h;
 }
 
 /****************************************************************
@@ -633,51 +677,56 @@ bt_read(void *ctx, uint32_t addr, void *dst, uint32_t len)
     return 1;
 }
 
-/* The DWARF reader over the root image, built once on the first fault.  Only
- * the root (slot 0) is symbolized: a spawned child's image is not retained, so
- * a child fault prints raw addresses (NULL reader).  Returns NULL when the
- * image cannot be read or carries no debug info a reader can use. */
+/* Build (once) and return the DWARF reader for a faulting process's own image,
+ * so any process is symbolized, not just the root.  A spawned child and a
+ * mem-image root keep their ELF bytes in p->bt_image (retained at load); a file
+ * root keeps none, so slot 0 reads its ELF from disk here the first time.
+ * Returns NULL when no image is available or it carries no usable debug info. */
 static const struct dw_reader *
-root_reader(sched *S)
+proc_reader(sched *S, proc *p)
 {
-    FILE *f;
-    long n;
-    size_t got;
+    if (p->bt_state != 0)
+        return p->bt_state == 1 ? &p->bt_reader : NULL;
+    p->bt_state = -1;                   /* assume failure until built */
 
-    if (S->bt_state != 0)
-        return S->bt_state == 1 ? &S->bt_reader : NULL;
-    S->bt_state = -1;                   /* assume failure until built */
+    /* A file root (no retained image) reads its ELF from disk once. */
+    if (!p->bt_image && p->slot == 0 && S->o->path) {
+        FILE *f = fopen(S->o->path, "rb");
+        long n;
+        size_t got;
 
-    f = fopen(S->o->path, "rb");
-    if (!f)
-        return NULL;
-    if (fseek(f, 0, SEEK_END) != 0 || (n = ftell(f)) <= 0) {
+        if (!f)
+            return NULL;
+        if (fseek(f, 0, SEEK_END) != 0 || (n = ftell(f)) <= 0) {
+            fclose(f);
+            return NULL;
+        }
+        rewind(f);
+        p->bt_image = malloc((size_t)n);
+        if (!p->bt_image) {
+            fclose(f);
+            return NULL;
+        }
+        got = fread(p->bt_image, 1, (size_t)n, f);
         fclose(f);
-        return NULL;
+        if (got != (size_t)n) {
+            free(p->bt_image);
+            p->bt_image = NULL;
+            return NULL;
+        }
+        p->bt_image_len = n;
     }
-    rewind(f);
-    S->bt_elf = malloc((size_t)n);
-    if (!S->bt_elf) {
-        fclose(f);
+    if (!p->bt_image)
         return NULL;
-    }
-    got = fread(S->bt_elf, 1, (size_t)n, f);
-    fclose(f);
-    if (got != (size_t)n) {
-        free(S->bt_elf);
-        S->bt_elf = NULL;
-        return NULL;
-    }
 
-    arena_init(&S->bt_arena);
-    if (dw_read_elf(&S->bt_arena, &S->bt_reader, S->bt_elf, (size_t)n) != 0) {
-        arena_free(&S->bt_arena);
-        free(S->bt_elf);
-        S->bt_elf = NULL;
+    arena_init(&p->bt_arena);
+    if (dw_read_elf(&p->bt_arena, &p->bt_reader, p->bt_image,
+                    (size_t)p->bt_image_len) != 0) {
+        arena_free(&p->bt_arena);
         return NULL;
     }
-    S->bt_state = 1;
-    return &S->bt_reader;
+    p->bt_state = 1;
+    return &p->bt_reader;
 }
 
 /* Print a symbolized backtrace for a faulting process to stderr.  pc is the
@@ -686,7 +735,7 @@ static void
 print_backtrace(sched *S, proc *p, uint32_t pc)
 {
     uint32_t pcs[BT_MAX_FRAMES];
-    const struct dw_reader *r = (p->slot == 0) ? root_reader(S) : NULL;
+    const struct dw_reader *r = proc_reader(S, p);
     struct bt_ctx bc;
     char buf[2048];
     int n;
@@ -830,6 +879,7 @@ free_proc_resources(proc *p)
     guest_fds_free(&p->g);              /* close its host fds (pipe ends -> EOF) */
     guest_p9_free(&p->g);
     gm_free(&p->g.mem);
+    bt_free(p);                         /* the fault backtrace, if any, is long printed */
     p->zombie = 1;
 }
 
@@ -1195,14 +1245,10 @@ sched_destroy(sched *S)
         guest_fds_free(&S->procs[i]->g);    /* close host fds, remove scratch dir */
         guest_p9_free(&S->procs[i]->g);
         gm_free(&S->procs[i]->g.mem);
+        bt_free(S->procs[i]);               /* its retained image + built reader */
         free(S->procs[i]);
     }
     free(S->vdso_buf);                  /* the one shared vDSO image */
-#ifdef SKJ_DWARF_BACKTRACE
-    if (S->bt_state == 1)
-        arena_free(&S->bt_arena);
-    free(S->bt_elf);
-#endif
 }
 
 int

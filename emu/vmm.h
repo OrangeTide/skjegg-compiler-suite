@@ -91,11 +91,13 @@ const char *const *vmm_gpreg_names(int *count);
  *
  * The register block matches gdb's built-in layout for the architecture (gdb
  * learns the arch from the ELF, so no target description is sent): x86-64 is the
- * 164-byte amd64 block (rax..r15, rip, eflags, then the six segment selectors);
- * aarch64 the 268-byte block (x0..x30, sp, pc, cpsr). read fills `out` (at least
+ * 164-byte amd64 core (rax..r15, rip, eflags, the six segment selectors)
+ * followed by the 372-byte SSE block (st0-7, fctrl..fop, xmm0-15, mxcsr) for a
+ * 536-byte total; aarch64 the 268-byte core (x0..x30, sp, pc, cpsr) followed by
+ * the 520-byte FP block (v0-31, fpsr, fpcr) for 788.  read fills `out` (at least
  * VMM_GDB_REGBYTES bytes) with the raw little-endian bytes and returns the
  * count; write consumes the same layout (segment selectors ignored). */
-#define VMM_GDB_REGBYTES 512
+#define VMM_GDB_REGBYTES 1024
 int  vmm_vcpu_gdb_read_regs(vmm_vcpu *vcpu, uint8_t *out);
 void vmm_vcpu_gdb_write_regs(vmm_vcpu *vcpu, const uint8_t *in, int len);
 

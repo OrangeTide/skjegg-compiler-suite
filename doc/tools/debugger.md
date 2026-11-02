@@ -1,43 +1,40 @@
 # A source-level debugger for skjegg guests
 
-This note is the design for source-level debugging of skjegg-compiled
-programs, C and Kobold first, and any other front end for free since they
-all lower to the one IR. It is a **design, not an implementation**. Nothing
-described here is built yet; the file records the decisions and the plan so
-the work can start from a fixed target.
+This note describes source-level debugging of skjegg-compiled programs, C and
+Kobold first, and any other front end for free since they all lower to the one
+IR. It began as a design and is now **implemented and shipping**; it records the
+decisions and how the pieces fit, so where the deeper sections read as a plan
+("Part N builds...", "will"), read them as done. The structure below is kept
+because it still explains why each piece is shaped the way it is.
 
-Two decisions are settled:
+Two decisions, both settled and in place:
 
-1. **Debug information is DWARF version 4**, emitted into the output ELF.
-   The line table is produced once in a format-neutral form in the IR and
-   serialized as a DWARF line-number program. gdb, `readelf`, `addr2line`
-   and `qemu-riscv32 -g` are the oracles that validate it, the same
-   golden-master method the assemblers use against GNU as.
+1. **Debug information is DWARF version 4**, emitted into the output ELF (and,
+   on arm64 Mach-O, `__DWARF`). The line table is produced once in a
+   format-neutral form in the IR and serialized as a DWARF line-number program.
+   gdb, `readelf`, `addr2line` and `qemu-riscv32 -g` are the oracles that
+   validate it, the same golden-master method the assemblers use against GNU as.
 2. **The debugger engine is a gdbserver-style RSP stub in `skj-run`.** The
-   emulator becomes execution plus a GDB remote-serial-protocol server; the
-   debugger front end is a separate process (a stock gdb, or a small in-tree
-   client). This keeps a clean split between the sandboxed execution core and
-   the debugger UI.
+   emulator is execution plus a GDB remote-serial-protocol server; the debugger
+   front end is a separate process (a stock gdb, or the in-tree `skj-dbg`). This
+   keeps a clean split between the sandboxed execution core and the debugger UI.
 
-The two halves are independent. The DWARF work is validated end to end
-through qemu's own gdbstub before the `skj-run` stub exists, so neither
-blocks the other.
+The deliverables, all binutils-free and in tree, all shipped:
 
-The deliverables, all binutils-free and in tree:
-
-- **`skj-run --gdb`**: the RSP server built into the runner (Part 2).
-- **`skj-dbg`**: a small in-tree RSP client, the debugger front end, grown
-  from `tests/rv32/gdbclient.c`. Stock gdb is the other front end, and the
-  oracle.
-- **`skj-addr2line`**: a standalone address-to-`file:line` symbolizer over
-  the DWARF a program carries, for use from the host or inside the sandbox
-  (Part 3).
+- **`skj-run --gdb`**: the RSP server built into the runner. It serves the rv,
+  MIPS, and HV (x86-64/arm64 under KVM/HVF) cores.
+- **`skj-dbg`**: the in-tree RSP client and debugger front end. Stock gdb is the
+  other front end, and the oracle.
+- **`skj-addr2line`**: a standalone address-to-`file:line` symbolizer over the
+  DWARF a program carries, for use from the host or inside the sandbox.
 - **A zero-allocation backtrace** the host calls to dump a faulted sandbox
-  process into a caller-provided buffer, shaped like Linux `backtrace()`
-  (Part 3).
+  process into a caller-provided buffer, shaped like Linux `backtrace()`. It
+  symbolizes any process, not just the root: each process keeps its own ELF
+  image, so a spawned child's fault backtrace is symbolized too.
 
-`skj-dbg`, `skj-addr2line`, and the backtrace share one DWARF reader, so the
-line-program and symbol-table parsing is written once.
+`skj-dbg`, `skj-addr2line`, and the backtrace share one DWARF reader
+(`dwarf/dwread.c`), so the line-program and symbol-table parsing is written
+once.
 
 ## Current state
 
@@ -54,24 +51,16 @@ the breakpoint (`emu/rv32.c:2601`, cause at `emu/rv32.h:284`). A GDB RSP
 client and a RISC-V register layout already exist for lockstep testing
 (`tests/rv32/gdbclient.{c,h}`).
 
-**Debug information is the gap.** The only source-line mechanism is the
-`IR_LOC` marker (`imm` carries the line, `ir/ir.h:185`), and `struct ir_insn`
-has no line, column, or file field (`ir/ir.h:234`). `IR_LOC` is wired end to
-end only on the kobold `-g` path into the JIT, where it builds an
-address-to-line table that has no runtime consumer yet (`EmitLoc` at
-`kobold/kpcom.pas:7004`, the JIT table at `jit/jit_common.c:123`). On the AOT
-backends `IR_LOC` becomes a `; line N` comment (`backend/mc_text.c:271`) or a
-no-op (`backend/arm64_mc_text.c:258`), and rv/mips/coldfire ignore it. The
-assemblers swallow `.file` and know nothing of `.loc` or DWARF
-(`as/rv_parse.c:441`, `as/mips_parse.c:369`). Object files carry a `.symtab`,
-but every symbol is `STT_NOTYPE` with no size (`as/rv_elf.c:224`), and the
-linker emits no symbol table at all in the final executable and no debug
-sections (`ld/elf_write.c:199`, discard set at `ld/script.c:526`,
-`ld/rv_link.c:425`).
-
-So a program can be controlled and inspected today, but no address maps back
-to a source line or a function name once it is linked. That is what Part 1
-builds.
+**Debug information is now emitted end to end.** A `-g` build carries the
+format-neutral line table from every front end through the IR to DWARF 4
+`.debug_line` plus a skeleton `.debug_info`/`.debug_abbrev`, with a real
+`.symtab` of `STT_FUNC` symbols; the assemblers emit and relocate the debug
+sections, and the in-tree linkers preserve and relocate them. So an address
+maps back to a source line and a function name once it is linked, validated
+against `readelf`/`addr2line`/`qemu -g` (the oracle ladder below) and consumed
+by `skj-dbg`, `skj-addr2line`, the fault backtrace, and stock gdb. The rest of
+this page describes how each piece works; the "Part 1/2/3" structure is the
+order it was built, not pending work.
 
 ## Part 1: DWARF 4 line information
 
@@ -191,15 +180,16 @@ is thin. The v1 set, and what each one does:
 | `m` / `M`     | Read and write memory. `gm_read_out` / `gm_write`, with the address and length bound-checked and an RSP error (`E`*nn*) returned for an invalid access. |
 | `c`           | Continue. Resume from the current PC and send nothing until the target halts, then send a stop reply. The `rv_run` loop with a breakpoint check between batches. |
 | `s`           | Single-step. `rv_run(cpu, 1, &n)`, then a stop reply. |
-| `Z0` / `z0`   | Insert and remove a software breakpoint. Software breakpoints only to start; no hardware or watchpoint packets. This drives the host-side breakpoint set below. |
+| `Z0` / `z0`   | Insert and remove a software breakpoint. This drives the host-side breakpoint set below. |
+| `Z2` / `z2`   | Insert and remove a write watchpoint. Implemented on the rv, MIPS, and HV stubs: the watched range is snapshotted and compared while single-stepping (no guest-memory change), and a hit reports `T05watch:<addr>;`. Read and access watchpoints (`Z3`/`Z4`) and hardware breakpoints are not implemented. |
 
 The register layout is advertised, not assumed. RV32 is the 32 integer
-registers plus PC; `x0` is zero. The float registers (`f[32]` plus `fcsr`,
-present in the core) are added only once the layout includes them, not
-piecemeal. gdb learns the layout from a target description served over
-`qXfer:features:read` (the `org.gnu.gdb.riscv.cpu` feature), and the
-`gdb_state` register ordering in `tests/rv32/gdbclient.h:14` already matches
-RISC-V gdb numbering, so the `g`/`G` encoding reuses it.
+registers plus PC; `x0` is zero. The **float registers are included**: the rv
+target description served over `qXfer:features:read` carries the
+`org.gnu.gdb.riscv.fpu` feature (`f0`-`f31` plus `fcsr`) beside the integer
+`org.gnu.gdb.riscv.cpu` feature, and the MIPS and HV `g`/`G` layouts carry their
+FP registers in the g-packet too, so `info float` and FP-typed locals work. The
+`g`/`G` encoding follows the gdb register numbering.
 
 ### Interrupt and feature negotiation
 
@@ -250,12 +240,20 @@ distinguished from a genuine guest fault before the scheduler would kill the
 process. The per-process `rv_cpu` and guest memory are both in hand there
 (`&p->cpu`, `p->g.mem`).
 
-For v1 the stub debugs the root process. The sandbox is multi-process (each
-child has its own `rv_cpu` and isolated memory, spawned over `RV_SYS_SPAWN`),
-and RSP's multiprocess and multi-thread extensions can expose children later;
-that is deferred. No new guest syscall is needed: control is entirely
-host-driven, so the private ecall block (`emu/rv_user.c:21`, the `0x000f`
-range) is untouched.
+The stub debugs the root process, and that is the design, not a limitation to
+lift later: **a sandbox is one gdb process.** The sandbox is multi-process (each
+child has its own CPU and isolated memory, spawned over the private `SPAWN`
+call), but following a spawned child under the one stub (RSP's multiprocess and
+multi-thread extensions) is not a requirement. Debugging several sandboxes means
+running several `skj-run --gdb` instances, each on its own port with its own
+debugger attached; the stub binds the port it is handed and keeps all state per
+connection (its only file-scope data is const tables and the target XML), so
+concurrent instances do not interfere (`test-rv-dbg-multi` runs two at once). A
+spawned child that faults is still symbolized: the fault backtrace keeps each
+process's own ELF image (`test-rv-spawn-backtrace`), so it is not raw addresses
+even though the stub itself does not step into the child. No new guest syscall
+is needed: control is entirely host-driven, so the private ecall block is
+untouched.
 
 ## Part 3: the reader, skj-addr2line, and the backtrace
 
@@ -296,10 +294,8 @@ allocation on the dump path. It is two steps, matching the Linux split:
    maintain that chain under `-g` (a small prologue/epilogue change), which is
    the simplest zero-allocation unwind. The alternative, a DWARF
    `.debug_frame` CFI interpreter, needs no ABI change but is heavier and
-   wants scratch state; the frame-pointer chain is the v1 choice, with CFI
-   noted as the later option if a frameless `-g` build is wanted. **This is
-   the one open prerequisite in the plan**: whether to spend the backend
-   frame-pointer change or build a CFI reader.
+   wants scratch state; the frame-pointer chain is the choice taken, with CFI
+   noted as the later option if a frameless `-g` build is wanted.
 
 2. **Symbolize into a caller buffer.** A formatter takes the `pcs` array and a
    caller-provided `char *buf, size_t len`, and writes bounded lines
@@ -307,10 +303,12 @@ allocation on the dump path. It is two steps, matching the Linux split:
    marker when the buffer fills. No allocation; the DWARF reader context is
    built once by the host, not per backtrace.
 
-On a guest fault the scheduler already reports cause, `mepc`, and `mtval` in
-`proc_slice` (`emu/rv_user.c:499`). The backtrace extends that: seed the walk
-from `mepc` and the faulting frame pointer, and append the symbolized frames
-to the same report, bounded by the caller's buffer.
+On a guest fault the scheduler reports the cause, the fault PC, and the fault
+address in `proc_slice`, then seeds the walk from the fault PC and the faulting
+frame pointer and appends the symbolized frames to the same report, bounded by
+the caller's buffer. The DWARF reader is built from the faulting **process's
+own** retained ELF image, so a spawned child (`[proc 2]` and up) is symbolized
+exactly like the root, not printed as raw addresses.
 
 ## Sequencing
 
@@ -330,16 +328,21 @@ to the same report, bounded by the caller's buffer.
    set, hooking `proc_slice`. By this point the debug info is already
    gdb-validated, so the stub is the only new thing under test.
 
-## Out of scope for v1
+## Still out of scope
 
 - Variable and type inspection (the `.debug_info` body: `DW_TAG_variable`,
   `DW_TAG_base_type`, location expressions). This is the expensive DWARF
-  territory and a later milestone.
-- DWARF for the native x86-64 and arm64 outputs so stock gdb debugs them
-  directly. The guest path (RV32 under qemu or skj-run) is the controllable
-  one and comes first.
-- Multi-process and multi-thread RSP.
+  territory and a later milestone; the line table and `STT_FUNC` symbols are
+  what ship.
+- DWARF for the native **x86-64 ELF** output, and accurate multi-object `-g`
+  on arm64 Mach-O (single-TU Mach-O `-g` shipped in the macOS tier; the ELF
+  path carries no DWARF). The guest path (rv/MIPS under skj-run or qemu, and the
+  HV cores) is the controllable one and shipped first.
+- Multi-process and multi-thread RSP within one stub. This is a design choice,
+  not a pending item: a sandbox is one gdb process (see "Hooking the sandbox"),
+  and several sandboxes are debugged with several `skj-run --gdb` instances.
+- Extending the symbolized fault backtrace to the in-process JIT tiers (the
+  emulated and HV tiers have it).
 - A custom leaner line-table section for skj-run's own use. DWARF is the only
-  format until there is a concrete need for a second one; if that need
-  arrives, the format-neutral table from step 1 serializes to it with no
-  upstream change.
+  format until there is a concrete need for a second one; if that need arrives,
+  the format-neutral table from step 1 serializes to it with no upstream change.

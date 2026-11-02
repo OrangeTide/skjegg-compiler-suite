@@ -3,8 +3,9 @@
    skj-run opens this stub with --gdb PORT: it listens on a TCP port, waits for
    a debugger (gdb, or the in-tree skj-dbg) to connect, and drives one process
    under the RSP subset the debugger plan calls for: `?`, `g`/`G`, `p`/`P`,
-   `m`/`M` (bound checked), `c`, `s`, `Z0`/`z0` software breakpoints, the raw
-   Ctrl-C interrupt byte, and `qSupported` with a RISC-V target description.
+   `m`/`M` (bound checked), `c`, `s`, `Z0`/`z0` software breakpoints,
+   `Z2`/`z2` write watchpoints, the raw Ctrl-C interrupt byte, and `qSupported`
+   with a RISC-V target description (integer and FP registers).
 
    Breakpoints are kept in a host-side table checked while single-stepping, so
    guest memory is never patched: that sidesteps the decoded-instruction cache

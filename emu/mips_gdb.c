@@ -18,11 +18,15 @@
 
 #define PKT_MAX     8192            /* packet payload buffer (PacketSize below) */
 #define BP_MAX      64              /* host-side software breakpoints */
+#define WP_MAX      16              /* host-side write watchpoints */
+#define WATCH_MAXLEN 16             /* longest watched range we shadow */
 #define NGPR        32
-#define NREG        38              /* r0-r31, status, lo, hi, badvaddr, cause, pc */
 #define IRQ_STRIDE  4096            /* steps between interrupt-byte polls */
 
-/* gdb register numbers for the o32 layout. */
+/* gdb register numbers for the o32 layout (gdb's built-in MIPS layout, since
+ * this stub sends no target description).  The FP registers follow pc: f0-f31
+ * at 38-69, the FP control/status (fcsr) at 70, the FP implementation (fir) at
+ * 71.  All are 32 bits in the o32 g packet. */
 enum {
     REG_STATUS   = 32,
     REG_LO       = 33,
@@ -30,6 +34,16 @@ enum {
     REG_BADVADDR = 35,
     REG_CAUSE    = 36,
     REG_PC       = 37,
+    REG_FP0      = 38,
+    REG_FCSR     = 70,
+    REG_FIR      = 71,
+    NREG_ALL     = 72,          /* r0-pc, f0-f31, fcsr, fir */
+};
+
+struct watchpoint {
+    uint32_t addr;
+    uint32_t len;
+    uint8_t shadow[WATCH_MAXLEN];   /* watched bytes as of the last run start */
 };
 
 struct gdb {
@@ -39,6 +53,10 @@ struct gdb {
     guest *g;
     uint32_t bp[BP_MAX];
     int nbp;
+    struct watchpoint wp[WP_MAX];
+    int nwp;
+    int watch_hit;          /* the last stop was a write watchpoint */
+    uint32_t watch_addr;    /* its address (valid when watch_hit) */
 };
 
 /****************************************************************
@@ -239,11 +257,15 @@ reg_get(const mips_cpu *cpu, int n)
 {
     if (n < NGPR)
         return cpu->r[n];
+    if (n >= REG_FP0 && n < REG_FP0 + 32)
+        return cpu->fpr[n - REG_FP0];
     switch (n) {
-    case REG_LO: return cpu->lo;
-    case REG_HI: return cpu->hi;
-    case REG_PC: return gdb_pc(cpu);
-    default:     return 0;          /* status, badvaddr, cause: unmodeled */
+    case REG_LO:   return cpu->lo;
+    case REG_HI:   return cpu->hi;
+    case REG_PC:   return gdb_pc(cpu);
+    case REG_FCSR: return cpu->fcsr;
+    case REG_FIR:  return 0;         /* no modeled FP implementation register */
+    default:       return 0;         /* status, badvaddr, cause: unmodeled */
     }
 }
 
@@ -255,11 +277,16 @@ reg_set(mips_cpu *cpu, int n, uint32_t v)
         cpu->r[0] = 0;              /* r0 stays hardwired to zero */
         return;
     }
+    if (n >= REG_FP0 && n < REG_FP0 + 32) {
+        cpu->fpr[n - REG_FP0] = v;
+        return;
+    }
     switch (n) {
-    case REG_LO: cpu->lo = v; break;
-    case REG_HI: cpu->hi = v; break;
-    case REG_PC: gdb_set_pc(cpu, v); break;
-    default:     break;             /* status, badvaddr, cause: ignored */
+    case REG_LO:   cpu->lo = v; break;
+    case REG_HI:   cpu->hi = v; break;
+    case REG_PC:   gdb_set_pc(cpu, v); break;
+    case REG_FCSR: cpu->fcsr = v; break;
+    default:       break;           /* status, badvaddr, cause, fir: ignored */
     }
 }
 
@@ -309,17 +336,18 @@ stop_signal(struct gdb *s)
     return 5;                       /* SIGTRAP: step done or breakpoint */
 }
 
-/* Send the stop reply for the current state: S<sig>, or W<code> when the guest
-   has exited. */
+/* Send the stop reply for the current state: W<code> when the guest has exited,
+   a T<sig>watch:<addr>; when a write watchpoint fired, else S<sig>. */
 static int
 send_stop(struct gdb *s)
 {
-    char buf[8];
-    if (s->g->exited) {
+    char buf[32];
+    if (s->g->exited)
         snprintf(buf, sizeof buf, "W%02x", s->g->exit_code & 0xff);
-    } else {
+    else if (s->watch_hit)
+        snprintf(buf, sizeof buf, "T%02xwatch:%x;", 5, s->watch_addr);
+    else
         snprintf(buf, sizeof buf, "S%02x", stop_signal(s));
-    }
     return send_packet(s, buf);
 }
 
@@ -333,6 +361,36 @@ is_breakpoint(struct gdb *s, uint32_t pc)
     return 0;
 }
 
+/* Snapshot the current bytes of every active watchpoint range at run start, so
+   a debugger memory write between stops does not read back as a guest write. */
+static void
+watch_snapshot(struct gdb *s)
+{
+    int i;
+    uint32_t j;
+    for (i = 0; i < s->nwp; i++)
+        for (j = 0; j < s->wp[i].len; j++)
+            s->wp[i].shadow[j] = gm_read8(&s->g->mem, s->wp[i].addr + j);
+}
+
+/* If a watched range changed since the snapshot, record the hit, refresh the
+   shadow so the next run starts clean, and return 1. */
+static int
+watch_check(struct gdb *s)
+{
+    int i;
+    uint32_t j;
+    for (i = 0; i < s->nwp; i++)
+        for (j = 0; j < s->wp[i].len; j++)
+            if (gm_read8(&s->g->mem, s->wp[i].addr + j) != s->wp[i].shadow[j]) {
+                s->watch_hit = 1;
+                s->watch_addr = s->wp[i].addr;
+                watch_snapshot(s);
+                return 1;
+            }
+    return 0;
+}
+
 /* Continue: single-step until a breakpoint, exit, fault/halt, or an interrupt
    byte on the socket.  Returns 1 if the guest exited, else 0 (stopped). */
 static int
@@ -340,6 +398,8 @@ do_continue(struct gdb *s)
 {
     uint32_t steps = 0;
 
+    s->watch_hit = 0;
+    watch_snapshot(s);
     for (;;) {
         if (s->g->exited || s->cpu->halted || s->cpu->trapped)
             return s->g->exited ? 1 : 0;
@@ -347,6 +407,8 @@ do_continue(struct gdb *s)
             return s->g->exited ? 1 : 0;
         if (s->g->exited)
             return 1;
+        if (s->nwp && watch_check(s))   /* a watched range was written */
+            return 0;
         if (is_breakpoint(s, s->cpu->pc))
             return 0;
         if (((++steps) & (IRQ_STRIDE - 1)) == 0 && interrupt_pending(s->fd))
@@ -395,7 +457,7 @@ handle_packet(struct gdb *s, const char *p)
     case 'g': {                         /* read all registers */
         char *w = out;
         int i;
-        for (i = 0; i < NREG; i++)
+        for (i = 0; i < NREG_ALL; i++)
             put_u32_hex(&w, reg_get(s->cpu, i));
         *w = '\0';
         return send_packet(s, out) == 0;
@@ -404,7 +466,7 @@ handle_packet(struct gdb *s, const char *p)
     case 'G': {                         /* write all registers */
         const char *h = p + 1;
         int i;
-        for (i = 0; i < NREG; i++) {
+        for (i = 0; i < NREG_ALL; i++) {
             uint32_t v;
             if (strlen(h) < 8 || get_u32_hex(h, &v))
                 break;
@@ -417,7 +479,7 @@ handle_packet(struct gdb *s, const char *p)
     case 'p': {                         /* read one register */
         char *w = out;
         long n = strtol(p + 1, NULL, 16);
-        if (n < 0 || n >= NREG)
+        if (n < 0 || n >= NREG_ALL)
             return send_packet(s, "E01") == 0;
         put_u32_hex(&w, reg_get(s->cpu, (int)n));
         *w = '\0';
@@ -428,7 +490,7 @@ handle_packet(struct gdb *s, const char *p)
         const char *eq = strchr(p, '=');
         long n = strtol(p + 1, NULL, 16);
         uint32_t v;
-        if (!eq || n < 0 || n >= NREG || get_u32_hex(eq + 1, &v))
+        if (!eq || n < 0 || n >= NREG_ALL || get_u32_hex(eq + 1, &v))
             return send_packet(s, "E01") == 0;
         reg_set(s->cpu, (int)n, v);
         return send_packet(s, "OK") == 0;
@@ -484,12 +546,13 @@ handle_packet(struct gdb *s, const char *p)
     case 's': {                         /* single step [addr] */
         if (p[1])
             gdb_set_pc(s->cpu, (uint32_t)strtoul(p + 1, NULL, 16));
+        s->watch_hit = 0;               /* a step stop is not a watch hit */
         if (!s->g->exited && !s->cpu->halted && !s->cpu->trapped)
             mips_step(s->cpu);
         return send_stop(s) == 0;
     }
 
-    case 'Z':                           /* insert breakpoint: Z0,addr,kind */
+    case 'Z':                           /* insert bp (Z0) or write watch (Z2) */
         if (p[1] == '0') {
             uint32_t addr = (uint32_t)strtoul(p + 3, NULL, 16);
             if (!is_breakpoint(s, addr)) {
@@ -499,15 +562,44 @@ handle_packet(struct gdb *s, const char *p)
             }
             return send_packet(s, "OK") == 0;
         }
-        return send_packet(s, "") == 0; /* hardware/watch not supported */
+        if (p[1] == '2') {              /* Z2,addr,kind — kind is the length */
+            char *end;
+            uint32_t addr = (uint32_t)strtoul(p + 3, &end, 16);
+            uint32_t len = (*end == ',') ? (uint32_t)strtoul(end + 1, NULL, 16) : 1;
+            int i;
+            if (len == 0 || len > WATCH_MAXLEN)
+                return send_packet(s, "E01") == 0; /* gdb falls back to sw watch */
+            for (i = 0; i < s->nwp; i++)
+                if (s->wp[i].addr == addr && s->wp[i].len == len)
+                    return send_packet(s, "OK") == 0;
+            if (s->nwp >= WP_MAX)
+                return send_packet(s, "E01") == 0;
+            s->wp[s->nwp].addr = addr;
+            s->wp[s->nwp].len = len;
+            s->nwp++;
+            return send_packet(s, "OK") == 0;
+        }
+        return send_packet(s, "") == 0; /* Z1/Z3/Z4 unsupported */
 
-    case 'z':                           /* remove breakpoint: z0,addr,kind */
+    case 'z':                           /* remove bp (z0) or write watch (z2) */
         if (p[1] == '0') {
             uint32_t addr = (uint32_t)strtoul(p + 3, NULL, 16);
             int i;
             for (i = 0; i < s->nbp; i++)
                 if (s->bp[i] == addr) {
                     s->bp[i] = s->bp[--s->nbp];
+                    break;
+                }
+            return send_packet(s, "OK") == 0;
+        }
+        if (p[1] == '2') {
+            char *end;
+            uint32_t addr = (uint32_t)strtoul(p + 3, &end, 16);
+            uint32_t len = (*end == ',') ? (uint32_t)strtoul(end + 1, NULL, 16) : 1;
+            int i;
+            for (i = 0; i < s->nwp; i++)
+                if (s->wp[i].addr == addr && s->wp[i].len == len) {
+                    s->wp[i] = s->wp[--s->nwp];
                     break;
                 }
             return send_packet(s, "OK") == 0;

@@ -4,15 +4,16 @@
    listens on a TCP port, waits for a debugger (gdb, gdb-multiarch, or the
    in-tree skj-dbg) to connect, and drives one process under the same RSP
    subset the RV32 stub serves: `?`, `g`/`G`, `p`/`P`, `m`/`M` (bound checked),
-   `c`, `s`, `Z0`/`z0` software breakpoints, the raw Ctrl-C interrupt byte, and
-   `qSupported`.
+   `c`, `s`, `Z0`/`z0` software breakpoints, `Z2`/`z2` write watchpoints, the
+   raw Ctrl-C interrupt byte, and `qSupported`.
 
    Registers follow gdb's o32 numbering: r0-r31 are 0-31, then status (32),
-   lo (33), hi (34), badvaddr (35), cause (36) and pc (37).  gdb derives that
-   layout from the ELF (the stub advertises no target description, since gdb's
-   MIPS tdesc validator rejects a supplied one; qemu-mipsel's stub does the
-   same).  The core models only the general registers plus HI/LO and the
-   program counter, so status, badvaddr and cause read back as zero and ignore
+   lo (33), hi (34), badvaddr (35), cause (36), pc (37), the COP1 registers
+   f0-f31 (38-69), fcsr (70) and fir (71).  gdb derives that layout from the
+   ELF (the stub advertises no target description, since gdb's MIPS tdesc
+   validator rejects a supplied one; qemu-mipsel's stub does the same).  The
+   core models the general registers, HI/LO, the program counter and the COP1
+   file, so status, badvaddr, cause and fir read back as zero and ignore
    writes.
 
    Breakpoints are kept in a host-side table checked while single-stepping, so

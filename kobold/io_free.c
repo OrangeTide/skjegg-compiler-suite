@@ -63,19 +63,16 @@ int rmdir(const char *path);                                /* libc/fileops.c */
 /****************************************************************
  * The number formatter: libc's numfmt.c, shared with the C runtime
  *
- * __fmt_greal renders a finite, non-negative double like "%g" (sig significant
- * digits; alt keeps trailing zeros, upper selects 'E') and returns the byte
- * count.  It is libgcc-free, so the rv32 freestanding tier links it with no
- * double-to-u64 helper.  io_write_real (below) is the one console write defined
- * here; the rest of the console seam (io_write_str/int/char, io_flush, io_halt,
- * and the whole read side with its one byte of pushback) is the shared
- * kobold/kp_io.c over the raw write/read syscalls.  Declared opaquely so this
- * file needs no -Ilibc; keep in step with libc/fmt.h.  __fmt_udec writes an
- * unsigned value's decimal digits (no NUL, no sign) and returns the count; the
- * integer Str helpers below share it.
+ * __fmt_udec writes an unsigned value's decimal digits (no NUL, no sign) and
+ * returns the count; the integer Str helpers below share it.  It is libgcc-free,
+ * so the rv32 freestanding tier links it with no 64-bit divide helper.  The
+ * whole console seam (io_write_str/int/char/real, io_flush, io_halt, and the
+ * read side with its one byte of pushback) is the shared kobold/kp_io.c over the
+ * raw write/read syscalls; real output there shares __fmt_greal from this same
+ * numfmt.c.  Declared opaquely so this file needs no -Ilibc; keep in step with
+ * libc/fmt.h.
  ****************************************************************/
 extern int __fmt_udec(char *out, uint64_t v);
-extern int __fmt_greal(char *out, double v, int sig, int alt, int upper);
 
 /****************************************************************
  * Str and Val for integers (hand-rolled, no libc; the real side is in the
@@ -227,18 +224,15 @@ kp_str_valcode(kp_gptr s, int32_t kind)
 }
 
 /****************************************************************
- * Reals: formatting, parsing, and the rv soft-float bit bridge
+ * Reals: parsing and the rv soft-float bit bridge
  *
- * The hosted tier formats a real with the C library's "%g" and parses it with
- * strtod (kp_host.c / str_fmt.c).  This tier parses with the same strtod (shared
- * from libc, see scan_real below) and formats through the same %g renderer:
- * __fmt_greal (libc/numfmt.c), which both the C libc's printf and this runtime
- * call.  It is libgcc-free (six significant digits, trailing zeros stripped,
- * digits extracted with double-to-int steps), so neither tier pulls a
- * double-to-u64 helper the rv32 freestanding tier has no libgcc for.  The rv32
- * soft-float ABI carries a double across a call as its
- * 64-bit integer bits, not in a float register, so the guest reaches these
- * through the brv_* bridge, which converts the bits to a double and back.
+ * Real output (io_write_real) lives in the shared kobold/kp_io.c now, over the
+ * same __fmt_greal both tiers use.  This tier parses a real with libc's strtod
+ * (shared from libc, see scan_real below), the same decimal-float parser the
+ * hosted tier and a C program built against this libc use.  The rv32 soft-float
+ * ABI carries a double across a call as its 64-bit integer bits, not in a float
+ * register, so the guest reaches the real routines through the brv_* bridge,
+ * which converts the bits to a double and back.
  ****************************************************************/
 
 #if (defined(__riscv) && __riscv_xlen == 32) || defined(__skj_riscv__)
@@ -258,30 +252,6 @@ d2b(double d)
     return b;
 }
 #endif
-
-/* Format v like C's "%g" (six significant digits): the sign and the NaN
-   spelling here, the magnitude through the shared __fmt_greal (numfmt.c), the
-   same renderer the C libc's %g uses.  Returns the byte count written to out
-   (no NUL). */
-static int
-fmt_g(double v, char *out)
-{
-    int n = 0;
-
-    if (v != v) { out[0] = 'n'; out[1] = 'a'; out[2] = 'n'; return 3; }
-    if (v < 0.0) { out[n++] = '-'; v = -v; }
-    return n + __fmt_greal(out + n, v, 6, 0, 0);
-}
-
-void
-io_write_real(int fd, double x)
-{
-    char buf[40];
-    int n = fmt_g(x, buf);
-
-    if (n > 0)
-        write(fd, buf, n);
-}
 
 /* Scan a real: the freestanding tier parses it with libc's strtod
    (libc/strtod.c), the same decimal-float parser a C program built against this

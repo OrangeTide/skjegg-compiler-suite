@@ -1263,7 +1263,8 @@ X64_ASMFLAGS ?= --64
 
 SKJ_BE_X64 := $(SKJEGG)backend/regalloc_x86.c $(SKJEGG)backend/x86_select.c \
               $(SKJEGG)backend/mc_text.c $(SKJEGG)backend/x86_aot.c
-SKJ_KP_AOT_RT := $(SKJEGG)kobold/aot_rt.c $(SKJEGG)kobold/kp_host.c $(SKJEGG)kobold/str_core.c \
+SKJ_KP_AOT_RT := $(SKJEGG)kobold/aot_rt.c $(SKJEGG)kobold/kp_host.c $(SKJEGG)kobold/kp_io.c \
+                 $(SKJEGG)libc/numfmt.c $(SKJEGG)kobold/str_core.c \
                  $(SKJEGG)kobold/str_fmt.c $(SKJEGG)kobold/dynarr.c $(SKJEGG)kobold/map.c \
                  $(SKJEGG)kobold/rt_host.c $(SKJEGG)kobold/co_shim.c \
                  $(SKJEGG)runtime/co_switch_x86.S $(SKJEGG)jit/call_guest_x86.S

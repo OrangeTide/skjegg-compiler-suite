@@ -114,6 +114,14 @@ typedef struct proc {
     int wait_slot;              /* slot it is blocked in SKJ_SYS_WAIT on, else -1 */
     struct guest_grant grants[RUN_MAX_MOUNTS]; /* its mounts, for a child to inherit */
     int ngrants;                /* live entries in grants[] */
+#ifdef SKJ_DWARF_BACKTRACE
+    uint8_t *bt_image;          /* this process's retained ELF bytes, or NULL (a file
+                                 * root keeps none and reads its path from disk) */
+    long bt_image_len;          /* length of bt_image */
+    struct arena bt_arena;      /* holds this process's lazily built reader tables */
+    struct dw_reader bt_reader; /* its DWARF line + symbol tables, when bt_state == 1 */
+    int bt_state;               /* 0 untried, 1 ready, -1 unavailable */
+#endif
 } proc;
 
 typedef struct sched {
@@ -133,12 +141,6 @@ typedef struct sched {
     int vdso_state;                 /* 0 untried, 1 ready, -1 unavailable */
     uint64_t insns;                 /* instructions retired across all processes */
     int limited;                    /* the global instruction budget was hit */
-#ifdef SKJ_DWARF_BACKTRACE
-    struct arena bt_arena;          /* holds the lazily built reader's tables */
-    struct dw_reader bt_reader;     /* the root image's DWARF line + symbol tables */
-    uint8_t *bt_elf;                /* the root ELF bytes the reader points into */
-    int bt_state;                   /* 0 untried, 1 ready, -1 unavailable */
-#endif
 } sched;
 
 /* What the shared private-selector handler decided. */

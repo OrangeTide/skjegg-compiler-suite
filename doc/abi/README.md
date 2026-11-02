@@ -76,8 +76,11 @@ than a stream buffer.
   (`__fixunsdfdi`), which the RV32 freestanding tier has no libgcc for.
 
 The C libc printf `%g` path and the Kobold `io_write_int` / `io_write_real` /
-`kp_str_from_int*` all route through these. The libc `%f` and `%e`
-decomposition is unchanged; it is hosted only.
+`kp_str_from_int*` all route through these. `__fmt_greal` takes a finite,
+non-negative value: each caller handles the sign and the NaN / infinity
+spellings itself, so Kobold's `io_write_real` prints `nan`, `inf`, and `-inf`
+for the non-finite cases. The libc `%f` and `%e` decomposition is unchanged; it
+is hosted only.
 
 ## Non-faulting Str and Val (B2)
 

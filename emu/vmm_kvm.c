@@ -88,6 +88,28 @@ a64_set(int fd, uint64_t id, uint64_t v)
     struct kvm_one_reg one = { .id = id, .addr = (uint64_t)(uintptr_t)&v };
     ioctl(fd, KVM_SET_ONE_REG, &one);
 }
+
+/* The FP/SIMD register ids: a 128-bit v-register, and the 32-bit fpsr/fpcr. */
+#define A64_FP128(field) \
+    (KVM_REG_ARM64 | KVM_REG_SIZE_U128 | KVM_REG_ARM_CORE | \
+     (offsetof(struct kvm_regs, field) / sizeof(uint32_t)))
+#define A64_FP32(field) \
+    (KVM_REG_ARM64 | KVM_REG_SIZE_U32 | KVM_REG_ARM_CORE | \
+     (offsetof(struct kvm_regs, field) / sizeof(uint32_t)))
+
+static void
+a64_get128(int fd, uint64_t id, uint8_t out[16])
+{
+    struct kvm_one_reg one = { .id = id, .addr = (uint64_t)(uintptr_t)out };
+    ioctl(fd, KVM_GET_ONE_REG, &one);
+}
+
+static void
+a64_set128(int fd, uint64_t id, const uint8_t in[16])
+{
+    struct kvm_one_reg one = { .id = id, .addr = (uint64_t)(uintptr_t)in };
+    ioctl(fd, KVM_SET_ONE_REG, &one);
+}
 #endif
 
 int
@@ -500,15 +522,48 @@ vmm_vcpu_gdb_read_regs(vmm_vcpu *vcpu, uint8_t *out)
     le32(out + n, sr.ds.selector); n += 4;
     le32(out + n, sr.es.selector); n += 4;
     le32(out + n, sr.fs.selector); n += 4;
-    le32(out + n, sr.gs.selector); n += 4;
-    return n;                                   /* 164 */
+    le32(out + n, sr.gs.selector); n += 4;   /* 164: the amd64 core block */
+
+    /* The i386.sse block gdb expects next: st0-7 (80-bit), fctrl/fstat/ftag and
+     * the x87 pointers, xmm0-15, mxcsr.  Our guests float with SSE, so the x87
+     * state is mostly idle; the abridged tag word is expanded to the full 2-bit
+     * form (valid or empty) that gdb displays. */
+    {
+        struct kvm_fpu fpu;
+        if (ioctl(vcpu->vcpu_fd, KVM_GET_FPU, &fpu) == 0) {
+            uint32_t ftag = 0;
+            int t;
+            for (i = 0; i < 8; i++) { memcpy(out + n, fpu.fpr[i], 10); n += 10; }
+            for (t = 0; t < 8; t++)
+                ftag |= (uint32_t)((fpu.ftwx >> t) & 1 ? 0 : 3) << (2 * t);
+            le32(out + n, fpu.fcw); n += 4;
+            le32(out + n, fpu.fsw); n += 4;
+            le32(out + n, ftag); n += 4;
+            le32(out + n, (uint32_t)(fpu.last_ip >> 32)); n += 4;   /* fiseg */
+            le32(out + n, (uint32_t)fpu.last_ip); n += 4;           /* fioff */
+            le32(out + n, (uint32_t)(fpu.last_dp >> 32)); n += 4;   /* foseg */
+            le32(out + n, (uint32_t)fpu.last_dp); n += 4;           /* fooff */
+            le32(out + n, fpu.last_opcode); n += 4;                 /* fop */
+            for (i = 0; i < 16; i++) { memcpy(out + n, fpu.xmm[i], 16); n += 16; }
+            le32(out + n, fpu.mxcsr); n += 4;
+        }
+    }
+    return n;                                   /* 164 core, 536 with SSE */
 #elif defined(__aarch64__)
     int i, n = 0;
     for (i = 0; i < 31; i++) { le64(out + n, a64_get(vcpu->vcpu_fd, A64_CORE(regs.regs[i]))); n += 8; }
     le64(out + n, a64_get(vcpu->vcpu_fd, A64_CORE(sp_el1))); n += 8;
     le64(out + n, a64_get(vcpu->vcpu_fd, A64_CORE(regs.pc))); n += 8;
     le32(out + n, (uint32_t)a64_get(vcpu->vcpu_fd, A64_CORE(regs.pstate))); n += 4;
-    return n;                                   /* 268 */
+    /* 268: the aarch64 core block.  gdb's aarch64 fpu feature follows: the 32
+     * 128-bit v-registers, then fpsr and fpcr. */
+    for (i = 0; i < 32; i++) {
+        a64_get128(vcpu->vcpu_fd, A64_FP128(fp_regs.vregs[i]), out + n);
+        n += 16;
+    }
+    le32(out + n, (uint32_t)a64_get(vcpu->vcpu_fd, A64_FP32(fp_regs.fpsr))); n += 4;
+    le32(out + n, (uint32_t)a64_get(vcpu->vcpu_fd, A64_FP32(fp_regs.fpcr))); n += 4;
+    return n;                                   /* 268 core, 788 with FP */
 #endif
 }
 
@@ -529,6 +584,29 @@ vmm_vcpu_gdb_write_regs(vmm_vcpu *vcpu, const uint8_t *in, int len)
     if (len >= 140)
         r.rflags = rd32(in + 136) | 0x2;
     ioctl(vcpu->vcpu_fd, KVM_SET_REGS, &r);     /* segment selectors kept as-is */
+
+    if (len >= 536) {                           /* the SSE block from offset 164 */
+        struct kvm_fpu fpu;
+        if (ioctl(vcpu->vcpu_fd, KVM_GET_FPU, &fpu) == 0) {
+            const uint8_t *fp = in + 164;
+            uint32_t ftag;
+            int i, t;
+            for (i = 0; i < 8; i++) memcpy(fpu.fpr[i], fp + i * 10, 10);
+            fpu.fcw = (uint16_t)rd32(fp + 80);
+            fpu.fsw = (uint16_t)rd32(fp + 84);
+            ftag = rd32(fp + 88);
+            fpu.ftwx = 0;
+            for (t = 0; t < 8; t++)
+                if (((ftag >> (2 * t)) & 3) != 3)
+                    fpu.ftwx |= (uint8_t)(1 << t);
+            fpu.last_ip = ((uint64_t)rd32(fp + 92) << 32) | rd32(fp + 96);
+            fpu.last_dp = ((uint64_t)rd32(fp + 100) << 32) | rd32(fp + 104);
+            fpu.last_opcode = (uint16_t)rd32(fp + 108);
+            for (i = 0; i < 16; i++) memcpy(fpu.xmm[i], fp + 112 + i * 16, 16);
+            fpu.mxcsr = rd32(fp + 368);
+            ioctl(vcpu->vcpu_fd, KVM_SET_FPU, &fpu);
+        }
+    }
 #elif defined(__aarch64__)
     int i;
     for (i = 0; i < 31 && (i + 1) * 8 <= len; i++)
@@ -536,6 +614,10 @@ vmm_vcpu_gdb_write_regs(vmm_vcpu *vcpu, const uint8_t *in, int len)
     if (len >= 256) a64_set(vcpu->vcpu_fd, A64_CORE(sp_el1), rd64(in + 248));
     if (len >= 264) a64_set(vcpu->vcpu_fd, A64_CORE(regs.pc), rd64(in + 256));
     if (len >= 268) a64_set(vcpu->vcpu_fd, A64_CORE(regs.pstate), rd32(in + 264));
+    for (i = 0; i < 32 && 268 + (i + 1) * 16 <= len; i++)   /* v0-31 */
+        a64_set128(vcpu->vcpu_fd, A64_FP128(fp_regs.vregs[i]), in + 268 + i * 16);
+    if (len >= 784) a64_set(vcpu->vcpu_fd, A64_FP32(fp_regs.fpsr), rd32(in + 780));
+    if (len >= 788) a64_set(vcpu->vcpu_fd, A64_FP32(fp_regs.fpcr), rd32(in + 784));
 #endif
 }
 

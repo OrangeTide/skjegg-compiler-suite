@@ -22,7 +22,15 @@
 
 #define PKT_MAX     8192
 #define BP_MAX      64
+#define WP_MAX      16              /* host-side write watchpoints */
+#define WATCH_MAXLEN 16             /* longest watched range we shadow */
 #define IRQ_STRIDE  4096            /* steps between interrupt-byte polls */
+
+struct watchpoint {
+    uint64_t addr;
+    uint32_t len;
+    uint8_t shadow[WATCH_MAXLEN];   /* watched bytes as of the last run start */
+};
 
 struct gdb {
     int fd;
@@ -33,6 +41,10 @@ struct gdb {
     uint64_t bp[BP_MAX];
     int nbp;
     int fault;                      /* a guest fault stopped the last run */
+    struct watchpoint wp[WP_MAX];
+    int nwp;
+    int watch_hit;                  /* the last stop was a write watchpoint */
+    uint64_t watch_addr;            /* its address (valid when watch_hit) */
 };
 
 /****************************************************************
@@ -198,9 +210,12 @@ stop_signal(struct gdb *s)
 static int
 send_stop(struct gdb *s)
 {
-    char buf[8];
+    char buf[32];
     if (s->g->exited)
         snprintf(buf, sizeof buf, "W%02x", s->g->exit_code & 0xff);
+    else if (s->watch_hit)
+        snprintf(buf, sizeof buf, "T%02xwatch:%llx;", 5,
+                 (unsigned long long)s->watch_addr);
     else
         snprintf(buf, sizeof buf, "S%02x", stop_signal(s));
     return send_packet(s, buf);
@@ -213,6 +228,38 @@ is_breakpoint(struct gdb *s, uint64_t pc)
     for (i = 0; i < s->nbp; i++)
         if (s->bp[i] == pc)
             return 1;
+    return 0;
+}
+
+/* Snapshot the current bytes of every active watchpoint range at run start, so
+   a debugger memory write between stops does not read back as a guest write. */
+static void
+watch_snapshot(struct gdb *s)
+{
+    int i;
+    uint32_t j;
+    for (i = 0; i < s->nwp; i++)
+        for (j = 0; j < s->wp[i].len; j++)
+            s->wp[i].shadow[j] = gm_read8(&s->g->mem,
+                                          (uint32_t)s->wp[i].addr + j);
+}
+
+/* If a watched range changed since the snapshot, record the hit, refresh the
+   shadow so the next run starts clean, and return 1. */
+static int
+watch_check(struct gdb *s)
+{
+    int i;
+    uint32_t j;
+    for (i = 0; i < s->nwp; i++)
+        for (j = 0; j < s->wp[i].len; j++)
+            if (gm_read8(&s->g->mem, (uint32_t)s->wp[i].addr + j)
+                != s->wp[i].shadow[j]) {
+                s->watch_hit = 1;
+                s->watch_addr = s->wp[i].addr;
+                watch_snapshot(s);
+                return 1;
+            }
     return 0;
 }
 
@@ -253,6 +300,8 @@ do_continue(struct gdb *s)
 {
     uint32_t steps = 0;
 
+    s->watch_hit = 0;
+    watch_snapshot(s);
     vmm_vcpu_debug_singlestep(s->vcpu, 1);
     for (;;) {
         if (s->g->exited || hv_is_halted(s->p))
@@ -260,6 +309,8 @@ do_continue(struct gdb *s)
         if (step_one(s))
             break;
         if (s->fault)
+            break;
+        if (s->nwp && watch_check(s))   /* a watched range was written */
             break;
         if (is_breakpoint(s, vmm_vcpu_pc(s->vcpu)))
             break;
@@ -375,6 +426,7 @@ handle_packet(struct gdb *s, const char *p)
     case 's':                           /* single step [addr] */
         if (p[1])
             vmm_vcpu_set_pc(s->vcpu, strtoull(p + 1, NULL, 16));
+        s->watch_hit = 0;               /* a step stop is not a watch hit */
         if (!s->g->exited && !hv_is_halted(s->p)) {
             vmm_vcpu_debug_singlestep(s->vcpu, 1);
             step_one(s);
@@ -382,7 +434,7 @@ handle_packet(struct gdb *s, const char *p)
         }
         return send_stop(s) == 0;
 
-    case 'Z':                           /* insert breakpoint: Z0,addr,kind */
+    case 'Z':                           /* insert bp (Z0) or write watch (Z2) */
         if (p[1] == '0') {
             uint64_t addr = strtoull(p + 3, NULL, 16);
             if (!is_breakpoint(s, addr)) {
@@ -392,9 +444,38 @@ handle_packet(struct gdb *s, const char *p)
             }
             return send_packet(s, "OK") == 0;
         }
-        return send_packet(s, "") == 0;
+        if (p[1] == '2') {              /* Z2,addr,kind — kind is the length */
+            char *end;
+            uint64_t addr = strtoull(p + 3, &end, 16);
+            uint32_t len = (*end == ',') ? (uint32_t)strtoul(end + 1, NULL, 16) : 1;
+            int i;
+            if (len == 0 || len > WATCH_MAXLEN)
+                return send_packet(s, "E01") == 0; /* gdb falls back to sw watch */
+            for (i = 0; i < s->nwp; i++)
+                if (s->wp[i].addr == addr && s->wp[i].len == len)
+                    return send_packet(s, "OK") == 0;
+            if (s->nwp >= WP_MAX)
+                return send_packet(s, "E01") == 0;
+            s->wp[s->nwp].addr = addr;
+            s->wp[s->nwp].len = len;
+            s->nwp++;
+            return send_packet(s, "OK") == 0;
+        }
+        return send_packet(s, "") == 0; /* Z1/Z3/Z4 unsupported */
 
-    case 'z':                           /* remove breakpoint: z0,addr,kind */
+    case 'z':                           /* remove bp (z0) or write watch (z2) */
+        if (p[1] == '2') {
+            char *end;
+            uint64_t addr = strtoull(p + 3, &end, 16);
+            uint32_t len = (*end == ',') ? (uint32_t)strtoul(end + 1, NULL, 16) : 1;
+            int i;
+            for (i = 0; i < s->nwp; i++)
+                if (s->wp[i].addr == addr && s->wp[i].len == len) {
+                    s->wp[i] = s->wp[--s->nwp];
+                    break;
+                }
+            return send_packet(s, "OK") == 0;
+        }
         if (p[1] == '0') {
             uint64_t addr = strtoull(p + 3, NULL, 16);
             int i;

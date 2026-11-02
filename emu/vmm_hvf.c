@@ -427,13 +427,23 @@ static uint32_t rd32(const uint8_t *p) { uint32_t v = 0; int i; for (i = 0; i < 
 int
 vmm_vcpu_gdb_read_regs(vmm_vcpu *vcpu, uint8_t *out)
 {
-    /* The 268-byte aarch64 block: x0..x30, sp (SP_EL1), pc, then cpsr. */
+    /* The 268-byte aarch64 core (x0..x30, sp, pc, cpsr), then gdb's aarch64
+     * fpu feature: the 32 128-bit v-registers, fpsr and fpcr.  Mirrors the KVM
+     * path (vmm_kvm.c); validated once HVF runs here. */
     int i, n = 0;
     for (i = 0; i < 31; i++) { le64(out + n, x_get(vcpu, i)); n += 8; }
     le64(out + n, sys_get(vcpu, HV_SYS_REG_SP_EL1)); n += 8;
     le64(out + n, reg_get(vcpu, HV_REG_PC)); n += 8;
-    le32(out + n, (uint32_t)reg_get(vcpu, HV_REG_CPSR)); n += 4;
-    return n;                                   /* 268 */
+    le32(out + n, (uint32_t)reg_get(vcpu, HV_REG_CPSR)); n += 4;   /* 268 core */
+    for (i = 0; i < 32; i++) {
+        hv_simd_fp_uchar16_t q;
+        hv_vcpu_get_simd_fp_reg(vcpu->vcpu,
+                                (hv_simd_fp_reg_t)(HV_SIMD_FP_REG_Q0 + i), &q);
+        memcpy(out + n, &q, 16); n += 16;
+    }
+    le32(out + n, (uint32_t)reg_get(vcpu, HV_REG_FPSR)); n += 4;
+    le32(out + n, (uint32_t)reg_get(vcpu, HV_REG_FPCR)); n += 4;
+    return n;                                   /* 268 core, 788 with FP */
 }
 
 void
@@ -445,6 +455,14 @@ vmm_vcpu_gdb_write_regs(vmm_vcpu *vcpu, const uint8_t *in, int len)
     if (len >= 256) sys_set(vcpu, HV_SYS_REG_SP_EL1, rd64(in + 248));
     if (len >= 264) reg_set(vcpu, HV_REG_PC, rd64(in + 256));
     if (len >= 268) reg_set(vcpu, HV_REG_CPSR, rd32(in + 264));
+    for (i = 0; i < 32 && 268 + (i + 1) * 16 <= len; i++) {   /* v0-31 */
+        hv_simd_fp_uchar16_t q;
+        memcpy(&q, in + 268 + i * 16, 16);
+        hv_vcpu_set_simd_fp_reg(vcpu->vcpu,
+                                (hv_simd_fp_reg_t)(HV_SIMD_FP_REG_Q0 + i), q);
+    }
+    if (len >= 784) reg_set(vcpu, HV_REG_FPSR, rd32(in + 780));
+    if (len >= 788) reg_set(vcpu, HV_REG_FPCR, rd32(in + 784));
 }
 
 void

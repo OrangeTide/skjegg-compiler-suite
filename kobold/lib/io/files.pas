@@ -35,6 +35,7 @@ function RemoveDir(const path: string): boolean;             { remove an empty d
 function Open(const path: string; var f: TextFile): boolean;
 function Create(const path: string; var f: TextFile): boolean;
 function ReadLine(var f: TextFile; var line: string): boolean;
+function ReadChar(var f: TextFile; var ch: char): boolean;
 function AtEof(const f: TextFile): boolean;
 procedure WriteStr(var f: TextFile; const s: string);
 procedure WriteLine(var f: TextFile; const s: string);
@@ -183,6 +184,25 @@ begin
   begin
     line := '';
     ReadLine := False;
+  end;
+end;
+
+{ Read one character into `ch`, pulling a host chunk when the buffer is empty.
+  Returns False at end of file (and leaves `ch` unchanged).  The byte-level
+  companion to ReadLine; both draw from the same pending buffer, so a program can
+  mix them on one handle.  The character is raw: a newline or carriage return is
+  returned as itself, unlike ReadLine which strips the line terminator. }
+function ReadChar(var f: TextFile; var ch: char): boolean;
+begin
+  if length(f.pending) = 0 then
+    Fill(f);
+  if length(f.pending) = 0 then
+    ReadChar := False
+  else
+  begin
+    ch := f.pending[1];
+    f.pending := copy(f.pending, 2, length(f.pending) - 1);
+    ReadChar := True;
   end;
 end;
 

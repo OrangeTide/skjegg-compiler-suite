@@ -178,6 +178,16 @@ constants; they are not a distinct type for range checking.
 | `{$I filename}` (include) | **not implemented** |
 | `{$M stacksize}` | **not implemented** |
 
+Record fields are laid out with **natural per-field alignment**: each field is
+aligned to its own size, capped at the target pointer width (4 on the ILP32
+targets, 8 on the LP64 x86-64/arm64 targets). So a 4-byte `integer` aligns to 4
+on every target, while a pointer or 64-bit field aligns to 8 on LP64. The
+pointer-width cap matters on LP64 because a pointer relocation must land on an
+8-aligned offset (the Mach-O static linker rejects an unaligned one). `{$ALIGN
+n}` lowers the cap for the records that follow it, down to `{$ALIGN 1}` for a
+fully packed record. The record's own size is padded up to its alignment so an
+array of records keeps every element aligned.
+
 ## Literals
 
 | Form | Status |
