@@ -228,6 +228,10 @@ typedef struct guest {
     uint32_t stack_top;
     int big_endian;
     int fds_inited;
+    int confined;               /* a grant was installed, so the capability mounts
+                                   are the only host access: the unconfined ambient
+                                   AT_FDCWD path is refused (see gfd_dir). A guest
+                                   with no grant keeps the ambient default. */
     int stdio[3];               /* host fds the sandbox's 0/1/2 dup from; default
                                    {0,1,2} (skj-run's own), but a host embedding
                                    the scheduler can bind them to a connection's

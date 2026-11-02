@@ -242,7 +242,9 @@ gdb_pc(const mips_cpu *cpu)
 }
 
 /* Redirect execution to `v`, resetting the delay-slot machinery so the next
-   step fetches `v` cleanly. */
+   step fetches `v` cleanly.  A redirect is a recovery, so clear any trap that
+   stopped the CPU: mips_step refuses to run while `trapped` is set, so without
+   this a `c addr`/`s addr` after a fault would never resume. */
 static void
 gdb_set_pc(mips_cpu *cpu, uint32_t v)
 {
@@ -250,6 +252,7 @@ gdb_set_pc(mips_cpu *cpu, uint32_t v)
     cpu->next_pc = v + 4;
     cpu->branch_taken = 0;
     cpu->in_delay = 0;
+    cpu->trapped = 0;
 }
 
 static uint32_t
@@ -400,6 +403,8 @@ do_continue(struct gdb *s)
 
     s->watch_hit = 0;
     watch_snapshot(s);
+    s->cpu->trapped = 0;                /* resume past a prior trap (it re-faults
+                                          if unfixed, rather than no-ooping) */
     for (;;) {
         if (s->g->exited || s->cpu->halted || s->cpu->trapped)
             return s->g->exited ? 1 : 0;
@@ -465,15 +470,17 @@ handle_packet(struct gdb *s, const char *p)
 
     case 'G': {                         /* write all registers */
         const char *h = p + 1;
-        int i;
+        int i, ok = 1;
         for (i = 0; i < NREG_ALL; i++) {
             uint32_t v;
-            if (strlen(h) < 8 || get_u32_hex(h, &v))
+            if (strlen(h) < 8 || get_u32_hex(h, &v)) {
+                ok = 0;                 /* short or non-hex: report it, not OK */
                 break;
+            }
             reg_set(s->cpu, i, v);
             h += 8;
         }
-        return send_packet(s, "OK") == 0;
+        return send_packet(s, ok ? "OK" : "E01") == 0;
     }
 
     case 'p': {                         /* read one register */
@@ -546,9 +553,16 @@ handle_packet(struct gdb *s, const char *p)
     case 's': {                         /* single step [addr] */
         if (p[1])
             gdb_set_pc(s->cpu, (uint32_t)strtoul(p + 1, NULL, 16));
-        s->watch_hit = 0;               /* a step stop is not a watch hit */
-        if (!s->g->exited && !s->cpu->halted && !s->cpu->trapped)
+        else
+            s->cpu->trapped = 0;        /* resume past a prior trap */
+        s->watch_hit = 0;
+        if (!s->g->exited && !s->cpu->halted && !s->cpu->trapped) {
+            if (s->nwp)
+                watch_snapshot(s);      /* baseline before the step */
             mips_step(s->cpu);
+            if (s->nwp)                 /* a watched write this step is a hit */
+                watch_check(s);
+        }
         return send_stop(s) == 0;
     }
 

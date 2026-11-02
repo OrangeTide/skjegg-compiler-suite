@@ -289,8 +289,10 @@ hv_run(proc *p, int budget, int *ran)
 
     /* Arm the preemption timer on first use.  It is a property of the scheduler
      * run loop; the gdb stub drives its own loop and never calls hv_run, so
-     * single-stepping is left undisturbed. */
-    if (!cpu->preempt_armed) {
+     * single-stepping is left undisturbed.  Only arm a live vcpu: when hv_ready
+     * failed it leaves the cpu halted with a NULL vcpu, and the loop below
+     * returns SKJ_RUN_HALT without ever arming, rather than dereferencing it. */
+    if (!cpu->preempt_armed && !cpu->halted && cpu->vcpu) {
         vmm_vcpu_arm_preempt(cpu->vcpu, SKJ_HV_SLICE_US);
         cpu->preempt_armed = 1;
     }
@@ -347,7 +349,7 @@ hv_run(proc *p, int budget, int *ran)
 
 static void     hv_halt(void *cpu)        { ((hv_cpu *)cpu)->halted = 1; }
 static void     hv_clear_yield(void *cpu) { ((hv_cpu *)cpu)->yield = 0; }
-static uint32_t hv_fault_pc(void *cpu)    { return (uint32_t)vmm_vcpu_pc(((hv_cpu *)cpu)->vcpu); }
+static uint32_t hv_fault_pc(void *cpu)    { hv_cpu *c = cpu; return c->vcpu ? (uint32_t)vmm_vcpu_pc(c->vcpu) : 0; }
 static uint32_t hv_trap_pc(void *cpu)     { return (uint32_t)((hv_cpu *)cpu)->trap_pc; }
 static uint32_t hv_bt_fp(void *cpu)       { (void)cpu; return 0; }   /* no backtrace */
 static int      hv_trap_signal(void *cpu) { (void)cpu; return 11; }  /* SIGSEGV */

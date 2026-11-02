@@ -135,13 +135,13 @@ rom_read(struct fs_mount *m, intptr_t h, void *buf, int n, int64_t *pos)
     struct romfs_img *r = img_of(m);
     uint32_t sz = node_size(r, (uint32_t)h);
     uint32_t off = r->data_off + node_data(r, (uint32_t)h);
-    int avail;
+    int64_t avail;
 
-    if (*pos >= (int64_t)sz)
+    if (*pos < 0 || *pos >= (int64_t)sz)
         return 0;
-    avail = (int)(sz - (uint32_t)*pos);
-    if (n > avail)
-        n = avail;
+    avail = (int64_t)sz - *pos;             /* 64-bit: never a negative int */
+    if ((int64_t)n > avail)
+        n = (int)avail;
     memcpy(buf, r->img + off + (uint32_t)*pos, (size_t)n);
     *pos += n;
     return n;
@@ -272,11 +272,20 @@ const struct fs_backend romfs_backend = {
     rom_ro, rom_ro2, rom_ro, rom_ro,
 };
 
-/* Validate an in-memory image and fill `out`.  Returns 0 or a negative errno. */
+/* Validate an in-memory image and fill `out`.  Returns 0 or a negative errno.
+ *
+ * The image is untrusted: a consumer may load a guest-supplied or downloaded
+ * one, so a crafted image must never make an accessor read outside the blob.
+ * The header tables are bounded here, then every node is validated once (its
+ * name string, type, parent index, and file data range), so the accessors
+ * above, which the walk and the ops call freely, need no per-call checks.  All
+ * table arithmetic is 64-bit so an offset or a count near 2^32 cannot wrap the
+ * bound on an ILP32 target. */
 static int
 romfs_parse(const void *image, size_t len, struct romfs_img *out)
 {
     const uint8_t *p = image;
+    uint32_t i;
 
     if (len < ROMFS_HDR_SIZE || memcmp(p, ROMFS_MAGIC, 8) != 0)
         return -EINVAL;
@@ -290,9 +299,34 @@ romfs_parse(const void *image, size_t len, struct romfs_img *out)
     out->data_off = rd_u32(p + 24);
     /* Reject an image whose tables fall outside its own length. */
     if (out->nnodes == 0
-        || (size_t)out->nodes_off + (size_t)out->nnodes * ROMFS_NODE_SIZE > len
+        || (uint64_t)out->nodes_off + (uint64_t)out->nnodes * ROMFS_NODE_SIZE > len
         || out->strs_off > len || out->data_off > len)
         return -EINVAL;
+    for (i = 0; i < out->nnodes; i++) {
+        const uint8_t *np = p + out->nodes_off + (size_t)i * ROMFS_NODE_SIZE;
+        uint32_t name = rd_u32(np + 0);
+        uint32_t type = rd_u32(np + 4);
+        int32_t  parent = (int32_t)rd_u32(np + 8);
+        uint32_t data = rd_u32(np + 12);
+        uint32_t size = rd_u32(np + 16);
+        uint64_t nameoff = (uint64_t)out->strs_off + name;
+        uint32_t j;
+        int term = 0;
+
+        if (type != ROMFS_T_FILE && type != ROMFS_T_DIR)
+            return -EINVAL;
+        if (parent < -1 || parent >= (int32_t)out->nnodes)
+            return -EINVAL;                 /* keeps node_parent() in range */
+        if (nameoff >= len)
+            return -EINVAL;                 /* name offset past the image */
+        for (j = (uint32_t)nameoff; j < len; j++)
+            if (p[j] == 0) { term = 1; break; }
+        if (!term)
+            return -EINVAL;                 /* name string is not terminated */
+        if (type == ROMFS_T_FILE
+            && (uint64_t)out->data_off + data + size > len)
+            return -EINVAL;                 /* file bytes fall outside the blob */
+    }
     return 0;
 }
 

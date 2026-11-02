@@ -72,6 +72,14 @@ read_file(const char *path, char *buf, int cap)
     return n;
 }
 
+/* Little-endian u32 store, for hand-building a crafted romfs image. */
+static void
+put32(uint8_t *b, int off, uint32_t v)
+{
+    b[off] = (uint8_t)v; b[off + 1] = (uint8_t)(v >> 8);
+    b[off + 2] = (uint8_t)(v >> 16); b[off + 3] = (uint8_t)(v >> 24);
+}
+
 int
 main(void)
 {
@@ -170,6 +178,40 @@ main(void)
     /* rename within the scratch mount (both ends root-absolute, same base). */
     CHECK(fs_rename("/hello", "/hello2") == 0, "rename /hello -> /hello2");
     CHECK(fs_exists("/hello2") == 1 && fs_exists("/hello") == 0, "rename moved it");
+
+    /* ramfs unlink-while-open: an open file keeps its bytes until its last
+     * close, and its node slot must not be reused while a handle holds it (a
+     * reused slot would alias the two files and misdirect a write). */
+    {
+        int f1 = fs_open("/u", FS_O_RDWR | FS_O_CREAT, 0644);
+        CHECK(f1 >= FS_FD_BASE, "open /u");
+        CHECK(fs_write(f1, "FFFF", 4) == 4, "write FFFF to /u");
+        CHECK(fs_unlink("/u") == 0, "unlink /u while a handle is open");
+        CHECK(fs_exists("/u") == 0, "/u is gone from the tree");
+        CHECK(write_file("/g", "GGGG") == 4, "create /g after the unlink");
+        CHECK(fs_lseek(f1, 0, FS_SEEK_SET) == 0, "seek the unlinked handle to 0");
+        CHECK(fs_write(f1, "XXXX", 4) == 4, "write through the unlinked handle");
+        CHECK(read_file("/g", buf, sizeof buf) == 4 && strcmp(buf, "GGGG") == 0,
+              "/g intact: the unlinked handle did not alias its slot");
+        fs_close(f1);
+        CHECK(read_file("/g", buf, sizeof buf) == 4 && strcmp(buf, "GGGG") == 0,
+              "/g still intact after the unlinked handle closes");
+    }
+
+    /* ramfs rename must refuse moving a directory into its own subtree. */
+    CHECK(fs_mkdir("/rd") == 0, "mkdir /rd");
+    CHECK(fs_rename("/rd", "/rd/inner") < 0, "rename /rd into its own subtree fails");
+    CHECK(fs_isdir("/rd") == 1, "/rd is still a directory at the root");
+
+    /* ramfs write far past the end is bounded, not truncated into a small buf. */
+    {
+        int fb = fs_open("/big", FS_O_RDWR | FS_O_CREAT, 0644);
+        CHECK(fb >= FS_FD_BASE, "open /big");
+        CHECK(fs_lseek(fb, (int64_t)2147483647, FS_SEEK_SET) == 2147483647,
+              "seek /big to INT_MAX");
+        CHECK(fs_write(fb, "!", 1) < 0, "write at INT_MAX is refused, not truncated");
+        fs_close(fb);
+    }
 
     /* Switch to the host mount; its cwd is independent of scratch's. */
     CHECK(fs_mount_set(1) == 0, "set current mount to host");
@@ -336,6 +378,52 @@ main(void)
         }
     }
 
+    /* romfs is untrusted: a crafted image must be rejected by the parser, not
+     * accepted into an out-of-bounds read.  Build a minimal well-formed image
+     * (one root dir node, a one-byte NUL string table, an empty data region),
+     * then corrupt one field per case and confirm romfs_mount refuses it.  Each
+     * failing mount installs nothing, so the mount indices above are unchanged.
+     * (The ILP32 nnodes*20 table overflow is fixed by 64-bit arithmetic; it
+     * cannot be reproduced on this 64-bit host, where size_t does not wrap.) */
+    {
+        uint8_t base[53];                   /* 32 hdr + 20 node + 1 string */
+        uint8_t bad[53];
+        memcpy(base, ROMFS_MAGIC, 8);
+        put32(base, 8, ROMFS_VERSION);
+        put32(base, 12, 1);                 /* nnodes          */
+        put32(base, 16, 32);                /* nodes_off       */
+        put32(base, 20, 52);                /* strs_off        */
+        put32(base, 24, 53);                /* data_off (empty)*/
+        put32(base, 28, 0);
+        put32(base, 32 + 0, 0);             /* node0.name -> strs[0] */
+        put32(base, 32 + 4, ROMFS_T_DIR);   /* node0.type            */
+        put32(base, 32 + 8, (uint32_t)-1);  /* node0.parent = root   */
+        put32(base, 32 + 12, 0);            /* node0.data            */
+        put32(base, 32 + 16, 0);            /* node0.size            */
+        base[52] = 0;                       /* the NUL for node0's name */
+
+        memcpy(bad, base, sizeof base);     /* name offset past the image */
+        put32(bad, 32 + 0, 1000);
+        CHECK(romfs_mount("bad", bad, sizeof bad, 0) < 0,
+              "romfs: a name offset past the image is rejected");
+
+        memcpy(bad, base, sizeof base);     /* file bytes past the data region */
+        put32(bad, 32 + 4, ROMFS_T_FILE);
+        put32(bad, 32 + 16, 100);
+        CHECK(romfs_mount("bad", bad, sizeof bad, 0) < 0,
+              "romfs: a file size past the image is rejected");
+
+        memcpy(bad, base, sizeof base);     /* parent index out of range */
+        put32(bad, 32 + 8, 5);
+        CHECK(romfs_mount("bad", bad, sizeof bad, 0) < 0,
+              "romfs: an out-of-range parent index is rejected");
+
+        memcpy(bad, base, sizeof base);     /* name string not terminated */
+        bad[52] = 'x';
+        CHECK(romfs_mount("bad", bad, sizeof bad, 0) < 0,
+              "romfs: an unterminated name string is rejected");
+    }
+
     /* 9pfs: an in-process 9P2000 server over a temp host dir, reached by the
      * ninefs client through the server transport. */
     {
@@ -406,6 +494,10 @@ main(void)
             CHECK(fs_rename("9p:hello.txt", "9p:greeting") == 0, "9pfs: rename hello.txt");
             CHECK(fs_exists("9p:hello.txt") == 0, "9p:hello.txt is gone after rename");
             CHECK(fs_exists("9p:greeting") == 1, "9p:greeting exists after rename");
+            /* unlink and rmdir enforce the target kind (greeting is a file,
+             * docs is a directory), so each refuses the other's kind. */
+            CHECK(fs_rmdir("9p:greeting") < 0, "9pfs: rmdir on a file is refused");
+            CHECK(fs_unlink("9p:docs") < 0, "9pfs: unlink on a directory is refused");
             CHECK(fs_unlink("9p:greeting") == 0, "9pfs: unlink greeting");
             CHECK(fs_exists("9p:greeting") == 0, "9p:greeting is gone after unlink");
             CHECK(fs_unlink("9p:docs/note") == 0, "9pfs: unlink docs/note");
@@ -430,6 +522,23 @@ main(void)
                     n = p9_server_handle(bad, tver, sizeof tver, rx, sizeof rx);
                     CHECK(n >= 5 && rx[4] == P9_RERROR,
                           "9pfs: truncated Tversion is rejected, not acted on");
+
+                    /* A stream whose second frame declares a size that would
+                     * overflow roff + msz must not slip past the length guard
+                     * and over-read the buffer: the stream stops after the
+                     * first frame, so its reply length equals the first frame
+                     * handled alone. */
+                    {
+                        uint8_t stream[11] = {
+                            7, 0, 0, 0, P9_TVERSION, 0, 0,   /* frame 1 */
+                            0xfc, 0xff, 0xff, 0xff,          /* frame 2: msz overflows */
+                        };
+                        uint8_t rx1[64];
+                        int one = p9_server_handle(bad, tver, sizeof tver, rx1, sizeof rx1);
+                        n = p9_server_handle_stream(bad, stream, sizeof stream, rx, sizeof rx);
+                        CHECK(one > 0 && n == one,
+                              "9pfs: overflowing frame length ends the stream, no over-read");
+                    }
                     p9_server_destroy(bad);
                 }
             }

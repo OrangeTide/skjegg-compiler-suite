@@ -6,6 +6,64 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.40.0
+
+#### Added
+- `vendor.sh` ships `setjmp`/`longjmp` in the per-target `libc.a`, so a vendored
+  C program that uses them (the jsh shell) links.
+
+#### Changed
+- Host-native cross compilers are the default test path. The C in-process cross
+  JITs that ran a compiler itself under qemu (`check-jit-rv`, `check-jit-arm64`,
+  their disassembly siblings, and the arm64 JIT trap and high-memory tests)
+  moved out of `check-all` into `check-emu-all`, matching what the Kobold side
+  already does, so `check-all` now runs no compiler under emulation. The
+  host-native `check-cc-rv` and `check-cc-arm64` keep the C corpus there.
+- The Kobold tutorial (`doc/languages/kobold/kp-tutorial.md`) is reworked into a
+  22-step path over the complete implemented language, each step a complete
+  program verified under the in-process JIT (or the ahead-of-time path units and
+  inline assembly require). New steps cover the scalar type set, constants,
+  `case`, `out` parameters, overloading, forward declarations, nested routines,
+  `with`, variant records, methods, dynamic arrays, open-array parameters, maps,
+  string interpolation, `for`-`in`, properties, `defer`, failable routines,
+  computed goto, units with the standard library, and the compiler directives.
+
+#### Fixed
+- The C compiler (`skj-cc`) folds three constant-expression cases in a
+  file-scope or static-storage initializer that it previously got wrong, on
+  every backend. `sizeof` of an expression operand no longer defaults to `int`
+  (it was folding to 4); an array bound deduced from a string-literal
+  initializer (`char x[] = "hello"`) is carried into the type, so `sizeof` is
+  the string length plus the NUL rather than garbage; and an enumerator
+  initializer evaluates the whole constant expression, so a computed enumerator
+  (`1 << n`, `A | B`, a reference to a prior enumerator) is correct rather than
+  0.
+- A 9P frame-length integer overflow in both the server's batched message
+  dispatcher and the `ninefs` client's reply cursor. A peer could choose a
+  later frame's declared size to wrap past the 32-bit maximum and slip it past
+  the length guard, reading past the buffer. Both now compare against the
+  remaining length.
+- A confined guest (one given any mount or grant) refuses the ambient
+  `AT_FDCWD` syscall path, which previously let a hostile guest reach any host
+  path with a raw `openat(AT_FDCWD, "/abs", ...)` despite the capability mounts.
+- `hv_run` no longer arms the per-vcpu preemption timer or reads the fault PC on
+  a null vcpu when hardware-virtualization startup failed, which crashed the
+  whole `skj-run` process instead of degrading to a clean halt.
+- Four correctness bugs across the RISC-V, MIPS and HV gdb remote stubs:
+  single-step now checks write watchpoints; the register-write (`G`) packet
+  reports an error on short or non-hex data instead of a false `OK`; a MIPS
+  guest can be resumed after a trap; and the HV stub clears its sticky fault
+  flag on resume, rather than reporting the same fault forever.
+- Guest-side filesystem hardening. The romfs parser validates an untrusted
+  image (every node's name, type, parent index and data range, with 64-bit
+  arithmetic). ramfs fixes the unlink-while-open slot-reuse aliasing, an
+  `int` write-offset truncation, a capacity-doubling overflow, and `rename` into
+  a node's own subtree. ninefs enforces the target kind in `unlink` and `rmdir`.
+- The scheduler records a child's spawner by handle, not by slot, so a
+  reaped-and-reused parent slot is recognized and the orphan is reaped rather
+  than leaked and falsely reparented; `wait` and `kill` ownership is exact
+  across slot reuse.
+
 ### 0.39.0
 
 #### Added

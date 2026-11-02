@@ -428,9 +428,11 @@ if [ "$has_libc" -eq 1 ]; then
     cp "$S"/include/sys/*.h "$DEST/include/sys/"
     # rand.c draws on the shared fast generator in runtime/rng.c.
     cp "$S/runtime/rng.c" "$S/runtime/rng.h" "$DEST/runtime/"
-    [ "$drv_cf" -eq 1 ]   && cp "$S/runtime/co_switch_cf.S" "$DEST/runtime/"
-    [ "$drv_rv" -eq 1 ]   && cp "$S/runtime/co_switch_rv.S" "$DEST/runtime/"
-    [ "$drv_mips" -eq 1 ] && cp "$S/runtime/co_switch_mips.S" "$DEST/runtime/"
+    # setjmp/longjmp ride in libc.a (emit_libc_rules archives setjmp_<arch>.o), so
+    # the per-target source ships alongside co_switch.
+    [ "$drv_cf" -eq 1 ]   && cp "$S/runtime/co_switch_cf.S" "$S/runtime/setjmp_cf.S" "$DEST/runtime/"
+    [ "$drv_rv" -eq 1 ]   && cp "$S/runtime/co_switch_rv.S" "$S/runtime/setjmp_rv.S" "$DEST/runtime/"
+    [ "$drv_mips" -eq 1 ] && cp "$S/runtime/co_switch_mips.S" "$S/runtime/setjmp_mips.S" "$DEST/runtime/"
     { [ "$drv_rv" -eq 1 ] || [ "$drv_mips" -eq 1 ]; } && cp "$S/runtime/soft64.c" "$DEST/runtime/"
 fi
 
@@ -1108,16 +1110,22 @@ fi
 # default lib dir (SKJ_CC_LIB overrides it at run time).  The staged files are
 # prerequisites so `make skjegg` produces a working driver; the sub-tools it
 # execs (skj-cc*, skj-as*, skj-ld*) are in SKJ_ALL already.
-# Emit the per-target libc.a (with the archived co_switch) and fini.o rules into
-# the generated Makefile.  $1 lib-dir name, $2 skj-cc, $3 skj-as, $4 co_switch
-# source under runtime/.  LIBC_SRCS is defined once below.
+# Emit the per-target libc.a (with the archived co_switch and setjmp) and fini.o
+# rules into the generated Makefile.  $1 lib-dir name, $2 skj-cc, $3 skj-as,
+# $4 co_switch source under runtime/, $5 setjmp source under runtime/.  setjmp
+# and longjmp are libc functions, so they ride in libc.a (a C program that uses
+# them, e.g. the jsh shell, then needs no extra object).  LIBC_SRCS is defined
+# once below.
 emit_libc_rules() {
-    _d=$1; _cc=$2; _as=$3; _csw=$4
+    _d=$1; _cc=$2; _as=$3; _csw=$4; _sj=$5
     {
         printf '\n$(BUILD)/lib/%s/obj/co_switch.o: $(SKJEGG)%s $(BUILD)/%s | $(BUILD)\n' "$_d" "$_csw" "$_as"
         printf '\t@mkdir -p $(BUILD)/lib/%s/obj\n' "$_d"
         printf '\t@$(BUILD)/%s -o $@ $(SKJEGG)%s\n' "$_as" "$_csw"
-        printf '$(BUILD)/lib/%s/libc.a: $(BUILD)/%s $(BUILD)/%s $(BUILD)/skj-ar $(BUILD)/lib/%s/obj/co_switch.o | $(BUILD)\n' "$_d" "$_cc" "$_as" "$_d"
+        printf '$(BUILD)/lib/%s/obj/setjmp.o: $(SKJEGG)%s $(BUILD)/%s | $(BUILD)\n' "$_d" "$_sj" "$_as"
+        printf '\t@mkdir -p $(BUILD)/lib/%s/obj\n' "$_d"
+        printf '\t@$(BUILD)/%s -o $@ $(SKJEGG)%s\n' "$_as" "$_sj"
+        printf '$(BUILD)/lib/%s/libc.a: $(BUILD)/%s $(BUILD)/%s $(BUILD)/skj-ar $(BUILD)/lib/%s/obj/co_switch.o $(BUILD)/lib/%s/obj/setjmp.o | $(BUILD)\n' "$_d" "$_cc" "$_as" "$_d" "$_d"
         printf '\t@mkdir -p $(BUILD)/lib/%s/obj\n' "$_d"
         printf '\t@for s in $(LIBC_SRCS); do \\\n'
         printf '\t    $(BUILD)/%s -DSKJ_LIBC_FLOAT $(LIBC_FSFLAGS) -I$(SKJEGG)include -I$(SKJEGG)libc -o $(BUILD)/lib/%s/obj/$$s.s $(SKJEGG)libc/$$s.c && \\\n' "$_cc" "$_d"
@@ -1136,7 +1144,7 @@ emit_libc_rules() {
             printf '\tdone\n'
         fi
         printf '\t@rm -f $@\n'
-        printf '\t@$(BUILD)/skj-ar rcs $@ $(addprefix $(BUILD)/lib/%s/obj/,$(addsuffix .o,$(LIBC_SRCS) $(RT_SRCS) $(FS_SRCS))) $(BUILD)/lib/%s/obj/co_switch.o\n' "$_d" "$_d"
+        printf '\t@$(BUILD)/skj-ar rcs $@ $(addprefix $(BUILD)/lib/%s/obj/,$(addsuffix .o,$(LIBC_SRCS) $(RT_SRCS) $(FS_SRCS))) $(BUILD)/lib/%s/obj/co_switch.o $(BUILD)/lib/%s/obj/setjmp.o\n' "$_d" "$_d" "$_d"
         printf '$(BUILD)/lib/%s/fini.o: $(BUILD)/%s $(BUILD)/%s | $(BUILD)\n' "$_d" "$_cc" "$_as"
         printf '\t@mkdir -p $(BUILD)/lib/%s\n' "$_d"
         printf '\t@$(BUILD)/%s -I$(SKJEGG)include -o $(BUILD)/lib/%s/fini.s $(SKJEGG)libc/fini.c\n' "$_cc" "$_d"
@@ -1179,7 +1187,7 @@ if [ "$has_driver" -eq 1 ]; then
         } >> "$MK"
         drv_lib="$drv_lib \$(BUILD)/lib/coldfire/crt0.o \$(BUILD)/lib/coldfire/half.o \$(BUILD)/lib/coldfire/va_cf.o"
         if [ "$has_libc" -eq 1 ]; then
-            emit_libc_rules coldfire skj-cc skj-as runtime/co_switch_cf.S
+            emit_libc_rules coldfire skj-cc skj-as runtime/co_switch_cf.S runtime/setjmp_cf.S
             drv_lib="$drv_lib \$(BUILD)/lib/coldfire/libc.a \$(BUILD)/lib/coldfire/fini.o"
         fi
     fi
@@ -1193,7 +1201,7 @@ if [ "$has_driver" -eq 1 ]; then
             # The rv libc needs the 64-bit divide helpers (divide-only soft64) its
             # 64-bit printf uses; the rv crt does not carry them.
             printf '\n$(BUILD)/lib/riscv/soft64_div.o: $(SKJEGG)runtime/soft64.c | $(BUILD)\n\t@mkdir -p $(@D)\n\t$(RV_CC) -std=c99 -O2 -Wall -ffreestanding -march=rv32imfd -mabi=ilp32 -DSOFT64_NO_MULSHIFT -c -o $@ $<\n' >> "$MK"
-            emit_libc_rules riscv skj-cc-rv skj-as-rv runtime/co_switch_rv.S
+            emit_libc_rules riscv skj-cc-rv skj-as-rv runtime/co_switch_rv.S runtime/setjmp_rv.S
             drv_lib="$drv_lib \$(BUILD)/lib/riscv/soft64_div.o \$(BUILD)/lib/riscv/libc.a \$(BUILD)/lib/riscv/fini.o"
         fi
     fi
@@ -1206,7 +1214,7 @@ if [ "$has_driver" -eq 1 ]; then
         drv_lib="$drv_lib \$(BUILD)/lib/mips/crt0.o \$(BUILD)/lib/mips/half.o \$(BUILD)/lib/mips/va_mips.o"
         if [ "$has_libc" -eq 1 ]; then
             printf '\n$(BUILD)/lib/mips/soft64_div.o: $(SKJEGG)runtime/soft64.c | $(BUILD)\n\t@mkdir -p $(@D)\n\t$(MIPS_CC) -march=mips1 -EL -G 0 -std=c99 -O2 -Wall -ffreestanding -DSOFT64_NO_MULSHIFT -c -o $@ $<\n' >> "$MK"
-            emit_libc_rules mips skj-cc-mips skj-as-mips runtime/co_switch_mips.S
+            emit_libc_rules mips skj-cc-mips skj-as-mips runtime/co_switch_mips.S runtime/setjmp_mips.S
             drv_lib="$drv_lib \$(BUILD)/lib/mips/soft64_div.o \$(BUILD)/lib/mips/libc.a \$(BUILD)/lib/mips/fini.o"
         fi
     fi

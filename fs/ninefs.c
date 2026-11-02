@@ -92,11 +92,11 @@ next_reply(const uint8_t *rx, uint32_t rxlen, uint32_t *roff, struct wire_in *in
     uint32_t base = *roff, sz;
     int type;
 
-    if (base + 7 > rxlen)
+    if (base > rxlen || rxlen - base < 7)   /* rxlen - base avoids base + 7 overflow */
         return -EIO;
     sz = (uint32_t)rx[base] | ((uint32_t)rx[base + 1] << 8)
        | ((uint32_t)rx[base + 2] << 16) | ((uint32_t)rx[base + 3] << 24);
-    if (sz < 7 || base + sz > rxlen)
+    if (sz < 7 || sz > rxlen - base)        /* and the server's size can't overflow it */
         return -EIO;
     wire_in_init(in, rx + base, sz);
     (void)wire_get_u32(in);                  /* size */
@@ -786,18 +786,36 @@ remove_rel(struct p9_mount *nm, const char *rel)
     return type == P9_RREMOVE ? 0 : (type < 0 ? type : -EACCES);
 }
 
+/* Tremove works on both files and directories, so unlink and rmdir would
+ * otherwise each remove the other's kind.  Stat the target first and enforce
+ * the kind, matching the ramfs and ambient backends.  (A non-empty directory is
+ * still refused by the server's own Tremove, surfaced by remove_rel.) */
 static int
 nine_unlink(struct fs_mount *m, intptr_t base, const char *rel)
 {
+    struct p9_mount *nm = nm_of(m);
+    uint32_t mode;
+    uint64_t len;
     (void)base;
-    return remove_rel(nm_of(m), rel);
+    if (stat_rel(nm, rel, &mode, &len) < 0)
+        return -ENOENT;
+    if (mode & P9_DMDIR)
+        return -EISDIR;                 /* unlink refuses a directory */
+    return remove_rel(nm, rel);
 }
 
 static int
 nine_rmdir(struct fs_mount *m, intptr_t base, const char *rel)
 {
+    struct p9_mount *nm = nm_of(m);
+    uint32_t mode;
+    uint64_t len;
     (void)base;
-    return remove_rel(nm_of(m), rel);
+    if (stat_rel(nm, rel, &mode, &len) < 0)
+        return -ENOENT;
+    if (!(mode & P9_DMDIR))
+        return -ENOTDIR;                /* rmdir refuses a non-directory */
+    return remove_rel(nm, rel);
 }
 
 static int

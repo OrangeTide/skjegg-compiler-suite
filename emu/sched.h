@@ -110,6 +110,9 @@ typedef struct proc {
     short park_events;          /* poll events it waits for (POLLIN) */
     uint64_t park_deadline;     /* monotonic ns to wake a sleeper, 0 if none */
     int parent;                 /* spawner's slot; -1 for the root */
+    uint32_t parent_handle;     /* spawner's handle (slot+generation); 0 for the
+                                 * root.  Identifies the parent across slot reuse,
+                                 * so an orphan is told from a reparented slot. */
     int zombie;                 /* exited: heavy resources freed, status kept for wait */
     int wait_slot;              /* slot it is blocked in SKJ_SYS_WAIT on, else -1 */
     struct guest_grant grants[RUN_MAX_MOUNTS]; /* its mounts, for a child to inherit */

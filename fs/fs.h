@@ -37,18 +37,18 @@
  * as BSD/Linux do: the resulting fd is read with fs_read to yield fixed
  * fs_dirent records.  There is no separate "opendir"; a language's
  * opendir/readdir/closedir is a thin wrapper over fs_open/fs_read/fs_close. */
-/* Literal values, not (1 << n): skj-cc does not fold a shift in an enum
- * initializer (it yields 0), and these flags cross into the freestanding guest
- * build it compiles.  The bit each one is appears in the comment. */
+/* The flag bits are the Linux/asm-generic O_* bit positions (so a host-side
+ * backend passes them straight to openat); keep the shift counts, which name
+ * those positions, rather than renumbering to sequential bits. */
 enum {
     FS_O_RDONLY = 0,
     FS_O_WRONLY = 1,
     FS_O_RDWR   = 2,
     FS_O_ACCMODE = 3,
-    FS_O_CREAT  = 0x00040,   /* 1 << 6  */
-    FS_O_TRUNC  = 0x00200,   /* 1 << 9  */
-    FS_O_APPEND = 0x00400,   /* 1 << 10 */
-    FS_O_DIRECTORY = 0x10000, /* 1 << 16 */
+    FS_O_CREAT  = 1 << 6,    /* 0x00040 */
+    FS_O_TRUNC  = 1 << 9,    /* 0x00200 */
+    FS_O_APPEND = 1 << 10,   /* 0x00400 */
+    FS_O_DIRECTORY = 1 << 16, /* 0x10000 */
 };
 
 /* Directory entry type. */

@@ -131,5 +131,15 @@ main(void)
         return 32;
     }
 
+    /* 6. The ambient AT_FDCWD path is closed once the guest is confined: a raw
+     *    openat with AT_FDCWD on an absolute host path must be refused, even for
+     *    a path that exists (the host root).  Before the gate, this reached the
+     *    host filesystem directly, bypassing the capability mounts entirely. */
+    fd = openat(-100 /* AT_FDCWD */, "/", O_RDONLY, 0);
+    if (fd >= 0) {
+        close(fd);
+        return 6;
+    }
+
     return 42;
 }

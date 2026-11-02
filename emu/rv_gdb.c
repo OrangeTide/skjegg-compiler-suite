@@ -552,14 +552,16 @@ handle_packet(struct gdb *s, const char *p)
 
     case 'G': {                         /* write all registers */
         const char *h = p + 1;
-        int i;
+        int i, ok = 1;
         for (i = 0; i < NREG_ALL; i++) {
             int bytes = reg_width(i);
-            if ((int)strlen(h) < bytes * 2 || set_reg(s, i, h))
+            if ((int)strlen(h) < bytes * 2 || set_reg(s, i, h)) {
+                ok = 0;                 /* short or non-hex: report it, not OK */
                 break;
+            }
             h += bytes * 2;
         }
-        return send_packet(s, "OK") == 0;
+        return send_packet(s, ok ? "OK" : "E01") == 0;
     }
 
     case 'p': {                         /* read one register */
@@ -630,9 +632,14 @@ handle_packet(struct gdb *s, const char *p)
     case 's': {                         /* single step [addr] */
         if (p[1])
             rv_set_pc(s->cpu, (uint32_t)strtoul(p + 1, NULL, 16));
-        s->watch_hit = 0;               /* a step stop is not a watch hit */
-        if (!s->g->exited && !s->cpu->halted)
+        s->watch_hit = 0;
+        if (!s->g->exited && !s->cpu->halted) {
+            if (s->nwp)
+                watch_snapshot(s);      /* baseline before the step */
             rv_step(s->cpu);
+            if (s->nwp)                 /* a watched write this step is a hit */
+                watch_check(s);
+        }
         return send_stop(s) == 0;
     }
 

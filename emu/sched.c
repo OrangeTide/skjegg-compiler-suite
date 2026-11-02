@@ -336,7 +336,7 @@ do_wait(proc *p, uint32_t handle, enum skj_priv *how)
     proc *c = proc_from_handle(p->sched, handle);
 
     *how = SKJ_PRIV_OK;
-    if (!c || c->parent != p->slot)
+    if (!c || c->parent_handle != p->handle)
         return SKJ_WAIT_BADHANDLE;
     if (c->done) {
         /* Mask to 8 bits (the POSIX exit-status width) so a real status can
@@ -373,7 +373,7 @@ do_kill(proc *p, uint32_t handle, uint32_t status)
 {
     proc *c = proc_from_handle(p->sched, handle);
 
-    if (!c || c->parent != p->slot)
+    if (!c || c->parent_handle != p->handle)
         return SKJ_WAIT_BADHANDLE;
     if (!c->done) {
         c->rc = (int)status;            /* a kill status wait() will read back */
@@ -630,6 +630,8 @@ proc_new_mem(sched *S, const uint8_t *img, long len, const char *what,
     if (!p)
         return 0;
     p->parent = parent;                         /* who may wait on it */
+    p->parent_handle = (parent >= 0 && parent < S->nprocs && S->procs[parent])
+                       ? S->procs[parent]->handle : 0;
     p->insn_budget = S->o->child_max_insns;     /* a spawned child is budgeted */
     if ((S->ops->word64 ? elf64_load_mem(&p->g, img, len, &info, what)
                         : elf32_load_mem(&p->g, img, len, &info, what)) != 0) {
@@ -1146,8 +1148,11 @@ sched_step(sched *S, int *ran)
     for (i = 1; i < S->nprocs; i++) {
         proc *c = S->procs[i];
         if (c && c->done) {
-            proc *par = (c->parent >= 0 && c->parent < S->nprocs)
-                        ? S->procs[c->parent] : 0;
+            /* Resolve the parent by handle, not by slot: if the slot was reaped
+             * and reused, proc_from_handle returns NULL (generation mismatch),
+             * so an orphan is reaped rather than leaked and falsely reparented
+             * onto the slot's new occupant. */
+            proc *par = proc_from_handle(S, c->parent_handle);
             if (!par || par->done)
                 reap_child(S, i);
         }

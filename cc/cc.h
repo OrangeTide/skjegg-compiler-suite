@@ -267,6 +267,13 @@ struct cc_node *cc_parse_program(struct arena *a);
 /* Fold an integer constant expression (dies if not constant). */
 long long cc_const_eval(struct cc_node *n);
 
+/* Typing hook for sizeof/_Alignof of an expression operand in a constant
+   expression.  The parser does not type expressions, so const_eval cannot size
+   `sizeof expr` on its own.  Lowering (where symbol types are known) points
+   this at its type resolver for the duration of the lowering pass; it stays
+   NULL at parse time, so parse-time const_eval keeps its prior behavior. */
+extern struct cc_type *(*cc_const_sizeof_typer)(struct cc_node *n);
+
 /****************************************************************
  * Lowering
  ****************************************************************/

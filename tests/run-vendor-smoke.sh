@@ -78,10 +78,25 @@ cat > escguest.c <<'EOF'
 #include <fcntl.h>
 int main(void) { int fd = open("data:../secret.txt", 0, 0); return fd < 0 ? 7 : 8; }
 EOF
+# setjmp/longjmp live in the vendored libc.a (vendor.sh archives setjmp_<arch>.o);
+# a program that uses them, like the jsh shell, needs no extra object.  A longjmp
+# of 42 must surface as setjmp's return, so main exits 42.
+cat > sjguest.c <<'EOF'
+#include <setjmp.h>
+static jmp_buf jb;
+int main(void)
+{
+    int v = setjmp(jb);
+    if (v == 0)
+        longjmp(jb, 42);
+    return v;
+}
+EOF
 
 echo "== compiling the guests with the vendored driver =="
 ./build/skjcc -target riscv -o confguest confguest.c
 ./build/skjcc -target riscv -o escguest  escguest.c
+./build/skjcc -target riscv -o sjguest   sjguest.c
 
 fail=0
 check() {
@@ -98,6 +113,7 @@ check() {
 check "granted mount reads back"      42 ./build/skj-run --mount data:data confguest
 check "escape above the mount denied"  7 ./build/skj-run --mount data:data escguest
 check "no grant: scratch default"     10 ./build/skj-run confguest
+check "setjmp/longjmp from vendored libc.a" 42 ./build/skj-run sjguest
 
 # The vDSO: the vendored tree builds the image (vdso-rv.elf is in SKJ_ALL) and
 # skj-run injects it with --vdso.  The guest finds the table through environ

@@ -2872,6 +2872,8 @@ check-emu-all: check-emu check-rv-emu check-mips-emu test-coop-read \
                test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp \
                check-rv32 \
                test-fpu-emu test-i64-emu test-ops-emu bench \
+               check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm \
+               test-jit-trap-arm64 test-jit-arm64-high \
                check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 \
                check-kp-free check-kp-corpus-rv check-kp-corpus-arm64 \
                check-kp-multi-rv check-kp-multi-arm64 \
@@ -6250,10 +6252,13 @@ test-sched-embed: build/skj-run tests/sched_embed.c tests/mem-root/hello.c $(EMU
 	@./build/skj-as-rv -o build/rv/memroot.o build/rv/memroot.s
 	@./build/skj-ld-rv -o build/rv/memroot.elf build/rv/start.o build/rv/memroot.o \
 	    build/lib/riscv/libc.a build/rv/va_rv.o build/rv/soft64_div.o
-	@$(CC) $(CFLAGS) $(EMU_FLAGS) -Iemu -o build/rv/sched_embed \
+	@# the host harness is named *_test so run-tests.sh skips it: it is an x86-64
+	@# host binary, not an rv32 guest, and build/rv is scanned by check-rv (a stale
+	@# build/rv/sched_embed otherwise ran under qemu-riscv32 and "failed").
+	@$(CC) $(CFLAGS) $(EMU_FLAGS) -Iemu -o build/rv/sched_embed_test \
 	    tests/sched_embed.c $(filter-out emu/main.c,$(EMU_SRC)) \
 	    -lm $(EMU_LDLIBS) -lpthread
-	@out=$$(./build/rv/sched_embed build/rv/memroot.elf 2>&1); \
+	@out=$$(./build/rv/sched_embed_test build/rv/memroot.elf 2>&1); \
 	 if echo "$$out" | grep -qx "mem-root ok" && echo "$$out" | grep -qx "embed ok"; then \
 	     echo "PASS: embedding API (ops getter + in-memory root) drives a guest"; \
 	 else \
@@ -7166,12 +7171,16 @@ test-help: $(addprefix build/,$(HELP_TOOLS))
 	     echo "PASS: -h prints usage and exits 0 on all $(words $(HELP_TOOLS)) tools"; \
 	 else exit 1; fi
 
+## check-all: the host-native cross path.  Every compiler here runs natively on
+## the host and emits target code; only test programs run under an emulator.  The
+## in-process JITs that run a compiler itself under emulation (the cross
+## skj-jit-* and skj-kp-jit-*) live in check-emu-all, not here.  check-jit stays:
+## it is the native host-arch (x86-64) JIT, the peer of check-kp-jit.
 check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm \
            check-rv check-x86-64 check-arm64 \
-           check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 \
-           check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm \
-           test-jit-trap test-jit-trap-arm64 test-jit-arm64-high \
+           check-x86-oracle check-arm64-oracle check-rv-oracle check-jit \
+           test-jit-trap \
            test-jit-arena test-fs \
            test-gc test-coro test-threads \
            test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 \

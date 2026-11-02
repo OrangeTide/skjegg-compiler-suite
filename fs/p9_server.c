@@ -612,8 +612,11 @@ p9_server_handle_stream(struct p9_server *s, const uint8_t *req, uint32_t reqlen
                      | ((uint32_t)req[roff + 3] << 24);
         int n;
 
-        if (msz < 7 || roff + msz > reqlen)
-            break;                      /* a malformed frame ends the stream */
+        if (msz < 7 || msz > reqlen - roff)
+            break;                      /* a malformed frame ends the stream;
+                                         * reqlen - roff avoids the roff + msz
+                                         * overflow a guest could use to slip a
+                                         * bogus frame length past the guard */
         n = p9_server_handle(s, req + roff, msz, rx + woff, rxcap - woff);
         if (n <= 0)
             break;                      /* no room for the reply: stop short */

@@ -511,8 +511,12 @@ parse_declspec(int *is_static, int *is_extern, int *is_typedef)
                 while (!consume(TOK_RBRACE)) {
                     struct cc_token name = expect(TOK_IDENT);
                     if (consume(TOK_ASSIGN)) {
-                        struct cc_node *e = parse_assign_expr();
-                        eval = e->ival;
+                        /* fold the whole constant expression, not just a bare
+                           literal: `1 << n`, `A | B`, or a prior enum constant
+                           (which parses to a literal) all reduce here.  Reading
+                           e->ival directly took only ND_INTLIT and silently
+                           made every computed enumerator 0. */
+                        eval = (long)const_eval(parse_assign_expr());
                     }
                     add_sym(name.sval, SYM_ENUM_CONST, cc_type_int(), eval);
                     eval++;
@@ -577,6 +581,9 @@ done:
     return result;
 }
 
+/* NULL until lowering installs its type resolver; see cc.h. */
+struct cc_type *(*cc_const_sizeof_typer)(struct cc_node *n) = NULL;
+
 static long long
 const_eval(struct cc_node *n)
 {
@@ -628,6 +635,11 @@ const_eval(struct cc_node *n)
     case ND_SIZEOF: {
         struct cc_type *t = n->decl_type ? n->decl_type
                           : (n->a ? n->a->type : NULL);
+        /* An expression operand carries no type at parse time; during lowering
+           the typing hook resolves it, so sizeof a declared array or struct
+           folds to its real size rather than defaulting to int. */
+        if (!t && n->a && cc_const_sizeof_typer)
+            t = cc_const_sizeof_typer(n->a);
         if (!t)
             t = cc_type_int();
         return n->op == TOK_ALIGNOF ? cc_type_align(t) : cc_type_size(t);

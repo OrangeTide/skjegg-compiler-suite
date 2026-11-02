@@ -529,11 +529,17 @@ gfd_entry(guest *g, uint32_t gfd)
 }
 
 /* A guest dirfd -> host dirfd via *out.  AT_FDCWD passes straight through (it
- * names no table entry).  Returns 0, or -1 on a bad index. */
+ * names no table entry) only for an unconfined guest; once a grant is installed
+ * the guest is confined to its capability mounts, so the ambient AT_FDCWD path
+ * is refused here -- otherwise a hostile guest could reach any host path with a
+ * raw openat(AT_FDCWD, "/abs", ...), bypassing the mounts entirely.  Returns 0,
+ * or -1 on a bad index (or a refused ambient open in confined mode). */
 static int
 gfd_dir(guest *g, uint32_t dirfd, int *out)
 {
     if ((int32_t)dirfd == GUEST_AT_FDCWD) {
+        if (g->confined)
+            return -1;
         *out = GUEST_AT_FDCWD;
         return 0;
     }
@@ -739,6 +745,8 @@ guest_install_mounts(guest *g, const char *elf_path, const run_opts *o,
                                            default landing (ramfs, or the
                                            FS_AMBIENT_DEFAULT ambient host) alone */
 
+    g->confined = 1;                    /* grants given: the capability mounts are
+                                           the only host access; refuse ambient */
     gfd_init(g);                        /* reserve 0/1/2 before any grant fd */
 
     /* Resolve the launcher symbols with the resolver matching the root ELF's
@@ -1003,6 +1011,7 @@ guest_install_grants_mem(guest *g, const uint8_t *img, long imglen,
     if (!tbl || !cnt_sym)
         return;                         /* the child links no fs/ table */
 
+    g->confined = 1;                    /* inherited grants: confine like the parent */
     gfd_init(g);                        /* reserve 0/1/2 before any grant fd */
 
     for (i = 0; i < nin && installed < FS_MAX_MOUNTS; i++) {

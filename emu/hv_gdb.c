@@ -301,6 +301,9 @@ do_continue(struct gdb *s)
     uint32_t steps = 0;
 
     s->watch_hit = 0;
+    s->fault = 0;                       /* resume past a prior fault; step_one
+                                           re-sets it if the guest faults again,
+                                           rather than reporting SIGSEGV forever */
     watch_snapshot(s);
     vmm_vcpu_debug_singlestep(s->vcpu, 1);
     for (;;) {
@@ -367,15 +370,20 @@ handle_packet(struct gdb *s, const char *p)
     case 'G': {                         /* write all registers */
         uint8_t regs[VMM_GDB_REGBYTES];
         const char *h = p + 1;
-        int i = 0;
-        while (i < (int)sizeof regs && h[0] && h[1]) {
+        int want = vmm_vcpu_gdb_read_regs(s->vcpu, regs);  /* expected byte count */
+        int i, ok = 1;
+        for (i = 0; i < want; i++) {    /* require exactly `want` valid hex bytes */
             int hi = hexval(h[0]), lo = hexval(h[1]);
-            if (hi < 0 || lo < 0)
+            if (hi < 0 || lo < 0) {     /* short (NUL hexval<0) or non-hex */
+                ok = 0;
                 break;
-            regs[i++] = (uint8_t)((hi << 4) | lo);
+            }
+            regs[i] = (uint8_t)((hi << 4) | lo);
             h += 2;
         }
-        vmm_vcpu_gdb_write_regs(s->vcpu, regs, i);
+        if (!ok)
+            return send_packet(s, "E01") == 0;
+        vmm_vcpu_gdb_write_regs(s->vcpu, regs, want);
         return send_packet(s, "OK") == 0;
     }
 
@@ -426,11 +434,16 @@ handle_packet(struct gdb *s, const char *p)
     case 's':                           /* single step [addr] */
         if (p[1])
             vmm_vcpu_set_pc(s->vcpu, strtoull(p + 1, NULL, 16));
-        s->watch_hit = 0;               /* a step stop is not a watch hit */
+        s->watch_hit = 0;
+        s->fault = 0;                   /* resume past a prior fault (G1) */
         if (!s->g->exited && !hv_is_halted(s->p)) {
+            if (s->nwp)
+                watch_snapshot(s);      /* baseline before the step */
             vmm_vcpu_debug_singlestep(s->vcpu, 1);
             step_one(s);
             vmm_vcpu_debug_singlestep(s->vcpu, 0);
+            if (s->nwp)                 /* a watched write this step is a hit */
+                watch_check(s);
         }
         return send_stop(s) == 0;
 

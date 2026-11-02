@@ -3921,6 +3921,13 @@ lower_local_decl(struct cc_node *n)
         g->is_local = 1;
         g->is_rodata = type_is_readonly(t);
         g->base_type = type_to_ir(t);
+        /* char m[] = "..." : deduce the bound as the string plus its NUL into
+           the TYPE, before arr_size is read, so sizeof (which reads the type)
+           is right.  The auto path does this in the common tail below, but the
+           static block returns before reaching it. */
+        if (t->kind == TY_ARRAY && t->array_len < 0 && n->a &&
+            n->a->kind == ND_STRLIT)
+            t->array_len = n->a->slen + 1;
         if (wants_image(t, n->a)) {
             /* aggregate (struct/union, or an array of one): a byte blob of the
                full size, aligned to the aggregate's alignment; an initializer
@@ -4749,6 +4756,14 @@ lower_global_decl(struct cc_node *gn)
         die("lower:%d: braced initializer for scalar type must hold a single value",
             gn->a->line);
 
+    /* char x[] = "..." : deduce the bound as the string plus its NUL into the
+       TYPE (sizeof reads the type), before any branch reads cc_type_size(t).
+       Mirrors lower_local_decl; without it the array keeps length -1 and
+       sizeof folds to garbage. */
+    if (t->kind == TY_ARRAY && t->array_len < 0 && gn->a &&
+        gn->a->kind == ND_STRLIT)
+        t->array_len = gn->a->slen + 1;
+
     if (gn->is_extern) {
         add_global(gn->name, t, t->kind == TY_FUNC);
         return;
@@ -4888,6 +4903,10 @@ cc_lower_program(struct arena *a, struct cc_node *ast)
     cur_prog = prog;
     nglobals = 0;
     str_counter = 0;
+
+    /* let const_eval size `sizeof expr` operands by their declared type (the
+       parser leaves expression nodes untyped); active only during lowering. */
+    cc_const_sizeof_typer = lvalue_type;
 
     /* register the varargs builtins so a call to one types by its return
        type (the lowering intercepts them by name; this is just for typing) */
