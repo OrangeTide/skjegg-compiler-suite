@@ -1174,13 +1174,36 @@ guest_p9_free(guest *g)
     g->np9 = 0;
 }
 
+/* True when a write on host fd hf would block right now: the fd reports no room
+ * and no end-of-file/error condition.  A regular file always polls writable, so
+ * this only ever holds for a full pipe, socket, or terminal.  A closed read end
+ * polls POLLHUP/POLLERR, which counts as not-blocked so the write proceeds and
+ * returns the error as it would for a lone guest. */
+static int
+write_would_block(int hf)
+{
+    struct pollfd pfd;
+    int r;
+
+    pfd.fd = hf;
+    pfd.events = POLLOUT;
+    pfd.revents = 0;
+    do {
+        r = poll(&pfd, 1, 0);
+    } while (r < 0 && errno == EINTR);
+    if (r <= 0)                                 /* 0 = no room; <0 = give up, write */
+        return r == 0;
+    return (pfd.revents & (POLLOUT | POLLHUP | POLLERR | POLLNVAL)) == 0;
+}
+
 static int32_t
 sys_write(guest *g, uint32_t fd, uint32_t buf, uint32_t len)
 {
     uint8_t tmp[4096];
-    uint32_t done = 0;
+    uint32_t done = g->wr_parked_done;  /* resume point after a POLLOUT park */
     int hf = gfd_host(g, fd);
 
+    g->wr_parked_done = 0;              /* consume it; set again only if we park */
     if (hf < 0)
         return -GUEST_EBADF;
     while (done < len) {
@@ -1194,6 +1217,19 @@ sys_write(guest *g, uint32_t fd, uint32_t buf, uint32_t len)
         if (g->quiet && (fd == 1 || fd == 2)) {
             done += chunk;
             continue;
+        }
+        /* A write to a full pipe must not stall the one shared host thread, or
+         * the sibling that has to drain the pipe can never run.  A parking core
+         * yields and re-runs the syscall when the pipe has room; it remembers
+         * the bytes already written (wr_parked_done) so the re-run resumes from
+         * there and the guest still sees one full write, never a short count.
+         * A core run alone (can_park = 0) does the blocking write below. */
+        if (write_would_block(hf) && g->can_park) {
+            g->wr_parked_done = done;
+            g->park = GPARK_RETRY;
+            g->park_fd = hf;
+            g->park_events = POLLOUT;
+            return 0;                   /* result not committed: the ecall re-runs */
         }
         n = write(hf, tmp, chunk);
         if (n <= 0)
@@ -1244,10 +1280,14 @@ sys_read(guest *g, uint32_t fd, uint32_t buf, uint32_t len)
 
     if (hf < 0)
         return -GUEST_EBADF;
-    /* Cooperative park: if a read would block, yield the slice and re-run the
-     * syscall when the fd is ready rather than stalling the whole sandbox on the
-     * host.  The scheduler waits on park_fd.  Opt-in per core (can_park). */
-    if (g->can_park && len > 0 && read_would_block(hf)) {
+    /* A read that would block must not stall the one host thread every guest in
+     * the scheduler shares, or a sibling that still has to produce the bytes (or
+     * close the pipe) can never run.  A parking core yields the slice and re-runs
+     * the syscall when the fd is ready (the scheduler waits on park_fd); the read
+     * has done nothing yet, so the re-run is a clean retry.  A core that is run
+     * alone with no scheduler to yield to (the gdb stub sets can_park = 0) falls
+     * through to a real blocking read, as a lone process would. */
+    if (len > 0 && read_would_block(hf) && g->can_park) {
         g->park = GPARK_RETRY;
         g->park_fd = hf;
         g->park_events = POLLIN;

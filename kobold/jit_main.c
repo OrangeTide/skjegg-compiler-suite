@@ -24,6 +24,7 @@
 #include "kpm.h"
 #include "jit_common.h"
 #include "kp_host.h"
+#include "kp_rt_io.h"
 #include "str.h"
 #include "frontend.h"
 
@@ -37,12 +38,17 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
-/* The same small debug/test surface Kobold's kprun binds on top of the standard
-   runtime, so this runner is a drop-in for the end-to-end runcheck corpus.  In the
-   JIT's register ABI each is a plain C function (kprun uses the value-stack ABI). */
-/* The console seam writes straight to the fd (kp_io.c), so these printf-based
-   debug stubs flush after each line to stay in order with a program's own
-   writeln output. */
+/* Whole-file string I/O (ReadFileStr/WriteFileStr) and the files and dirs unit
+   primitives (the kpf_ and kpd_ families) live in kobold/kp_rt_io.c now,
+   compiled host-native and linked here (the AOT start file links the same
+   source target-native). The bindings below map each guest symbol name to the
+   linked function.
+
+   The four debug/test stubs stay here as statics: the JIT byte sink (jit/code.h)
+   already owns the C symbols emit and emit64, so the shared file cannot export
+   them under those names; the bindings point the guest names at these copies.
+   The console seam writes straight to the fd (kp_io.c), so these printf-based
+   stubs flush after each line to stay in order with a program's own output. */
 static void h_printInt(int n) { printf("%d\n", n); fflush(stdout); }
 static void h_emit64(int64_t n) { printf("%lld\n", (long long)n); fflush(stdout); }
 
@@ -54,209 +60,6 @@ static void h_emitf(uint64_t xb) { double x; memcpy(&x, &xb, sizeof x); printf("
 #else
 static void h_emitf(double x) { printf("%g\n", x); fflush(stdout); }
 #endif
-
-/* ReadFileStr(path): read a host file named by a guest string, returning its
-   contents as a fresh guest string (empty on any failure), mirroring kprun. */
-static kp_gptr h_readFileStr(kp_gptr pathstr)
-{
-    char path[1024];
-    int plen = kp_str_len(pathstr);
-    char *buf;
-    size_t n = 0;
-    kp_gptr s;
-
-    if (plen < 0 || plen >= (int)sizeof(path))
-        return kp_str_new("", 0);
-    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
-    path[plen] = '\0';
-    buf = kp_read_file(path, &n);
-    s = kp_str_new(buf ? buf : "", (int)n);
-    free(buf);
-    return s;
-}
-
-/* WriteFileStr(path, data): write a guest string to a host file, 1 ok / 0 fail.
-   Bound for a guest that imports it (the front end's own `-o` path). */
-static int h_writeFileStr(kp_gptr pathstr, kp_gptr datastr)
-{
-    char path[1024];
-    int plen = kp_str_len(pathstr);
-
-    if (plen < 0 || plen >= (int)sizeof(path))
-        return 0;
-    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
-    path[plen] = '\0';
-    return kp_write_file(path, kp_str_bytes(datastr), (size_t)kp_str_len(datastr));
-}
-
-/* The line/stream file primitives the `files` unit builds on: open a handle,
-   read one chunk, write bytes, close.  They are stateless (the unit holds the
-   fd and does its own line buffering), so the same five mirror across every
-   runtime tier (here, aot_rt.c, and io_free.c). */
-#define KPF_CHUNK 4096
-
-static int h_kpf_open_read(kp_gptr pathstr)
-{
-    char path[1024];
-    int plen = kp_str_len(pathstr);
-    if (plen < 0 || plen >= (int)sizeof(path))
-        return -1;
-    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
-    path[plen] = '\0';
-    return open(path, O_RDONLY);
-}
-
-static int h_kpf_open_write(kp_gptr pathstr)
-{
-    char path[1024];
-    int plen = kp_str_len(pathstr);
-    if (plen < 0 || plen >= (int)sizeof(path))
-        return -1;
-    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
-    path[plen] = '\0';
-    return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-}
-
-static kp_gptr h_kpf_read(int fd)
-{
-    char tmp[KPF_CHUNK];
-    ssize_t n = (fd < 0) ? -1 : read(fd, tmp, sizeof tmp);
-    if (n <= 0)
-        return kp_str_new("", 0);
-    return kp_str_new(tmp, (int)n);
-}
-
-static int h_kpf_write(int fd, kp_gptr datastr)
-{
-    if (fd < 0)
-        return -1;
-    return (int)write(fd, kp_str_bytes(datastr), (size_t)kp_str_len(datastr));
-}
-
-static void h_kpf_close(int fd)
-{
-    if (fd >= 0)
-        close(fd);
-}
-
-/* Path metadata and operations the `files` unit exposes Pascal-style, over the
-   host stat/unlink/rename/mkdir (the AOT aot_rt.c and freestanding io_free.c
-   mirror them under the same names). */
-static int h_kpf_pathcopy(kp_gptr s, char *buf, int cap)
-{
-    int n = kp_str_len(s);
-    if (n < 0 || n >= cap)
-        return -1;
-    memcpy(buf, kp_str_bytes(s), (size_t)n);
-    buf[n] = '\0';
-    return n;
-}
-
-static int h_kpf_exists(kp_gptr pathstr)
-{
-    char path[1024];
-    struct stat st;
-    if (h_kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return 0;
-    return stat(path, &st) == 0;
-}
-
-static int64_t h_kpf_size(kp_gptr pathstr)
-{
-    char path[1024];
-    struct stat st;
-    if (h_kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return -1;
-    if (stat(path, &st) != 0)
-        return -1;
-    return (int64_t)st.st_size;
-}
-
-static int h_kpf_isdir(kp_gptr pathstr)
-{
-    char path[1024];
-    struct stat st;
-    if (h_kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return 0;
-    if (stat(path, &st) != 0)
-        return 0;
-    return S_ISDIR(st.st_mode) ? 1 : 0;
-}
-
-static int h_kpf_delete(kp_gptr pathstr)
-{
-    char path[1024];
-    if (h_kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return 0;
-    return unlink(path) == 0;
-}
-
-static int h_kpf_rename(kp_gptr oldstr, kp_gptr newstr)
-{
-    char oldp[1024], newp[1024];
-    if (h_kpf_pathcopy(oldstr, oldp, sizeof oldp) < 0)
-        return 0;
-    if (h_kpf_pathcopy(newstr, newp, sizeof newp) < 0)
-        return 0;
-    return rename(oldp, newp) == 0;
-}
-
-static int h_kpf_mkdir(kp_gptr pathstr)
-{
-    char path[1024];
-    if (h_kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return 0;
-    return mkdir(path, 0755) == 0;
-}
-
-static int h_kpf_rmdir(kp_gptr pathstr)
-{
-    char path[1024];
-    if (h_kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return 0;
-    return rmdir(path) == 0;
-}
-
-/* Directory reads for the `dirs` unit, over host opendir/readdir. */
-#define H_KPD_MAX 16
-static DIR *h_kpd_tab[H_KPD_MAX];
-
-static int h_kpd_open(kp_gptr pathstr)
-{
-    char path[1024];
-    int plen = kp_str_len(pathstr);
-    int i;
-    if (plen < 0 || plen >= (int)sizeof(path))
-        return -1;
-    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
-    path[plen] = '\0';
-    for (i = 0; i < H_KPD_MAX; i++)
-        if (!h_kpd_tab[i])
-            break;
-    if (i == H_KPD_MAX)
-        return -1;
-    h_kpd_tab[i] = opendir(path);
-    return h_kpd_tab[i] ? i : -1;
-}
-
-static kp_gptr h_kpd_next(int h)
-{
-    struct dirent *e;
-    if (h < 0 || h >= H_KPD_MAX || !h_kpd_tab[h])
-        return kp_str_new("", 0);
-    e = readdir(h_kpd_tab[h]);
-    if (!e)
-        return kp_str_new("", 0);
-    return kp_str_new(e->d_name, (int)strlen(e->d_name));
-}
-
-static void h_kpd_close(int h)
-{
-    if (h >= 0 && h < H_KPD_MAX && h_kpd_tab[h]) {
-        closedir(h_kpd_tab[h]);
-        h_kpd_tab[h] = 0;
-    }
-}
 
 static void *jit_as_addr(void (*fn)(void))
 {
@@ -648,28 +451,29 @@ int main(int argc, char **argv)
     extern double kp_random_real(void);
     extern int kp_secure_below(int bound);
 
-    /* The kprun-compatible debug/test surface. */
+    /* The kprun-compatible debug/test surface and the files/dirs primitives,
+       all from kobold/kp_rt_io.c (shared with the AOT runtime). */
     if (add_binding("printInt", jit_as_addr((void (*)(void))h_printInt), err, sizeof err) ||
         add_binding("emit", jit_as_addr((void (*)(void))h_printInt), err, sizeof err) ||
         add_binding("emitf", jit_as_addr((void (*)(void))h_emitf), err, sizeof err) ||
         add_binding("emit64", jit_as_addr((void (*)(void))h_emit64), err, sizeof err) ||
-        add_binding("ReadFileStr", jit_as_addr((void (*)(void))h_readFileStr), err, sizeof err) ||
-        add_binding("WriteFileStr", jit_as_addr((void (*)(void))h_writeFileStr), err, sizeof err) ||
-        add_binding("kpf_open_read", jit_as_addr((void (*)(void))h_kpf_open_read), err, sizeof err) ||
-        add_binding("kpf_open_write", jit_as_addr((void (*)(void))h_kpf_open_write), err, sizeof err) ||
-        add_binding("kpf_read", jit_as_addr((void (*)(void))h_kpf_read), err, sizeof err) ||
-        add_binding("kpf_write", jit_as_addr((void (*)(void))h_kpf_write), err, sizeof err) ||
-        add_binding("kpf_close", jit_as_addr((void (*)(void))h_kpf_close), err, sizeof err) ||
-        add_binding("kpf_exists", jit_as_addr((void (*)(void))h_kpf_exists), err, sizeof err) ||
-        add_binding("kpf_size", jit_as_addr((void (*)(void))h_kpf_size), err, sizeof err) ||
-        add_binding("kpf_isdir", jit_as_addr((void (*)(void))h_kpf_isdir), err, sizeof err) ||
-        add_binding("kpf_delete", jit_as_addr((void (*)(void))h_kpf_delete), err, sizeof err) ||
-        add_binding("kpf_rename", jit_as_addr((void (*)(void))h_kpf_rename), err, sizeof err) ||
-        add_binding("kpf_mkdir", jit_as_addr((void (*)(void))h_kpf_mkdir), err, sizeof err) ||
-        add_binding("kpf_rmdir", jit_as_addr((void (*)(void))h_kpf_rmdir), err, sizeof err) ||
-        add_binding("kpd_open", jit_as_addr((void (*)(void))h_kpd_open), err, sizeof err) ||
-        add_binding("kpd_next", jit_as_addr((void (*)(void))h_kpd_next), err, sizeof err) ||
-        add_binding("kpd_close", jit_as_addr((void (*)(void))h_kpd_close), err, sizeof err) ||
+        add_binding("ReadFileStr", jit_as_addr((void (*)(void))ReadFileStr), err, sizeof err) ||
+        add_binding("WriteFileStr", jit_as_addr((void (*)(void))WriteFileStr), err, sizeof err) ||
+        add_binding("kpf_open_read", jit_as_addr((void (*)(void))kpf_open_read), err, sizeof err) ||
+        add_binding("kpf_open_write", jit_as_addr((void (*)(void))kpf_open_write), err, sizeof err) ||
+        add_binding("kpf_read", jit_as_addr((void (*)(void))kpf_read), err, sizeof err) ||
+        add_binding("kpf_write", jit_as_addr((void (*)(void))kpf_write), err, sizeof err) ||
+        add_binding("kpf_close", jit_as_addr((void (*)(void))kpf_close), err, sizeof err) ||
+        add_binding("kpf_exists", jit_as_addr((void (*)(void))kpf_exists), err, sizeof err) ||
+        add_binding("kpf_size", jit_as_addr((void (*)(void))kpf_size), err, sizeof err) ||
+        add_binding("kpf_isdir", jit_as_addr((void (*)(void))kpf_isdir), err, sizeof err) ||
+        add_binding("kpf_delete", jit_as_addr((void (*)(void))kpf_delete), err, sizeof err) ||
+        add_binding("kpf_rename", jit_as_addr((void (*)(void))kpf_rename), err, sizeof err) ||
+        add_binding("kpf_mkdir", jit_as_addr((void (*)(void))kpf_mkdir), err, sizeof err) ||
+        add_binding("kpf_rmdir", jit_as_addr((void (*)(void))kpf_rmdir), err, sizeof err) ||
+        add_binding("kpd_open", jit_as_addr((void (*)(void))kpd_open), err, sizeof err) ||
+        add_binding("kpd_next", jit_as_addr((void (*)(void))kpd_next), err, sizeof err) ||
+        add_binding("kpd_close", jit_as_addr((void (*)(void))kpd_close), err, sizeof err) ||
         add_binding("kp_now_ms", jit_as_addr((void (*)(void))kp_now_ms), err, sizeof err) ||
         add_binding("kp_sleep_ms", jit_as_addr((void (*)(void))kp_sleep_ms), err, sizeof err) ||
         add_binding("kp_random_seed", jit_as_addr((void (*)(void))kp_random_seed), err, sizeof err) ||

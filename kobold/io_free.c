@@ -25,7 +25,6 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <sys/stat.h>   /* struct stat, stat, mkdir (over the crt's statx/mkdirat) */
 
 /****************************************************************
  * The host seam: write, read, exit
@@ -55,9 +54,6 @@ int open(const char *path, int flags, int mode);
 int close(int fd);
 long lseek(int fd, long offset, int whence);
 int getdents64(int fd, void *buf, int count);
-int unlink(const char *path);                               /* libc/fileops.c */
-int rename(const char *oldpath, const char *newpath);       /* libc/fileops.c */
-int rmdir(const char *path);                                /* libc/fileops.c */
 #endif
 
 /****************************************************************
@@ -576,93 +572,13 @@ kpf_close(int fd)
         kpio_close(fd);
 }
 
-/* Path metadata and operations the `files` unit exposes Pascal-style: existence,
-   size, a directory test, and delete/rename/mkdir, over the libc stat/unlink/
-   rename/mkdir, which the crt serves from the statx and *at syscalls (the only
-   file-metadata syscalls the rv32 and ColdFire kernels give).  The AOT aot_rt.c
-   and JIT jit_main.c mirror these under the same names over the host libc. */
-static int
-kpf_pathcopy(kp_gptr s, char *buf, int cap)
-{
-    int n = kp_str_len(s);
-    if (n < 0 || n >= cap)
-        return -1;
-    memcpy(buf, kp_str_bytes(s), (size_t)n);
-    buf[n] = '\0';
-    return n;
-}
-
-int
-kpf_exists(kp_gptr pathstr)
-{
-    char path[1024];
-    struct stat st;
-    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return 0;
-    return stat(path, &st) == 0;
-}
-
-int64_t
-kpf_size(kp_gptr pathstr)
-{
-    char path[1024];
-    struct stat st;
-    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return -1;
-    if (stat(path, &st) != 0)
-        return -1;
-    return (int64_t)st.st_size;
-}
-
-int
-kpf_isdir(kp_gptr pathstr)
-{
-    char path[1024];
-    struct stat st;
-    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return 0;
-    if (stat(path, &st) != 0)
-        return 0;
-    return S_ISDIR(st.st_mode) ? 1 : 0;
-}
-
-int
-kpf_delete(kp_gptr pathstr)
-{
-    char path[1024];
-    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return 0;
-    return unlink(path) == 0;
-}
-
-int
-kpf_rename(kp_gptr oldstr, kp_gptr newstr)
-{
-    char oldp[1024], newp[1024];
-    if (kpf_pathcopy(oldstr, oldp, sizeof oldp) < 0)
-        return 0;
-    if (kpf_pathcopy(newstr, newp, sizeof newp) < 0)
-        return 0;
-    return rename(oldp, newp) == 0;
-}
-
-int
-kpf_mkdir(kp_gptr pathstr)
-{
-    char path[1024];
-    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return 0;
-    return mkdir(path, 0755) == 0;
-}
-
-int
-kpf_rmdir(kp_gptr pathstr)
-{
-    char path[1024];
-    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return 0;
-    return rmdir(path) == 0;
-}
+/* The path metadata and operations the `files` unit exposes (exists, size, a
+   directory test, delete/rename/mkdir/rmdir) are tier-independent: they call the
+   libc stat/unlink/rename/mkdir/rmdir directly (which the crt serves from the
+   statx and *at syscalls, the only file-metadata syscalls the rv32 and ColdFire
+   kernels give).  That is the same C the hosted tiers use, so one source
+   (kobold/kp_rt_meta.c) now serves every tier and this file no longer carries a
+   copy. */
 
 /* Directory reads for the `dirs` unit.  A small fixed table of open
    directories: a Kobold handle is a table index, the walk over the raw

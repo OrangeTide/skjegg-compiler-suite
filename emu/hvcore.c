@@ -82,6 +82,16 @@ typedef struct hv_cpu {
     int preempt_armed;                  /* the preemption timer is set up */
     uint64_t trap_pc;
     uint64_t fault_addr;
+    /* A blocking syscall parks by deferring the doorbell MMIO read completion:
+     * doorbell_parked marks that the just-serviced doorbell parked (no result
+     * committed), and doorbell_pending holds that state across the scheduler
+     * detour so the next slice re-runs the syscall before the vcpu resumes.
+     * KVM keeps the MMIO read pending until this vcpu's next KVM_RUN, so
+     * saved_ex (its mmio_data points into the vcpu's run buffer, untouched while
+     * other vcpus run) still completes the read when the syscall finishes. */
+    int doorbell_parked;
+    int doorbell_pending;
+    struct vmm_exit saved_ex;
 } hv_cpu;
 
 static int
@@ -167,10 +177,9 @@ hv_service_doorbell(proc *p, struct vmm_exit *ex)
         cpu->yield = 1;
         vmm_vcpu_syscall_ret(ex, 0);
         return;
-    case SKJ_PRIV_RETRY:                /* unreachable: the HV cores set can_park=0,
-                                         * so wait() returns WOULDBLOCK, never parks */
-        cpu->yield = 1;
-        vmm_vcpu_syscall_ret(ex, 0);
+    case SKJ_PRIV_RETRY:                /* wait() on a live child: park (g->park is
+                                         * GPARK_RETRY) and re-run when it exits */
+        cpu->doorbell_parked = 1;
         return;
     case SKJ_PRIV_NO:
         break;
@@ -179,7 +188,18 @@ hv_service_doorbell(proc *p, struct vmm_exit *ex)
     sys = (g->arch == GUEST_ARCH_AARCH64) ? sys_of_arm64(nr) : sys_of_x64(nr);
     r = guest_syscall(g, sys, (uint32_t)a[0], (uint32_t)a[1], (uint32_t)a[2],
                       (uint32_t)a[3], (uint32_t)a[4], (uint32_t)a[5]);
+    /* A blocking read/write/nanosleep parks: the syscall committed nothing (or,
+     * for a partial write, recorded its progress in g->wr_parked_done), so leave
+     * the MMIO read pending and let hv_run re-run it when the fd is ready.  A
+     * sched_yield parks as GPARK_YIELD: the call is complete (result committed),
+     * but the slice ends. */
+    if (g->park == GPARK_RETRY) {
+        cpu->doorbell_parked = 1;
+        return;
+    }
     vmm_vcpu_syscall_ret(ex, (uint64_t)(int64_t)r);
+    if (g->park == GPARK_YIELD)
+        cpu->yield = 1;
     if (g->exited)
         cpu->halted = 1;
 }
@@ -244,6 +264,11 @@ hv_ready(proc *p, uint32_t entry, uint32_t sp)
 {
     hv_cpu *cpu = p->cpu;
 
+    /* The HV cores service cooperative parks like the emulated cores: a blocking
+     * syscall yields the slice and re-runs when the fd is ready (see hv_run and
+     * hv_service_doorbell).  The gdb stub, which drives one lone vcpu with no
+     * scheduler, clears this so a blocking syscall blocks on the host instead. */
+    p->g.can_park = 1;
     cpu->vm = vmm_new();
     if (!cpu->vm || vmm_map(cpu->vm, cpu->ram, 0, cpu->ram_size) != 0) {
         fprintf(stderr, "skj-run: VMM setup failed\n");
@@ -309,6 +334,32 @@ hv_run(proc *p, int budget, int *ran)
             return SKJ_RUN_BUDGET;
         }
 
+        if (cpu->doorbell_pending) {
+            /* Resume a parked doorbell: re-run the syscall before the vcpu runs
+             * again, so the still-pending MMIO read completes with the real
+             * result (or parks once more).  The vcpu has not run since the park,
+             * so its registers still hold the syscall arguments. */
+            hv_service_doorbell(p, &cpu->saved_ex);
+            steps++;
+            if (g->exited || cpu->halted) {
+                if (ran) *ran = steps;
+                return SKJ_RUN_HALT;
+            }
+            if (cpu->doorbell_parked) {     /* still blocked: re-park this slice */
+                cpu->doorbell_parked = 0;
+                if (ran) *ran = steps;
+                return SKJ_RUN_YIELD;
+            }
+            cpu->doorbell_pending = 0;
+            if (cpu->yield) {
+                cpu->yield = 0;
+                if (ran) *ran = steps;
+                return SKJ_RUN_YIELD;
+            }
+            continue;                       /* next iteration runs the vcpu, which
+                                               completes the now-serviced MMIO */
+        }
+
         vmm_vcpu_run(cpu->vcpu, &ex);
         steps++;
 
@@ -318,6 +369,18 @@ hv_run(proc *p, int budget, int *ran)
             if (g->exited || cpu->halted) {
                 if (ran) *ran = steps;
                 return SKJ_RUN_HALT;
+            }
+            if (cpu->doorbell_parked) {
+                /* A blocking syscall parked.  Keep the exit (its mmio_data points
+                 * into the vcpu run buffer, which stays put while other vcpus
+                 * run) so the next slice can complete the read, mark this process
+                 * io_blocked through the scheduler (g->park is GPARK_RETRY), and
+                 * yield. */
+                cpu->doorbell_parked = 0;
+                cpu->saved_ex = ex;
+                cpu->doorbell_pending = 1;
+                if (ran) *ran = steps;
+                return SKJ_RUN_YIELD;
             }
             if (cpu->yield) {
                 cpu->yield = 0;

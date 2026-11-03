@@ -97,7 +97,18 @@ rm -rf "$seed"
 mkdir -p "$seed"
 
 tmp=$(mktemp -d)
-"$RUN" --mount-ro "bin:$OUTDIR/bin" --mount "data:$seed" \
+# Bound the run with a timeout when one is available, as a generic safety net:
+# the HV cores run the shell and its children as several guests round-robin on
+# one host thread, and a blocking pipe read or write now parks cooperatively
+# (the scheduler runs the sibling instead of stalling the shared thread), but if
+# that ever regressed a wedged guest would block make indefinitely.  With the
+# guard the greps below fail and the test reports a bounded failure instead.
+if command -v timeout >/dev/null 2>&1; then
+    RUN_GUARD="timeout 60"
+else
+    RUN_GUARD=""
+fi
+$RUN_GUARD "$RUN" --mount-ro "bin:$OUTDIR/bin" --mount "data:$seed" \
     "$OUTDIR/jsh.elf" <"$ROOT/tests/jsh/demo.jsh" >"$tmp/out" 2>"$tmp/err" || true
 
 fail=0

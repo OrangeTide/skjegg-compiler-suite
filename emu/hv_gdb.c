@@ -556,6 +556,11 @@ hv_gdb_serve(proc *root, int port, int *exit_code)
     s.ack_mode = 1;
     s.p = root;
     s.g = &root->g;
+    /* The stub drives one lone vcpu with no scheduler, so it cannot service a
+     * cooperative park.  Clear can_park: a blocking syscall blocks on the host
+     * (as a lone process would) rather than deferring a doorbell the stub's
+     * single-step loop would then mis-complete. */
+    s.g->can_park = 0;
     s.vcpu = hv_vcpu_of(root);
 
     s.fd = listen_accept(port);

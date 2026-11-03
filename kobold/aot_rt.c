@@ -29,10 +29,6 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <dirent.h>
 
 /* The renamed guest entry (skj-kp emits the program's entry under this name). */
 extern void kp_guest_entry(void);
@@ -43,9 +39,15 @@ uint64_t kp_call_guest(void *entry, void *stack_top,
 void kp_handle_sweep(void);
 
 /* From kobold/kp_host.c. */
-char *kp_read_file(const char *path, size_t *lenp);
-int kp_write_file(const char *path, const char *data, size_t len);
 void kp_io_set_args(int argc, char **argv);
+
+/* The file, directory, and whole-file string surface the stdlib units call by
+   name (ReadFileStr/WriteFileStr and the kpf_ and kpd_ families) lives in
+   kobold/kp_rt_io.c now, shared verbatim with the JIT driver; this AOT build
+   links that object (KP_AOT_RT). The four debug/test stubs below stay here (and
+   as statics in the JIT driver): the JIT byte sink owns the C symbols emit and
+   emit64, so they cannot be one shared symbol, while the guest links an AOT
+   program against these exact names. */
 
 /****************************************************************
  * Traps (the guest calls these on a failed runtime check)
@@ -84,210 +86,6 @@ void emitf(uint64_t xb) { double x; memcpy(&x, &xb, sizeof x); printf("%g\n", x)
 #else
 void emitf(double x) { printf("%g\n", x); fflush(stdout); }
 #endif
-
-kp_gptr ReadFileStr(kp_gptr pathstr)
-{
-    char path[1024];
-    int plen = kp_str_len(pathstr);
-    char *buf;
-    size_t n = 0;
-    kp_gptr s;
-
-    if (plen < 0 || plen >= (int)sizeof(path))
-        return kp_str_new("", 0);
-    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
-    path[plen] = '\0';
-    buf = kp_read_file(path, &n);
-    s = kp_str_new(buf ? buf : "", (int)n);
-    free(buf);
-    return s;
-}
-
-/* WriteFileStr(path, data): write a guest string to a host file named by another
-   guest string, returning 1 on success and 0 on failure.  The front end's `-o`
-   uses it to write the KPM1 module without a shell redirect. */
-int WriteFileStr(kp_gptr pathstr, kp_gptr datastr)
-{
-    char path[1024];
-    int plen = kp_str_len(pathstr);
-
-    if (plen < 0 || plen >= (int)sizeof(path))
-        return 0;
-    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
-    path[plen] = '\0';
-    return kp_write_file(path, kp_str_bytes(datastr), (size_t)kp_str_len(datastr));
-}
-
-/* The line/stream file primitives the `files` unit builds on: open a handle,
-   read one chunk, write bytes, close.  Stateless (the unit holds the fd and does
-   its own line buffering), mirroring jit_main.c and io_free.c. */
-#define KPF_CHUNK 4096
-
-int kpf_open_read(kp_gptr pathstr)
-{
-    char path[1024];
-    int plen = kp_str_len(pathstr);
-    if (plen < 0 || plen >= (int)sizeof(path))
-        return -1;
-    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
-    path[plen] = '\0';
-    return open(path, O_RDONLY);
-}
-
-int kpf_open_write(kp_gptr pathstr)
-{
-    char path[1024];
-    int plen = kp_str_len(pathstr);
-    if (plen < 0 || plen >= (int)sizeof(path))
-        return -1;
-    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
-    path[plen] = '\0';
-    return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-}
-
-kp_gptr kpf_read(int fd)
-{
-    char tmp[KPF_CHUNK];
-    ssize_t n = (fd < 0) ? -1 : read(fd, tmp, sizeof tmp);
-    if (n <= 0)
-        return kp_str_new("", 0);
-    return kp_str_new(tmp, (int)n);
-}
-
-int kpf_write(int fd, kp_gptr datastr)
-{
-    if (fd < 0)
-        return -1;
-    return (int)write(fd, kp_str_bytes(datastr), (size_t)kp_str_len(datastr));
-}
-
-void kpf_close(int fd)
-{
-    if (fd >= 0)
-        close(fd);
-}
-
-/* Path metadata and operations the `files` unit exposes Pascal-style: existence,
-   size, a directory test, and delete/rename/mkdir, over the host stat/unlink/
-   rename/mkdir.  The freestanding io_free.c mirrors them over the same POSIX
-   names.  A guest string is copied to a NUL-terminated path first. */
-static int kpf_pathcopy(kp_gptr s, char *buf, int cap)
-{
-    int n = kp_str_len(s);
-    if (n < 0 || n >= cap)
-        return -1;
-    memcpy(buf, kp_str_bytes(s), (size_t)n);
-    buf[n] = '\0';
-    return n;
-}
-
-int kpf_exists(kp_gptr pathstr)
-{
-    char path[1024];
-    struct stat st;
-    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return 0;
-    return stat(path, &st) == 0;
-}
-
-int64_t kpf_size(kp_gptr pathstr)
-{
-    char path[1024];
-    struct stat st;
-    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return -1;
-    if (stat(path, &st) != 0)
-        return -1;
-    return (int64_t)st.st_size;
-}
-
-int kpf_isdir(kp_gptr pathstr)
-{
-    char path[1024];
-    struct stat st;
-    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return 0;
-    if (stat(path, &st) != 0)
-        return 0;
-    return S_ISDIR(st.st_mode) ? 1 : 0;
-}
-
-int kpf_delete(kp_gptr pathstr)
-{
-    char path[1024];
-    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return 0;
-    return unlink(path) == 0;
-}
-
-int kpf_rename(kp_gptr oldstr, kp_gptr newstr)
-{
-    char oldp[1024], newp[1024];
-    if (kpf_pathcopy(oldstr, oldp, sizeof oldp) < 0)
-        return 0;
-    if (kpf_pathcopy(newstr, newp, sizeof newp) < 0)
-        return 0;
-    return rename(oldp, newp) == 0;
-}
-
-int kpf_mkdir(kp_gptr pathstr)
-{
-    char path[1024];
-    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return 0;
-    return mkdir(path, 0755) == 0;
-}
-
-int kpf_rmdir(kp_gptr pathstr)
-{
-    char path[1024];
-    if (kpf_pathcopy(pathstr, path, sizeof path) < 0)
-        return 0;
-    return rmdir(path) == 0;
-}
-
-/* Directory reads for the `dirs` unit, over the host opendir/readdir.  A Kobold
-   handle is an index into a small table of open DIR*; kpd_next returns one
-   entry name at a time (or the empty string at end). */
-#define KPD_MAX 16
-static DIR *kpd_tab[KPD_MAX];
-
-int kpd_open(kp_gptr pathstr)
-{
-    char path[1024];
-    int plen = kp_str_len(pathstr);
-    int i;
-    if (plen < 0 || plen >= (int)sizeof(path))
-        return -1;
-    memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
-    path[plen] = '\0';
-    for (i = 0; i < KPD_MAX; i++)
-        if (!kpd_tab[i])
-            break;
-    if (i == KPD_MAX)
-        return -1;
-    kpd_tab[i] = opendir(path);
-    return kpd_tab[i] ? i : -1;
-}
-
-kp_gptr kpd_next(int h)
-{
-    struct dirent *e;
-    if (h < 0 || h >= KPD_MAX || !kpd_tab[h])
-        return kp_str_new("", 0);
-    e = readdir(kpd_tab[h]);
-    if (!e)
-        return kp_str_new("", 0);
-    return kp_str_new(e->d_name, (int)strlen(e->d_name));
-}
-
-void kpd_close(int h)
-{
-    if (h >= 0 && h < KPD_MAX && kpd_tab[h]) {
-        closedir(kpd_tab[h]);
-        kpd_tab[h] = 0;
-    }
-}
 
 /****************************************************************
  * Process entry

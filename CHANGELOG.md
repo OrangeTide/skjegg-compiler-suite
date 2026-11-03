@@ -6,6 +6,23 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.41.0
+
+#### Fixed
+- The hardware-virtualization (HV) cores now park on a blocking syscall and let
+  the scheduler run a sibling, instead of stalling the one host thread that every
+  guest in a sandbox shares. A multi-guest HV program that pipes between its
+  guests (the `jsh` shell and its coreutils running under KVM) no longer
+  deadlocks when a reader waits on a writer, a writer fills a pipe, or a guest
+  sleeps or yields. This also removes an intermittent hang in the HV test tier.
+  The full-pipe write case is fixed on the emulated cores too.
+
+#### Changed
+- The hosted Kobold file and directory runtime is one shared source across the
+  in-process JIT, ahead-of-time, and freestanding tiers, in place of three
+  near-identical copies. Behavior is unchanged; only the per-tier differences
+  (the allocation model and the filesystem-interpose seam) stay separate.
+
 ### 0.40.0
 
 #### Added

@@ -241,14 +241,19 @@ typedef struct guest {
     struct guest_p9bind p9[GUEST_MAX_P9];
 
     /* Cooperative blocking-syscall park (see the GPARK_* enum).  can_park is set
-     * by a sandbox core's ready() to opt in; the HV cores leave it 0. */
+     * by a core's ready() to opt in; a core run alone with no scheduler to yield
+     * to (the gdb stub) leaves it 0 and blocks on the host instead. */
     int can_park;               /* this core services parks; 0 = block on the host */
     int park;                   /* GPARK_* result of the last syscall, else NONE */
-    int park_fd;                /* host fd to wait on (GPARK_RETRY read); -1 if none */
-    short park_events;          /* poll events to wait for (POLLIN) */
+    int park_fd;                /* host fd to wait on (GPARK_RETRY); -1 if none */
+    short park_events;          /* poll events to wait for (POLLIN / POLLOUT) */
     uint64_t park_deadline;     /* monotonic ns to wake a sleeper; 0 if none */
     int sleeping;               /* a nanosleep is pending (its deadline is live) */
     uint64_t sleep_deadline;    /* that sleep's absolute monotonic ns deadline */
+    uint32_t wr_parked_done;    /* bytes already written by a POLLOUT-parked write,
+                                   so its re-run resumes mid-buffer (never a short
+                                   count to the guest); 0 when no write is parked */
+
     char scratch_dir[64];       /* host-owned ephemeral scratch dir to remove at
                                    teardown, "" if none (only the root owns it) */
     uint32_t vdso_base;         /* injected vDSO table address, 0 if none; the

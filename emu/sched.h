@@ -107,7 +107,7 @@ typedef struct proc {
                                  * scheduler skips its slices until park_fd is
                                  * ready or park_deadline passes */
     int park_fd;                /* host fd it waits on, or -1 (a pure sleeper) */
-    short park_events;          /* poll events it waits for (POLLIN) */
+    short park_events;          /* poll events it waits for (POLLIN / POLLOUT) */
     uint64_t park_deadline;     /* monotonic ns to wake a sleeper, 0 if none */
     int parent;                 /* spawner's slot; -1 for the root */
     uint32_t parent_handle;     /* spawner's handle (slot+generation); 0 for the

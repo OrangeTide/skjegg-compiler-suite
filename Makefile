@@ -321,12 +321,12 @@ check-jit: build/skj-jit
 ## A driver's main.c links against this; skj-kp-jit is the generic runner and
 ## skj-kp-patrol a host that adds an opaque handle type.
 KP_RT  := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kobold/map.c kobold/rt_host.c \
-          kobold/co_shim.c runtime/co_switch_x86.S kobold/kp_host.c kobold/kp_io.c libc/numfmt.c \
+          kobold/co_shim.c runtime/co_switch_x86.S kobold/kp_host.c kobold/kp_io.c kobold/kp_rt_io.c kobold/kp_rt_meta.c libc/numfmt.c \
           runtime/rng.c runtime/rng_glue.c runtime/sched_glue.c \
           jit/jit_common.c jit/jit_arena.c jit/jit_x86.c jit/emit_x86.c jit/code.c \
           jit/call_guest_x86.S \
           backend/x86_select.c backend/regalloc_x86.c $(IR_SRC)
-KP_HDRS := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue.h kobold/obj.h kobold/gheap_core.h kobold/co.h \
+KP_HDRS := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue.h kobold/obj.h kobold/gheap_core.h kobold/co.h kobold/kp_rt_io.h \
            kobold/handle.h kobold/lowmem.h kobold/kp_host.h jit/jit_common.h jit/jit_arena.h \
            jit/jit_x86.h jit/emit_x86.h jit/code.h backend/mc.h backend/x86_select.h ir/ir.h ir/target.h runtime/rng.h
 # -DKP_GLUE_HOSTED: the hosted Kobold runtime (the in-process JIT and libkpaot.a)
@@ -487,12 +487,12 @@ build/skj-kp-patrol: kobold/patrol_main.c $(KP_RT) build/kp_co.o $(KP_HDRS) Make
 ## holds without MAP_32BIT.  Built with RVJIT_CC (zig's bundled rv32 libc, since the
 ## rv64 toolchain has no ilp32 multilib) and run under qemu-riscv32.
 KP_RT_RV := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kobold/map.c kobold/rt_host.c \
-            kobold/co_shim.c runtime/co_switch_rv.S kobold/kp_host.c kobold/kp_io.c libc/numfmt.c \
+            kobold/co_shim.c runtime/co_switch_rv.S kobold/kp_host.c kobold/kp_io.c kobold/kp_rt_io.c kobold/kp_rt_meta.c libc/numfmt.c \
             runtime/rng.c runtime/rng_glue.c runtime/sched_glue.c \
             jit/jit_common.c jit/jit_arena.c jit/jit_rv.c jit/emit_rv.c jit/code.c \
             jit/call_guest_rv.S jit/rv_jit_i64.S \
             backend/rv_select.c backend/regalloc_rv.c $(IR_SRC)
-KP_HDRS_RV := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue.h kobold/obj.h kobold/gheap_core.h kobold/co.h \
+KP_HDRS_RV := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue.h kobold/obj.h kobold/gheap_core.h kobold/co.h kobold/kp_rt_io.h \
               kobold/handle.h kobold/lowmem.h kobold/kp_host.h jit/jit_common.h jit/jit_arena.h \
               jit/emit_rv.h jit/code.h backend/rv_mc.h backend/rv_select.h ir/ir.h ir/target.h
 KP_CFLAGS_RV := $(CFLAGS) -DKP_FREESTANDING -DKP_REAL=double -Iir -Ijit -Ibackend -Ikobold
@@ -513,12 +513,12 @@ build/skj-kp-jit-rv: kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c $(KP_
 ## rt_host.c/co_shim.c).  Cross-built with the arm64 toolchain and run under
 ## qemu-aarch64, which executes the JIT-generated code.
 KP_RT_A64 := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kobold/map.c kobold/rt_host.c \
-             kobold/co_shim.c runtime/co_switch_arm64.S kobold/kp_host.c kobold/kp_io.c libc/numfmt.c \
+             kobold/co_shim.c runtime/co_switch_arm64.S kobold/kp_host.c kobold/kp_io.c kobold/kp_rt_io.c kobold/kp_rt_meta.c libc/numfmt.c \
              runtime/rng.c runtime/rng_glue.c runtime/sched_glue.c \
              jit/jit_common.c jit/jit_arena.c jit/jit_arm64.c jit/emit_arm64.c jit/code.c \
              jit/call_guest_arm64.S \
              backend/arm64_select.c backend/regalloc_arm64.c $(IR_SRC)
-KP_HDRS_A64 := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue.h kobold/obj.h kobold/gheap_core.h kobold/co.h \
+KP_HDRS_A64 := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue.h kobold/obj.h kobold/gheap_core.h kobold/co.h kobold/kp_rt_io.h \
                kobold/handle.h kobold/lowmem.h kobold/kp_host.h jit/jit_common.h jit/jit_arena.h \
                jit/emit_arm64.h jit/code.h backend/arm64_mc.h backend/arm64_select.h ir/ir.h
 KP_CFLAGS_A64 := $(CFLAGS) -DKP_FREESTANDING -DKP_REAL=double -DKP_GLUE_HOSTED -Iir -Ijit -Ibackend -Ikobold
@@ -580,7 +580,7 @@ check-kp: build/skj-kp
 ## link rather than through a binding table.
 ## co.c is vendored and builds with -Wall -Wextra but not -Wpedantic, so it is taken
 ## from the shared build/kp_co.o rule rather than recompiled here.
-KP_AOT_RT := kobold/aot_rt.c kobold/kp_host.c kobold/kp_io.c libc/numfmt.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
+KP_AOT_RT := kobold/aot_rt.c kobold/kp_rt_io.c kobold/kp_rt_meta.c kobold/kp_host.c kobold/kp_io.c libc/numfmt.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
              kobold/map.c kobold/rt_host.c kobold/co_shim.c \
              runtime/rng.c runtime/rng_glue.c runtime/sched_glue.c \
              runtime/co_switch_x86.S jit/call_guest_x86.S
@@ -633,7 +633,7 @@ build/skj-kp-cf: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_CF) kobold/kpm.h 
 ## stack-ABI 64-bit multiply and shifts the guest reaches through the skj_jit_*
 ## names (the register-ABI __divdi3 family and all FP math come from the toolchain
 ## runtime library at link).  arm64 needs neither: i64 and doubles are native.
-KP_AOT_RT_RV := kobold/aot_rt.c kobold/kp_host.c kobold/kp_io.c libc/numfmt.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
+KP_AOT_RT_RV := kobold/aot_rt.c kobold/kp_rt_io.c kobold/kp_rt_meta.c kobold/kp_host.c kobold/kp_io.c libc/numfmt.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
                 kobold/map.c kobold/rt_host.c kobold/co_shim.c \
                 runtime/co_switch_rv.S jit/call_guest_rv.S jit/rv_jit_i64.S \
                 kobold/rv_i64_aot_alias.S
@@ -647,7 +647,7 @@ build/libkpaot-rv.a: $(KP_AOT_RT_RV) build/kp_co_rv.o $(KP_HDRS_RV) runtime/i64_
 	@rm -f $@
 	$(AR) rcs $@ build/aot-rv/*.o build/kp_co_rv.o
 
-KP_AOT_RT_A64 := kobold/aot_rt.c kobold/kp_host.c kobold/kp_io.c libc/numfmt.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
+KP_AOT_RT_A64 := kobold/aot_rt.c kobold/kp_rt_io.c kobold/kp_rt_meta.c kobold/kp_host.c kobold/kp_io.c libc/numfmt.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
                  kobold/map.c kobold/rt_host.c kobold/co_shim.c \
                  runtime/rng.c runtime/rng_glue.c runtime/sched_glue.c \
                  runtime/co_switch_arm64.S jit/call_guest_arm64.S
@@ -670,7 +670,7 @@ build/libkpaot-arm64.a: $(KP_AOT_RT_A64) build/kp_co_a64_lp64.o $(KP_HDRS_A64) M
 ## the parameterless entry.  Unlike the freestanding libkpaot-cf-free.a (a no-libc
 ## boris tier over skj-run), this links against glibc and runs under qemu-m68k, which
 ## is what the behavioral corpus (tests/kp-corpus) needs for its emit* externals.
-KP_AOT_RT_CF := kobold/aot_rt.c kobold/kp_host.c kobold/kp_io.c libc/numfmt.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
+KP_AOT_RT_CF := kobold/aot_rt.c kobold/kp_rt_io.c kobold/kp_rt_meta.c kobold/kp_host.c kobold/kp_io.c libc/numfmt.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c \
                 kobold/map.c kobold/rt_host.c kobold/co_shim.c \
                 runtime/co_switch_cf.S jit/call_guest_cf.S
 build/libkpaot-cf.a: $(KP_AOT_RT_CF) build/kp_co_cf.o $(KP_HDRS) Makefile | build
@@ -1431,12 +1431,21 @@ build/kpfree-rv/stat.o: libc/stat.c $(FS_HDR) $(wildcard include/*.h) $(wildcard
 build/kpfree-rv/fileops.o: libc/fileops.c $(FS_HDR) $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
 	./build/skj-cc-rv -Iinclude -Ilibc $(KPFREE_RV_FS) -o $(@:.o=.s) libc/fileops.c
 	./build/skj-as-rv -o $@ $(@:.o=.s)
+## kp_rt_meta.c's path-metadata ops (the kpf_exists family) need struct stat and
+## stat/mkdir, so like io_free.o it is built with the libc include path on top of
+## the freestanding flags.  It takes no FS flags: it calls stat/unlink/rename/
+## mkdir/rmdir directly (the stat.o/fileops.o wrappers above supply them over the
+## crt's statx and *at syscalls), so this is the one hosted-and-freestanding
+## shared source in the archive.
+build/kpfree-rv/kp_rt_meta.o: kobold/kp_rt_meta.c $(KP_HDRS_RV) $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	./build/skj-cc-rv $(KPFREE_RV_SKJFLAGS) -Iinclude -Ilibc -o $(@:.o=.s) kobold/kp_rt_meta.c
+	./build/skj-as-rv -o $@ $(@:.o=.s)
 ## The brk-bump both runtimes share: rt_free.c's gheap grows through __libc_sbrk
 ## (libc/sbrk.c), the same source libc's malloc uses.  skj-cc-rv defines
 ## __skj_ilp32__, so sbrk.c takes its brk path, not the LP64 fixed-region one.
 ## Built by the libc/%.o pattern rule above.
 
-KPFREE_RV_ARCHIVE := build/kpfree-rv/rt_free.o build/kpfree-rv/io_free.o build/kpfree-rv/kp_io.o \
+KPFREE_RV_ARCHIVE := build/kpfree-rv/rt_free.o build/kpfree-rv/io_free.o build/kpfree-rv/kp_rt_meta.o build/kpfree-rv/kp_io.o \
                      build/kpfree-rv/io_free_rv.o build/kpfree-rv/sbrk.o \
                      build/kpfree-rv/fs.o build/kpfree-rv/ramfs.o build/kpfree-rv/ambientfs.o build/kpfree-rv/hostcap.o \
                      build/kpfree-rv/devfs.o build/kpfree-rv/romfs.o \
@@ -1468,7 +1477,7 @@ build/libkpaot-rv-free.a: $(KPFREE_RV_ARCHIVE) | build/kpfree-rv
 ## exit 1).  Built strict-ColdFire (-mcpu=5475) with M68K_CC so skj-run's CFV4e
 ## core runs it, and assembled by skj-as to keep the path binutils-free.
 # Deferred (=, not :=): CF_RT_CFLAGS is defined further down the Makefile.
-KP_HDRS_CF := kobold/str.h kobold/dynarr.h kobold/map.h kobold/obj.h kobold/gheap_core.h kobold/co.h \
+KP_HDRS_CF := kobold/str.h kobold/dynarr.h kobold/map.h kobold/obj.h kobold/gheap_core.h kobold/co.h kobold/kp_rt_io.h \
               kobold/handle.h kobold/lowmem.h kobold/rt_glue.h kobold/kp_abi.h ir/target.h
 # The C runtime is compiled by skj-cc (the in-tree C compiler) to GAS asm and
 # assembled by skj-as, so the ColdFire kp runtime is built with no external
@@ -1528,6 +1537,11 @@ build/kpfree-cf/stat.o: libc/stat.c $(FS_HDR) $(wildcard include/*.h) $(wildcard
 build/kpfree-cf/fileops.o: libc/fileops.c $(FS_HDR) $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
 	./build/skj-cc -Iinclude -Ilibc $(KPFREE_CF_FS) -o $(@:.o=.s) libc/fileops.c
 	./build/skj-as -o $@ $(@:.o=.s)
+## kp_rt_meta.c's path-metadata ops need struct stat and stat/mkdir (see the rv
+## rule): the libc include path on top of the freestanding flags, no FS flags.
+build/kpfree-cf/kp_rt_meta.o: kobold/kp_rt_meta.c $(KP_HDRS_CF) $(wildcard include/*.h) $(wildcard include/sys/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	./build/skj-cc $(KPFREE_CF_SKJFLAGS) -Iinclude -Ilibc -o $(@:.o=.s) kobold/kp_rt_meta.c
+	./build/skj-as -o $@ $(@:.o=.s)
 # The fs/ layer objects for the cf freestanding archive (the sibling of the rv
 # fs/%.o pattern rule): one source per target stem, full FS feature set, skj-as.
 build/kpfree-cf/%.o: fs/%.c $(FS_HDR) $(wildcard include/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
@@ -1545,7 +1559,7 @@ build/kpfree-cf/%.o: runtime/%.c $(wildcard runtime/*.h) build/skj-cc build/skj-
 	./build/skj-cc $(KPFREE_CF_SKJFLAGS) -o $(@:.o=.s) $<
 	./build/skj-as -o $@ $(@:.o=.s)
 
-KPFREE_CF_ARCHIVE := build/kpfree-cf/rt_free.o build/kpfree-cf/io_free.o build/kpfree-cf/kp_io.o \
+KPFREE_CF_ARCHIVE := build/kpfree-cf/rt_free.o build/kpfree-cf/io_free.o build/kpfree-cf/kp_rt_meta.o build/kpfree-cf/kp_io.o \
                      build/kpfree-cf/io_free_cf.o build/kpfree-cf/sbrk.o \
                      build/kpfree-cf/fs.o build/kpfree-cf/ramfs.o build/kpfree-cf/ambientfs.o build/kpfree-cf/hostcap.o \
                      build/kpfree-cf/devfs.o build/kpfree-cf/romfs.o \
@@ -2867,7 +2881,7 @@ check-emu-all: check-emu check-rv-emu check-mips-emu test-coop-read \
                test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh \
                test-rv-vdso test-cf-vdso test-mips-vdso \
                test-rv-mem-root test-sched-embed \
-               test-hv-x86-64-vdso test-hv-arm64-vdso test-hv-parallel \
+               test-hv-x86-64-vdso test-hv-arm64-vdso test-hv-parallel test-hv-x86-64-pump \
                test-rv-env test-cf-env test-hv-x86-64-env test-rv-decode-cache \
                test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp \
                check-rv32 \
@@ -6146,6 +6160,27 @@ test-x86-64-jsh: build/skj-cc-x86-64 build/skj-as-x86-64 \
 	 NAME=test-x86-64-jsh \
 	 sh tests/run-jsh.sh
 
+## The cooperative-park stress test on the x86-64 HV tier: two guests share one
+## host thread and move a multi-pipe-buffer payload, so a full-pipe write
+## (POLLOUT), an empty-pipe read (POLLIN), a sched_yield, and a nanosleep each
+## park the caller and let the sibling run instead of blocking the shared thread
+## (the HV syscall suspend/resume path; see emu/hvcore.c and emu/guest.c).  SKIPs
+## without an accessible /dev/kvm, like the other HV tests.
+test-hv-x86-64-pump: build/skj-cc-x86-64 build/skj-as-x86-64 \
+                 build/hv-x86_64/start.o build/hv-x86_64/syscall.o build/hv-x86_64/setjmp.o \
+                 build/x86_64/half.o build/x86_64/va.o build/x86_64/soft64.o build/x86_64/co_switch.o \
+                 build/skj-run
+	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: x86-64 hv-pump (no accessible /dev/kvm)"; exit 0; fi; \
+	 CCBIN="$(CURDIR)/build/skj-cc-x86-64" \
+	 ASM="$(CURDIR)/build/skj-as-x86-64 -o" \
+	 LD="$(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none -o" \
+	 START="$(CURDIR)/build/hv-x86_64/start.o" \
+	 HALF="$(CURDIR)/build/hv-x86_64/syscall.o $(CURDIR)/build/x86_64/va.o $(CURDIR)/build/x86_64/half.o $(CURDIR)/build/x86_64/soft64.o $(CURDIR)/build/hv-x86_64/setjmp.o" \
+	 OUTDIR="$(CURDIR)/build/hv-pump-x86_64" \
+	 RUN="$(CURDIR)/build/skj-run" \
+	 NAME=test-hv-x86-64-pump \
+	 sh tests/run-hv-pump.sh
+
 test-arm64-jsh: build/skj-cc-arm64 build/skj-as-aarch64 \
                 build/hv-arm64/start.o build/hv-arm64/syscall.o build/hv-arm64/setjmp.o \
                 build/arm64/va.o build/arm64/soft64.o build/arm64/co_switch.o \
@@ -7221,4 +7256,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill test-rv-spawn-backtrace test-rv-spawn-mounts test-cf-spawn-mounts test-rv-spawn-pipe test-cf-spawn-pipe test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh test-rv-vdso test-cf-vdso test-mips-vdso test-rv-mem-root test-sched-embed test-hv-x86-64-vdso test-hv-arm64-vdso test-rv-env test-cf-env test-hv-x86-64-env test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as test-ld-x86-64 test-ld-arm64 test-cc-driver-x86-64 test-cc-driver-arm64 check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-textfile check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-gdb-fpwatch test-hv-preempt test-hv-parallel check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill test-rv-spawn-backtrace test-rv-spawn-mounts test-cf-spawn-mounts test-rv-spawn-pipe test-cf-spawn-pipe test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh test-rv-vdso test-cf-vdso test-mips-vdso test-rv-mem-root test-sched-embed test-hv-x86-64-vdso test-hv-arm64-vdso test-rv-env test-cf-env test-hv-x86-64-env test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as test-ld-x86-64 test-ld-arm64 test-cc-driver-x86-64 test-cc-driver-arm64 check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-textfile check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-gdb-fpwatch test-hv-preempt test-hv-parallel test-hv-x86-64-pump check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE
