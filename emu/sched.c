@@ -469,6 +469,8 @@ proc_alloc(sched *S)
     p->g.quiet = S->o->quiet;
     p->sched = S;
     p->slot = slot;
+    p->g.sched = S;                     /* the syscall path reaches the process */
+    p->g.slot = slot;                   /* table through these (the proc: fs)    */
     p->gen = S->slot_gen[slot];
     p->parent = -1;                     /* the root; a spawn overrides it */
     p->wait_slot = -1;

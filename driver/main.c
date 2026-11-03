@@ -28,6 +28,7 @@
 #include <errno.h>
 
 #include "version.h"
+#include "exepath.h"
 
 #ifndef SKJ_LIB_DIR
 #define SKJ_LIB_DIR ""
@@ -168,14 +169,28 @@ lib_dir(void)
     const char *d = getenv("SKJ_CC_LIB");
     if (d && *d)
         return d;
+    /* A relocated install keeps the per-target runtime at <bindir>/../lib/skjegg
+       beside this driver.  Prefer it over the baked build-tree path when it is
+       actually present, so an installed copy works with nothing in the
+       environment; an in-tree build has no such directory and falls through.
+       The candidate is heap-allocated and sized exactly (not a fixed on-stack
+       array), so there is no truncation and the callers' path snprintf stay
+       free of -Wformat-truncation (a bounded source array would bound libd and
+       make gcc flag the downstream concatenation). */
+    if (self_dir[0]) {
+        static const char suffix[] = "/../lib/skjegg";
+        size_t dl = strlen(self_dir);
+        char *buf = malloc(dl + sizeof suffix);
+        if (buf) {
+            memcpy(buf, self_dir, dl);
+            memcpy(buf + dl, suffix, sizeof suffix);
+            if (access(buf, F_OK) == 0)
+                return buf;
+            free(buf);
+        }
+    }
     if (SKJ_LIB_DIR[0])
         return SKJ_LIB_DIR;
-    /* fall back to <self_dir>/lib */
-    static char buf[1024];
-    if (self_dir[0]) {
-        snprintf(buf, sizeof buf, "%s/lib", self_dir);
-        return buf;
-    }
     return "lib";
 }
 
@@ -230,16 +245,7 @@ main(int argc, char **argv)
     int nobjs = 0;
 
     /* record our own directory for tool/lib discovery */
-    {
-        const char *slash = strrchr(argv[0], '/');
-        if (slash) {
-            size_t n = (size_t)(slash - argv[0]);
-            if (n >= sizeof self_dir)
-                n = sizeof self_dir - 1;
-            memcpy(self_dir, argv[0], n);
-            self_dir[n] = '\0';
-        }
-    }
+    skj_exe_dir(argv[0], self_dir, sizeof self_dir);
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];

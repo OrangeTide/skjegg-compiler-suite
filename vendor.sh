@@ -312,7 +312,7 @@ cp "$S/CHANGELOG.md" "$DEST/"
 # IR core (always present)
 mkdir -p "$DEST/ir"
 cp "$S/ir/ir.c" "$S/ir/ir.h" "$S/ir/util.c" "$S/ir/util.h" \
-   "$S/ir/arena.c" "$S/ir/arena.h" "$S/ir/target.h" "$DEST/ir/"
+   "$S/ir/arena.c" "$S/ir/arena.h" "$S/ir/target.h" "$S/ir/exepath.h" "$DEST/ir/"
 
 # backends
 if [ "$has_cf" -eq 1 ]; then
@@ -552,10 +552,12 @@ if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || \
        "$S/emu/elf32.c" "$S/emu/elf32.h" \
        "$S/emu/elf64.c" "$S/emu/elf64.h" "$S/emu/run_reason.h" \
        "$S/emu/sched.c" "$S/emu/sched.h" \
+       "$S/emu/procfs.c" "$S/emu/procfs.h" \
        "$S/emu/hostplat.c" "$S/emu/hostplat.h" "$DEST/emu/"
     # guest.c reads the fs/ mount-table layout and, for the --9p doorbell, drives
     # the host-side 9P2000 server; reaches host facilities through hostplat.
     # sched.c is the arch-neutral process sandbox every core's *_user.c binds to.
+    # procfs.c generates the host-served proc: pseudo filesystem from that table.
     cp "$S/fs/fs.h" "$S/fs/ninefs.h" "$S/fs/p9_wire.h" "$S/fs/wire.h" \
        "$S/fs/p9_server.c" "$S/fs/p9_server.h" "$DEST/fs/"
     # The vDSO image source (pure leaf functions plus the host-updated system
@@ -594,6 +596,12 @@ if [ "$has_emu_hv" -eq 1 ]; then
        "$S/emu/vmm.h" "$S/emu/vmm_kvm.c" "$S/emu/vmm_hvf.c" \
        "$S/emu/hv_gdb.c" "$S/emu/hv_gdb.h" \
        "$S/emu/skj_hv_abi.h" "$DEST/emu/"
+fi
+# The architecture-neutral GDB stub core (packet transport, command dispatch,
+# qXfer, and the breakpoint/watchpoint tables), shared by the per-arch --gdb
+# stubs copied above.
+if [ "$has_emu_rv" -eq 1 ] || [ "$has_emu_mips" -eq 1 ] || [ "$has_emu_hv" -eq 1 ]; then
+    cp "$S/emu/gdbstub.c" "$S/emu/gdbstub.h" "$DEST/emu/"
 fi
 # The DWARF line/symbol reader behind the symbolized fault backtrace on the
 # emulated cores (gated by SKJ_DWARF_BACKTRACE in rv/cf/mips_user.c).  It needs
@@ -1251,8 +1259,8 @@ if [ "$has_driver" -eq 1 ]; then
     fi
     {
         printf '\nSKJ_ALL += $(BUILD)/skjcc\n'
-        printf '$(BUILD)/skjcc: $(SKJEGG)driver/main.c%s | $(BUILD)\n' "$drv_lib"
-        printf '\t$(CC) $(CFLAGS) -DSKJ_LIB_DIR='\''"$(abspath $(BUILD))/lib"'\'' -o $@ $(SKJEGG)driver/main.c\n'
+        printf '$(BUILD)/skjcc: $(SKJEGG)driver/main.c $(SKJEGG)ir/exepath.h%s | $(BUILD)\n' "$drv_lib"
+        printf '\t$(CC) $(CFLAGS) -I$(SKJEGG)ir -DSKJ_LIB_DIR='\''"$(abspath $(BUILD))/lib"'\'' -o $@ $(SKJEGG)driver/main.c\n'
     } >> "$MK"
 fi
 
@@ -1321,7 +1329,7 @@ fi
 # emulator driver
 if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || \
    [ "$has_emu_mips" -eq 1 ] || [ "$has_emu_hv" -eq 1 ]; then
-    _emu_src='$(SKJEGG)emu/main.c $(SKJEGG)emu/guest.c $(SKJEGG)emu/elf32.c $(SKJEGG)emu/elf64.c $(SKJEGG)emu/hostplat.c $(SKJEGG)emu/sched.c $(SKJEGG)fs/p9_server.c'
+    _emu_src='$(SKJEGG)emu/main.c $(SKJEGG)emu/guest.c $(SKJEGG)emu/elf32.c $(SKJEGG)emu/elf64.c $(SKJEGG)emu/hostplat.c $(SKJEGG)emu/sched.c $(SKJEGG)emu/procfs.c $(SKJEGG)fs/p9_server.c'
     # Extra flags: the per-core gdb stubs (--gdb PORT) and the DWARF backtrace.
     _emu_flags=""
     if [ "$has_emu_cf" -eq 1 ]; then
@@ -1340,6 +1348,10 @@ if [ "$has_emu_cf" -eq 1 ] || [ "$has_emu_rv" -eq 1 ] || \
     if [ "$has_emu_hv" -eq 1 ]; then
         _emu_src="$_emu_src \$(SKJEGG)emu/hvcore.c \$(SKJEGG)emu/hv_gdb.c"
         _emu_flags="$_emu_flags -DSKJ_HV_GDB"
+    fi
+    # The shared gdb stub core, linked once whenever any per-arch stub is in.
+    if [ "$has_emu_rv" -eq 1 ] || [ "$has_emu_mips" -eq 1 ] || [ "$has_emu_hv" -eq 1 ]; then
+        _emu_src="$_emu_src \$(SKJEGG)emu/gdbstub.c"
     fi
     # The symbolized fault backtrace on the emulated cores: the DWARF reader plus
     # the arena it uses, and the flag that turns the code on in *_user.c.

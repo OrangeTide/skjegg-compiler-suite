@@ -77,7 +77,7 @@ build_elf() {
 # This host directory is served directly as the read-only bin: mount below, so
 # there is no romfs image to pack: one host copy serves jsh and every child.
 mkdir -p "$OUTDIR/bin"
-for tool in cat echo ls rm sleep cp mv; do
+for tool in cat echo ls rm sleep cp mv ps; do
     build_elf "$ROOT/examples/bin/$tool.c" "$OUTDIR/bin/$tool"
 done
 

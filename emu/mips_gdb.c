@@ -1,27 +1,17 @@
-/* mips_gdb.c : the MIPS I GDB remote-serial-protocol server (see mips_gdb.h).
+/* mips_gdb.c : the MIPS I backend for the shared GDB stub (see mips_gdb.h).
 
-   The transport (hex, packet framing, socket) mirrors rv_gdb.c; only the
-   register layout and the program-counter handling (MIPS delay slots) are
-   MIPS-specific. */
+   Supplies the gdb_target vtable; the protocol, transport, and the
+   breakpoint/watchpoint tables live in the shared core (gdbstub.c).  Only the
+   register layout, the delay-slot program-counter handling, and the trap-to-
+   signal map are MIPS-specific.  gdb derives the o32 register layout from the
+   ELF, so this backend sends no target description. */
 
 #include "mips_gdb.h"
+#include "gdbstub.h"
 
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <errno.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <arpa/inet.h>
 
-#define PKT_MAX     8192            /* packet payload buffer (PacketSize below) */
-#define BP_MAX      64              /* host-side software breakpoints */
-#define WP_MAX      16              /* host-side write watchpoints */
-#define WATCH_MAXLEN 16             /* longest watched range we shadow */
 #define NGPR        32
-#define IRQ_STRIDE  4096            /* steps between interrupt-byte polls */
 
 /* gdb register numbers for the o32 layout (gdb's built-in MIPS layout, since
  * this stub sends no target description).  The FP registers follow pc: f0-f31
@@ -40,28 +30,20 @@ enum {
     NREG_ALL     = 72,          /* r0-pc, f0-f31, fcsr, fir */
 };
 
-struct watchpoint {
-    uint32_t addr;
-    uint32_t len;
-    uint8_t shadow[WATCH_MAXLEN];   /* watched bytes as of the last run start */
-};
-
-struct gdb {
-    int fd;                 /* the accepted connection */
-    int ack_mode;           /* +/- acknowledgements still in effect */
+struct mips_ctx {
     mips_cpu *cpu;
     guest *g;
-    uint32_t bp[BP_MAX];
-    int nbp;
-    struct watchpoint wp[WP_MAX];
-    int nwp;
-    int watch_hit;          /* the last stop was a write watchpoint */
-    uint32_t watch_addr;    /* its address (valid when watch_hit) */
 };
 
 /****************************************************************
- * Hex and packet transport
+ * Register hex marshalling (MIPS specific)
  ****************************************************************/
+
+static char
+hexdig(int v)
+{
+    return "0123456789abcdef"[v & 0xf];
+}
 
 static int
 hexval(int c)
@@ -71,138 +53,6 @@ hexval(int c)
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     return -1;
 }
-
-static char
-hexdig(int v)
-{
-    return "0123456789abcdef"[v & 0xf];
-}
-
-static int
-write_all(int fd, const void *buf, size_t len)
-{
-    const char *p = buf;
-
-    while (len) {
-        ssize_t n = write(fd, p, len);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        p += n;
-        len -= (size_t)n;
-    }
-    return 0;
-}
-
-/* Read one byte, blocking.  Returns 0 and the byte, or -1 on EOF/error. */
-static int
-read_byte(int fd, unsigned char *c)
-{
-    for (;;) {
-        ssize_t n = read(fd, c, 1);
-        if (n == 1) return 0;
-        if (n == 0) return -1;
-        if (errno == EINTR) continue;
-        return -1;
-    }
-}
-
-/* Append the $...#cc frame for `payload` and send it, honoring ack mode. */
-static int
-send_packet(struct gdb *s, const char *payload)
-{
-    char buf[PKT_MAX + 8];
-    unsigned sum = 0;
-    size_t i, len = strlen(payload);
-
-    if (len + 5 > sizeof buf)
-        return -1;
-    buf[0] = '$';
-    for (i = 0; i < len; i++) {
-        buf[1 + i] = payload[i];
-        sum += (unsigned char)payload[i];
-    }
-    buf[1 + len] = '#';
-    buf[2 + len] = hexdig((sum >> 4) & 0xf);
-    buf[3 + len] = hexdig(sum & 0xf);
-    for (;;) {
-        unsigned char ack;
-        if (write_all(s->fd, buf, len + 4))
-            return -1;
-        if (!s->ack_mode)
-            return 0;
-        if (read_byte(s->fd, &ack))
-            return -1;
-        if (ack == '+')
-            return 0;
-        if (ack == '-')
-            continue;               /* resend on a NAK */
-        return 0;                   /* unexpected: treat as delivered */
-    }
-}
-
-/* Receive one packet payload into `out` (NUL-terminated).  Returns the length,
-   -1 on EOF/error, or -2 when a raw Ctrl-C (0x03) interrupt byte arrived in
-   place of a packet.  Leading `+`/`-` acks are skipped. */
-static int
-recv_packet(struct gdb *s, char *out, size_t cap)
-{
-    unsigned char c;
-    unsigned sum, want;
-    size_t n;
-
-    for (;;) {
-        if (read_byte(s->fd, &c))
-            return -1;
-        if (c == 0x03)
-            return -2;              /* interrupt request */
-        if (c == '$')
-            break;
-        /* otherwise a stray ack or noise: ignore */
-    }
-    n = 0;
-    sum = 0;
-    for (;;) {
-        if (read_byte(s->fd, &c))
-            return -1;
-        if (c == '#')
-            break;
-        if (n + 1 >= cap)
-            return -1;
-        out[n++] = (char)c;
-        sum += c;
-    }
-    out[n] = '\0';
-    {
-        unsigned char h, l;
-        if (read_byte(s->fd, &h) || read_byte(s->fd, &l))
-            return -1;
-        want = (unsigned)((hexval(h) << 4) | hexval(l));
-    }
-    if (s->ack_mode) {
-        char a = (want == (sum & 0xff)) ? '+' : '-';
-        if (write_all(s->fd, &a, 1))
-            return -1;
-        if (a == '-')
-            return recv_packet(s, out, cap);    /* bad checksum: await resend */
-    }
-    return (int)n;
-}
-
-/* Is a raw 0x03 interrupt byte waiting on the socket?  Non-blocking. */
-static int
-interrupt_pending(int fd)
-{
-    unsigned char c;
-    ssize_t n = recv(fd, &c, 1, MSG_DONTWAIT);
-
-    return (n == 1 && c == 0x03);
-}
-
-/****************************************************************
- * Register and memory helpers
- ****************************************************************/
 
 /* Little-endian u32 -> 8 lowercase hex chars appended at *p. */
 static void
@@ -293,34 +143,148 @@ reg_set(mips_cpu *cpu, int n, uint32_t v)
     }
 }
 
-/* True if `addr` lies in a mapped region. */
+/****************************************************************
+ * The gdb_target vtable
+ ****************************************************************/
+
 static int
-addr_mapped(guest *g, uint32_t addr)
+mips_read_regs(void *ctx, char *out, size_t cap)
 {
+    mips_cpu *cpu = ((struct mips_ctx *)ctx)->cpu;
+    char *w = out;
+    int i;
+    (void)cap;
+    for (i = 0; i < NREG_ALL; i++)
+        put_u32_hex(&w, reg_get(cpu, i));
+    *w = '\0';
+    return 0;
+}
+
+static int
+mips_write_regs(void *ctx, const char *hex)
+{
+    mips_cpu *cpu = ((struct mips_ctx *)ctx)->cpu;
+    const char *h = hex;
+    int i;
+    for (i = 0; i < NREG_ALL; i++) {
+        uint32_t v;
+        if (strlen(h) < 8 || get_u32_hex(h, &v))
+            return -1;
+        reg_set(cpu, i, v);
+        h += 8;
+    }
+    return 0;
+}
+
+static int
+mips_read_reg(void *ctx, int n, char *out, size_t cap)
+{
+    mips_cpu *cpu = ((struct mips_ctx *)ctx)->cpu;
+    char *w = out;
+    (void)cap;
+    if (n < 0 || n >= NREG_ALL)
+        return -1;
+    put_u32_hex(&w, reg_get(cpu, n));
+    *w = '\0';
+    return 0;
+}
+
+static int
+mips_write_reg(void *ctx, int n, const char *hex)
+{
+    mips_cpu *cpu = ((struct mips_ctx *)ctx)->cpu;
+    uint32_t v;
+    if (n < 0 || n >= NREG_ALL || get_u32_hex(hex, &v))
+        return -1;
+    reg_set(cpu, n, v);
+    return 0;
+}
+
+static int
+mips_mem_mapped(void *ctx, uint64_t addr)
+{
+    guest *g = ((struct mips_ctx *)ctx)->g;
+    uint32_t a = (uint32_t)addr;
     int i;
     for (i = 0; i < g->mem.nregions; i++) {
         struct gm_region *r = &g->mem.regions[i];
-        if (addr >= r->base && addr - r->base < r->size)
+        if (a >= r->base && a - r->base < r->size)
             return 1;
     }
     return 0;
 }
 
-/****************************************************************
- * Stop replies and execution
- ****************************************************************/
-
-/* The gdb signal to report for the current stopped state.  A memory fault is a
-   SIGSEGV; a CPU trap maps by kind to the matching gdb signal number (so gdb
-   prints SIGBUS/SIGFPE/SIGILL by name); anything else is a SIGTRAP (step done
-   or breakpoint). */
-static int
-stop_signal(struct gdb *s)
+static uint8_t
+mips_read8(void *ctx, uint64_t addr)
 {
-    if (s->g->mem.fault)
+    return gm_read8(&((struct mips_ctx *)ctx)->g->mem, (uint32_t)addr);
+}
+
+static void
+mips_write8(void *ctx, uint64_t addr, uint8_t v)
+{
+    gm_write8(&((struct mips_ctx *)ctx)->g->mem, (uint32_t)addr, v);
+}
+
+/* The breakpoint-match pc is the raw next-fetch pc, not the display pc. */
+static uint64_t
+mips_get_pc(void *ctx)
+{
+    return ((struct mips_ctx *)ctx)->cpu->pc;
+}
+
+static void
+mips_set_pc(void *ctx, uint64_t pc)
+{
+    gdb_set_pc(((struct mips_ctx *)ctx)->cpu, (uint32_t)pc);
+}
+
+/* Clear a prior trap before a run so execution resumes past it (it re-faults if
+   unfixed rather than no-ooping); mips_step refuses to run while trapped. */
+static void
+mips_run_begin(void *ctx)
+{
+    ((struct mips_ctx *)ctx)->cpu->trapped = 0;
+}
+
+static int
+mips_step_cb(void *ctx)
+{
+    struct mips_ctx *c = ctx;
+    if (c->g->exited)
+        return GDB_RUN_EXITED;
+    if (c->cpu->halted || c->cpu->trapped)
+        return GDB_RUN_STOP;
+    if (mips_step(c->cpu) < 0)      /* halted or trapped on this step */
+        return c->g->exited ? GDB_RUN_EXITED : GDB_RUN_STOP;
+    if (c->g->exited)
+        return GDB_RUN_EXITED;
+    return GDB_RUN_OK;
+}
+
+static int
+mips_exited(void *ctx)
+{
+    return ((struct mips_ctx *)ctx)->g->exited;
+}
+
+static int
+mips_exit_code(void *ctx)
+{
+    return ((struct mips_ctx *)ctx)->g->exit_code;
+}
+
+/* A memory fault is a SIGSEGV; a CPU trap maps by kind to the matching gdb
+   signal number (so gdb prints SIGBUS/SIGFPE/SIGILL by name); anything else is
+   a SIGTRAP (step done or breakpoint). */
+static int
+mips_stop_signal(void *ctx)
+{
+    mips_cpu *cpu = ((struct mips_ctx *)ctx)->cpu;
+    if (((struct mips_ctx *)ctx)->g->mem.fault)
         return 11;                  /* SIGSEGV */
-    if (s->cpu->trapped) {
-        switch (s->cpu->trap_type) {
+    if (cpu->trapped) {
+        switch (cpu->trap_type) {
         case MIPS_TR_FETCH_FAULT:
         case MIPS_TR_LOAD_FAULT:
         case MIPS_TR_STORE_FAULT:
@@ -339,366 +303,20 @@ stop_signal(struct gdb *s)
     return 5;                       /* SIGTRAP: step done or breakpoint */
 }
 
-/* Send the stop reply for the current state: W<code> when the guest has exited,
-   a T<sig>watch:<addr>; when a write watchpoint fired, else S<sig>. */
-static int
-send_stop(struct gdb *s)
-{
-    char buf[32];
-    if (s->g->exited)
-        snprintf(buf, sizeof buf, "W%02x", s->g->exit_code & 0xff);
-    else if (s->watch_hit)
-        snprintf(buf, sizeof buf, "T%02xwatch:%x;", 5, s->watch_addr);
-    else
-        snprintf(buf, sizeof buf, "S%02x", stop_signal(s));
-    return send_packet(s, buf);
-}
-
-static int
-is_breakpoint(struct gdb *s, uint32_t pc)
-{
-    int i;
-    for (i = 0; i < s->nbp; i++)
-        if (s->bp[i] == pc)
-            return 1;
-    return 0;
-}
-
-/* Snapshot the current bytes of every active watchpoint range at run start, so
-   a debugger memory write between stops does not read back as a guest write. */
-static void
-watch_snapshot(struct gdb *s)
-{
-    int i;
-    uint32_t j;
-    for (i = 0; i < s->nwp; i++)
-        for (j = 0; j < s->wp[i].len; j++)
-            s->wp[i].shadow[j] = gm_read8(&s->g->mem, s->wp[i].addr + j);
-}
-
-/* If a watched range changed since the snapshot, record the hit, refresh the
-   shadow so the next run starts clean, and return 1. */
-static int
-watch_check(struct gdb *s)
-{
-    int i;
-    uint32_t j;
-    for (i = 0; i < s->nwp; i++)
-        for (j = 0; j < s->wp[i].len; j++)
-            if (gm_read8(&s->g->mem, s->wp[i].addr + j) != s->wp[i].shadow[j]) {
-                s->watch_hit = 1;
-                s->watch_addr = s->wp[i].addr;
-                watch_snapshot(s);
-                return 1;
-            }
-    return 0;
-}
-
-/* Continue: single-step until a breakpoint, exit, fault/halt, or an interrupt
-   byte on the socket.  Returns 1 if the guest exited, else 0 (stopped). */
-static int
-do_continue(struct gdb *s)
-{
-    uint32_t steps = 0;
-
-    s->watch_hit = 0;
-    watch_snapshot(s);
-    s->cpu->trapped = 0;                /* resume past a prior trap (it re-faults
-                                          if unfixed, rather than no-ooping) */
-    for (;;) {
-        if (s->g->exited || s->cpu->halted || s->cpu->trapped)
-            return s->g->exited ? 1 : 0;
-        if (mips_step(s->cpu) < 0)      /* halted or trapped on this step */
-            return s->g->exited ? 1 : 0;
-        if (s->g->exited)
-            return 1;
-        if (s->nwp && watch_check(s))   /* a watched range was written */
-            return 0;
-        if (is_breakpoint(s, s->cpu->pc))
-            return 0;
-        if (((++steps) & (IRQ_STRIDE - 1)) == 0 && interrupt_pending(s->fd))
-            return 0;                   /* Ctrl-C from the debugger */
-    }
-}
-
-/****************************************************************
- * Packet dispatch
- ****************************************************************/
-
-/* Returns 1 to keep serving, 0 to end the session. */
-static int
-handle_packet(struct gdb *s, const char *p)
-{
-    char out[PKT_MAX];
-
-    switch (p[0]) {
-    case '?':                           /* why stopped */
-        return send_stop(s) == 0;
-
-    case 'q':
-        if (strncmp(p, "qSupported", 10) == 0) {
-            /* No qXfer:features: gdb derives the o32 register layout from the
-             * ELF, the way it does for qemu-mipsel's stub.  A target-supplied
-             * MIPS description is rejected by gdb's tdesc validator anyway, so
-             * advertising one only produces a spurious warning. */
-            snprintf(out, sizeof out, "PacketSize=%x", PKT_MAX - 1);
-            return send_packet(s, out) == 0;
-        }
-        if (strcmp(p, "qAttached") == 0)
-            return send_packet(s, "1") == 0;
-        if (p[1] == 'C' && p[2] == '\0')        /* current thread */
-            return send_packet(s, "QC01") == 0;
-        if (strcmp(p, "qfThreadInfo") == 0)
-            return send_packet(s, "m01") == 0;
-        if (strcmp(p, "qsThreadInfo") == 0)
-            return send_packet(s, "l") == 0;
-        if (strncmp(p, "qTStatus", 8) == 0)
-            return send_packet(s, "") == 0;
-        return send_packet(s, "") == 0;
-
-    case 'H':                           /* set thread for subsequent ops */
-        return send_packet(s, "OK") == 0;
-
-    case 'g': {                         /* read all registers */
-        char *w = out;
-        int i;
-        for (i = 0; i < NREG_ALL; i++)
-            put_u32_hex(&w, reg_get(s->cpu, i));
-        *w = '\0';
-        return send_packet(s, out) == 0;
-    }
-
-    case 'G': {                         /* write all registers */
-        const char *h = p + 1;
-        int i, ok = 1;
-        for (i = 0; i < NREG_ALL; i++) {
-            uint32_t v;
-            if (strlen(h) < 8 || get_u32_hex(h, &v)) {
-                ok = 0;                 /* short or non-hex: report it, not OK */
-                break;
-            }
-            reg_set(s->cpu, i, v);
-            h += 8;
-        }
-        return send_packet(s, ok ? "OK" : "E01") == 0;
-    }
-
-    case 'p': {                         /* read one register */
-        char *w = out;
-        long n = strtol(p + 1, NULL, 16);
-        if (n < 0 || n >= NREG_ALL)
-            return send_packet(s, "E01") == 0;
-        put_u32_hex(&w, reg_get(s->cpu, (int)n));
-        *w = '\0';
-        return send_packet(s, out) == 0;
-    }
-
-    case 'P': {                         /* write one register: P n=val */
-        const char *eq = strchr(p, '=');
-        long n = strtol(p + 1, NULL, 16);
-        uint32_t v;
-        if (!eq || n < 0 || n >= NREG_ALL || get_u32_hex(eq + 1, &v))
-            return send_packet(s, "E01") == 0;
-        reg_set(s->cpu, (int)n, v);
-        return send_packet(s, "OK") == 0;
-    }
-
-    case 'm': {                         /* read memory: m addr,len */
-        char *end;
-        uint32_t addr = (uint32_t)strtoul(p + 1, &end, 16);
-        uint32_t len = (*end == ',') ? (uint32_t)strtoul(end + 1, NULL, 16) : 0;
-        char *w = out;
-        uint32_t i;
-
-        if (len == 0)
-            return send_packet(s, "E01") == 0;
-        if (!addr_mapped(s->g, addr))
-            return send_packet(s, "E01") == 0;
-        if (len > (PKT_MAX - 1) / 2)
-            len = (PKT_MAX - 1) / 2;
-        for (i = 0; i < len; i++) {
-            uint8_t b = gm_read8(&s->g->mem, addr + i);
-            *w++ = hexdig(b >> 4);
-            *w++ = hexdig(b & 0xf);
-        }
-        *w = '\0';
-        return send_packet(s, out) == 0;
-    }
-
-    case 'M': {                         /* write memory: M addr,len:data */
-        char *end;
-        uint32_t addr = (uint32_t)strtoul(p + 1, &end, 16);
-        uint32_t len = (*end == ',') ? (uint32_t)strtoul(end + 1, &end, 16) : 0;
-        const char *data = (*end == ':') ? end + 1 : NULL;
-        uint32_t i;
-
-        if (!data || !addr_mapped(s->g, addr))
-            return send_packet(s, "E01") == 0;
-        for (i = 0; i < len; i++) {
-            int hi = hexval(data[2 * i]), lo = hexval(data[2 * i + 1]);
-            if (hi < 0 || lo < 0)
-                return send_packet(s, "E01") == 0;
-            gm_write8(&s->g->mem, addr + i, (uint8_t)((hi << 4) | lo));
-        }
-        return send_packet(s, "OK") == 0;
-    }
-
-    case 'c': {                         /* continue [addr] */
-        if (p[1])
-            gdb_set_pc(s->cpu, (uint32_t)strtoul(p + 1, NULL, 16));
-        do_continue(s);
-        return send_stop(s) == 0;
-    }
-
-    case 's': {                         /* single step [addr] */
-        if (p[1])
-            gdb_set_pc(s->cpu, (uint32_t)strtoul(p + 1, NULL, 16));
-        else
-            s->cpu->trapped = 0;        /* resume past a prior trap */
-        s->watch_hit = 0;
-        if (!s->g->exited && !s->cpu->halted && !s->cpu->trapped) {
-            if (s->nwp)
-                watch_snapshot(s);      /* baseline before the step */
-            mips_step(s->cpu);
-            if (s->nwp)                 /* a watched write this step is a hit */
-                watch_check(s);
-        }
-        return send_stop(s) == 0;
-    }
-
-    case 'Z':                           /* insert bp (Z0) or write watch (Z2) */
-        if (p[1] == '0') {
-            uint32_t addr = (uint32_t)strtoul(p + 3, NULL, 16);
-            if (!is_breakpoint(s, addr)) {
-                if (s->nbp >= BP_MAX)
-                    return send_packet(s, "E01") == 0;
-                s->bp[s->nbp++] = addr;
-            }
-            return send_packet(s, "OK") == 0;
-        }
-        if (p[1] == '2') {              /* Z2,addr,kind — kind is the length */
-            char *end;
-            uint32_t addr = (uint32_t)strtoul(p + 3, &end, 16);
-            uint32_t len = (*end == ',') ? (uint32_t)strtoul(end + 1, NULL, 16) : 1;
-            int i;
-            if (len == 0 || len > WATCH_MAXLEN)
-                return send_packet(s, "E01") == 0; /* gdb falls back to sw watch */
-            for (i = 0; i < s->nwp; i++)
-                if (s->wp[i].addr == addr && s->wp[i].len == len)
-                    return send_packet(s, "OK") == 0;
-            if (s->nwp >= WP_MAX)
-                return send_packet(s, "E01") == 0;
-            s->wp[s->nwp].addr = addr;
-            s->wp[s->nwp].len = len;
-            s->nwp++;
-            return send_packet(s, "OK") == 0;
-        }
-        return send_packet(s, "") == 0; /* Z1/Z3/Z4 unsupported */
-
-    case 'z':                           /* remove bp (z0) or write watch (z2) */
-        if (p[1] == '0') {
-            uint32_t addr = (uint32_t)strtoul(p + 3, NULL, 16);
-            int i;
-            for (i = 0; i < s->nbp; i++)
-                if (s->bp[i] == addr) {
-                    s->bp[i] = s->bp[--s->nbp];
-                    break;
-                }
-            return send_packet(s, "OK") == 0;
-        }
-        if (p[1] == '2') {
-            char *end;
-            uint32_t addr = (uint32_t)strtoul(p + 3, &end, 16);
-            uint32_t len = (*end == ',') ? (uint32_t)strtoul(end + 1, NULL, 16) : 1;
-            int i;
-            for (i = 0; i < s->nwp; i++)
-                if (s->wp[i].addr == addr && s->wp[i].len == len) {
-                    s->wp[i] = s->wp[--s->nwp];
-                    break;
-                }
-            return send_packet(s, "OK") == 0;
-        }
-        return send_packet(s, "") == 0;
-
-    case 'D':                           /* detach */
-        send_packet(s, "OK");
-        return 0;
-
-    case 'k':                           /* kill */
-        return 0;
-
-    default:
-        return send_packet(s, "") == 0; /* unsupported: empty reply */
-    }
-}
-
-/****************************************************************
- * Server setup and loop
- ****************************************************************/
-
-static int
-listen_accept(int port)
-{
-    int ls, conn, yes = 1;
-    struct sockaddr_in addr;
-
-    ls = socket(AF_INET, SOCK_STREAM, 0);
-    if (ls < 0)
-        return -1;
-    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
-    memset(&addr, 0, sizeof addr);
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons((uint16_t)port);
-    if (bind(ls, (struct sockaddr *)&addr, sizeof addr) < 0 ||
-        listen(ls, 1) < 0) {
-        close(ls);
-        return -1;
-    }
-    fprintf(stderr, "skj-run: gdb server listening on 127.0.0.1:%d\n", port);
-    fflush(stderr);
-    conn = accept(ls, NULL, NULL);
-    close(ls);
-    if (conn < 0)
-        return -1;
-    setsockopt(conn, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof yes);
-    return conn;
-}
+static const struct gdb_target mips_target = {
+    0,                              /* no target description */
+    mips_read_regs, mips_write_regs, mips_read_reg, mips_write_reg,
+    mips_mem_mapped, mips_read8, mips_write8,
+    mips_get_pc, mips_set_pc, mips_step_cb,
+    mips_exited, mips_exit_code, mips_stop_signal,
+    mips_run_begin, 0,
+};
 
 int
 mips_gdb_serve(mips_cpu *cpu, guest *g, int port, int *exit_code)
 {
-    struct gdb s;
-    char pkt[PKT_MAX];
-
-    memset(&s, 0, sizeof s);
-    s.ack_mode = 1;
-    s.cpu = cpu;
-    s.g = g;
-
-    s.fd = listen_accept(port);
-    if (s.fd < 0) {
-        fprintf(stderr, "skj-run: gdb server could not listen on port %d\n",
-                port);
-        return -1;
-    }
-
-    for (;;) {
-        int n = recv_packet(&s, pkt, sizeof pkt);
-        if (n == -1)
-            break;                      /* connection closed */
-        if (n == -2) {                  /* an interrupt between packets */
-            send_stop(&s);
-            continue;
-        }
-        if (n == 0)
-            continue;                   /* empty packet */
-        if (!handle_packet(&s, pkt))
-            break;
-    }
-
-    close(s.fd);
-    if (exit_code)
-        *exit_code = g->exited ? g->exit_code : 0;
-    return 0;
+    struct mips_ctx ctx;
+    ctx.cpu = cpu;
+    ctx.g = g;
+    return gdb_serve(&mips_target, &ctx, port, exit_code);
 }

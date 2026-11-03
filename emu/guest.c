@@ -18,6 +18,7 @@
 #include "ninefs.h"         /* P9_MSIZE: the 9p channel buffer size               */
 #include "p9_server.h"      /* the host-side 9p file server the doorbell drives   */
 #include "hostplat.h"       /* the host facilities that service the guest ABI     */
+#include "procfs.h"         /* the proc: pseudo filesystem, served from the sched  */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -569,6 +570,13 @@ gfd_close(guest *g, uint32_t gfd)
     int hf;
     if (gfd >= GUEST_MAX_FDS || !g->fdtab[gfd].used)
         return -GUEST_EBADF;
+    if (g->fdtab[gfd].dev == GDEV_PROC) {   /* a proc: open holds a generated buffer
+                                             * or a listing cursor, not a host fd */
+        procfs_free(g->fdtab[gfd].dirp);
+        g->fdtab[gfd].dirp = 0;
+        g->fdtab[gfd].used = 0;
+        return 0;
+    }
     hf = g->fdtab[gfd].host_fd;
     if (g->fdtab[gfd].dirp) {           /* a getdents64 stream owns its own dup fd */
         hp_dirclose((hp_dir *)g->fdtab[gfd].dirp);
@@ -730,6 +738,25 @@ install_scratch(guest *g, uint32_t tbl, int slot)
     return slot + 1;
 }
 
+/* Install the always-on read-only proc: mount at table slot `slot`.  Its root
+ * is a GDEV_PROC capability fd; the hostcap backend drives it and the kernel
+ * services the ops from the scheduler's process table (emu/procfs.c).  Returns
+ * the next free slot. */
+static int
+install_proc(guest *g, uint32_t tbl, int slot)
+{
+    int idx;
+
+    if (slot >= FS_MAX_MOUNTS)
+        return slot;
+    idx = gfd_alloc(g, GDEV_PROC, -1);
+    if (idx < 0)
+        return slot;
+    write_mount_entry(g, tbl, slot, "proc", 4, idx,
+                      (uint32_t)FS_KIND_HOST | FS_RO);
+    return slot + 1;
+}
+
 void
 guest_install_mounts(guest *g, const char *elf_path, const run_opts *o,
                      struct guest_grant *rec, int *nrec)
@@ -740,18 +767,11 @@ guest_install_mounts(guest *g, const char *elf_path, const run_opts *o,
 
     if (nrec)
         *nrec = 0;
-    if (ngrants == 0)
-        return;                         /* no grants: leave the guest's own
-                                           default landing (ramfs, or the
-                                           FS_AMBIENT_DEFAULT ambient host) alone */
-
-    g->confined = 1;                    /* grants given: the capability mounts are
-                                           the only host access; refuse ambient */
-    gfd_init(g);                        /* reserve 0/1/2 before any grant fd */
 
     /* Resolve the launcher symbols with the resolver matching the root ELF's
      * class, so an LP64 root (x86-64, arm64) is handled as well as an ILP32 one
-     * (rv, cf, mips). */
+     * (rv, cf, mips).  Done before the zero-grant check because the always-on
+     * proc: mount is installed even when no --mount grant was given. */
     {
         uint32_t (*symf)(const char *, const char *) = elf32_symbol;
         FILE *cf = fopen(elf_path, "rb");
@@ -767,11 +787,19 @@ guest_install_mounts(guest *g, const char *elf_path, const run_opts *o,
         cur_sym = symf(elf_path, "fs_cur_mount");
         aux_sym = symf(elf_path, "fs_mount_aux");
     }
-    if (!tbl || !cnt_sym) {
-        fprintf(stderr, "skj-run: a mount was given but %s links no fs_mounts "
-                "table; ignoring %d grant(s)\n", elf_path, ngrants);
+    if (!tbl || !cnt_sym) {             /* the guest links no fs/ table at all */
+        if (ngrants)
+            fprintf(stderr, "skj-run: a mount was given but %s links no fs_mounts "
+                    "table; ignoring %d grant(s)\n", elf_path, ngrants);
         return;
     }
+
+    gfd_init(g);                        /* reserve 0/1/2 before any grant fd */
+    if (ngrants)
+        g->confined = 1;                /* real host grants: the capability mounts
+                                           are the only host access; refuse ambient.
+                                           proc: alone does not confine (it grants
+                                           no host-fs access). */
 
     for (i = 0; i < o->nmounts && installed < FS_MAX_MOUNTS; i++) {
         const char *spec = o->mounts[i];
@@ -953,8 +981,11 @@ guest_install_mounts(guest *g, const char *elf_path, const run_opts *o,
 
     /* Give this sandbox its own scratch, unless the caller named a "scratch"
        mount of its own.  Per-sandbox and never inherited (see install_scratch),
-       so a bare path lands on an isolated directory per process. */
-    {
+       so a bare path lands on an isolated directory per process.  Only when real
+       grants were given: a guest launched with none keeps its own default
+       landing (its in-guest ramfs, or the FS_AMBIENT_DEFAULT ambient host),
+       which fs_init still reaches since no host "scratch" is in the table. */
+    if (ngrants) {
         int have_scratch = 0, j;
         for (j = 0; j < o->nmounts; j++)
             if (strncmp(o->mounts[j], "scratch:", 8) == 0)
@@ -972,8 +1003,23 @@ guest_install_mounts(guest *g, const char *elf_path, const run_opts *o,
             installed = install_scratch(g, tbl, installed);
     }
 
+    /* The always-on read-only proc: mount.  With real grants the host owns the
+       whole table from slot 0, so proc: is appended after scratch and the grants
+       and the default mount is reset to slot 0.  With no grants the guest keeps
+       its own built-in table and default landing (its in-guest ramfs, the
+       FS_WITH_HOSTFS raw path backend, or the FS_AMBIENT_DEFAULT ambient host):
+       proc: is appended after whatever the guest already declares and the
+       built-in fs_cur_mount is left untouched, so a bare path still resolves the
+       way it did before proc: existed. */
+    if (!ngrants) {
+        uint32_t base = gm_load(&g->mem, cnt_sym, 4, g->big_endian);
+        installed = (base <= FS_MAX_MOUNTS) ? (int)base : FS_MAX_MOUNTS;
+    }
+
+    installed = install_proc(g, tbl, installed);
+
     gm_store(&g->mem, cnt_sym, 4, g->big_endian, (uint32_t)installed);
-    if (cur_sym)
+    if (cur_sym && ngrants)
         gm_store(&g->mem, cur_sym, 4, g->big_endian, 0);   /* default mount 0 */
     if (g->mem.fault)
         fprintf(stderr, "skj-run: fault writing the mount table into %s\n",
@@ -1050,6 +1096,8 @@ guest_install_grants_mem(guest *g, const uint8_t *img, long imglen,
 
     /* The child gets its own fresh scratch, never a share of the parent's. */
     installed = install_scratch(g, tbl, installed);
+
+    installed = install_proc(g, tbl, installed);    /* the child sees proc: too */
 
     gm_store(&g->mem, cnt_sym, 4, g->big_endian, (uint32_t)installed);
     if (cur_sym)
@@ -1276,8 +1324,22 @@ sys_read(guest *g, uint32_t fd, uint32_t buf, uint32_t len)
 {
     uint8_t tmp[4096];
     ssize_t n;
-    int hf = gfd_host(g, fd);
+    int hf;
+    struct gfd *pent = gfd_entry(g, fd);
 
+    if (pent && pent->dev == GDEV_PROC) {   /* served from the generated buffer */
+        int r;
+        if (len > sizeof(tmp))
+            len = sizeof(tmp);
+        r = procfs_read(pent->dirp, tmp, (int)len);
+        if (r < 0)
+            return -GUEST_EBADF;
+        gm_write(&g->mem, buf, tmp, (uint32_t)r);
+        if (g->mem.fault)
+            return -GUEST_EFAULT;
+        return r;
+    }
+    hf = gfd_host(g, fd);
     if (hf < 0)
         return -GUEST_EBADF;
     /* A read that would block must not stall the one host thread every guest in
@@ -1362,9 +1424,24 @@ sys_openat(guest *g, uint32_t dirfd, uint32_t pathp, uint32_t flags,
     char path[1024];
     int32_t e;
     int fd, hd;
+    struct gfd *pent;
 
     if ((e = copy_path(g, pathp, path, sizeof(path))) != 0)
         return e;
+    pent = gfd_entry(g, dirfd);
+    if (pent && pent->dev == GDEV_PROC) {   /* a proc: capability: serve host-side */
+        int err;
+        void *h = procfs_open(g->sched, g->slot, path, &err);
+        if (!h)
+            return err == -ENOENT ? -GUEST_ENOENT : -GUEST_EBADF;
+        e = gfd_alloc(g, GDEV_PROC, -1);
+        if (e < 0) {
+            procfs_free(h);
+            return -GUEST_EBADF;
+        }
+        g->fdtab[e].dirp = h;               /* the open state hangs off the entry */
+        return e;
+    }
     if (gfd_dir(g, dirfd, &hd) < 0)
         return -GUEST_EBADF;
     fd = (hd == GUEST_AT_FDCWD)         /* ambient: unconfined, as before */
@@ -1387,8 +1464,14 @@ static int32_t
 sys_lseek(guest *g, uint32_t fd, uint32_t offset, uint32_t whence)
 {
     off_t r;
-    int hf = gfd_host(g, fd);
+    int hf;
+    struct gfd *pent = gfd_entry(g, fd);
 
+    if (pent && pent->dev == GDEV_PROC) {
+        int64_t pr = procfs_lseek(pent->dirp, (int64_t)(int32_t)offset, (int)whence);
+        return pr < 0 ? -GUEST_EBADF : (int32_t)pr;
+    }
+    hf = gfd_host(g, fd);
     if (hf < 0)
         return -GUEST_EBADF;
     r = lseek(hf, (off_t)(int32_t)offset, (int)whence);
@@ -1406,9 +1489,19 @@ sys_llseek(guest *g, uint32_t fd, uint32_t off_hi, uint32_t off_lo,
            uint32_t resultp, uint32_t whence)
 {
     int64_t off = (int64_t)(((uint64_t)off_hi << 32) | off_lo);
-    int hf = gfd_host(g, fd);
+    int hf;
     off_t r;
+    struct gfd *pent = gfd_entry(g, fd);
 
+    if (pent && pent->dev == GDEV_PROC) {
+        int64_t pr = procfs_lseek(pent->dirp, off, (int)whence);
+        if (pr < 0)
+            return -GUEST_EBADF;
+        gm_store(&g->mem, resultp, 4, 0, (uint32_t)(uint64_t)pr);
+        gm_store(&g->mem, resultp + 4, 4, 0, (uint32_t)((uint64_t)pr >> 32));
+        return g->mem.fault ? -GUEST_EFAULT : 0;
+    }
+    hf = gfd_host(g, fd);
     if (hf < 0)
         return -GUEST_EBADF;
     r = lseek(hf, (off_t)off, (int)whence);
@@ -1447,18 +1540,42 @@ sys_statx(guest *g, uint32_t dirfd, uint32_t pathp, uint32_t flags,
 
     (void)mask;
     if (flags & 0x1000u) {                      /* AT_EMPTY_PATH: fstat the fd */
-        int hf = gfd_host(g, dirfd);
-        if (hf < 0)
-            return -GUEST_EBADF;
-        r = fstat(hf, &hs);
+        struct gfd *pent = gfd_entry(g, dirfd);
+        int hf;
+        if (pent && pent->dev == GDEV_PROC) {
+            struct fs_stat ps;
+            procfs_fstat(pent->dirp, &ps);
+            memset(&hs, 0, sizeof hs);
+            hs.st_mode = ps.mode;
+            hs.st_size = ps.size;
+            hs.st_nlink = ps.nlink;
+            hs.st_ino = ps.ino;
+            r = 0;
+        } else {
+            hf = gfd_host(g, dirfd);
+            if (hf < 0)
+                return -GUEST_EBADF;
+            r = fstat(hf, &hs);
+        }
     } else {
         int hd;
+        struct gfd *pent;
         int32_t e = copy_path(g, pathp, path, sizeof(path));
         if (e != 0)
             return e;
-        if (gfd_dir(g, dirfd, &hd) < 0)
+        pent = gfd_entry(g, dirfd);
+        if (pent && pent->dev == GDEV_PROC) {   /* a proc: capability stat */
+            struct fs_stat ps;
+            if (procfs_stat(g->sched, g->slot, path, &ps) < 0)
+                return -GUEST_ENOENT;
+            memset(&hs, 0, sizeof hs);
+            hs.st_mode = ps.mode;
+            hs.st_size = ps.size;
+            hs.st_nlink = ps.nlink;
+            r = 0;
+        } else if (gfd_dir(g, dirfd, &hd) < 0) {
             return -GUEST_EBADF;
-        if (hd == GUEST_AT_FDCWD) {
+        } else if (hd == GUEST_AT_FDCWD) {
             r = fstatat(hd, path, &hs, 0);          /* ambient: unconfined */
         } else {
             r = hp_stat_beneath(hd, path, &hs);     /* confined to the grant */
@@ -1660,6 +1777,34 @@ sys_getdents64(guest *g, uint32_t fd, uint32_t dirp, uint32_t count)
 
     if (!ent)
         return -GUEST_EBADF;
+    if (ent->dev == GDEV_PROC) {        /* synthesize entries from the process table */
+        for (;;) {
+            struct fs_dirent de;
+            uint16_t reclen;
+            int namelen, r;
+
+            r = procfs_getdent(ent->dirp, &de);
+            if (r < 0)
+                return -GUEST_ENOENT;
+            if (r == 0)
+                break;                  /* end of directory */
+            namelen = (int)strlen(de.name);
+            reclen = (uint16_t)((19 + namelen + 1 + 7) & ~7);
+            if (gpos + reclen > count) {    /* will not fit: re-offer it next call */
+                procfs_rewind1(ent->dirp);
+                if (gpos == 0)
+                    return -GUEST_EINVAL;
+                break;
+            }
+            emit_dirent64(g, dirp, gpos, de.ino, (uint64_t)de.ino,
+                          de.type == FS_DT_DIR ? 4 /* DT_DIR */ : 8 /* DT_REG */,
+                          de.name, namelen);
+            gpos += reclen;
+        }
+        if (g->mem.fault)
+            return -GUEST_EFAULT;
+        return (int32_t)gpos;
+    }
     d = (hp_dir *)ent->dirp;
     if (!d) {                           /* open the stream on the first call */
         d = hp_diropen(ent->host_fd);

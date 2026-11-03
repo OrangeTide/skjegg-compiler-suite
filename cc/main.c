@@ -1,9 +1,12 @@
 /* main.c : skj-cc C compiler driver */
 
+#define _DEFAULT_SOURCE         /* expose readlink() under -std=c99 (exepath.h) */
+
 #include "cc.h"
 #include "cpp.h"
 #include "arena.h"
 #include "version.h"
+#include "exepath.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -127,11 +130,29 @@ main(int argc, char **argv)
         die("%s", CC_USAGE);
 
     /* Default search path for skj-provided headers (e.g. <stdarg.h>), added
-       after any -I so user paths win.  SKJ_INCLUDE_DIR is baked in at build
-       time; the SKJ_CC_INCLUDE environment variable overrides it for an
-       installed or relocated toolchain. */
+       after any -I so user paths win.  Resolution order: the SKJ_CC_INCLUDE
+       environment variable (explicit override); then, for a relocated install,
+       <bindir>/../lib/skjegg/include beside this compiler, when present; then
+       the SKJ_INCLUDE_DIR baked in at build time (the in-tree build tree). */
     {
         const char *inc = getenv("SKJ_CC_INCLUDE");
+#ifndef __skj__
+        /* The relocated-install probe (resolve headers beside the binary) is a
+           host-tool feature; it uses access(), which the self-hosting skjegg
+           libc does not provide.  A guest-built compiler (__skj__) skips it and
+           uses the env or baked path below. */
+        static char selfbuf[1024];
+        if (!inc || !*inc) {
+            char self_dir[1024];
+            skj_exe_dir(argv[0], self_dir, sizeof self_dir);
+            if (self_dir[0]) {
+                snprintf(selfbuf, sizeof selfbuf,
+                         "%s/../lib/skjegg/include", self_dir);
+                if (access(selfbuf, F_OK) == 0)
+                    inc = selfbuf;
+            }
+        }
+#endif
 #ifdef SKJ_INCLUDE_DIR
         if (!inc || !*inc)
             inc = SKJ_INCLUDE_DIR;

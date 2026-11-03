@@ -862,14 +862,25 @@ fs_init(void)
         /* Land on scratch, the default spot where a bare path resolves.  When
          * the host grants an ephemeral "scratch" directory (skj-run does), it is
          * already in the table as a confined host mount, so just select it and
-         * the guest needs no in-guest filesystem at all.  Only when no host
-         * scratch was granted, and only if the in-guest ramfs is compiled in,
-         * fall back to an in-memory scratch disk (the bare-qemu path). */
+         * the guest needs no in-guest filesystem at all.  When no host scratch
+         * was granted the table still holds the always-on proc: mount, so this
+         * pass runs even with nothing to land on; fall back to the same default
+         * landing the no-table path installs, so a bare path resolves the way it
+         * would if the table were empty: the in-guest ramfs scratch, overridden
+         * by the unconfined ambient host when FS_AMBIENT_DEFAULT is set. */
         scratch = fs_mount_find("scratch");
+        if (scratch < 0) {
 #ifdef FS_WITH_RAM
-        if (scratch < 0)
             scratch = ramfs_mount("scratch", 0);
 #endif
+#ifdef FS_AMBIENT_DEFAULT
+            {
+                int h = ambient_mount("host", 0);
+                if (h >= 0)
+                    scratch = h;
+            }
+#endif
+        }
         if (scratch >= 0)
             fs_cur_mount = scratch;
 #endif

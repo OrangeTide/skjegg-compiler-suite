@@ -193,6 +193,38 @@ deployment chooses by what it links and what the launcher grants. This went
 through the capability-fd mechanism rather than a new 9P-style served kind, so
 it needs no 9P and no round-trip batching for scratch or bin.
 
+### The `proc:` filesystem **(done)**
+
+`proc:` is a read-only pseudo filesystem that exposes the live process table, so
+a tool can enumerate what is running. It is **host-served**: a guest cannot read
+the host scheduler state directly, so the content is generated host-side from the
+`sched` process table and handed back a byte range at a time.
+
+It reuses the capability-fd path with no new guest-side backend. A `proc:` mount's
+root fd is a new capability-device kind, `GDEV_PROC`, and the ordinary
+`openat`/`read`/`getdents64`/`statx`/`lseek`/`close` the `hostcap` backend issues
+against it are routed, inside `skj-run`, to the generators in `emu/procfs.c`. There
+is no `fs/` layer change and no new `FS_WITH_*` flag. A file's text is produced into
+a growable buffer with a `printf`-style append helper (`gbuf`), the reusable
+generated-content mechanism future pseudo files reuse.
+
+`proc:` is **always mounted**, for the root process and every spawned child, so a
+tool can rely on it without a `--mount`. The namespace is:
+
+- `proc:` (root): one directory per live process, named by its id (`slot + 1`,
+  matching the `[proc N]` convention), plus a `self` alias for the opening
+  process.
+- `proc:<id>/status`: `key:value` lines from the `proc` fields that already
+  exist: `Pid`, `State` (running / sleeping / blocked / zombie / done),
+  `Parent`, `Insns` (retired instruction count), and `ExitCode`/`Fatal` when
+  applicable.
+
+There is no `cmdline` yet: argv is not retained on `proc`. Richer per-pid files
+are a follow-on that first needs argv retention. The `ps` tool
+(`examples/bin/ps.c`) reads `proc:` and prints a `PID` / `STATE` / `PARENT` /
+`INSNS` table; `tests/run-ps.sh` (target `test-rv-ps`) runs it under `skj-run`
+with no `--mount` and checks the sole process lists as pid 1, running.
+
 ## The userland **(done)**
 
 The userland that rides on this is a shell, `jsh`, and a set of small tools

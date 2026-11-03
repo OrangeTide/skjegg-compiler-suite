@@ -6,6 +6,39 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.42.0
+
+#### Added
+- `make install` and `make uninstall` install the toolchain under a `PREFIX`.
+  The `cc` driver resolves its runtime objects and headers relative to the
+  installed executable, so an installed tree needs only `PATH` set, not a
+  fixed layout.
+- A host-served `proc:` pseudo filesystem exposes the `skj-run` sandbox
+  process table. It is always mounted and read-only: the root lists one
+  directory per live process (named by id) plus a `self` alias, and each
+  `<id>/status` carries the process metadata the scheduler already tracks
+  (pid, state, parent, retired instruction count, and exit code). A standalone
+  `ps` tool reads it and prints the table. Content is generated on demand into
+  a growable buffer, a reusable mechanism future pseudo files can build on.
+
+#### Changed
+- The hosted Kobold file and directory runtime now routes through the shared
+  `fs/` layer in the in-process JIT and the ahead-of-time tiers too, completing
+  the stream-primitive unification begun in 0.41.0. The dead native-libc branch
+  is gone and the runtime layering, the shared bottom layer and its two
+  deliberate seams, is documented.
+- The three gdb remote-protocol stubs (RISC-V, MIPS, and the
+  hardware-virtualization core) are factored onto one shared transport and
+  watchpoint module, `emu/gdbstub.c`. Each stub is now a thin per-architecture
+  adapter supplying a target vtable; behavior is unchanged.
+- The RISC-V interpreter (`rv_run`) gains a decoded-operand cache and threaded
+  (computed-goto) dispatch, about 9% faster on the kpcom self-compile.
+
+#### Fixed
+- The self-hosted C compiler build no longer requires `readlink` or `access`;
+  `vendor.sh` ships `ir/exepath.h` and builds the vendored skjcc with its
+  include path, so a vendored, self-hosted driver links.
+
 ### 0.41.0
 
 #### Fixed

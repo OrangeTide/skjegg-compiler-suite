@@ -1,26 +1,18 @@
-/* rv_gdb.c : the RV32 GDB remote-serial-protocol server (see rv_gdb.h). */
+/* rv_gdb.c : the RV32 backend for the shared GDB stub (see rv_gdb.h).
+
+   Supplies the gdb_target vtable (registers, memory, single-step, stop signal)
+   and a RISC-V target description; the protocol, transport, and the
+   breakpoint/watchpoint tables live in the shared core (gdbstub.c). */
 
 #include "rv_gdb.h"
+#include "gdbstub.h"
 
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <errno.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <arpa/inet.h>
 
-#define PKT_MAX     8192            /* packet payload buffer (PacketSize below) */
-#define BP_MAX      64              /* host-side software breakpoints */
-#define WP_MAX      16              /* host-side write watchpoints */
-#define WATCH_MAXLEN 16             /* longest watched range we shadow */
 #define NGPR        32
 #define RV_FP0      33              /* regnum of f0 (ft0), after the 33 GPRs+pc */
 #define RV_FCSR     65              /* regnum of fcsr */
 #define NREG_ALL    66              /* x0-x31, pc, f0-f31, fcsr */
-#define IRQ_STRIDE  4096            /* steps between interrupt-byte polls */
 
 /* The target description gdb reads over qXfer, so a plain `gdb-multiarch
  * target remote` learns the architecture and register layout with no manual
@@ -102,28 +94,20 @@ static const char target_xml[] =
     "  </feature>\n"
     "</target>\n";
 
-struct watchpoint {
-    uint32_t addr;
-    uint32_t len;
-    uint8_t shadow[WATCH_MAXLEN];   /* watched bytes as of the last run start */
-};
-
-struct gdb {
-    int fd;                 /* the accepted connection */
-    int ack_mode;           /* +/- acknowledgements still in effect */
+struct rv_ctx {
     rv_cpu *cpu;
     guest *g;
-    uint32_t bp[BP_MAX];
-    int nbp;
-    struct watchpoint wp[WP_MAX];
-    int nwp;
-    int watch_hit;          /* the last stop was a write watchpoint */
-    uint32_t watch_addr;    /* its address (valid when watch_hit) */
 };
 
 /****************************************************************
- * Hex and packet transport
+ * Register hex marshalling (RISC-V specific)
  ****************************************************************/
+
+static char
+hexdig(int v)
+{
+    return "0123456789abcdef"[v & 0xf];
+}
 
 static int
 hexval(int c)
@@ -133,138 +117,6 @@ hexval(int c)
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     return -1;
 }
-
-static char
-hexdig(int v)
-{
-    return "0123456789abcdef"[v & 0xf];
-}
-
-static int
-write_all(int fd, const void *buf, size_t len)
-{
-    const char *p = buf;
-
-    while (len) {
-        ssize_t n = write(fd, p, len);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        p += n;
-        len -= (size_t)n;
-    }
-    return 0;
-}
-
-/* Read one byte, blocking.  Returns 0 and the byte, or -1 on EOF/error. */
-static int
-read_byte(int fd, unsigned char *c)
-{
-    for (;;) {
-        ssize_t n = read(fd, c, 1);
-        if (n == 1) return 0;
-        if (n == 0) return -1;
-        if (errno == EINTR) continue;
-        return -1;
-    }
-}
-
-/* Append the $...#cc frame for `payload` and send it, honoring ack mode. */
-static int
-send_packet(struct gdb *s, const char *payload)
-{
-    char buf[PKT_MAX + 8];
-    unsigned sum = 0;
-    size_t i, len = strlen(payload);
-
-    if (len + 5 > sizeof buf)
-        return -1;
-    buf[0] = '$';
-    for (i = 0; i < len; i++) {
-        buf[1 + i] = payload[i];
-        sum += (unsigned char)payload[i];
-    }
-    buf[1 + len] = '#';
-    buf[2 + len] = hexdig((sum >> 4) & 0xf);
-    buf[3 + len] = hexdig(sum & 0xf);
-    for (;;) {
-        unsigned char ack;
-        if (write_all(s->fd, buf, len + 4))
-            return -1;
-        if (!s->ack_mode)
-            return 0;
-        if (read_byte(s->fd, &ack))
-            return -1;
-        if (ack == '+')
-            return 0;
-        if (ack == '-')
-            continue;               /* resend on a NAK */
-        return 0;                   /* unexpected: treat as delivered */
-    }
-}
-
-/* Receive one packet payload into `out` (NUL-terminated).  Returns the length,
-   -1 on EOF/error, or -2 when a raw Ctrl-C (0x03) interrupt byte arrived in
-   place of a packet.  Leading `+`/`-` acks are skipped. */
-static int
-recv_packet(struct gdb *s, char *out, size_t cap)
-{
-    unsigned char c;
-    unsigned sum, want;
-    size_t n;
-
-    for (;;) {
-        if (read_byte(s->fd, &c))
-            return -1;
-        if (c == 0x03)
-            return -2;              /* interrupt request */
-        if (c == '$')
-            break;
-        /* otherwise a stray ack or noise: ignore */
-    }
-    n = 0;
-    sum = 0;
-    for (;;) {
-        if (read_byte(s->fd, &c))
-            return -1;
-        if (c == '#')
-            break;
-        if (n + 1 >= cap)
-            return -1;
-        out[n++] = (char)c;
-        sum += c;
-    }
-    out[n] = '\0';
-    {
-        unsigned char h, l;
-        if (read_byte(s->fd, &h) || read_byte(s->fd, &l))
-            return -1;
-        want = (unsigned)((hexval(h) << 4) | hexval(l));
-    }
-    if (s->ack_mode) {
-        char a = (want == (sum & 0xff)) ? '+' : '-';
-        if (write_all(s->fd, &a, 1))
-            return -1;
-        if (a == '-')
-            return recv_packet(s, out, cap);    /* bad checksum: await resend */
-    }
-    return (int)n;
-}
-
-/* Is a raw 0x03 interrupt byte waiting on the socket?  Non-blocking. */
-static int
-interrupt_pending(int fd)
-{
-    unsigned char c;
-    ssize_t n = recv(fd, &c, 1, MSG_DONTWAIT);
-
-    return (n == 1 && c == 0x03);
-}
-
-/****************************************************************
- * Register and memory helpers
- ****************************************************************/
 
 /* Little-endian u32 -> 8 lowercase hex chars appended at *p. */
 static void
@@ -333,449 +185,183 @@ reg_width(int n)
    no-op.  The 32 FP registers are the full 64-bit D-extension view (cpu->f);
    the integer registers, pc and fcsr are 32-bit. */
 static void
-emit_reg(char **w, struct gdb *s, int n)
+emit_reg(char **w, struct rv_ctx *c, int n)
 {
     if (n < NGPR)
-        put_u32_hex(w, rv_get_x(s->cpu, n));
+        put_u32_hex(w, rv_get_x(c->cpu, n));
     else if (n == NGPR)
-        put_u32_hex(w, rv_get_pc(s->cpu));
+        put_u32_hex(w, rv_get_pc(c->cpu));
     else if (n >= RV_FP0 && n < RV_FP0 + 32)
-        put_u64_hex(w, s->cpu->f[n - RV_FP0]);
+        put_u64_hex(w, c->cpu->f[n - RV_FP0]);
     else if (n == RV_FCSR)
-        put_u32_hex(w, s->cpu->fcsr);
+        put_u32_hex(w, c->cpu->fcsr);
 }
 
 /* Set register n from hex at h (width per reg_width); returns 0 on success. */
 static int
-set_reg(struct gdb *s, int n, const char *h)
+set_reg(struct rv_ctx *c, int n, const char *h)
 {
     uint32_t v32;
     uint64_t v64;
 
     if (n < NGPR) {
         if (get_u32_hex(h, &v32)) return -1;
-        rv_set_x(s->cpu, n, v32);
+        rv_set_x(c->cpu, n, v32);
     } else if (n == NGPR) {
         if (get_u32_hex(h, &v32)) return -1;
-        rv_set_pc(s->cpu, v32);
+        rv_set_pc(c->cpu, v32);
     } else if (n >= RV_FP0 && n < RV_FP0 + 32) {
         if (get_u64_hex(h, &v64)) return -1;
-        s->cpu->f[n - RV_FP0] = v64;
+        c->cpu->f[n - RV_FP0] = v64;
     } else if (n == RV_FCSR) {
         if (get_u32_hex(h, &v32)) return -1;
-        s->cpu->fcsr = v32;
+        c->cpu->fcsr = v32;
     } else {
         return -1;
     }
     return 0;
 }
 
-/* True if `addr` lies in a mapped region. */
+/****************************************************************
+ * The gdb_target vtable
+ ****************************************************************/
+
 static int
-addr_mapped(guest *g, uint32_t addr)
+rv_read_regs(void *ctx, char *out, size_t cap)
 {
+    struct rv_ctx *c = ctx;
+    char *w = out;
+    int i;
+    (void)cap;
+    for (i = 0; i < NREG_ALL; i++)
+        emit_reg(&w, c, i);
+    *w = '\0';
+    return 0;
+}
+
+static int
+rv_write_regs(void *ctx, const char *hex)
+{
+    struct rv_ctx *c = ctx;
+    const char *h = hex;
+    int i;
+    for (i = 0; i < NREG_ALL; i++) {
+        int bytes = reg_width(i);
+        if ((int)strlen(h) < bytes * 2 || set_reg(c, i, h))
+            return -1;
+        h += bytes * 2;
+    }
+    return 0;
+}
+
+static int
+rv_read_reg(void *ctx, int n, char *out, size_t cap)
+{
+    struct rv_ctx *c = ctx;
+    char *w = out;
+    (void)cap;
+    if (n < 0 || n >= NREG_ALL)
+        return -1;
+    emit_reg(&w, c, n);
+    *w = '\0';
+    return 0;
+}
+
+static int
+rv_write_reg(void *ctx, int n, const char *hex)
+{
+    if (n < 0 || n >= NREG_ALL)
+        return -1;
+    return set_reg(ctx, n, hex);
+}
+
+static int
+rv_mem_mapped(void *ctx, uint64_t addr)
+{
+    guest *g = ((struct rv_ctx *)ctx)->g;
+    uint32_t a = (uint32_t)addr;
     int i;
     for (i = 0; i < g->mem.nregions; i++) {
         struct gm_region *r = &g->mem.regions[i];
-        if (addr >= r->base && addr - r->base < r->size)
+        if (a >= r->base && a - r->base < r->size)
             return 1;
     }
     return 0;
 }
 
-/****************************************************************
- * Stop replies and execution
- ****************************************************************/
-
-/* The signal to report for the current stopped state. */
-static int
-stop_signal(struct gdb *s)
+static uint8_t
+rv_read8(void *ctx, uint64_t addr)
 {
-    if (s->g->mem.fault)
-        return 11;                  /* SIGSEGV */
-    if (s->cpu->in_trap)
-        return 5;                   /* SIGTRAP (a guest trap) */
-    return 5;                       /* SIGTRAP: step done or breakpoint */
+    return gm_read8(&((struct rv_ctx *)ctx)->g->mem, (uint32_t)addr);
 }
 
-/* Send the stop reply for the current state: W<code> when the guest has exited,
-   a T<sig>watch:<addr>; when a write watchpoint fired, else S<sig>. */
-static int
-send_stop(struct gdb *s)
-{
-    char buf[32];
-    if (s->g->exited)
-        snprintf(buf, sizeof buf, "W%02x", s->g->exit_code & 0xff);
-    else if (s->watch_hit)
-        snprintf(buf, sizeof buf, "T%02xwatch:%x;", 5, s->watch_addr);
-    else
-        snprintf(buf, sizeof buf, "S%02x", stop_signal(s));
-    return send_packet(s, buf);
-}
-
-static int
-is_breakpoint(struct gdb *s, uint32_t pc)
-{
-    int i;
-    for (i = 0; i < s->nbp; i++)
-        if (s->bp[i] == pc)
-            return 1;
-    return 0;
-}
-
-/* Snapshot the current bytes of every active watchpoint range.  Taken at the
-   start of each run so a memory write by the debugger (M packet) between stops
-   does not read back as a guest write. */
 static void
-watch_snapshot(struct gdb *s)
+rv_write8(void *ctx, uint64_t addr, uint8_t v)
 {
-    int i;
-    uint32_t j;
-    for (i = 0; i < s->nwp; i++)
-        for (j = 0; j < s->wp[i].len; j++)
-            s->wp[i].shadow[j] = gm_read8(&s->g->mem, s->wp[i].addr + j);
+    gm_write8(&((struct rv_ctx *)ctx)->g->mem, (uint32_t)addr, v);
 }
 
-/* If a watched range changed since the snapshot, record the hit (for the stop
-   reply), refresh the shadow so the next run starts clean, and return 1. */
+static uint64_t
+rv_get_pc_cb(void *ctx)
+{
+    return rv_get_pc(((struct rv_ctx *)ctx)->cpu);
+}
+
+static void
+rv_set_pc_cb(void *ctx, uint64_t pc)
+{
+    rv_set_pc(((struct rv_ctx *)ctx)->cpu, (uint32_t)pc);
+}
+
+/* One instruction.  Mirrors the old do_continue body: stop first if the guest
+   has already exited or halted, then step; rv_step returns < 0 on a halt. */
 static int
-watch_check(struct gdb *s)
+rv_step_cb(void *ctx)
 {
-    int i;
-    uint32_t j;
-    for (i = 0; i < s->nwp; i++)
-        for (j = 0; j < s->wp[i].len; j++)
-            if (gm_read8(&s->g->mem, s->wp[i].addr + j) != s->wp[i].shadow[j]) {
-                s->watch_hit = 1;
-                s->watch_addr = s->wp[i].addr;
-                watch_snapshot(s);
-                return 1;
-            }
-    return 0;
+    struct rv_ctx *c = ctx;
+    if (c->g->exited)
+        return GDB_RUN_EXITED;
+    if (c->cpu->halted)
+        return GDB_RUN_STOP;
+    if (rv_step(c->cpu) < 0)
+        return c->g->exited ? GDB_RUN_EXITED : GDB_RUN_STOP;
+    if (c->g->exited)
+        return GDB_RUN_EXITED;
+    return GDB_RUN_OK;
 }
-
-/* Continue: single-step until a breakpoint, exit, fault/halt, or an interrupt
-   byte on the socket.  Returns 1 if the guest exited, else 0 (stopped). */
-static int
-do_continue(struct gdb *s)
-{
-    uint32_t steps = 0;
-
-    s->watch_hit = 0;
-    watch_snapshot(s);
-    for (;;) {
-        if (s->g->exited || s->cpu->halted)
-            return s->g->exited ? 1 : 0;
-        if (rv_step(s->cpu) < 0)        /* halted on this step */
-            return s->g->exited ? 1 : 0;
-        if (s->g->exited)
-            return 1;
-        if (s->nwp && watch_check(s))   /* a watched range was written */
-            return 0;
-        if (is_breakpoint(s, rv_get_pc(s->cpu)))
-            return 0;
-        if (((++steps) & (IRQ_STRIDE - 1)) == 0 && interrupt_pending(s->fd))
-            return 0;                   /* Ctrl-C from the debugger */
-    }
-}
-
-/****************************************************************
- * Packet dispatch
- ****************************************************************/
-
-/* Returns 1 to keep serving, 0 to end the session. */
-static int
-handle_packet(struct gdb *s, const char *p)
-{
-    char out[PKT_MAX];
-
-    switch (p[0]) {
-    case '?':                           /* why stopped */
-        return send_stop(s) == 0;
-
-    case 'q':
-        if (strncmp(p, "qSupported", 10) == 0) {
-            snprintf(out, sizeof out,
-                     "PacketSize=%x;qXfer:features:read+", PKT_MAX - 1);
-            return send_packet(s, out) == 0;
-        }
-        if (strncmp(p, "qXfer:features:read:", 20) == 0) {
-            /* qXfer:features:read:ANNEX:OFFSET,LENGTH */
-            const char *a = p + 20;
-            unsigned long off, len;
-            const char *comma;
-            size_t xlen = sizeof target_xml - 1;
-
-            comma = strchr(a, ':');
-            if (!comma)
-                return send_packet(s, "E00") == 0;
-            off = strtoul(comma + 1, (char **)&comma, 16);
-            len = (*comma == ',') ? strtoul(comma + 1, NULL, 16) : 0;
-            if (off >= xlen)
-                return send_packet(s, "l") == 0;
-            if (len > sizeof out - 2)
-                len = sizeof out - 2;
-            if (off + len >= xlen) {
-                out[0] = 'l';
-                memcpy(out + 1, target_xml + off, xlen - off);
-                out[1 + (xlen - off)] = '\0';
-            } else {
-                out[0] = 'm';
-                memcpy(out + 1, target_xml + off, len);
-                out[1 + len] = '\0';
-            }
-            return send_packet(s, out) == 0;
-        }
-        if (strcmp(p, "qAttached") == 0)
-            return send_packet(s, "1") == 0;
-        if (p[1] == 'C' && p[2] == '\0')        /* current thread */
-            return send_packet(s, "QC01") == 0;
-        if (strcmp(p, "qfThreadInfo") == 0)
-            return send_packet(s, "m01") == 0;
-        if (strcmp(p, "qsThreadInfo") == 0)
-            return send_packet(s, "l") == 0;
-        if (strncmp(p, "qTStatus", 8) == 0)
-            return send_packet(s, "") == 0;
-        return send_packet(s, "") == 0;
-
-    case 'H':                           /* set thread for subsequent ops */
-        return send_packet(s, "OK") == 0;
-
-    case 'g': {                         /* read all registers */
-        char *w = out;
-        int i;
-        for (i = 0; i < NREG_ALL; i++)
-            emit_reg(&w, s, i);
-        *w = '\0';
-        return send_packet(s, out) == 0;
-    }
-
-    case 'G': {                         /* write all registers */
-        const char *h = p + 1;
-        int i, ok = 1;
-        for (i = 0; i < NREG_ALL; i++) {
-            int bytes = reg_width(i);
-            if ((int)strlen(h) < bytes * 2 || set_reg(s, i, h)) {
-                ok = 0;                 /* short or non-hex: report it, not OK */
-                break;
-            }
-            h += bytes * 2;
-        }
-        return send_packet(s, ok ? "OK" : "E01") == 0;
-    }
-
-    case 'p': {                         /* read one register */
-        char *w = out;
-        long n = strtol(p + 1, NULL, 16);
-        if (n < 0 || n >= NREG_ALL)
-            return send_packet(s, "E01") == 0;
-        emit_reg(&w, s, (int)n);
-        *w = '\0';
-        return send_packet(s, out) == 0;
-    }
-
-    case 'P': {                         /* write one register: P n=val */
-        const char *eq = strchr(p, '=');
-        long n = strtol(p + 1, NULL, 16);
-        if (!eq || n < 0 || n >= NREG_ALL || set_reg(s, (int)n, eq + 1))
-            return send_packet(s, "E01") == 0;
-        return send_packet(s, "OK") == 0;
-    }
-
-    case 'm': {                         /* read memory: m addr,len */
-        char *end;
-        uint32_t addr = (uint32_t)strtoul(p + 1, &end, 16);
-        uint32_t len = (*end == ',') ? (uint32_t)strtoul(end + 1, NULL, 16) : 0;
-        char *w = out;
-        uint32_t i;
-
-        if (len == 0)
-            return send_packet(s, "E01") == 0;
-        if (!addr_mapped(s->g, addr))
-            return send_packet(s, "E01") == 0;
-        if (len > (PKT_MAX - 1) / 2)
-            len = (PKT_MAX - 1) / 2;
-        for (i = 0; i < len; i++) {
-            uint8_t b = gm_read8(&s->g->mem, addr + i);
-            *w++ = hexdig(b >> 4);
-            *w++ = hexdig(b & 0xf);
-        }
-        *w = '\0';
-        return send_packet(s, out) == 0;
-    }
-
-    case 'M': {                         /* write memory: M addr,len:data */
-        char *end;
-        uint32_t addr = (uint32_t)strtoul(p + 1, &end, 16);
-        uint32_t len = (*end == ',') ? (uint32_t)strtoul(end + 1, &end, 16) : 0;
-        const char *data = (*end == ':') ? end + 1 : NULL;
-        uint32_t i;
-
-        if (!data || !addr_mapped(s->g, addr))
-            return send_packet(s, "E01") == 0;
-        for (i = 0; i < len; i++) {
-            int hi = hexval(data[2 * i]), lo = hexval(data[2 * i + 1]);
-            if (hi < 0 || lo < 0)
-                return send_packet(s, "E01") == 0;
-            gm_write8(&s->g->mem, addr + i, (uint8_t)((hi << 4) | lo));
-        }
-        return send_packet(s, "OK") == 0;
-    }
-
-    case 'c': {                         /* continue [addr] */
-        if (p[1])
-            rv_set_pc(s->cpu, (uint32_t)strtoul(p + 1, NULL, 16));
-        do_continue(s);
-        return send_stop(s) == 0;
-    }
-
-    case 's': {                         /* single step [addr] */
-        if (p[1])
-            rv_set_pc(s->cpu, (uint32_t)strtoul(p + 1, NULL, 16));
-        s->watch_hit = 0;
-        if (!s->g->exited && !s->cpu->halted) {
-            if (s->nwp)
-                watch_snapshot(s);      /* baseline before the step */
-            rv_step(s->cpu);
-            if (s->nwp)                 /* a watched write this step is a hit */
-                watch_check(s);
-        }
-        return send_stop(s) == 0;
-    }
-
-    case 'Z':                           /* insert bp (Z0) or write watch (Z2) */
-        if (p[1] == '0') {
-            uint32_t addr = (uint32_t)strtoul(p + 3, NULL, 16);
-            if (!is_breakpoint(s, addr)) {
-                if (s->nbp >= BP_MAX)
-                    return send_packet(s, "E01") == 0;
-                s->bp[s->nbp++] = addr;
-            }
-            return send_packet(s, "OK") == 0;
-        }
-        if (p[1] == '2') {              /* Z2,addr,kind — kind is the length */
-            char *end;
-            uint32_t addr = (uint32_t)strtoul(p + 3, &end, 16);
-            uint32_t len = (*end == ',') ? (uint32_t)strtoul(end + 1, NULL, 16) : 1;
-            int i;
-            if (len == 0 || len > WATCH_MAXLEN)
-                return send_packet(s, "E01") == 0; /* gdb falls back to sw watch */
-            for (i = 0; i < s->nwp; i++)
-                if (s->wp[i].addr == addr && s->wp[i].len == len)
-                    return send_packet(s, "OK") == 0;
-            if (s->nwp >= WP_MAX)
-                return send_packet(s, "E01") == 0;
-            s->wp[s->nwp].addr = addr;
-            s->wp[s->nwp].len = len;
-            s->nwp++;
-            return send_packet(s, "OK") == 0;
-        }
-        return send_packet(s, "") == 0; /* Z1/Z3/Z4 unsupported */
-
-    case 'z':                           /* remove bp (z0) or write watch (z2) */
-        if (p[1] == '0') {
-            uint32_t addr = (uint32_t)strtoul(p + 3, NULL, 16);
-            int i;
-            for (i = 0; i < s->nbp; i++)
-                if (s->bp[i] == addr) {
-                    s->bp[i] = s->bp[--s->nbp];
-                    break;
-                }
-            return send_packet(s, "OK") == 0;
-        }
-        if (p[1] == '2') {
-            char *end;
-            uint32_t addr = (uint32_t)strtoul(p + 3, &end, 16);
-            uint32_t len = (*end == ',') ? (uint32_t)strtoul(end + 1, NULL, 16) : 1;
-            int i;
-            for (i = 0; i < s->nwp; i++)
-                if (s->wp[i].addr == addr && s->wp[i].len == len) {
-                    s->wp[i] = s->wp[--s->nwp];
-                    break;
-                }
-            return send_packet(s, "OK") == 0;
-        }
-        return send_packet(s, "") == 0;
-
-    case 'D':                           /* detach */
-        send_packet(s, "OK");
-        return 0;
-
-    case 'k':                           /* kill */
-        return 0;
-
-    default:
-        return send_packet(s, "") == 0; /* unsupported: empty reply */
-    }
-}
-
-/****************************************************************
- * Server setup and loop
- ****************************************************************/
 
 static int
-listen_accept(int port)
+rv_exited(void *ctx)
 {
-    int ls, conn, yes = 1;
-    struct sockaddr_in addr;
-
-    ls = socket(AF_INET, SOCK_STREAM, 0);
-    if (ls < 0)
-        return -1;
-    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
-    memset(&addr, 0, sizeof addr);
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons((uint16_t)port);
-    if (bind(ls, (struct sockaddr *)&addr, sizeof addr) < 0 ||
-        listen(ls, 1) < 0) {
-        close(ls);
-        return -1;
-    }
-    fprintf(stderr, "skj-run: gdb server listening on 127.0.0.1:%d\n", port);
-    fflush(stderr);
-    conn = accept(ls, NULL, NULL);
-    close(ls);
-    if (conn < 0)
-        return -1;
-    setsockopt(conn, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof yes);
-    return conn;
+    return ((struct rv_ctx *)ctx)->g->exited;
 }
+
+static int
+rv_exit_code(void *ctx)
+{
+    return ((struct rv_ctx *)ctx)->g->exit_code;
+}
+
+static int
+rv_stop_signal(void *ctx)
+{
+    return ((struct rv_ctx *)ctx)->g->mem.fault ? 11 : 5;
+}
+
+static const struct gdb_target rv_target = {
+    target_xml,
+    rv_read_regs, rv_write_regs, rv_read_reg, rv_write_reg,
+    rv_mem_mapped, rv_read8, rv_write8,
+    rv_get_pc_cb, rv_set_pc_cb, rv_step_cb,
+    rv_exited, rv_exit_code, rv_stop_signal,
+    0, 0,
+};
 
 int
 rv_gdb_serve(rv_cpu *cpu, guest *g, int port, int *exit_code)
 {
-    struct gdb s;
-    char pkt[PKT_MAX];
-
-    memset(&s, 0, sizeof s);
-    s.ack_mode = 1;
-    s.cpu = cpu;
-    s.g = g;
-
-    s.fd = listen_accept(port);
-    if (s.fd < 0) {
-        fprintf(stderr, "skj-run: gdb server could not listen on port %d\n",
-                port);
-        return -1;
-    }
-
-    for (;;) {
-        int n = recv_packet(&s, pkt, sizeof pkt);
-        if (n == -1)
-            break;                      /* connection closed */
-        if (n == -2) {                  /* an interrupt between packets */
-            send_stop(&s);
-            continue;
-        }
-        if (n == 0)
-            continue;                   /* empty packet */
-        if (!handle_packet(&s, pkt))
-            break;
-    }
-
-    close(s.fd);
-    if (exit_code)
-        *exit_code = g->exited ? g->exit_code : 0;
-    return 0;
+    struct rv_ctx ctx;
+    ctx.cpu = cpu;
+    ctx.g = g;
+    return gdb_serve(&rv_target, &ctx, port, exit_code);
 }

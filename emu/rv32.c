@@ -21,6 +21,20 @@
 #define RV_UNLIKELY(x) (x)
 #endif
 
+/* Dispatch style for the interpreter loop. A GCC or Clang build uses
+ * labels-as-values for threaded dispatch: every handler ends with its own
+ * indirect jump to the next instruction's handler, so the branch predictor
+ * sees one site per opcode instead of one shared switch. A portable build
+ * falls back to a plain switch. Both are generated from the same handler
+ * bodies through the OPC() and DISPATCH() macros in rv_run, so there is only
+ * one copy of the decode logic to maintain. Define RV_NO_THREADED to force the
+ * switch on a GNU compiler (used to A/B the two). */
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(RV_NO_THREADED)
+#define RV_THREADED 1
+#else
+#define RV_THREADED 0
+#endif
+
 /* Guest-instruction coverage. Which lines of this file a test executed is
  * not the same question as which instructions it ran, and for an emulator
  * the second one is the useful one. icov.c answers it; this build option
@@ -1899,11 +1913,22 @@ illegal(rv_cpu *cpu, uint32_t insn)
  * or an eviction only costs the fetch-and-expand it was meant to save.
  ****************************************************************/
 
+/* Each entry is a decoded-operand record: beyond the expanded encoding it
+ * carries the operand fields and the one immediate that opcode uses, both
+ * computed once at fill time (rv_dec_fields) so the hot loop neither extracts
+ * fields nor reshuffles an immediate on every re-execution, and `op`, the
+ * major-opcode dispatch index. A Zcmp entry sets zcmp and leaves the operand
+ * fields unused (exec_zcmp reads the raw encoding). */
 typedef struct rv_dec {
     uint32_t pc;            /* tag; RV_DEC_NONE marks an empty slot */
     uint32_t insn;          /* expanded form (raw 16-bit for a Zcmp entry) */
-    uint16_t len;           /* 2 or 4: how far the PC advances */
-    uint16_t zcmp;          /* 1 for a Zcmp form dispatched to exec_zcmp */
+    int32_t  imm;           /* immediate, already in this opcode's format */
+    uint8_t  rd, rs1, rs2;  /* register number fields */
+    uint8_t  f3;            /* funct3 */
+    uint8_t  f7;            /* funct7 */
+    uint8_t  op;            /* dispatch index: (insn >> 2) & 0x1f */
+    uint8_t  len;           /* 2 or 4: how far the PC advances */
+    uint8_t  zcmp;          /* 1 for a Zcmp form dispatched to exec_zcmp */
 } rv_dec;
 
 #define RV_DEC_BITS 16
@@ -1916,26 +1941,160 @@ rv_dec_index(const rv_cpu *cpu, uint32_t pc)
     return ((pc >> 1) ^ (pc >> 17)) & cpu->dec_mask;
 }
 
+/* Fill the decoded-operand fields of an entry whose `insn` (expanded, 32-bit)
+ * and `len` are already set. Done once per fill, not per execution. */
+static inline void
+rv_dec_fields(rv_dec *d)
+{
+    uint32_t insn = d->insn;
+
+    d->rd  = (uint8_t)RD(insn);
+    d->rs1 = (uint8_t)RS1(insn);
+    d->rs2 = (uint8_t)RS2(insn);
+    d->f3  = (uint8_t)FUNCT3(insn);
+    d->f7  = (uint8_t)FUNCT7(insn);
+    d->op  = (uint8_t)((insn >> 2) & 0x1f);
+    switch (OPCODE(insn)) {
+    case OP_LUI:
+    case OP_AUIPC:
+        d->imm = imm_u(insn);
+        break;
+    case OP_JAL:
+        d->imm = imm_j(insn);
+        break;
+    case OP_JALR:
+    case OP_LOAD:
+    case OP_LOAD_FP:
+    case OP_IMM:
+        d->imm = imm_i(insn);
+        break;
+    case OP_STORE:
+    case OP_STORE_FP:
+        d->imm = imm_s(insn);
+        break;
+    case OP_BRANCH:
+        d->imm = imm_b(insn);
+        break;
+    default:                /* OP_REG, OP_AMO, OP_FP, OP_SYSTEM, fused FMA */
+        d->imm = 0;
+        break;
+    }
+}
+
+/* OPC(name) opens a handler: a case label of the opcode switch in the portable
+ * build, a plain label the dispatch table jumps to in the threaded build.
+ * PREP() extracts the operand fields every handler shares. DISPATCH() ends a
+ * handler: `break` out to the retire tail in the portable build, or, in the
+ * threaded build, retire the instruction and jump straight to the next one. */
+#if RV_THREADED
+#define OPC(name)   L_##name
+#else
+#define OPC(name)   case OP_##name
+#endif
+
+#define PREP()                      \
+    do {                            \
+        rd = d->rd;                 \
+        rs1 = d->rs1;               \
+        rs2 = d->rs2;               \
+        f3 = d->f3;                 \
+        f7 = d->f7;                 \
+        imm = d->imm;               \
+        a = cpu->x[rs1];            \
+        b = cpu->x[rs2];            \
+        sa = (int32_t)a;            \
+        sb = (int32_t)b;            \
+    } while (0)
+
+#if RV_THREADED
+/* Finish the instruction that just ran and jump to the next handler. The
+ * leading test mirrors the portable build's retire label exactly: an ordinary
+ * completion advances the pc, a redirect or trap that arrived here through
+ * `goto retire` leaves the pc the trap set. Anything the inline fast fetch
+ * cannot serve (a pending interrupt, a misaligned pc, a decode-cache miss, or
+ * no cache at all) bails to the full `step` prologue, which takes the
+ * interrupt, traps the fault, or refills the cache before dispatching. */
+#define DISPATCH()                                                  \
+    do {                                                            \
+        cpu->x[0] = 0;                                              \
+        if (!cpu->in_trap)                                          \
+            cpu->pc = next;                                         \
+        cpu->cycles++;                                              \
+        cpu->mcycle++;                                              \
+        cpu->minstret++;                                            \
+        count++;                                                    \
+        if (RV_UNLIKELY(cpu->in_trap || cpu->halted || cpu->waiting \
+                        || count >= budget))                        \
+            goto out;                                               \
+        if (RV_UNLIKELY((cpu->mip & cpu->mie) != 0))                \
+            goto step;                                              \
+        pc = cpu->pc;                                               \
+        if (RV_UNLIKELY((pc & 1) || dec == NULL))                   \
+            goto step;                                              \
+        d = &dec[rv_dec_index(cpu, pc)];                            \
+        if (RV_UNLIKELY(d->pc != pc))                               \
+            goto step;                                              \
+        cpu->in_trap = 0;                                           \
+        insn = d->insn;                                             \
+        next = pc + d->len;                                         \
+        if (RV_UNLIKELY(d->zcmp))                                   \
+            goto do_zcmp;                                           \
+        PREP();                                                     \
+        goto *dtab[d->op];                                          \
+    } while (0)
+#else
+#define DISPATCH()  break
+#endif
+
 /** Run up to `budget` instructions.
  *
- * The loop stays here across instructions rather than returning after each,
- * dispatching on the major opcode with a switch the compiler lowers to a jump
- * table. cpu->pc names the instruction in flight and `next` the one after.
+ * The loop stays here across instructions rather than returning after each.
+ * A GCC/Clang build threads the dispatch (each handler jumps to the next
+ * through the dtab table of label addresses); a portable build dispatches on
+ * the major opcode with a switch the compiler lowers to a jump table.
+ * cpu->pc names the instruction in flight and `next` the one after.
  *
  * It stops the moment the machine halts (an exit, or a bus fault the host
  * turned into a halt), a trap is taken, the hart parks on wfi, or the budget
  * is spent, and returns the reason so the host can act on a faulting or
  * yielding task instead of spinning out the batch. *retired, when non-NULL,
  * receives the number of instructions it accounted for. */
+#if RV_THREADED
+/* The threaded build uses two GCC extensions: the address of a label
+ * (&&label) and the computed goto (goto *p). Both are warned about under
+ * -Wpedantic, so silence just that warning for this one function; the switch
+ * build below the #else path stays strictly conforming. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
 enum rv_run_reason
 rv_run(rv_cpu *cpu, int budget, int *retired)
 {
     uint32_t rd, rs1, rs2, f3, f7, a, b, addr, val, csr, old;
     uint32_t insn, next, lo, pc;
-    int32_t sa, sb;
+    int32_t sa, sb, imm;
     int rm;
     int count = 0;
     rv_dec *d;
+    rv_dec *dec = cpu->dec;
+    rv_dec scratch;         /* stands in for a cache slot when no cache exists */
+
+#if RV_THREADED
+    /* The dispatch table maps the 5-bit major-opcode index ((insn >> 2) & 0x1f,
+     * valid because a 32-bit encoding always has bits 1:0 set) to its handler.
+     * Indices with no RV32 opcode point at the illegal handler. GCC permits a
+     * static array of label addresses; it is built once. */
+    static const void *const dtab[32] = {
+        &&L_LOAD,    &&L_LOAD_FP, &&L_illegal, &&L_MISC_MEM,  /*  0.. 3 */
+        &&L_IMM,     &&L_AUIPC,   &&L_illegal, &&L_illegal,    /*  4.. 7 */
+        &&L_STORE,   &&L_STORE_FP,&&L_illegal, &&L_AMO,        /*  8..11 */
+        &&L_REG,     &&L_LUI,     &&L_illegal, &&L_illegal,    /* 12..15 */
+        &&L_MADD,    &&L_MSUB,    &&L_NMSUB,   &&L_NMADD,       /* 16..19 */
+        &&L_FP,      &&L_illegal, &&L_illegal, &&L_illegal,     /* 20..23 */
+        &&L_BRANCH,  &&L_JALR,    &&L_illegal, &&L_JAL,         /* 24..27 */
+        &&L_SYSTEM,  &&L_illegal, &&L_illegal, &&L_illegal,     /* 28..31 */
+    };
+#endif
 
 step:
     if (count >= budget || cpu->halted)
@@ -1961,9 +2120,11 @@ step:
         goto out;
     }
 
-    /* Fast path: a predecoded entry for this PC (guest code never changes). */
-    d = cpu->dec ? &cpu->dec[rv_dec_index(cpu, pc)] : NULL;
-    if (d && d->pc == pc) {
+    /* Fast path: a predecoded entry for this PC (guest code never changes).
+     * Without a cache, a stack scratch entry stands in so the handler reads
+     * its operands the same way; the scratch is always treated as a miss. */
+    d = dec ? &dec[rv_dec_index(cpu, pc)] : &scratch;
+    if (dec && d->pc == pc) {
         next = pc + d->len;
         insn = d->insn;
         if (d->zcmp)
@@ -1981,7 +2142,7 @@ step:
             ICOV_NOTE(lo, 2);
             if (cpu->zcmp && is_zcmp((uint16_t)lo)) {
                 insn = lo;
-                if (d) { d->insn = lo; d->len = 2; d->zcmp = 1; d->pc = pc; }
+                d->insn = lo; d->len = 2; d->zcmp = 1; d->pc = pc;
                 goto do_zcmp;
             }
             insn = rv_expand_c((uint16_t)lo);
@@ -1992,7 +2153,7 @@ step:
                 count++;
                 goto out;
             }
-            if (d) { d->insn = insn; d->len = 2; d->zcmp = 0; d->pc = pc; }
+            d->insn = insn; d->len = 2; d->zcmp = 0; d->pc = pc;
         } else {
             if (RV_UNLIKELY(cpu->probe && cpu->probe(cpu->bus_ctx, pc + 2, 2, 0))) {
                 rv_trace_push(&cpu->trace, RV_TR_FETCH_FAULT, pc, 0, pc + 2,
@@ -2004,41 +2165,44 @@ step:
             insn = lo | ((cpu->read16(cpu->bus_ctx, pc + 2) & 0xffff) << 16);
             next = pc + 4;
             ICOV_NOTE(insn, 4);
-            if (d) { d->insn = insn; d->len = 4; d->zcmp = 0; d->pc = pc; }
+            d->insn = insn; d->len = 4; d->zcmp = 0; d->pc = pc;
         }
+        rv_dec_fields(d);       /* decode operands and immediate once */
     }
 
-    rd = RD(insn); rs1 = RS1(insn); rs2 = RS2(insn);
-    f3 = FUNCT3(insn); f7 = FUNCT7(insn);
-    a = cpu->x[rs1]; b = cpu->x[rs2];
-    sa = (int32_t)a; sb = (int32_t)b;
+    PREP();
 
+#if RV_THREADED
+    goto *dtab[d->op];
+#else
     switch (OPCODE(insn)) {
-    case OP_LUI:
-        cpu->x[rd] = (uint32_t)imm_u(insn);
-        break;
+#endif
 
-    case OP_AUIPC:
-        cpu->x[rd] = cpu->pc + (uint32_t)imm_u(insn);
-        break;
+    OPC(LUI):
+        cpu->x[rd] = (uint32_t)imm;
+        DISPATCH();
 
-    case OP_JAL:
-        val = cpu->pc + (uint32_t)imm_j(insn);
+    OPC(AUIPC):
+        cpu->x[rd] = cpu->pc + (uint32_t)imm;
+        DISPATCH();
+
+    OPC(JAL):
+        val = cpu->pc + (uint32_t)imm;
         cpu->x[rd] = next;
         next = val;
-        break;
+        DISPATCH();
 
-    case OP_JALR:
+    OPC(JALR):
         if (f3 != 0) {
             illegal(cpu, insn);
             goto retire;
         }
-        val = (a + (uint32_t)imm_i(insn)) & ~1u;
+        val = (a + (uint32_t)imm) & ~1u;
         cpu->x[rd] = next;
         next = val;
-        break;
+        DISPATCH();
 
-    case OP_BRANCH:
+    OPC(BRANCH):
         switch (f3) {
         case 0: val = a == b; break;                        /* beq */
         case 1: val = a != b; break;                        /* bne */
@@ -2049,11 +2213,11 @@ step:
         default: illegal(cpu, insn); goto retire;
         }
         if (val)
-            next = cpu->pc + (uint32_t)imm_b(insn);
-        break;
+            next = cpu->pc + (uint32_t)imm;
+        DISPATCH();
 
-    case OP_LOAD:
-        addr = a + (uint32_t)imm_i(insn);
+    OPC(LOAD):
+        addr = a + (uint32_t)imm;
         switch (f3) {
         case 0: /* lb */
             if (mem_read(cpu, addr, 1, &val)) goto retire;
@@ -2079,20 +2243,19 @@ step:
             illegal(cpu, insn);
             goto retire;
         }
-        break;
+        DISPATCH();
 
-    case OP_STORE:
-        addr = a + (uint32_t)imm_s(insn);
+    OPC(STORE):
+        addr = a + (uint32_t)imm;
         switch (f3) {
         case 0: mem_write(cpu, addr, 1, b); break;
         case 1: mem_write(cpu, addr, 2, b); break;
         case 2: mem_write(cpu, addr, 4, b); break;
         default: illegal(cpu, insn); goto retire;
         }
-        break;
+        DISPATCH();
 
-    case OP_IMM: {
-        int32_t imm = imm_i(insn);
+    OPC(IMM): {
         uint32_t shamt = (uint32_t)imm & 0x1f;
 
         switch (f3) {
@@ -2114,10 +2277,10 @@ step:
             else goto zb_imm;
             break;
         }
-        break;
+        DISPATCH();
     }
 
-    case OP_REG:
+    OPC(REG):
         if (f7 == 0x01) {
             /* M extension */
             switch (f3) {
@@ -2152,7 +2315,7 @@ step:
                 cpu->x[rd] = b == 0 ? a : a % b;
                 break;
             }
-            break;
+            DISPATCH();
         }
         if (f7 != 0 && f7 != 0x20)
             goto zb_reg;
@@ -2191,9 +2354,9 @@ step:
             cpu->x[rd] = a & b;                             /* and */
             break;
         }
-        break;
+        DISPATCH();
 
-    case OP_AMO: {
+    OPC(AMO): {
         /* Atomics on a single hart with no interrupts. Nothing can
          * interleave with a read-modify-write here, so each of these is
          * just a load, an operation and a store. The reservation that
@@ -2233,7 +2396,7 @@ step:
             cpu->res_addr = addr;
             cpu->res_valid = 1;
             cpu->x[rd] = old;
-            break;
+            DISPATCH();
         }
 
         if (funct5 == 0x03) {               /* sc.w */
@@ -2245,7 +2408,7 @@ step:
                 cpu->x[rd] = 1;
             }
             cpu->res_valid = 0;
-            break;
+            DISPATCH();
         }
 
         if (mem_read(cpu, addr, 4, &old))
@@ -2267,10 +2430,10 @@ step:
         if (mem_write(cpu, addr, 4, val))
             goto retire;
         cpu->x[rd] = old;                   /* the value before the update */
-        break;
+        DISPATCH();
     }
 
-    case OP_MISC_MEM:
+    OPC(MISC_MEM):
         /* fence (f3=0) is a data barrier: nothing to do on a single-hart
          * interpreter. fence.i (f3=1) makes prior stores visible to
          * instruction fetch, so it must drop the decoded-instruction cache,
@@ -2285,17 +2448,17 @@ step:
         } else if (f3 != 0) {
             illegal(cpu, insn);
         }
-        break;
+        DISPATCH();
 
-    case OP_LOAD_FP:
+    OPC(LOAD_FP):
         if (f3 == 2) {                          /* flw */
-            addr = a + (uint32_t)imm_i(insn);
+            addr = a + (uint32_t)imm;
             if (mem_read(cpu, addr, 4, &val))
                 goto retire;
             cpu->f[rd] = nanbox(val);
         } else if (f3 == 3 && cpu->dp) {        /* fld: two 32-bit reads */
             uint32_t lo, hi;
-            addr = a + (uint32_t)imm_i(insn);
+            addr = a + (uint32_t)imm;
             if (mem_read(cpu, addr, 4, &lo))
                 goto retire;
             if (mem_read(cpu, addr + 4, 4, &hi))
@@ -2305,26 +2468,30 @@ step:
             illegal(cpu, insn);
             goto retire;
         }
-        break;
+        DISPATCH();
 
-    case OP_STORE_FP:
+    OPC(STORE_FP):
         if (f3 == 2) {                          /* fsw: low 32 bits */
-            addr = a + (uint32_t)imm_s(insn);
+            addr = a + (uint32_t)imm;
             mem_write(cpu, addr, 4, (uint32_t)cpu->f[rs2]);
         } else if (f3 == 3 && cpu->dp) {        /* fsd: two 32-bit writes */
-            addr = a + (uint32_t)imm_s(insn);
+            addr = a + (uint32_t)imm;
             mem_write(cpu, addr, 4, (uint32_t)cpu->f[rs2]);
             mem_write(cpu, addr + 4, 4, (uint32_t)(cpu->f[rs2] >> 32));
         } else {
             illegal(cpu, insn);
             goto retire;
         }
-        break;
+        DISPATCH();
 
+#if RV_THREADED
+    L_MADD: L_MSUB: L_NMSUB: L_NMADD: {
+#else
     case OP_MADD:
     case OP_MSUB:
     case OP_NMSUB:
     case OP_NMADD: {
+#endif
         uint32_t fmt = (insn >> 25) & 3;
 
         rm = resolve_rm(cpu, f3);
@@ -2365,10 +2532,10 @@ step:
             illegal(cpu, insn);
             goto retire;
         }
-        break;
+        DISPATCH();
     }
 
-    case OP_FP: {
+    OPC(FP): {
         uint32_t fmt = f7 & 3;          /* 0 = single, 1 = double */
         uint32_t op5 = f7 >> 2;
 
@@ -2585,10 +2752,10 @@ step:
             illegal(cpu, insn);
             goto retire;
         }
-        break;
+        DISPATCH();
     }
 
-    case OP_SYSTEM:
+    OPC(SYSTEM):
         if (f3 == 0) {
             if (insn == 0x00000073) {           /* ecall */
                 rv_trace_push(&cpu->trace, RV_TR_ECALL, cpu->pc, insn,
@@ -2596,7 +2763,7 @@ step:
                 if (cpu->ecall) {
                     int er = cpu->ecall(cpu, cpu->ecall_ctx);
                     if (er == RV_ECALL_OK)
-                        break;              /* handled: advance past the ecall */
+                        DISPATCH();         /* handled: advance past the ecall */
                     if (er == RV_ECALL_RETRY)
                         goto out;           /* parked: leave pc, re-run next time */
                 }
@@ -2628,7 +2795,7 @@ step:
                  * flag is for a host that would rather jump its own
                  * clock forward than step the wait out. */
                 cpu->waiting = 1;
-                break;
+                DISPATCH();
             }
             illegal(cpu, insn);
             goto retire;
@@ -2651,7 +2818,7 @@ step:
          * so they never raise an exception on a read-only csr */
         if ((f3 & 3) != 1 && rs1 == 0) {
             cpu->x[rd] = old;
-            break;
+            DISPATCH();
         }
         switch (f3 & 3) {
         case 1: break;                                  /* csrrw */
@@ -2664,14 +2831,24 @@ step:
         }
         cpu->x[rd] = old;
         rv_trace_push(&cpu->trace, RV_TR_CSR, cpu->pc, insn, csr, NULL);
-        break;
+        DISPATCH();
 
+#if RV_THREADED
+    L_illegal:
+#else
     default:
+#endif
         illegal(cpu, insn);
-        break;
+        DISPATCH();
+
+#if !RV_THREADED
     }
+#endif
 
 retire:
+#if RV_THREADED
+    DISPATCH();
+#else
     cpu->x[0] = 0;
     if (!cpu->in_trap)
         cpu->pc = next;
@@ -2682,6 +2859,7 @@ retire:
     if (RV_UNLIKELY(cpu->in_trap || cpu->halted || cpu->waiting))
         goto out;
     goto step;
+#endif
 
     /* A Zcmp form does too much to be rewritten as one 32-bit instruction, so
      * it runs here and joins the others at retire. */
@@ -2724,6 +2902,13 @@ out:
         return RV_RUN_YIELD;
     return RV_RUN_BUDGET;
 }
+#if RV_THREADED
+#pragma GCC diagnostic pop
+#endif
+
+#undef OPC
+#undef PREP
+#undef DISPATCH
 
 /****************************************************************
  * Public API
