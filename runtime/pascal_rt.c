@@ -404,6 +404,22 @@ __pascal_arr_setlength_mgd(void *a, int newlen, int elsize,
    unbuffered (direct write), so Flush is a no-op. */
 static int g_outfd = 1;
 
+/* Write exactly n bytes to the current output fd, advancing over a short write
+   and stopping on error.  Every output path funnels through here, so checking
+   write()'s result (the host libc marks it warn_unused_result) and completing a
+   partial write are both handled in one place. */
+static void
+out_write(const char *p, int n)
+{
+    while (n > 0) {
+        int w = write(g_outfd, p, n);
+        if (w <= 0)
+            break;              /* error, or nothing written: stop this chunk */
+        p += w;
+        n -= w;
+    }
+}
+
 void
 __pascal_set_outfd(int fd)
 {
@@ -418,8 +434,7 @@ __pascal_flush(void)
 void
 __pascal_write_raw(const char *p, int n)
 {
-    if (n > 0)
-        write(g_outfd, p, n);
+    out_write(p, n);
 }
 
 /* Command-line arguments (ParamStr/ParamCount).  main captures argc/argv here
@@ -467,7 +482,7 @@ __pascal_write_int(int v)
     unsigned int u;
 
     if (v == 0) {
-        write(g_outfd, "0", 1);
+        out_write("0", 1);
         return;
     }
 
@@ -486,7 +501,7 @@ __pascal_write_int(int v)
     }
     if (neg)
         buf[--i] = '-';
-    write(g_outfd, buf + i, sizeof(buf) - i);
+    out_write(buf + i, (int)(sizeof(buf) - i));
 }
 
 void
@@ -497,7 +512,7 @@ __pascal_write_int64(long long v)
     unsigned long long u;
 
     if (v == 0) {
-        write(g_outfd, "0", 1);
+        out_write("0", 1);
         return;
     }
 
@@ -516,7 +531,7 @@ __pascal_write_int64(long long v)
     }
     if (neg)
         buf[--i] = '-';
-    write(g_outfd, buf + i, sizeof(buf) - i);
+    out_write(buf + i, (int)(sizeof(buf) - i));
 }
 
 #ifdef PAS_HOST
@@ -527,7 +542,7 @@ __pascal_write_real(double v)
     int n = snprintf(buf, sizeof(buf), "%.15g", v);
 
     if (n > 0)
-        write(g_outfd, buf, (int)n);
+        out_write(buf, (int)n);
 }
 
 void *
@@ -561,7 +576,7 @@ void
 __pascal_write_real(double v)
 {
     (void)v;
-    write(g_outfd, "0", 1);
+    out_write("0", 1);
 }
 
 void *
@@ -588,7 +603,7 @@ void
 __pascal_write_char(int v)
 {
     char c = (char)v;
-    write(g_outfd, &c, 1);
+    out_write(&c, 1);
 }
 
 void
@@ -597,7 +612,7 @@ __pascal_write_str(const void *s)
     int len = pstr_len(s);
 
     if (len > 0)
-        write(g_outfd, pstr_bytes(s), len);
+        out_write(pstr_bytes(s), len);
 }
 
 int

@@ -27,16 +27,16 @@ runtime across the tiers that apply:
 - **The file system switch (`fs/`).** The mount table, the fd space, the path
   resolver, and the backends are plain C that neither language owns. A C libc
   path call and a Kobold file/directory primitive are both thin adapters over
-  the same `fs_open` / `fs_read` / `fs_write` / `fs_close` and the same
+  the same `fs_open`/`fs_read`/`fs_write`/`fs_close` and the same
   `fs_dirent` directory model. See `fs/fs.h` and `doc/tools/process-model.md`.
 
 ## The one file and directory model
 
 Every tier now reaches files and directories through `fs/`. There is no
-`opendir` / `DIR*` layer and no raw `open` in the language runtimes; a directory
+`opendir`/`DIR*` layer and no raw `open` in the language runtimes; a directory
 is an fd opened with `FS_O_DIRECTORY` and read as a whole number of fixed
-`struct fs_dirent` records, and a language's `OpenDir` / `NextEntry` is a thin
-wrapper over `fs_open` / `fs_read` / `fs_close`.
+`struct fs_dirent` records, and a language's `OpenDir`/`NextEntry` is a thin
+wrapper over `fs_open`/`fs_read`/`fs_close`.
 
 What differs per tier is only the backend behind the mount and how the mount
 table is populated, not the model or the call surface:
@@ -63,8 +63,8 @@ at `FS_FD_BASE` (3), so the two never collide.
 These stay separate because the tiers genuinely differ, not for lack of
 unification:
 
-- **Whole-file read/write allocation model.** `ReadFileStr` / `WriteFileStr`
-  stay on the per-tier whole-file helpers (`kp_read_file` / `kp_write_file`).
+- **Whole-file read/write allocation model.** `ReadFileStr`/`WriteFileStr`
+  stay on the per-tier whole-file helpers (`kp_read_file`/`kp_write_file`).
   The freestanding tier allocates the read buffer from the guest heap and builds
   the result string in place; the hosted tiers use host `malloc`. That
   allocation split is the reason these two entry points are not folded onto the

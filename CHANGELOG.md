@@ -6,6 +6,19 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.42.1
+
+#### Fixed
+- The host Pascal runtime build (`runtime/pascal_rt.c` with `-DPAS_HOST`) no
+  longer warns about ignoring the result of `write()`, which the host libc
+  marks `warn_unused_result`. Output now funnels through one helper that checks
+  the result and advances over a short write; the freestanding paths share it
+  too, so a partial write completes there as well.
+- The PDF build of the runtime-layering manual page no longer fails: a few
+  space-padded slash separators between inline code spans could wrap onto a
+  line starting with a slash and a space, which the PDF typesetter reads as a
+  term-list item. They are tightened so the manual's PDF target builds.
+
 ### 0.42.0
 
 #### Added
