@@ -6,6 +6,30 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.43.0
+
+#### Changed
+- `vendor.sh` builds the Kobold front end from `kpcom.pas` source for any
+  target, in place of the single prebuilt x86-64 seed it used to ship. The
+  Kobold component now vendors the Compact Pascal compiler and its host runtime,
+  and the generated `skjegg.mk` builds `skj-pc` for the host and compiles
+  `kpcom.pas` into a per-target `skj-kpc-<target>` (rv32, ColdFire, x86-64,
+  arm64), each a host binary that emits its one target's KPM1. A consumer
+  targeting a VM host now gets a correct-width front end built from source
+  rather than a mismatched seed. The vendored host backend is x86-64; building
+  on an arm64 host needs the arm64 selector vendored too.
+- A MooScript verb call now carries a per-argument routing mask so a host bridge
+  can place values into the verb's context. `__moo_verb_call` takes a new
+  `typemask` argument, two bits per call argument (object, string, or anything
+  else), letting the host route object and string arguments without guessing
+  from the raw temporaries.
+
+#### Fixed
+- `vendor.sh` now ships the Kobold runtime glue that lives under `runtime/`
+  (`rng_glue.c`, `sched_glue.c`, and the per-architecture `io_free_*.S`). A
+  consumer building the freestanding Kobold runtime (the rv32 VM hosts)
+  previously had to supply these by hand.
+
 ### 0.42.1
 
 #### Fixed

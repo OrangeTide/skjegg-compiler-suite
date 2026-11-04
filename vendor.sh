@@ -623,18 +623,34 @@ fi
 # Kobold-Pascal AOT path (kobold).  The front end kpcom is in-tree Pascal source
 # (kobold/kpcom.pas); this carries the KPM1 reader and runtime (kobold/), the
 # x86-64 selector the host tools build on, and the jit/ call trampoline libkpaot
-# links.  There is no committed seed: the x86-64 bootstrap seed is generated at
-# vendor time from source (skjegg's own build) and shipped under prebuild/, so a
-# consumer AOT-compiles it with skj-kp without needing skj-pc or fpc.  With riscv
-# also selected it adds the jit/ pieces the RV32 runtime needs.  The freestanding
+# links.  Rather than a prebuilt seed of one fixed width, it ships the Compact
+# Pascal compiler itself (the pascal/ front end and its host runtime), so the
+# consumer builds skj-pc for the host and compiles kpcom.pas straight into a
+# per-target Kobold front end skj-kpc-<target> from source: any target (rv32,
+# ColdFire, x86-64, arm64) from the host, no fpc and no seed.  With riscv also
+# selected it adds the jit/ pieces the RV32 runtime needs.  The freestanding
 # runtime and its libkpaot*-free rules arrive with a later step.
 if [ "$has_kp" -eq 1 ]; then
-    mkdir -p "$DEST/kobold" "$DEST/backend" "$DEST/jit" "$DEST/prebuild" "$DEST/runtime"
+    mkdir -p "$DEST/kobold" "$DEST/backend" "$DEST/jit" "$DEST/runtime" \
+             "$DEST/pascal" "$DEST/tests"
     cp "$S"/kobold/*.c "$S"/kobold/*.h "$S"/kobold/*.S "$DEST/kobold/"
+    # The Compact Pascal front end and its host runtime: skj-pc compiles kpcom.pas
+    # (valid Pascal) to native host code, and pascal_kpcom_host.c + pascal_rt.c
+    # (built -DPAS_HOST) are the host main and string/IO runtime it links.
+    cp "$S"/pascal/*.c "$S"/pascal/*.h "$DEST/pascal/"
+    cp "$S/runtime/pascal_rt.c" "$DEST/runtime/"
+    cp "$S/tests/pascal_kpcom_host.c" "$DEST/tests/"
     # The coroutine context switches live in runtime/ (beside start*.S); the
     # Kobold runtime links the one for each selected backend.
     cp "$S/runtime/co_switch_x86.S" "$S/runtime/co_switch_rv.S" \
        "$S/runtime/co_switch_arm64.S" "$DEST/runtime/"
+    # The Kobold runtime glue that lives under runtime/ rather than kobold/:
+    # rng_glue.c and sched_glue.c back std.random / std.time and the park/yield
+    # (Sleep / Yield) primitives on every tier, and io_free_<arch>.S is the
+    # freestanding console I/O stub each VM-host target links into libkpaot-*-free.
+    cp "$S/runtime/rng_glue.c" "$S/runtime/sched_glue.c" "$DEST/runtime/"
+    [ "$has_rv" -eq 1 ] && cp "$S/runtime/io_free_rv.S" "$DEST/runtime/"
+    [ "$has_cf" -eq 1 ] && cp "$S/runtime/io_free_cf.S" "$DEST/runtime/"
     cp "$S/kobold/kpcom.pas" "$S/kobold/version.inc" "$S/kobold/stdlib.inc" \
        "$DEST/kobold/"
     cp "$S/backend/regalloc_x86.c" "$S/backend/x86_select.c" \
@@ -645,12 +661,6 @@ if [ "$has_kp" -eq 1 ]; then
     if [ "$has_rv" -eq 1 ]; then
         cp "$S/jit/call_guest_rv.S" "$S/jit/rv_jit_i64.S" "$DEST/jit/"
     fi
-    # No committed seed: generate the x86-64 (LP64) seed from source now and ship
-    # it as prebuild/kpcom.kpm.  skjegg's own build builds the host front end from
-    # kpcom.pas via skj-pc and emits this module; the consumer's skjegg.mk then
-    # AOT-compiles it with skj-kp (x86-64) into skj-kpc.
-    make -s -C "$S" build/kpcom-x86-64.kpm
-    cp "$S/build/kpcom-x86-64.kpm" "$DEST/prebuild/kpcom.kpm"
 fi
 
 # Documentation.  Vendor the usage docs for each selected tool and language, so
@@ -1302,17 +1312,39 @@ $(BUILD)/libkpaot.a: $(SKJ_KP_AOT_RT) $(BUILD)/kp_co.o | $(BUILD)
 	@for f in $(SKJ_KP_AOT_RT); do o=$(BUILD)/aot/`basename $$f | sed 's/\.[cS]$$/.o/'`; $(CC) $(SKJ_KP_CFLAGS) -c $$f -o $$o || exit 1; done
 	$(AR) rcs $@ $(BUILD)/aot/*.o $(BUILD)/kp_co.o
 
-# skj-kpc: the Kobold-Pascal front end as a native x86-64 binary.  The vendor-time
-# x86-64 seed (prebuild/kpcom.kpm) is AOT-compiled by skj-kp and linked against
-# libkpaot.a, so 'skj-kpc --emit-kpm foo.pas' turns Kobold source into a KPM1
-# module with no fpc.
-SKJ_ALL += $(BUILD)/skj-kpc
-$(BUILD)/kpcom.s: $(SKJEGG)prebuild/kpcom.kpm $(BUILD)/skj-kp | $(BUILD)
-	$(BUILD)/skj-kp $(SKJEGG)prebuild/kpcom.kpm -o $@
-$(BUILD)/kpcom.o: $(BUILD)/kpcom.s | $(BUILD)
-	$(X64_ASM) $(X64_ASMFLAGS) $< -o $@
-$(BUILD)/skj-kpc: $(BUILD)/kpcom.o $(BUILD)/libkpaot.a | $(BUILD)
-	$(CC) -no-pie $(BUILD)/kpcom.o $(BUILD)/libkpaot.a -o $@ -lm
+# The Kobold-Pascal front end, built from source rather than a prebuilt seed:
+# skj-pc (the Compact Pascal compiler) built for the host compiles kpcom.pas
+# (valid Pascal) to native host code, and compiling it with -d KP_TARGET_<T>
+# bakes the emitted target in.  So skj-kpc-<target> runs on this host and emits
+# that target's KPM1 modules, for any supported target from any host.  The host
+# backend vendored here is x86-64; building on an arm64 host needs the arm64
+# selector vendored too.
+HOST_ARCH := $(shell uname -m)
+ifeq ($(filter x86_64 amd64,$(HOST_ARCH)),)
+$(error building skj-pc/skj-kpc from kpcom.pas needs an x86-64 host, got $(HOST_ARCH))
+endif
+
+SKJ_PASCAL_FE := $(SKJEGG)pascal/lex.c $(SKJEGG)pascal/parse.c \
+                 $(SKJEGG)pascal/lower.c $(SKJEGG)pascal/main.c
+
+SKJ_ALL += $(BUILD)/skj-pc-x86-64
+$(BUILD)/skj-pc-x86-64: $(SKJ_PASCAL_FE) $(SKJ_IR) $(SKJ_BE_X64) | $(BUILD)
+	$(CC) $(CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -I$(SKJEGG)pascal -I$(SKJEGG)ir -I$(SKJEGG)backend -o $@ $(SKJ_PASCAL_FE) $(SKJ_IR) $(SKJ_BE_X64)
+
+# The Compact Pascal host runtime (native libc): the managed string/array and IO
+# runtime every skj-kpc-<target> links.
+$(BUILD)/pascal_rt_host.o: $(SKJEGG)runtime/pascal_rt.c | $(BUILD)
+	$(CC) -std=c99 -O2 -DPAS_HOST -c -o $@ $<
+
+# skj-kpc / skj-kpc-x86-64: the Kobold front end that emits x86-64 KPM1 modules,
+# so 'skj-kpc --emit-kpm foo.pas' turns Kobold source into a module with no fpc.
+SKJ_ALL += $(BUILD)/skj-kpc $(BUILD)/skj-kpc-x86-64
+$(BUILD)/skj-kpc: $(BUILD)/skj-pc-x86-64 $(SKJEGG)tests/pascal_kpcom_host.c $(BUILD)/pascal_rt_host.o $(SKJEGG)kobold/kpcom.pas | $(BUILD)
+	$(BUILD)/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_X64 -o $(BUILD)/kpcom-x86-64-fe.s $(SKJEGG)kobold/kpcom.pas
+	$(X64_ASM) $(X64_ASMFLAGS) $(BUILD)/kpcom-x86-64-fe.s -o $(BUILD)/kpcom-x86-64-fe.o
+	$(CC) -no-pie $(BUILD)/kpcom-x86-64-fe.o $(SKJEGG)tests/pascal_kpcom_host.c $(BUILD)/pascal_rt_host.o -lm -o $@
+$(BUILD)/skj-kpc-x86-64: $(BUILD)/skj-kpc | $(BUILD)
+	cp -f $(BUILD)/skj-kpc $@
 MK
     if [ "$has_rv" -eq 1 ]; then
         cat >> "$MK" <<'MK'
@@ -1324,6 +1356,29 @@ $(BUILD)/skj-kp-rv: $(SKJEGG)kobold/aot_main.c $(SKJEGG)kobold/kpm.c $(SKJ_IR) $
 	$(CC) $(CFLAGS) -DKP_AOT_RV -I$(SKJEGG)ir -I$(SKJEGG)backend -I$(SKJEGG)kobold -o $@ $(SKJEGG)kobold/aot_main.c $(SKJEGG)kobold/kpm.c $(SKJ_IR) $(SKJ_RV)
 MK
     fi
+
+    # Per-target Kobold front ends built from source: skj-pc compiles kpcom.pas
+    # with the emitted target baked in, so each skj-kpc-<target> runs on the host
+    # and emits that one target's KPM1 (rv32 for the VM hosts, ColdFire, arm64).
+    # Emitted for each selected backend target; the x86-64 host front end
+    # (skj-kpc / skj-kpc-x86-64) is above.
+    for _pair in rv:RV cf:CF arm64:ARM64; do
+        _t=${_pair%:*}; _d=${_pair#*:}
+        case $_t in
+            rv)    [ "$has_rv" -eq 1 ]     || continue ;;
+            cf)    [ "$has_cf" -eq 1 ]     || continue ;;
+            arm64) [ "$has_a64_be" -eq 1 ] || continue ;;
+        esac
+        {
+            printf '\n'
+            printf '# skj-kpc-%s: the Kobold front end that emits %s KPM1 modules.\n' "$_t" "$_t"
+            printf 'SKJ_ALL += $(BUILD)/skj-kpc-%s\n' "$_t"
+            printf '$(BUILD)/skj-kpc-%s: $(BUILD)/skj-pc-x86-64 $(SKJEGG)tests/pascal_kpcom_host.c $(BUILD)/pascal_rt_host.o $(SKJEGG)kobold/kpcom.pas | $(BUILD)\n' "$_t"
+            printf '\t$(BUILD)/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_%s -o $(BUILD)/kpcom-%s-fe.s $(SKJEGG)kobold/kpcom.pas\n' "$_d" "$_t"
+            printf '\t$(X64_ASM) $(X64_ASMFLAGS) $(BUILD)/kpcom-%s-fe.s -o $(BUILD)/kpcom-%s-fe.o\n' "$_t" "$_t"
+            printf '\t$(CC) -no-pie $(BUILD)/kpcom-%s-fe.o $(SKJEGG)tests/pascal_kpcom_host.c $(BUILD)/pascal_rt_host.o -lm -o $@\n' "$_t"
+        } >> "$MK"
+    done
 fi
 
 # emulator driver
