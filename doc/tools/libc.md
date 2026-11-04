@@ -22,10 +22,10 @@ fixed.
 
 ## The problem, and why it is a shared-runtime problem
 
-skjegg targets several VM hosts (native and qemu, smolmoo, and the planned
-boris and aldeby) plus the bare qemu and emulator tiers. Each consumer that
-runs compiled code carries its own runtime, and those runtimes are partially
-the same. Today that overlap is implicit and the shared parts are duplicated
+skjegg targets several VM hosts (the native and qemu tiers, plus downstream
+embedders that run compiled code as sandboxed guests) alongside the bare qemu
+and emulator tiers. Each consumer that runs compiled code carries its own
+runtime, and those runtimes are partially the same. Today that overlap is implicit and the shared parts are duplicated
 rather than factored:
 
 - The 64-bit integer helpers exist as target assembly in every full crt and
@@ -143,9 +143,9 @@ since a single set of crt symbols already serves everyone.
 
 `stdio` splits along the same line. Formatted output is portable and lives in
 `fmt/`. The stream backing (the three standard streams, buffering) sits on the
-seam. `fopen` of a real file is host-tier and optional: boris and aldeby may
-provide a file power, while smolmoo and the native tier do not, so `fopen`
-arrives only where a host backs it.
+seam. `fopen` of a real file is host-tier and optional: some hosts provide a
+file power, while others (and the native tier) do not, so `fopen` arrives only
+where a host backs it.
 
 ## Phasing
 

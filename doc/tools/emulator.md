@@ -81,8 +81,9 @@ emu/main.c       the driver
 The three cores are independent components. A project vendoring skjegg
 takes `emu-cf`, `emu-rv`, `emu-mips`, or any mix; `EMU_COLDFIRE=0` /
 `EMU_RV32=0` / `EMU_MIPS32=0` drop a core out of the build entirely. This
-matters because the target hosts differ: smolmoo is ColdFire, and a host
-that moved to RV32 would carry only the RISC-V core.
+matters because target hosts differ: a ColdFire-based host carries only
+the ColdFire core, while a host that moved to RV32 would carry only the
+RISC-V core.
 
 The MIPS core is the user-visible architecture only: the general
 registers, HI/LO, the branch and load delay slots, and the `SYSCALL` and
@@ -246,7 +247,7 @@ real ColdFire nor this emulator has.
 
 `make check-emu` rebuilds that runtime with `-mcpu=5475` and relinks
 into `build/cf`. The compiled test objects are unchanged, since every
-front end already emits ColdFire. That build is what a boris or smolmoo
+front end already emits ColdFire. That build is what a downstream VM
 host would load, so the emulator tier is the closer model of the real
 target; qemu stays as an independent oracle for the generic-m68k build.
 Note that qemu cannot run the ColdFire tier at all, `-cpu cfv4e`
@@ -981,13 +982,13 @@ FPU put together. That machinery is not built. Results are canonicalized
 only where it is free (a NaN result is forced to a single quiet-NaN bit
 pattern), not to force cross-host agreement.
 
-On by default is the right default for the three hosts. boris and
-smolmoo run double enabled: neither synchronizes floating-point state
-between systems, so host-dependent rounding never shows. Only aldeby
-synchronizes state, and only one program on it (the client/server
-prediction VM) is sensitive to it; that one must clear `dp` (or use the
-deterministic single-precision path) rather than impose a softfloat cost
-on everything else. `fadd.d`/`fsd` now run on `skj-run`, so a
+On by default is the right default for the typical host. Most hosts run
+double enabled: they do not synchronize floating-point state between
+systems, so host-dependent rounding never shows. A host that does
+synchronize state, with a program sensitive to it (a client/server
+prediction VM), must clear `dp` (or use the deterministic
+single-precision path) rather than impose a softfloat cost on everything
+else. `fadd.d`/`fsd` now run on `skj-run`, so a
 double-precision guest no longer needs qemu; qemu stays the cross-check
 for double, since it is the independent model.
 
@@ -1004,9 +1005,9 @@ clear.
 
 The single-precision core is not just a convenience, it is the
 deterministic floating-point surface the VM hosts build on. A game that
-runs its simulation on a smolmoo server and predicts it on a client
-needs both sides to compute the same `float` bits, or the prediction
-drifts from the authority. The core is built for exactly this: it
+runs its simulation on a server and predicts it on a client needs both
+sides to compute the same `float` bits, or the prediction drifts from
+the authority. The core is built for exactly this: it
 depends on no host rounding mode (see above), so its `fadd.s` and the
 rest are a fixed function of their inputs on any host, and that function
 is verified bit-for-bit against qemu by the fuzz, lockstep and

@@ -86,11 +86,12 @@ jobs:
         run: make test-torture-diff
 
   # The ASan+UBSan sanitizer passes.  check-emu-san (the host-only emulator
-  # tier) and check-san (the ColdFire/Kobold toolchain corpora plus the reader,
-  # assembler, and front-end fuzzers) are each about half the sanitizer time and
-  # independent, so they run as two parallel jobs rather than one sequential
-  # one, halving the sanitizer critical path.  Both need the same
-  # toolchain/qemu/zig environment as build.
+  # tier) runs as its own job; check-san (the toolchain corpora plus the
+  # reader, assembler, and front-end fuzzers) is split by target architecture
+  # and fanned out as a matrix, so no single slice is the critical path.  The
+  # per-arch slices are defined in the Makefile (check-san-cf/-rv/-x86-64/-mips
+  # /-arm64 and the arch-neutral check-san-fuzz) and their union is check-san.
+  # All need the same toolchain/qemu/zig environment as build.
   sanitizer-emu:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -130,6 +131,19 @@ jobs:
   sanitizer-suite:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each leg rebuilds its slice with ASan+UBSan.  cf and x86-64 are the
+        # heavy backends (the ColdFire toolchain corpora; the x86-64 C and
+        # Kobold JIT corpora) and run alone; rv is the RV assembler/linker; the
+        # last leg groups the light MIPS and AArch64 assembler slices with the
+        # arch-neutral reader, preprocessor, and front-end fuzzers.
+        slice:
+          - check-san-cf
+          - check-san-rv
+          - check-san-x86-64
+          - check-san-mips check-san-arm64 check-san-fuzz
     env:
       MIPS_AS: mipsel-linux-gnu-as
       MIPS_LD: mipsel-linux-gnu-ld
@@ -154,15 +168,8 @@ jobs:
           version: 0.14.0
       - name: Build all tools
         run: make
-
-      # The whole sanitizer suite rebuilt with ASan+UBSan: the ColdFire
-      # toolchain (skj-cpp/cc/as/ld) over the cpp, cc, and Excelsior corpora,
-      # the RV assembler/linker, the x86-64 C and Kobold JIT drivers over their
-      # corpora, and the reader, assembler, and front-end fuzzers, so the code
-      # generators, assembler/linker, and JIT get the same sanitizer coverage
-      # the emulator already has.
       - name: Sanitizer suite (ASan+UBSan)
-        run: make check-san
+        run: make ${{ matrix.slice }}
 
   # The compiler-independence proof: rebuild the Kobold front end from source
   # with Free Pascal alone (no skjegg tool, no committed seed) and assert it

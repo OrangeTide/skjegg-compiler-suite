@@ -6,6 +6,25 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.43.1
+
+#### Changed
+- The sanitizer suite is split by target architecture so CI runs it in
+  parallel. The Makefile's `check-san` is now the union of per-backend slices
+  (`check-san-cf`, `-rv`, `-x86-64`, `-mips`, `-arm64`) plus an arch-neutral
+  `check-san-fuzz`, and the CI sanitizer job fans those slices out as a matrix
+  so no single slice is the critical path. `check-san` and the local gate are
+  unchanged.
+- Documentation refresh. The README and reference manual group the tool list
+  (ahead-of-time compilers, in-process JITs, the binutils-free assembler and
+  linker family, and the runner/sandbox/debug tools), add the x86-64 and
+  AArch64 toolchains, and gain sections on the `skj-run` sandbox emulator and
+  KVM/HVF hypervisor, the shared small libc, and the JIT runtime. The vendoring
+  section documents the current `--arch`/`--frontend`/`--with` interface. The
+  internals docs drop the retired 32-bit x86 backend and complete the
+  per-backend register and ABI tables. Published docs no longer carry internal
+  consumer-project names.
+
 ### 0.43.0
 
 #### Changed

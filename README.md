@@ -7,27 +7,50 @@ trading a small effort for a big payoff.
 
 ## Tools
 
-| Tool         | Description                                  | Status      |
-|--------------|----------------------------------------------|-------------|
-| `skj-tinc`   | TinC compiler (minimal C)                    | Working     |
-| `skj-sc`     | TinScheme compiler                           | Working     |
-| `skj-mooc`   | MooScript compiler                           | Working     |
-| `skj-pc`     | Compact Pascal compiler                      | Working     |
-| `skj-cc`     | C compiler (C89 + C99 subset)                | Working     |
-| `skj-cpp`    | C preprocessor (library, also used by `cc`)  | Working     |
-| `skj-as`     | ColdFire/m68k assembler (GAS subset -> ELF32)| Working     |
-| `skj-ld`     | ColdFire/m68k static linker                  | Working     |
-| `skj-as-rv`  | RISC-V RV32 assembler                         | Working     |
-| `skj-ld-rv`  | RISC-V RV32 static linker                     | Working     |
-| `skj-as-mips`| MIPS I assembler                              | Working     |
-| `skj-ld-mips`| MIPS I linker (ELF and PlayStation PS-EXE)    | Working     |
-| `skj-ar`     | `ar(1)` archive tool (any ELF32 target)       | Working     |
-| `skj-run`    | Guest runner (ColdFire and RV32 cores)        | Working     |
+Ahead-of-time compilers (lower source to target assembly):
+
+| Tool       | Description                                     | Status  |
+|------------|-------------------------------------------------|---------|
+| `skj-tinc` | TinC compiler (minimal C)                       | Working |
+| `skj-sc`   | TinScheme compiler                              | Working |
+| `skj-mooc` | MooScript compiler                              | Working |
+| `skj-pc`   | Compact Pascal compiler                         | Working |
+| `skj-kpc`  | Kobold compiler (Pascal-derived; per target)    | Working |
+| `skj-cc`   | C compiler (C89 + C99 subset)                   | Working |
+| `skj-cpp`  | C preprocessor (library, also used by `cc`)     | Working |
+
+In-process JITs (compile to machine code in memory and run it, no external
+assembler):
+
+| Tool         | Description                                  | Status  |
+|--------------|----------------------------------------------|---------|
+| `skj-jit`    | C JIT (x86-64 host; also `-arm64`, `-rv`)    | Working |
+| `skj-kp-jit` | Kobold JIT (x86-64 host; also `-arm64`, `-rv`)| Working |
+
+Binutils-free assemblers, linkers, and archive tool:
+
+| Tool                     | Description                               | Status  |
+|--------------------------|-------------------------------------------|---------|
+| `skj-as`, `skj-ld`       | ColdFire/m68k assembler + linker (ELF32)  | Working |
+| `skj-as-rv`, `skj-ld-rv` | RISC-V RV32 assembler + linker            | Working |
+| `skj-as-mips`, `skj-ld-mips` | MIPS I assembler + linker (ELF and PlayStation PS-EXE) | Working |
+| `skj-as-x86-64`, `skj-ld-x86-64` | x86-64 assembler + linker (ELF64)  | Working |
+| `skj-as-aarch64`, `skj-ld-aarch64` | AArch64 assembler + linker (ELF64 and Mach-O) | Working |
+| `skj-ar`                 | `ar(1)` archive tool (any ELF target)     | Working |
+
+Runner, sandbox, and debugging:
+
+| Tool            | Description                                             | Status  |
+|-----------------|---------------------------------------------------------|---------|
+| `skj-run`       | Sandboxed guest runner: emulates ColdFire/RV32/MIPS, runs x86-64/arm64 natively under a hypervisor | Working |
+| `skj-dbg`       | Source-level debugger (DWARF line info, backtraces)     | Working |
+| `skj-addr2line` | Address to source line for skj targets                  | Working |
+| `skj-mkromfs`   | Build a read-only romfs image for the sandbox filesystem | Working |
 
 Most compilers exist in per-backend variants (for example `skj-cc-rv`,
-`skj-cc-x86-64`, `skj-cc-arm64`).  The `skj-as`/`skj-ld` family is a
-binutils-free assembler and linker for the ColdFire, RISC-V, and MIPS
-targets, verified against GNU as and the qemu suites.
+`skj-cc-x86-64`, `skj-cc-arm64`).  The assembler and linker family is a
+binutils-free replacement for the ColdFire, RISC-V, MIPS, x86-64, and
+AArch64 targets, verified against GNU as and the qemu suites.
 
 ## Architecture
 
@@ -38,7 +61,7 @@ tinc/    ──┐                               ┌── backend/cf_emit.c    
 scheme/  ──┤                               │
 moo/     ──┼──▶  ir/ir.h  ──▶  regalloc  ──┼── backend/rv_emit.c     (RISC-V RV32IMFD+Zfh)
 pascal/  ──┤       │                       │
-cc/      ──┘       │                       ├── backend/x86_emit.c    (x86-32 and x86-64)
+cc/      ──┘       │                       ├── backend/x86_emit.c    (x86-64)
   ▲                │                       │
   │                └── ir/ir.c, ir/util.c  ├── backend/arm64_emit.c  (AArch64)
   │                                        │
@@ -54,20 +77,64 @@ backend means writing a regalloc + emitter pair and a
 
 Not every front end targets every backend.  TinC and TinScheme run on
 every backend.  The C compiler runs on ColdFire, RISC-V, x86-64,
-AArch64, and MIPS (not x86-32).  MooScript and Compact Pascal are
-ColdFire only.  The x86-32 and x86-64 targets share one backend,
-selected at compile time by `X86_BITS`.
+AArch64, and MIPS.  Compact Pascal builds for ColdFire, x86-64, and
+AArch64, and its Kobold dialect (via `skj-kpc` and the Kobold JIT) also
+targets RISC-V.  MooScript is ColdFire only.  The genuine 32-bit ISAs
+(ColdFire, RISC-V RV32, MIPS) are ILP32; x86-64 and AArch64 are LP64,
+the pointer-width axis living in `ir/target.h`.
+
+## Sandbox emulator and hypervisor
+
+`skj-run` runs a compiled guest in-tree the way `qemu-user` does, but it
+is both an emulator and a thin hypervisor. The 32-bit cores (ColdFire,
+RISC-V RV32, MIPS I) run by interpretation; 64-bit guests (x86-64,
+AArch64) run natively through a hardware hypervisor, KVM on Linux and
+HVF on macOS. It is the only runner for strict ColdFire code, which qemu
+does not model.
+
+Every guest runs inside a sandbox: one process per guest, a
+capability-based filesystem of named mounts confined with openat2
+`RESOLVE_BENEATH`, a small unix-like process model with spawn/wait/kill,
+a `jsh` shell and a set of coreutils, a host-served read-only `proc:`
+pseudo-filesystem, and a gdb stub for remote debugging. See
+`doc/tools/emulator.md` and `doc/tools/process-model.md`.
+
+## C standard library
+
+`libc/` is a small, freestanding-friendly C standard library shared
+across all five targets (ColdFire, RISC-V, MIPS, x86-64, AArch64). It
+provides the headers plus string/ctype, the `snprintf`/`printf` family
+with floating conversions, the stdlib numerics and the `malloc` family
+over a single `__libc_sbrk` seam, buffered stdio, `errno`,
+`strtod`/`sscanf`, and `atexit` exit-time flushing. It factors out
+runtime pieces that each consumer used to duplicate (the 64-bit integer
+helpers, the bump arena, integer/float formatting). Built and checked
+with `make check-libc` and the per-target `check-libc-*`; see
+`doc/tools/libc.md`.
+
+## JIT runtime
+
+The in-process JITs (`skj-jit` for C, `skj-kp-jit` for Kobold) compile a
+source to native machine code in the running process and call into it,
+rather than writing assembly for an external assembler. Each drives the
+same instruction selector as the ahead-of-time backend through a shared
+sink interface: one selector, two sinks, a text sink emitting GAS
+assembly for the AOT path and a byte sink emitting raw machine code for
+the JIT. Hosts are x86-64 and AArch64, plus an RV32 variant whose emitted
+guest code runs under the emulator. See `doc/tools/jit.md`.
 
 ## Layout
 
 ```
 ir/          portable IR library (types, opcodes, builder)
-backend/     code generation: ColdFire, RISC-V RV32, x86-32/64, AArch64, MIPS I
-as/          ColdFire assembler, plus the RV32 and MIPS front ends over a shared skeleton
-ld/          ColdFire linker, plus the RV32 and MIPS front ends over a shared layout core
+backend/     code generation: ColdFire, RISC-V RV32, x86-64, AArch64, MIPS I
+as/          ColdFire assembler, plus the RV32, MIPS, x86-64, and AArch64 front ends over a shared skeleton
+ld/          ColdFire linker, plus the RV32, MIPS, x86-64, and AArch64 front ends over a shared layout core
 ar/          target-neutral ar(1) archive tool
 cpp/         C preprocessor (library and standalone tool)
-emu/         ColdFire and RV32 emulator cores, and skj-run (doc/tools/emulator.md)
+emu/         emulator cores (ColdFire, RV32, MIPS), the KVM/HVF hypervisor, and skj-run (doc/tools/emulator.md)
+jit/         in-process JIT byte sinks and arena (doc/tools/jit.md)
+libc/        shared C standard library (doc/tools/libc.md)
 runtime/     target runtimes (start_*.S per target, pascal_rt.c, str.c, list.c, 64-bit helpers)
 tinc/        TinC front end (C-like)
 scheme/      TinScheme front end (Scheme subset with GC; doc/internals/closures.md)
@@ -103,7 +170,9 @@ directly in a browser.
   `m68k-linux-gnu-as` and `m68k-linux-gnu-ld` are optional, since
   `skj-as` and `skj-ld` can replace them.
 - `qemu-user` for the user-mode emulators (`qemu-m68k`, `qemu-riscv32`,
-  `qemu-i386`, `qemu-x86_64`, `qemu-aarch64`, `qemu-mipsel`).
+  `qemu-x86_64`, `qemu-aarch64`, `qemu-mipsel`).  `skj-run` covers the
+  32-bit targets without qemu, and runs 64-bit guests natively under a
+  hypervisor (KVM on Linux, HVF on macOS).
 
 Per-target toolchains, needed only to build and test that target:
 
@@ -112,7 +181,9 @@ Per-target toolchains, needed only to build and test that target:
 - AArch64: `gcc-aarch64-linux-gnu`, `binutils-aarch64-linux-gnu`.
 - MIPS: `binutils-mipsel-linux-gnu` (or a bare-metal `mipsel-none-elf`
   cross).  `skj-as-mips`/`skj-ld-mips` can replace binutils.
-- x86: a host `as` (GNU binutils, intel mode) and a host `ld`.
+- x86-64: no host binutils needed; `skj-as-x86-64`/`skj-ld-x86-64` are
+  the in-tree assembler and linker.  KVM (`/dev/kvm`) is needed to run
+  x86-64 guests under `skj-run`.
 
 ## Build and Run
 
@@ -120,11 +191,13 @@ Per-target toolchains, needed only to build and test that target:
 make              # build all tools (every front end, backend, and toolchain)
 make check        # ColdFire suite: compile, assemble, link, run under qemu-m68k
 make check-rv     # RISC-V RV32 suite under qemu-riscv32
-make check-x86    # x86-32 suite under qemu-i386
 make check-x86-64 # x86-64 suite under qemu-x86_64
 make check-arm64  # AArch64 suite under qemu-aarch64
 make check-cc     # C compiler tests (skj-cc -> skj-as -> skj-ld -> qemu-m68k)
 make check-cpp    # C preprocessor tests
+make check-libc   # C standard library tests across every target
+make check-jit    # in-process JIT (skj-jit) tests
+make check-emu    # skj-run emulator and sandbox tests
 make check-rvas   # RV32 assembler/linker golden-master vs GNU as
 make check-all    # the whole qemu matrix across every backend
 make check-smoke  # full in-tree toolchain smoke test (no cross toolchain needed)
@@ -158,22 +231,34 @@ qemu-riscv32 ./prog ; echo $?
 ## Vendoring
 
 `vendor.sh` copies selected Skjegg components into another project.
-Pick one or more backends and front ends, plus optional tools.  The IR
-core is always included.
+The IR core is always included.  Selection is along three axes
+(comma- or space-separated, repeatable): `--arch` picks target
+architectures, `--frontend` picks language front ends, and `--with`
+picks per-target or standalone features.  Each axis expands into the
+flat component tokens, which are still accepted directly so an older
+`update-skjegg.sh` keeps working.
 
 ```sh
-# Vendor TinC + Pascal with the ColdFire backend and assembler
+# C for RISC-V with the in-tree toolchain and the skj-run emulator
+./vendor.sh --arch riscv --frontend cc --with toolchain,emulator
+
+# A self-contained 64-bit C target running natively under the hypervisor
+./vendor.sh --arch x86-64 --frontend cc --with toolchain,runtime,emulator
+
+# TinC + Pascal for ColdFire with the assembler (flat-component form)
 ./vendor.sh coldfire tinc pascal as
 
-# Vendor just the C compiler (pulls in the cpp library automatically)
-./vendor.sh coldfire cc
-
-# Vendor the binutils-free RISC-V toolchain on its own
-./vendor.sh as-rv ld-rv
-
 # Vendor into a custom directory
-./vendor.sh -d lib/skjegg coldfire tinc
+./vendor.sh -d lib/skjegg --arch coldfire --frontend tinc
 ```
+
+The `--with` features are `toolchain` (the in-tree assembler, linker,
+and `ar` for each selected `--arch`), `emulator` (the `skj-run` core per
+arch: an emulated CPU for coldfire/riscv/mips, the KVM/HVF
+hardware-virtualization core for x86-64/aarch64), `runtime` (the hosted
+libc and crt), `sandbox` (build that libc with its fd I/O confined
+through the capability `fs/` layer), and `cpp` (the standalone
+preprocessor).
 
 The script generates two files in the destination directory:
 
@@ -188,29 +273,35 @@ The `ORIGIN` variable at the top of `vendor.sh` controls where sources
 are fetched from (defaults to the GitHub repository).  Edit it to point
 at a fork or local path.
 
-### Components
+### Flat components
+
+The axes expand to these tokens, which may also be passed directly.
 
 | Name       | What it vendors                                          |
 |------------|----------------------------------------------------------|
 | `coldfire` | ColdFire/m68k backend + `runtime/start.S`                |
 | `riscv`    | RISC-V RV32 backend + `runtime/start_rv.S`               |
-| `x86`      | x86-32 / x86-64 backend + runtime                        |
 | `mips`     | MIPS I backend + runtime (incl. the soft-float path)     |
+| `x86-64`   | x86-64 (LP64) backend + runtime                          |
+| `arm64`    | AArch64 (LP64) backend + runtime                         |
 | `tinc`     | TinC front end                                           |
 | `scheme`   | TinScheme front end (with GC)                            |
 | `moo`      | MooScript front end + `runtime/str.c`, `list.c`          |
 | `pascal`   | Compact Pascal front end + `runtime/pascal_rt.c`         |
 | `cc`       | C compiler front end (auto-includes the cpp library)     |
+| `kp`       | Kobold-Pascal AOT path (`skj-kpc`, `skj-kp`, `libkpaot.a`) |
 | `as`, `ld` | ColdFire assembler and linker (library + standalone)     |
 | `as-rv`, `ld-rv`     | RISC-V RV32 assembler and linker               |
 | `as-mips`, `ld-mips` | MIPS assembler and linker (ld-mips writes PS-EXE) |
+| `as-x86-64`, `ld-x86-64` | x86-64 ELF64 assembler and linker          |
+| `as-aarch64`, `ld-arm64` | AArch64 ELF64 assembler and linker         |
 | `ar`       | target-neutral `ar(1)` archive tool                      |
+| `addr2line`| offline DWARF symbolizer (backtrace address to file:line) |
 | `cpp`      | C preprocessor (library + standalone tool)               |
-| `emu-cf`, `emu-rv`   | the ColdFire and RV32 emulator cores           |
+| `emu-cf`, `emu-rv`, `emu-mips` | the ColdFire, RV32, and MIPS emulator cores |
 
 A front-end selection needs at least one backend.  The `cc` component
-pulls in the `cpp` library automatically.  The AArch64 backend is not
-yet vendorable; it builds only in-tree.
+pulls in the `cpp` library automatically.
 
 ## Name
 

@@ -140,9 +140,9 @@ builds the `libc.a` and runtime archives.
   JIT) execute the IR in process instead of emitting an object.
   See `doc/tools/jit.md`.
 
-qemu (`qemu-m68k`, `qemu-riscv32`, `qemu-i386`, `qemu-x86_64`, `qemu-aarch64`)
-is the independent cross-check for every target and the default run environment
-in the test suite.
+qemu (`qemu-m68k`, `qemu-riscv32`, `qemu-x86_64`, `qemu-aarch64`,
+`qemu-mipsel`) is the independent cross-check for every target and the default
+run environment in the test suite.
 
 ## Targets and ABIs
 

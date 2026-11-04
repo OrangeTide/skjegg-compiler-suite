@@ -283,8 +283,9 @@ provides `__cont_capture` and `__cont_resume`.
 
 ### Floating-Point Arithmetic
 
-Float temps occupy a separate register class (fp2-fp7 on ColdFire,
-xmm1-xmm7 on x86-32; not yet implemented on RISC-V).
+Float temps occupy a separate register class on every backend: fp2-fp7
+on ColdFire, hardware `fs0`-`fs11` on RISC-V (RV32FD+Zfh), even
+`$f20`-`$f30` on MIPS, xmm1-xmm7 on x86-64, and d8-d15 on AArch64.
 
 | Opcode    | Operands        | Description                          |
 |-----------|-----------------|--------------------------------------|
@@ -335,10 +336,13 @@ Produce 1 for true, 0 for false (unlike integer compares which produce
 
 ### 64-bit Integer Operations
 
-I64 temps occupy a third register class. On 32-bit targets, the backend
-allocates register pairs (ColdFire: d6/d7, d4/d5, d2/d3; x86-32:
-esi/edi). Complex operations (multiply, shifts) call library helpers
-(`__muldi3`, `__ashldi3`, `__ashrdi3`, `__lshrdi3`).
+I64 temps occupy a third register class. On the 32-bit targets
+(ColdFire, RISC-V RV32, MIPS), the backend allocates register pairs
+(ColdFire: d6/d7, d4/d5, d2/d3), and complex operations (multiply,
+shifts) call library helpers (`__muldi3`, `__ashldi3`, `__ashrdi3`,
+`__lshrdi3`). On the 64-bit targets (x86-64, AArch64) an i64 is a single
+native register sharing the integer pool, with no pair class and no
+helper calls.
 
 | Opcode      | Operands        | Description                        |
 |-------------|------------------|------------------------------------|
@@ -421,17 +425,26 @@ burst of machine instructions.
 
 ### Backend Register Budgets
 
-| Backend  | Integer           | Float             | I64 (pairs)       |
-|----------|-------------------|-------------------|-------------------|
-| ColdFire | d2-d7 (6)         | fp2-fp7 (6)       | 3 pairs           |
-| RISC-V   | s1-s11 (11)       | (not implemented) | (not implemented) |
-| x86-32   | ebx, esi, edi (3) | xmm1-xmm7 (7)    | 1 pair (esi/edi)  |
+| Backend  | Integer            | Float               | I64                |
+|----------|--------------------|---------------------|--------------------|
+| ColdFire | d2-d7 (6)          | fp2-fp7 (6)         | 3 register pairs   |
+| RISC-V   | s1-s11 (11)        | fs0-fs11 (12)       | register pairs     |
+| MIPS     | $s0-$s7 (8)        | even $f20-$f30 (6)  | register pairs     |
+| x86-64   | rbx, r12-r15 (5)   | xmm1-xmm7 (7)       | native (int pool)  |
+| AArch64  | x19-x28 (10)       | d8-d15 (8)          | native (int pool)  |
 
 ### Calling Convention
 
-All backends use the same stack-based calling convention:
+The IR's own uniform convention is stack-based: arguments pushed
+right-to-left (a word each on 32-bit targets, 64-bit values taking two
+slots), caller pops after return, and the result comes back in the
+target's first return register (ColdFire d0, RISC-V a0, MIPS $v0, x86-64
+rax, AArch64 x0; float in fp0/xmm0/d0, and a 32-bit i64 in a register
+pair such as ColdFire d0:d1). The tinc, scheme, moo, and pascal front
+ends use this convention on every backend.
 
-- Arguments pushed right-to-left, 32 bits each (64-bit values take two
-  slots). Caller pops after return.
-- Return: ColdFire d0, RISC-V a0, x86-32 eax. Float return: ColdFire
-  fp0, x86-32 xmm0. I64 return: ColdFire d0:d1, x86-32 eax:edx.
+External calls follow the platform psABI instead: the C compiler on
+x86-64 and AArch64 emits System V AMD64 and AAPCS64 calls so it can link
+against real libc and crt, and the RISC-V and MIPS cc paths use their
+respective psABIs. See `doc/internals/calling-convention.md` and
+`doc/internals/lp64.md`.

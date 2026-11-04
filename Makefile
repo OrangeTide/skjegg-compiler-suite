@@ -3348,15 +3348,33 @@ check-san-kobold: check-san-kp check-san-kp-corpus check-san-kp-multi \
                   check-san-kp-io check-san-kp-inc
 	@echo "check-san-kobold: KPM1 reader and the Kobold corpora clean under ASan+UBSan."
 
+## The sanitized slices grouped by target architecture, so CI can run them as
+## parallel jobs.  Their union is exactly check-san (every slice, no overlap):
+## each per-arch group is that backend's sanitized tools/corpora and its
+## assembler fuzzer, and check-san-fuzz holds the arch-neutral reader and front
+## end fuzzers.
+check-san-cf: check-san-tools test-as-fuzz
+	@echo "check-san-cf: the ColdFire toolchain and corpora clean under the sanitizers."
+check-san-rv: check-san-rvas test-as-rv-fuzz
+	@echo "check-san-rv: the RV32 assembler/linker clean under the sanitizers."
+check-san-x86-64: check-san-jit check-san-kobold test-as-x86-64-fuzz
+	@echo "check-san-x86-64: the x86-64 C JIT and the Kobold corpora clean under the sanitizers."
+check-san-mips: test-as-mips-fuzz
+	@echo "check-san-mips: the MIPS assembler clean under the sanitizers."
+check-san-arm64: test-as-aarch64-fuzz
+	@echo "check-san-arm64: the AArch64 assembler clean under the sanitizers."
+check-san-fuzz: test-kpm-fuzz test-cpp-fuzz \
+                test-fe-tinc-fuzz test-fe-pascal-fuzz test-fe-moo-fuzz test-fe-cc-fuzz
+	@echo "check-san-fuzz: the KPM1 reader, preprocessor, and front-end fuzzers clean under the sanitizers."
+
 ## Every sanitized slice.
-check-san: check-san-tools check-san-rvas check-san-jit check-san-kobold \
-           test-kpm-fuzz test-cpp-fuzz \
-           test-as-fuzz test-as-rv-fuzz test-as-mips-fuzz test-as-x86-64-fuzz test-as-aarch64-fuzz \
-           test-fe-tinc-fuzz test-fe-pascal-fuzz test-fe-moo-fuzz \
-           test-fe-cc-fuzz
+check-san: check-san-cf check-san-rv check-san-x86-64 check-san-mips check-san-arm64 \
+           check-san-fuzz
 	@echo "All check-san suites passed under the sanitizers."
 
-.PHONY: check-san check-san-tools check-san-kobold \
+.PHONY: check-san check-san-cf check-san-rv check-san-x86-64 \
+        check-san-mips check-san-arm64 check-san-fuzz \
+        check-san-tools check-san-kobold \
         check-san-cpp check-san-cc check-san-rvas check-san-kp \
         check-san-jit check-san-tinc check-san-scheme check-san-moo \
         check-san-pc check-san-ar check-san-kp-corpus check-san-kp-multi \

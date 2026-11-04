@@ -8,8 +8,8 @@ unresolved.
 
 ## Review reconciliation (target-server maintainer, 2026-07-10)
 
-The maintainer of the target RPG server (`aldeby` / demon-engine) reviewed
-this brief against the shipped server: server-authoritative, a fixed 30 Hz
+The maintainer of the target RPG server reviewed this brief against the
+shipped server: server-authoritative, a fixed 30 Hz
 tick, a shared-C `sim.c` movement core, client prediction, netchan/microser
 wire. The review's decisions (D1-D5) supersede this brief's implicit
 premises where they differ; the rest stays design-fork reference. Reconciled
@@ -215,8 +215,9 @@ The language is named **Excelsior**, a fork informed by LambdaMOO rather
 than a MooScript revision. MooScript diverges from MOO's purpose and
 architecture enough here (static typing, a coroutine turn model, capability
 security, user-defined constructors, code-as-data) that keeping the MOO
-name would misrepresent both. MooScript stays as-is for smolmoo; Excelsior
-is a new front end that carries LambdaMOO's lessons without its conventions.
+name would misrepresent both. MooScript stays as-is for its existing host;
+Excelsior is a new front end that carries LambdaMOO's lessons without its
+conventions.
 
 Source files use `.exs` for the body and `.exi` for the interface, mirroring
 Ada's `.adb` and `.ads`. The `.exi` spec carries more than Ada's: under
@@ -254,7 +255,7 @@ signature; local inference removes annotation noise where the type is
 obvious, but there is no runtime tagging of atomic values and no
 per-call-site polymorphism. `int` and `float` are plain machine values.
 
-The one deliberate dynamic point is `prop`, smolmoo's property type whose
+The one deliberate dynamic point is `prop`, a property type whose
 runtime type is not known at compile time. It is a compiler-level tagged
 union, not hand-written boilerplate, and it preserves the part of
 LambdaMOO worth keeping without adopting whole-language dynamic typing.

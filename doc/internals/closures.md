@@ -141,10 +141,10 @@ single `IR_RESUME`.
 
 The runtime provides `__cont_capture`, `__cont_resume`, and the globals
 `__cont_mark_sp` and `__cont_arena`. They exist in every crt: `runtime/start.S`
-(ColdFire), `start_x86.asm` (x86-32), `start_x86_64.asm`, `start_arm64.S`,
-`start_rv.S` (RISC-V), `start_mips.S`, and `start_psx.S` (the PlayStation MIPS
+(ColdFire), `start_x86_64.s` (x86-64), `start_arm64.S`, `start_rv.S`
+(RISC-V), `start_mips.S`, and `start_psx.S` (the PlayStation MIPS
 variant). All five backend emitters lower the three opcodes
-(`backend/{cf,x86,arm64,rv,mips}_emit.c`). The `start_x86_64_sysv.asm` host
+(`backend/{cf,x86,arm64,rv,mips}_emit.c`). The `start_x86_64_sysv.s` host
 variant does **not** carry these routines; only the toolkit's own crt does.
 
 The mechanism is stack-segment copying:
@@ -293,6 +293,6 @@ send boundary.
 | Continuation surface (TinC) | `tinc/lower.c` (the `mark` / `capture` / `resume` intrinsics), `tinc/DESIGN.md` |
 | Continuation IR opcodes | `ir/ir.h`, documented in `doc/internals/ir.md` |
 | Continuation opcode emission | `backend/{cf,x86,arm64,rv,mips}_emit.c` |
-| Continuation runtime | `runtime/start.S`, `start_x86.asm`, `start_x86_64.asm`, `start_arm64.S`, `start_rv.S`, `start_mips.S`, `start_psx.S` (`__cont_capture`, `__cont_resume`, `__cont_mark_sp`, `__cont_arena`) |
+| Continuation runtime | `runtime/start.S`, `start_x86_64.s`, `start_arm64.S`, `start_rv.S`, `start_mips.S`, `start_psx.S` (`__cont_capture`, `__cont_resume`, `__cont_mark_sp`, `__cont_arena`) |
 | Excelsior func values (non-capturing) | `excelsior/lower.c` (`lower_funclit_fn`), `excelsior/resolve.c` (`funclit_capture_check`), `excelsior/function-values.md` |
 | Excelsior sources (coroutines) | `excelsior/lower.c`, the crt "Excelsior sources" sections, `runtime/libexc.c`, `excelsior/sources.md` |
