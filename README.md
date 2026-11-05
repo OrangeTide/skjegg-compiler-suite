@@ -123,6 +123,19 @@ assembly for the AOT path and a byte sink emitting raw machine code for
 the JIT. Hosts are x86-64 and AArch64, plus an RV32 variant whose emitted
 guest code runs under the emulator. See `doc/tools/jit.md`.
 
+## PlayStation SDK
+
+`libpsx` is a runtime SDK for writing original-PlayStation (R3051) games in C,
+Compact Pascal, and Kobold. It drives the console hardware: the GPU and
+double-buffered display, DMA, sprites and textures, the SPU with ADSR and
+reverb, CD-DA and XA audio, the controller and memory card, the three timers,
+16.16 fixed-point math, debug text, and 3D through the GTE and an ordering
+table. It builds on the MIPS backend and the PS-EXE output mode, boots on a
+retail BIOS, and is tested headlessly on the PCSX-Redux emulator by framebuffer
+and audio capture. Pascal and Kobold reach the C library through thin `psx`
+units. See `doc/tools/psx-sdk.md` for the architecture and
+`doc/tools/psx-api.md` for the full function reference.
+
 ## Layout
 
 ```
@@ -141,6 +154,8 @@ scheme/      TinScheme front end (Scheme subset with GC; doc/internals/closures.
 moo/         MooScript front end
 pascal/      Compact Pascal front end (doc/languages/pascal.md)
 cc/          C front end (uses the cpp library)
+libpsx/      PlayStation SDK (doc/tools/psx-sdk.md, psx-api.md)
+units/       language units over libpsx (psx.pas, psx.kp)
 tests/       test programs and harnesses
 doc/         design and reference docs (tools/, languages/, internals/)
 ```
@@ -154,7 +169,8 @@ tool, and internals. Its source of truth is the Markdown under `doc/`:
 - `doc/languages/` the language front ends, including the full Kobold-Pascal
   specification under `doc/languages/kobold/` (grammar, language reference,
   units, module format, host ABI, and more).
-- `doc/tools/` the emulator, the JIT, the libc, and the MIPS backend.
+- `doc/tools/` the emulator, the JIT, the libc, the MIPS backend, and the
+  PlayStation SDK (`psx-sdk.md` and the `psx-api.md` function reference).
 - `doc/internals/` the shared IR, calling conventions, closures, and the LP64
   model.
 

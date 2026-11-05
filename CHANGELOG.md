@@ -6,6 +6,19 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.44.1
+
+#### Added
+- A complete `libpsx` API reference (`doc/tools/psx-api.md`): every public entry
+  point with its C signature, the Pascal and Kobold calling conventions, and the
+  Kobold unit name for each call.
+
+#### Changed
+- The README now describes the PlayStation SDK and points at both PSX docs.
+- `doc/tools/psx-sdk.md` is refocused on the current state and the roadmap. The
+  milestone-by-milestone build log is gone; the subsystem descriptions, the
+  memory map, the asset path, and the testing approach stay.
+
 ### 0.44.0
 
 #### Added
