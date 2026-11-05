@@ -1,6 +1,6 @@
 /* sprite_asset.c - the C accessor that loads the sprite samples' textures.
  *
- * Compact Pascal and Kobold cannot pass a raw data pointer, so the pointer to
+ * Pascal and Kobold cannot pass a raw data pointer, so the pointer to
  * an embedded TIM stays here in C: these functions upload a texture and return
  * its integer handle, which the Pascal and Kobold samples then draw through the
  * psx unit's handle calls. It is the small per-game glue the handle API expects.

@@ -1,4 +1,4 @@
-/* main.c : Compact Pascal compiler driver */
+/* main.c : Pascal compiler driver */
 
 #include "pascal.h"
 #include "arena.h"

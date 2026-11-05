@@ -1,4 +1,4 @@
-/* pas_rt.c - minimal Compact Pascal runtime for the bare-metal PlayStation.
+/* pas_rt.c - minimal Pascal runtime for the bare-metal PlayStation.
  *
  * The full runtime/pascal_rt.c does string and file I/O through a host libc. A
  * PlayStation game that drives libpsx directly needs almost none of that, so

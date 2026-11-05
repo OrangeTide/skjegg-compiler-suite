@@ -1,4 +1,4 @@
-{ hello.pas - a milestone-5 libpsx sample in Compact Pascal.
+{ hello.pas - a milestone-5 libpsx sample in Pascal.
 
   The same bouncing square as the C hello_gpu, written in Pascal, to show the
   Pascal front end reaching the PlayStation. It calls libpsx through external

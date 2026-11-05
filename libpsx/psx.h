@@ -1,6 +1,6 @@
 /* psx.h - libpsx, the shared PlayStation runtime SDK.
  *
- * libpsx is one C and assembly library that C, Compact Pascal, and Kobold
+ * libpsx is one C and assembly library that C, Pascal, and Kobold
  * games call to drive the original PlayStation (R3051). The full plan is in
  * doc/tools/psx-sdk.md. This header is the public C interface. Pascal and
  * Kobold reach the same entry points through thin units that bind these names.
@@ -147,7 +147,7 @@ void psx_draw_rot(const psx_texinfo *t, int cx, int cy, int angle, fix16 scale);
 /* --- texture handles ---
  *
  * The functions above pass a psx_texinfo by pointer, which C uses directly. For
- * callers that cannot (Compact Pascal has no pointers, and the Kobold unit keeps
+ * callers that cannot (Pascal has no pointers, and the Kobold unit keeps
  * the binding pointer-free), the same textures are reached by an integer handle:
  * psx_tex_upload returns one, and the handle draws take it in place of the
  * struct. The raw pointer stays on the C side, so a Pascal or Kobold game loads
@@ -489,7 +489,7 @@ void psx_gpu_chain_link(uint32_t next_addr);
  *
  * The GTE calls above pass matrices and vertices by pointer. These wrap the
  * common 3D steps so they take and return only scalars, for callers that cannot
- * pass an array (Compact Pascal has no pointers; the Kobold unit stays
+ * pass an array (Pascal has no pointers; the Kobold unit stays
  * pointer-free). The matrix and the last projected point are kept on the C side,
  * as the texture handles keep the TIM pointer. */
 

@@ -1,4 +1,4 @@
-/* parse.c : recursive-descent parser for Compact Pascal */
+/* parse.c : recursive-descent parser for Pascal */
 
 #include "pascal.h"
 

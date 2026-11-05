@@ -1,4 +1,4 @@
-{ Fixture for test-pc-loc: debug-info line markers (-g) on the Compact Pascal
+{ Fixture for test-pc-loc: debug-info line markers (-g) on the Pascal
   path.  Each statement sits on its own line so skj-pc emits one IR_LOC per line
   and the ColdFire backend records a "| line N" comment.  The test only inspects
   the assembly, so the program need not do anything interesting. }

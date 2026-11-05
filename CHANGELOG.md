@@ -6,6 +6,19 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.44.2
+
+#### Changed
+- Removed the "Compact Pascal" name throughout the documentation, the source
+  comments, the Makefile, and `vendor.sh`. The Pascal front end (`skj-pc`) is
+  just Pascal, a Free Pascal-lineage dialect without the Delphi and Object
+  Pascal object model. `doc/languages/pascal.md` is reworded to that framing,
+  and `pascal/EXPANSION.md` is rewritten from a build journal into a
+  current-state and roadmap document. The docs also note `skj-pc` builds for
+  MIPS.
+- Restored the PlayStation SDK architecture diagram in `doc/tools/psx-sdk.md` to
+  the continuous-spine style and fixed its box alignment.
+
 ### 0.44.1
 
 #### Added

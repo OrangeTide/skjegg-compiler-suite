@@ -1,6 +1,6 @@
 # The PlayStation SDK
 
-`libpsx` is a runtime SDK that lets C, Compact Pascal, and Kobold programs drive
+`libpsx` is a runtime SDK that lets C, Pascal, and Kobold programs drive
 the original PlayStation (SCPH-100x, the R3051 at 33.8 MHz) well enough to make
 games: its GPU, SPU, controllers, timers, memory card, and CD-ROM, plus 3D
 through the GTE. It is one C and assembly library. Pascal and Kobold reach it
@@ -19,27 +19,22 @@ output mode (`skj-ld-mips -f ps-exe`), and the BIOS-TTY runtime
 ## Architecture
 
 ```
-   C game       Compact Pascal        Kobold game
-                  │ uses psx        │ uses psx
-                  └────────┬────────┘
-                           ▼
-            ┌────────────────────────────┐
-            │  psx.pas / psx.kp units    │
-            │  external decls, no logic  │
-            └──────────────┬─────────────┘
-                           ▼
-   one C ABI (the toolkit stack convention,
-   which all three front ends already emit)
-                           ▼
-   ┌──────────────────────────────────────────────┐
-   │  libpsx   (C compiled soft-float, plus asm)  │
-   │  gpu  dma  irq  spu  pad  timer  cd  fixed   │
-   │  gte.S  ot  tex  debug  fs glue  BIOS shims  │
-   └───────────────────────┬──────────────────────┘
-                           ▼
-   MMIO (volatile load/store) + BIOS calls
-                           │
-            start_psx.S  +  skj-ld-mips -f ps-exe
+  C game      Pascal game         Kobold game
+    │            │ uses psx          │ uses psx
+    │      ┌─────┴────────┬──────────┘
+    │      │  psx.pas     │  psx.kp        thin units: external
+    │      │  unit        │  unit          declarations, no logic
+    │      └─────┬────────┴──────────┐
+    └────────────┴───────────────────┘
+                 │  one C ABI (the toolkit stack convention,
+                 │  which all three front ends already emit)
+          ┌──────┴───────────────────────────────────────┐
+          │  libpsx   (C compiled soft-float, plus asm)  │
+          │  gpu  dma  irq  spu  pad  timer  cd  fixed   │
+          │  gte.S  ot  tex  debug  fs glue  BIOS shims  │
+          └──────┬───────────────────────────────────────┘
+                 │  MMIO (volatile load/store) + BIOS calls
+          start_psx.S   +   skj-ld-mips -f ps-exe
 ```
 
 C includes `psx.h` and calls `libpsx` directly; Pascal and Kobold reach the same
@@ -62,7 +57,7 @@ that name the `libpsx` C entry points and carry no behavior. This follows the
 toolkit idiom: a capability that needs no special lowering lives in a shipped
 unit over `external`, not in the compiler.
 
-Compact Pascal has no pointers and the Kobold unit stays pointer-free, so an
+Pascal has no pointers and the Kobold unit stays pointer-free, so an
 entry point that takes a pointer or array cannot be bound directly. Two paths
 solve it. Textures use an integer handle returned by a C accessor. The 3D path
 uses the scalar-only helpers in `libpsx/gte_easy.c`: `psx_gte_rot_xyz` builds
@@ -75,7 +70,7 @@ For a hand-written instruction, `skj-cc` and the Kobold front end both take
 GNU-style extended inline asm: `asm("template" : outputs : inputs : clobbers)`
 with `"=r"`/`"r"`/`"+r"` constraints and `%0` substitution. Kobold spells it
 `asm('...' : ...)` with no `volatile` keyword, and it is an AOT feature, which is
-the PlayStation's path. The Compact Pascal front end has no inline-asm statement.
+the PlayStation's path. The Pascal front end has no inline-asm statement.
 There, and whenever a whole routine is easier to write by hand, assemble a `.s`
 with `skj-as-mips` and link the object (or an `skj-ar` archive) into the PS-EXE,
 reaching it through an `external` declaration, the way `libpsx` links `gte.S` and
@@ -361,6 +356,6 @@ libpsx/tools/wavcheck.c      host audio-capture frequency checker
 libpsx/tools/timconv.c       host PPM -> TIM texture converter
 libpsx/tools/vagconv.c       host PCM -> SPU-ADPCM converter
 libpsx/tools/mkcdda.c        host CD-DA test-disc (CUE/BIN) generator
-units/psx.pas       Compact Pascal unit over libpsx
+units/psx.pas       Pascal unit over libpsx
 units/psx.kp        Kobold unit over libpsx
 ```

@@ -1,4 +1,4 @@
-/* pascal_rt.c : runtime helpers for Compact Pascal (cross-compiled) */
+/* pascal_rt.c : runtime helpers for Pascal (cross-compiled) */
 
 #ifdef PAS_HOST
 #include <unistd.h>

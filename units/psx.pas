@@ -1,10 +1,10 @@
-{ psx.pas - the Compact Pascal binding to the libpsx PlayStation SDK
+{ psx.pas - the Pascal binding to the libpsx PlayStation SDK
   (milestone 6).
 
-  Compact Pascal has no unit or include system, so this is not a compilable
+  Pascal has no unit or include system, so this is not a compilable
   unit: it is the canonical declaration block for the libpsx entry points, to
   be copied into a Pascal program's declaration section. (The Kobold binding,
-  units/psx.kp, is a real `uses` unit; Compact Pascal's lack of modules is the
+  units/psx.kp, is a real `uses` unit; Pascal's lack of modules is the
   one place the two languages differ here.) Pascal and libpsx share the toolkit
   stack calling convention, so these bind with no glue.
 

@@ -1,7 +1,10 @@
-# Compact Pascal Language Reference (skj-pc)
+# Pascal Language Reference (skj-pc)
 
-`skj-pc` implements a subset of Compact Pascal targeting the Skjegg
-shared IR.  This document records what is and is not supported.
+`skj-pc` is a Pascal compiler targeting the Skjegg shared IR. The language is a
+Pascal dialect in the Free Pascal lineage: managed (reference-counted) strings
+and dynamic arrays, and the common procedural extensions, but without the Delphi
+and Object Pascal object model (no classes, objects, interfaces, or RTTI). This
+document records what is and is not supported.
 
 ## Types
 
@@ -207,7 +210,7 @@ supported.  Shebang lines (`#!/...`) are skipped.
 
 ## Grammar
 
-Compact Pascal has no separate grammar specification file; the grammar is the
+skj-pc has no separate grammar specification file; the grammar is the
 one the front end under `pascal/` parses. The EBNF below describes the
 implemented subset (it omits the features listed as not implemented above). It
 follows the usual conventions: `{ ... }` is zero or more, `[ ... ]` is optional,

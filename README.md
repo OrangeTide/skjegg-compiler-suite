@@ -14,7 +14,7 @@ Ahead-of-time compilers (lower source to target assembly):
 | `skj-tinc` | TinC compiler (minimal C)                       | Working |
 | `skj-sc`   | TinScheme compiler                              | Working |
 | `skj-mooc` | MooScript compiler                              | Working |
-| `skj-pc`   | Compact Pascal compiler                         | Working |
+| `skj-pc`   | Pascal compiler                         | Working |
 | `skj-kpc`  | Kobold compiler (Pascal-derived; per target)    | Working |
 | `skj-cc`   | C compiler (C89 + C99 subset)                   | Working |
 | `skj-cpp`  | C preprocessor (library, also used by `cc`)     | Working |
@@ -77,8 +77,8 @@ backend means writing a regalloc + emitter pair and a
 
 Not every front end targets every backend.  TinC and TinScheme run on
 every backend.  The C compiler runs on ColdFire, RISC-V, x86-64,
-AArch64, and MIPS.  Compact Pascal builds for ColdFire, x86-64, and
-AArch64, and its Kobold dialect (via `skj-kpc` and the Kobold JIT) also
+AArch64, and MIPS.  Pascal builds for ColdFire, x86-64, AArch64, and
+MIPS, and its Kobold dialect (via `skj-kpc` and the Kobold JIT) also
 targets RISC-V.  MooScript is ColdFire only.  The genuine 32-bit ISAs
 (ColdFire, RISC-V RV32, MIPS) are ILP32; x86-64 and AArch64 are LP64,
 the pointer-width axis living in `ir/target.h`.
@@ -126,7 +126,7 @@ guest code runs under the emulator. See `doc/tools/jit.md`.
 ## PlayStation SDK
 
 `libpsx` is a runtime SDK for writing original-PlayStation (R3051) games in C,
-Compact Pascal, and Kobold. It drives the console hardware: the GPU and
+Pascal, and Kobold. It drives the console hardware: the GPU and
 double-buffered display, DMA, sprites and textures, the SPU with ADSR and
 reverb, CD-DA and XA audio, the controller and memory card, the three timers,
 16.16 fixed-point math, debug text, and 3D through the GTE and an ordering
@@ -152,7 +152,7 @@ runtime/     target runtimes (start_*.S per target, pascal_rt.c, str.c, list.c, 
 tinc/        TinC front end (C-like)
 scheme/      TinScheme front end (Scheme subset with GC; doc/internals/closures.md)
 moo/         MooScript front end
-pascal/      Compact Pascal front end (doc/languages/pascal.md)
+pascal/      Pascal front end (doc/languages/pascal.md)
 cc/          C front end (uses the cpp library)
 libpsx/      PlayStation SDK (doc/tools/psx-sdk.md, psx-api.md)
 units/       language units over libpsx (psx.pas, psx.kp)
@@ -303,7 +303,7 @@ The axes expand to these tokens, which may also be passed directly.
 | `tinc`     | TinC front end                                           |
 | `scheme`   | TinScheme front end (with GC)                            |
 | `moo`      | MooScript front end + `runtime/str.c`, `list.c`          |
-| `pascal`   | Compact Pascal front end + `runtime/pascal_rt.c`         |
+| `pascal`   | Pascal front end + `runtime/pascal_rt.c`         |
 | `cc`       | C compiler front end (auto-includes the cpp library)     |
 | `kp`       | Kobold-Pascal AOT path (`skj-kpc`, `skj-kp`, `libkpaot.a`) |
 | `as`, `ld` | ColdFire assembler and linker (library + standalone)     |

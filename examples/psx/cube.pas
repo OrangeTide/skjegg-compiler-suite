@@ -1,7 +1,7 @@
-{ cube.pas - a spinning 3D cube in Compact Pascal through the psx unit's GTE
+{ cube.pas - a spinning 3D cube in Pascal through the psx unit's GTE
   helpers.
 
-  The Pascal counterpart of cube.c. Compact Pascal cannot pass the matrix and
+  The Pascal counterpart of cube.c. Pascal cannot pass the matrix and
   vertex arrays the raw GTE calls take, so it uses the pointer-free helpers
   (libpsx/gte_easy.c): build a rotation from two angles, project each cube corner,
   and read its screen position and depth back as plain integers. The six faces go
@@ -9,7 +9,7 @@
   to front. All faces are submitted (no backface cull), which the painter's order
   of the table resolves for a convex cube.
 
-  Compact Pascal has no unit system, so the bindings are declared inline here;
+  Pascal has no unit system, so the bindings are declared inline here;
   units/psx.pas is the canonical copy. }
 
 program cubepas;

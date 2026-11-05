@@ -156,7 +156,7 @@ Kobold accepts a subset of the Free Pascal dialect, so these family features app
 | Properties (uniform access `read` / `write`) | Done | A `property name: T read getX write setX;` on a record, or a computed field, that reads and writes through accessor routines. Scalar, handle, and aggregate value types are all supported. Inline accessor bodies and cross-module export are not yet available. See `kp-property.md`. |
 | Units (`unit` / `interface` / `implementation`, `uses`) | Done | Not the class model above; a separate-compilation feature, with selective imports, renames, re-export, and `implement I for R` trait conformance. See the Modules row under Extended Pascal, `kp-units.md`, and `kp-module-format.md`. |
 
-## Kobold-original and Compact-Pascal extensions
+## Kobold-original and Pascal extensions
 
 These are the features that make Kobold an embedded game-scripting language rather
 than a general-purpose Pascal.

@@ -1,4 +1,4 @@
-/* lex.c : hand-written lexer for Compact Pascal */
+/* lex.c : hand-written lexer for Pascal */
 
 #include "pascal.h"
 #include "target.h"

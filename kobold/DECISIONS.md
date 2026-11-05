@@ -224,7 +224,7 @@ script; a script formats through the string builtins (`str`, `copy`) or a host
 **Free Pascal subset.** Most of Kobold's day-to-day ergonomics come from the
 Borland lineage that Free Pascal continues, and `fpc` is the bootstrap compiler,
 so the accepted source is a Free Pascal subset. The Kobold-original and
-Compact-Pascal extensions on top are drawn partly from the Compact Pascal design,
+Pascal extensions on top are drawn partly from the skj-pc Pascal design,
 partly Go-inspired, with the coroutine surface Kobold's own.
 
 **No reference dynamic arrays (`ref array of T`).** Dropped to keep the array

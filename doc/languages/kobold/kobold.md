@@ -24,7 +24,7 @@ project that uses both should keep the extensions apart.
 `kobold/kpcom.pas` is the one deliberate exception. The Kobold compiler is
 self-hosting and is written in the subset common to both languages, so its
 single source file is valid Pascal and valid Kobold at the same time. It keeps
-the `.pas` extension because the bootstrap compiles it with the Compact Pascal
+the `.pas` extension because the bootstrap compiles it with the Pascal
 front end (`skj-pc`) before a Kobold compiler exists. No other file in a project
 should rely on this dual-language property; treat it as unique to `kpcom`.
 
@@ -38,7 +38,7 @@ in this tree or in a consuming project, should use `.kp`.
 
 `kpcom` is written in its own language, so the tree cannot compile
 `kobold/kpcom.pas` with a C front end. The bootstrap root is `skj-pc`, the
-Compact Pascal compiler: `kpcom.pas` is valid Pascal as well as Kobold (the one
+Pascal compiler: `kpcom.pas` is valid Pascal as well as Kobold (the one
 file that is both, see "Source file extensions" above), so `skj-pc` compiles it
 directly into a host front end with no prior Kobold compiler and no committed
 seed. There is no `prebuild/` artifact.

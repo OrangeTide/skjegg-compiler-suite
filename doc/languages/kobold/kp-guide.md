@@ -32,7 +32,7 @@ not a systems programmer.
   function interface. A host object is named by an integer handle id, never by
   an address, so a script never holds a host pointer.
 
-Kobold-Pascal shares much of its syntax with Compact Pascal (`../pascal.md`),
+Kobold-Pascal shares much of its syntax with Pascal (`../pascal.md`),
 but compiles to native machine code rather than WebAssembly and uses opaque
 handles rather than pointers.
 

@@ -3197,7 +3197,7 @@ check-san-moo: build/san/skj-mooc
 	@$(SAN_RUNENV) sh tests/run-compile-san.sh "$(CURDIR)/build/san/skj-mooc" moo $(MOO_TESTS) $(MOO_TOY_TESTS)
 
 check-san-pc: build/san/skj-pc
-	@echo "== check-san: Compact Pascal front end (skj-pc, compile-only) =="
+	@echo "== check-san: Pascal front end (skj-pc, compile-only) =="
 	@$(SAN_RUNENV) sh tests/run-compile-san.sh "$(CURDIR)/build/san/skj-pc" pascal $(PAS_TESTS)
 
 check-san-ar: build/san/skj-ar build/start.o build/half.o
@@ -3948,7 +3948,7 @@ MOO_TOY_BINS := $(MOO_TOY_TESTS:tests/%.moo=build/%)
 $(MOO_TOY_BINS): build/%: build/%.o $(MOO_TOY_RT_OBJS) build/skj-ld
 	./build/skj-ld -o $@ $(MOO_TOY_RT_OBJS) $<
 
-## Compact Pascal compiler
+## Pascal compiler
 PC_SRC := pascal/lex.c pascal/parse.c pascal/lower.c pascal/main.c $(IR_SRC) $(BE_CF)
 
 build/skj-pc: $(PC_SRC) pascal/pascal.h ir/ir.h | build
@@ -4201,7 +4201,7 @@ test-kp-rv-trap-backtrace: build/skj-kpc-rv build/skj-kp-rv build/skj-as-rv buil
 	     cat build/debug/ktrap.err; exit 1; \
 	 fi
 
-## Debug-info line markers (-g) on the Compact Pascal path: skj-pc emits an
+## Debug-info line markers (-g) on the Pascal path: skj-pc emits an
 ## IR_LOC per statement and records the source file on each function; the
 ## ColdFire backend records each marker as a DWARF ".loc" directive.  Assert the
 ## markers appear under -g, are absent without it, and the -g assembly still
@@ -7434,7 +7434,7 @@ build/psx/kasm.exe: examples/psx/kasm.kp build/psx-units/psx.kpm build/psx/psx_u
 	    build/mips/start_psx.o build/psx/kasm.o build/psx/psx_unit.o build/mips/libpsx.a
 
 ## Milestone 6: the thin language units and a game in each language.
-## The Pascal game declares the psx bindings inline (Compact Pascal has no unit
+## The Pascal game declares the psx bindings inline (Pascal has no unit
 ## system); the Kobold game uses the real `psx` unit, compiled to its own module
 ## and linked beside the program.
 build/psx/game_pas.exe: examples/psx/game.pas build/skj-pc-mips build/mips/libpsx.a \

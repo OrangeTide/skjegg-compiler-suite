@@ -634,7 +634,7 @@ if [ "$has_kp" -eq 1 ]; then
     mkdir -p "$DEST/kobold" "$DEST/backend" "$DEST/jit" "$DEST/runtime" \
              "$DEST/pascal" "$DEST/tests"
     cp "$S"/kobold/*.c "$S"/kobold/*.h "$S"/kobold/*.S "$DEST/kobold/"
-    # The Compact Pascal front end and its host runtime: skj-pc compiles kpcom.pas
+    # The Pascal front end and its host runtime: skj-pc compiles kpcom.pas
     # (valid Pascal) to native host code, and pascal_kpcom_host.c + pascal_rt.c
     # (built -DPAS_HOST) are the host main and string/IO runtime it links.
     cp "$S"/pascal/*.c "$S"/pascal/*.h "$DEST/pascal/"
@@ -1313,7 +1313,7 @@ $(BUILD)/libkpaot.a: $(SKJ_KP_AOT_RT) $(BUILD)/kp_co.o | $(BUILD)
 	$(AR) rcs $@ $(BUILD)/aot/*.o $(BUILD)/kp_co.o
 
 # The Kobold-Pascal front end, built from source rather than a prebuilt seed:
-# skj-pc (the Compact Pascal compiler) built for the host compiles kpcom.pas
+# skj-pc (the Pascal compiler) built for the host compiles kpcom.pas
 # (valid Pascal) to native host code, and compiling it with -d KP_TARGET_<T>
 # bakes the emitted target in.  So skj-kpc-<target> runs on this host and emits
 # that target's KPM1 modules, for any supported target from any host.  The host
@@ -1331,7 +1331,7 @@ SKJ_ALL += $(BUILD)/skj-pc-x86-64
 $(BUILD)/skj-pc-x86-64: $(SKJ_PASCAL_FE) $(SKJ_IR) $(SKJ_BE_X64) | $(BUILD)
 	$(CC) $(CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -I$(SKJEGG)pascal -I$(SKJEGG)ir -I$(SKJEGG)backend -o $@ $(SKJ_PASCAL_FE) $(SKJ_IR) $(SKJ_BE_X64)
 
-# The Compact Pascal host runtime (native libc): the managed string/array and IO
+# The Pascal host runtime (native libc): the managed string/array and IO
 # runtime every skj-kpc-<target> links.
 $(BUILD)/pascal_rt_host.o: $(SKJEGG)runtime/pascal_rt.c | $(BUILD)
 	$(CC) -std=c99 -O2 -DPAS_HOST -c -o $@ $<

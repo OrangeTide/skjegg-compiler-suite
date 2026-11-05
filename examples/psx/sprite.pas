@@ -1,10 +1,10 @@
-{ sprite.pas - the Compact Pascal texture sample.
+{ sprite.pas - the Pascal texture sample.
 
-  Compact Pascal has no unit system, so the libpsx bindings are declared inline
+  Pascal has no unit system, so the libpsx bindings are declared inline
   (units/psx.pas is the canonical copy). It loads two textures by handle through
   the C accessor in sprite_asset.c (Pascal has no pointers, so the raw TIM
   pointer stays in C), draws one as a plain sprite and the other rotated, and
-  runs a fixed number of frames. It proves Compact Pascal reaches the richer 2D
+  runs a fixed number of frames. It proves Pascal reaches the richer 2D
   draws, the same as the C and Kobold samples. }
 
 program spritepas;

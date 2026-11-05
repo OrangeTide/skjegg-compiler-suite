@@ -1,4 +1,4 @@
-/* pascal.h : Compact Pascal front-end declarations */
+/* pascal.h : Pascal front-end declarations */
 
 #ifndef PASCAL_H
 #define PASCAL_H

@@ -44,13 +44,13 @@ the soft-float PlayStation configuration where it applies).
 | Language | Driver | Reference |
 |----------|--------|-----------|
 | C | `skj-cc` (and `-rv`, `-x86-64`, `-arm64`, `-mips`, `-mips-sf`) | `doc/languages/c.md` |
-| Compact Pascal | `skj-pc` | `doc/languages/pascal.md` |
+| Pascal | `skj-pc` | `doc/languages/pascal.md` |
 | Kobold-Pascal | `skj-kpc` (and per-target variants) | `doc/languages/kobold/` |
 | TinC | `skj-tinc` (and per-target variants) | front end under `tinc/` |
 | TinScheme | `skj-sc` (and per-target variants) | front end under `scheme/` |
 | MooScript | `skj-mooc` | front end under `moo/` |
 
-C and Compact Pascal have full language references in `doc/languages/`.
+C and Pascal have full language references in `doc/languages/`.
 Kobold-Pascal has its own manual set under `doc/languages/kobold/`, indexed from
 the manual landing page. The remaining front ends are documented alongside their
 sources for now.
@@ -185,7 +185,7 @@ make clean          # remove build/
 ```
 
 Per-language and per-feature suites (`check-cc`, `check-cpp`, the
-`test-fpu`/`test-i64`/`test-ops` integration tests, the Compact Pascal
+`test-fpu`/`test-i64`/`test-ops` integration tests, the Pascal
 `check-pc-host` and `check-pc-kpcom` suites, and the Kobold suites) number in
 the hundreds. `make help` prints the full catalog, generated from the Makefile
 so it is always complete. Every binary is built through a Makefile target; the

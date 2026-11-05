@@ -1,6 +1,6 @@
-{ game.pas - the milestone-6 Compact Pascal sample: the coin-chase game.
+{ game.pas - the milestone-6 Pascal sample: the coin-chase game.
 
-  Mirrors the C game.c. Compact Pascal has no unit system, so the psx bindings
+  Mirrors the C game.c. Pascal has no unit system, so the psx bindings
   are declared inline here (units/psx.pas is the canonical copy). Move the
   player with the d-pad onto the bobbing coin to score and beep; it runs a fixed
   number of frames. It uses no Pascal runtime, so it links freestanding against

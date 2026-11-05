@@ -1,7 +1,7 @@
 /* gte_easy.c - pointer-free GTE helpers for the language units.
  *
  * The core GTE API (gte.S, gte_mat.c) passes matrices and vertex arrays by
- * pointer, which C uses directly but Compact Pascal (no pointers) and the Kobold
+ * pointer, which C uses directly but Pascal (no pointers) and the Kobold
  * unit (kept pointer-free) cannot. These helpers keep the matrix and the last
  * projected point on the C side and expose only scalar-in, scalar-out calls, the
  * same way the texture handles keep the TIM pointer on the C side. A Pascal or
