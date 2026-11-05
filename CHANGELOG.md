@@ -6,6 +6,26 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.44.3
+
+#### Added
+- A `ps1` target (alias `psx`) in the `skjcc` driver: `skjcc -target ps1 -o
+  game.exe game.c` runs the whole C PlayStation pipeline (soft-float MIPS
+  compile, assemble, link the crt and `libpsx.a`, write a PS-EXE) and finds
+  `psx.h` for you.
+- `make install` now installs the PlayStation toolchain and the libpsx SDK: the
+  MIPS compilers (`skj-cc-mips-sf`, `skj-pc-mips`, `skj-kpc-mips`,
+  `skj-kp-mips-sf`), `skj-mkromfs`, and the asset converters into
+  `$(PREFIX)/bin`, and `libpsx.a`, `start_psx.o`, `psx.h`, the units, and the
+  Kobold unit module into `$(PREFIX)/lib/skjegg/ps1`.
+- A setup guide, `doc/tools/psx-setup.md`: installing the toolchain, building the
+  spinning-cube sample in C, Pascal, and Kobold, running it on an emulator, and
+  an example project Makefile.
+
+#### Changed
+- Replaced the architecture diagram in `doc/tools/psx-sdk.md` with a layered
+  model that states how each layer reaches the one below it.
+
 ### 0.44.2
 
 #### Changed

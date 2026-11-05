@@ -4941,9 +4941,20 @@ INSTALL ?= install
 INSTALL_KPAOT := build/libkpaot.a build/libkpaot-rv.a build/libkpaot-arm64.a \
                  build/libkpaot-cf.a build/libkpaot-rv-free.a build/libkpaot-cf-free.a
 
+# The PlayStation (MIPS PS-EXE) toolchain and the libpsx SDK, so a project
+# outside the tree can build PS1 programs. The skjcc `ps1` target drives the C
+# path; skj-pc-mips and skj-kpc-mips/skj-kp-mips-sf build Pascal and Kobold.
+# See doc/tools/psx-setup.md.
+INSTALL_PSX_TOOLS := build/skj-cc-mips-sf build/skj-pc-mips build/skj-kpc-mips \
+                     build/skj-kp-mips-sf build/skj-mkromfs \
+                     build/skj-timconv build/skj-vagconv build/skj-mkcdda
+INSTALL_PSX_SDK := build/mips/libpsx.a build/mips/start_psx.o \
+                   build/psx-units/psx.kpm build/psx/psx_unit.o
+
 install: $(TOOLS) \
          $(DRIVER_LIB_CF) $(DRIVER_LIB_RV) $(DRIVER_LIB_MIPS) \
-         $(DRIVER_LIB_X64) $(DRIVER_LIB_A64) $(INSTALL_KPAOT)
+         $(DRIVER_LIB_X64) $(DRIVER_LIB_A64) $(INSTALL_KPAOT) \
+         $(INSTALL_PSX_TOOLS) $(INSTALL_PSX_SDK)
 	@echo "  INSTALL  tools -> $(DESTDIR)$(bindir)"
 	@$(INSTALL) -d $(DESTDIR)$(bindir)
 	@$(INSTALL) -m 755 $(TOOLS) $(DESTDIR)$(bindir)/
@@ -4959,6 +4970,13 @@ install: $(TOOLS) \
 	@$(INSTALL) -d $(DESTDIR)$(libdir)/arm64    && $(INSTALL) -m 644 $(DRIVER_LIB_A64)  $(DESTDIR)$(libdir)/arm64/
 	@echo "  INSTALL  Kobold runtime -> $(DESTDIR)$(libdir)/kobold"
 	@$(INSTALL) -d $(DESTDIR)$(libdir)/kobold && $(INSTALL) -m 644 $(INSTALL_KPAOT) $(DESTDIR)$(libdir)/kobold/
+	@echo "  INSTALL  PlayStation toolchain -> $(DESTDIR)$(bindir)"
+	@$(INSTALL) -m 755 $(INSTALL_PSX_TOOLS) $(DESTDIR)$(bindir)/
+	@echo "  INSTALL  libpsx SDK -> $(DESTDIR)$(libdir)/ps1"
+	@$(INSTALL) -d $(DESTDIR)$(libdir)/ps1
+	@$(INSTALL) -m 644 build/mips/libpsx.a build/mips/start_psx.o $(DESTDIR)$(libdir)/ps1/
+	@$(INSTALL) -m 644 libpsx/psx.h units/psx.pas units/psx.kp $(DESTDIR)$(libdir)/ps1/
+	@$(INSTALL) -m 644 build/psx-units/psx.kpm build/psx/psx_unit.o $(DESTDIR)$(libdir)/ps1/
 	@echo
 	@echo "Installed skjegg $(SKJ_VERSION) under $(DESTDIR)$(PREFIX)."
 	@echo "The tools find their headers and runtime relative to their own"
@@ -4968,7 +4986,7 @@ install: $(TOOLS) \
 
 uninstall:
 	@echo "  UNINSTALL  $(DESTDIR)$(bindir) tools + $(DESTDIR)$(libdir)"
-	@for t in $(notdir $(TOOLS)); do rm -f "$(DESTDIR)$(bindir)/$$t"; done
+	@for t in $(notdir $(TOOLS) $(INSTALL_PSX_TOOLS)); do rm -f "$(DESTDIR)$(bindir)/$$t"; done
 	@rm -rf "$(DESTDIR)$(libdir)"
 
 ## The skjcc driver end to end on the 64-bit targets, with no external
@@ -7740,6 +7758,17 @@ test-psx-cube-lang: build/psx/cube_pas.exe build/psx/cube_kp.exe
 	@OBJDUMP="$(MIPS_OBJDUMP)" sh tests/run-psx-tests.sh build/psx/cube_pas.exe
 	@OBJDUMP="$(MIPS_OBJDUMP)" sh tests/run-psx-tests.sh build/psx/cube_kp.exe
 
+## The skjcc `ps1` driver target: the whole C pipeline (skj-cc-mips-sf ->
+## skj-as-mips -> skj-ld-mips -f ps-exe, linking start_psx.o and libpsx.a) in one
+## command.  Stage the SDK where the in-tree driver looks (build/lib/ps1) and
+## build the cube through it, matching the installed flow in doc/tools/psx-setup.md.
+test-psx-cube-driver: build/skjcc build/mips/libpsx.a build/mips/start_psx.o \
+                      build/skj-cc-mips-sf build/skj-as-mips build/skj-ld-mips | build/psx
+	@mkdir -p build/lib/ps1
+	@cp build/mips/libpsx.a build/mips/start_psx.o libpsx/psx.h build/lib/ps1/
+	@./build/skjcc -target ps1 -o build/psx/cube_drv.exe examples/psx/cube.c
+	@OBJDUMP="$(MIPS_OBJDUMP)" sh tests/run-psx-tests.sh build/psx/cube_drv.exe
+
 ## Framebuffer check that both language cube samples project and draw 3D faces:
 ## at frame 40 the cube's centre shows a face colour (green with this compose
 ## order) while a corner keeps the background, so the GTE projection and the
@@ -8285,7 +8314,7 @@ check-mips-all: check-mips check-mips-noreorder check-mips-emu test-mips-fs-cap 
                 check-cc-mips check-cc-mips-noreorder \
                 check-mipsas check-cc-mips-skj test-mips-archive test-mips-psexe \
                 test-psx-gpu test-psx-tex test-psx-rot test-psx-alpha test-psx-cd test-psx-audio test-psx-timconv test-psx-adpcm test-psx-m2 test-psx-assets \
-                test-psx-fixed test-psx-game test-psx-lang test-psx-units test-psx-sprite-lang test-psx-gte test-psx-timer test-psx-cdda test-psx-mc test-psx-pad test-psx-shade test-psx-env test-psx-dbgtext test-psx-cube-lang test-psx-kasm \
+                test-psx-fixed test-psx-game test-psx-lang test-psx-units test-psx-sprite-lang test-psx-gte test-psx-timer test-psx-cdda test-psx-mc test-psx-pad test-psx-shade test-psx-env test-psx-dbgtext test-psx-cube-lang test-psx-kasm test-psx-cube-driver \
                 test-cc-mips-asm check-mips-sf test-threaded-mips
 	@echo "All MIPS test suites passed."
 

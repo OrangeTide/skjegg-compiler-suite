@@ -46,6 +46,7 @@ struct target {
     const char *crt0;           /* crt object basename under <libdir>/<name>/ */
     const char *runtime[4];     /* runtime helper basenames, NULL-terminated */
     const char *libc;           /* libc archive basename, linked unless -ffreestanding */
+    const char *inc;            /* extra -I subdir under <libdir>/, or NULL */
 };
 
 /* The table mirrors the check-cc-* Makefile recipes.  crt0/runtime names are
@@ -55,27 +56,36 @@ static const struct target targets[] = {
       "skj-cc",
       "skj-as", { NULL },
       "skj-ld", { NULL },
-      "crt0.o", { "half.o", "va_cf.o", NULL }, "libc.a" },
+      "crt0.o", { "half.o", "va_cf.o", NULL }, "libc.a", NULL },
     { { "riscv", "rv32", NULL },
       "skj-cc-rv",
       "skj-as-rv", { NULL },
       "skj-ld-rv", { NULL },
-      "crt0.o", { "va_rv.o", "soft64_div.o", NULL }, "libc.a" },
+      "crt0.o", { "va_rv.o", "soft64_div.o", NULL }, "libc.a", NULL },
     { { "mips", NULL },
       "skj-cc-mips",
       "skj-as-mips", { NULL },
       "skj-ld-mips", { NULL },
-      "crt0.o", { "half.o", "va_mips.o", "soft64_div.o", NULL }, "libc.a" },
+      "crt0.o", { "half.o", "va_mips.o", "soft64_div.o", NULL }, "libc.a", NULL },
     { { "x86-64", "x86_64", NULL },
       "skj-cc-x86-64",
       "skj-as-x86-64", { NULL },
       "skj-ld-x86-64", { NULL },
-      "crt0.o", { "half.o", "va.o", NULL }, NULL },
+      "crt0.o", { "half.o", "va.o", NULL }, NULL, NULL },
     { { "arm64", "aarch64", NULL },
       "skj-cc-arm64",
       "skj-as-aarch64", { NULL },
       "skj-ld-arm64", { NULL },
-      "crt0.o", { "va.o", NULL }, NULL },
+      "crt0.o", { "va.o", NULL }, NULL, NULL },
+    /* The PlayStation (MIPS PS-EXE): soft-float C, the BIOS-TTY crt, and the
+       libpsx SDK, linked into a PS-EXE.  There is no libc (the SDK and the
+       program provide the environment), so libpsx.a rides the runtime slot and
+       is always linked; psx.h is found through the installed ps1 include dir. */
+    { { "ps1", "psx", NULL },
+      "skj-cc-mips-sf",
+      "skj-as-mips", { NULL },
+      "skj-ld-mips", { "-f", "ps-exe", NULL },
+      "start_psx.o", { "libpsx.a", NULL }, NULL, "ps1" },
 };
 #define NTARGETS ((int)(sizeof(targets) / sizeof(targets[0])))
 
@@ -334,6 +344,14 @@ main(int argc, char **argv)
         return 0;
     }
 
+    /* The per-target lib dir (the installed <bindir>/../lib/skjegg, else the
+       baked path): needed for an extra include dir at compile and for the crt
+       and libraries at link. */
+    const char *libd = lib_dir();
+    char incflag[1024] = "";
+    if (t->inc)
+        snprintf(incflag, sizeof incflag, "-I%s/%s", libd, t->inc);
+
     /* a temp directory for intermediates, unless -save-temps.  -S needs none
        (its only artifact is the .s); -c and a full link both produce an
        intermediate .s (and the link an intermediate .o). */
@@ -368,6 +386,7 @@ main(int argc, char **argv)
             av[n++] = "-o";
             av[n++] = spath;
             for (int k = 0; k < ncc_opts; k++) av[n++] = cc_opts[k];
+            if (t->inc) av[n++] = incflag;
             av[n++] = srcs[s];
             av[n] = NULL;
             if (run(av, -1) != 0) die("compile failed for %s", srcs[s]);
@@ -405,7 +424,6 @@ main(int argc, char **argv)
 
     /* link: ld <pre...> -o out crt0 objs... passed-objs... runtime... */
     if (!stop_s && !stop_c) {
-        const char *libd = lib_dir();
         char crt0[1024];
         char fini[1024];
         char libc[1024];

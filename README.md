@@ -133,7 +133,8 @@ reverb, CD-DA and XA audio, the controller and memory card, the three timers,
 table. It builds on the MIPS backend and the PS-EXE output mode, boots on a
 retail BIOS, and is tested headlessly on the PCSX-Redux emulator by framebuffer
 and audio capture. Pascal and Kobold reach the C library through thin `psx`
-units. See `doc/tools/psx-sdk.md` for the architecture and
+units. See `doc/tools/psx-setup.md` to install the toolchain and build a first
+program, `doc/tools/psx-sdk.md` for the architecture, and
 `doc/tools/psx-api.md` for the full function reference.
 
 ## Layout

@@ -382,7 +382,9 @@ maps the full image of a handle's texture to the four screen corners. Call
 ## See also
 
 - [The PlayStation SDK overview](psx-sdk.md): design, memory budget, driver
-  pieces, asset tools, verification, and milestones.
-- [The MIPS backend](mips-backend.md): the R3000/R3051 code generator and the
-  PS-EXE output path.
+  pieces, asset tools, verification, and roadmap.
+- [Setting up the PlayStation toolchain](psx-setup.md): install, build the
+  cube in each language, run it, and an example project Makefile.
+- [The MIPS backend](mips.md): the R3000/R3051 code generator and the PS-EXE
+  output path.
 - `examples/psx/`: worked examples in C, Pascal, and Kobold.

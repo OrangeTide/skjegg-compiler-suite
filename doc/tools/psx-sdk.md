@@ -6,9 +6,10 @@ games: its GPU, SPU, controllers, timers, memory card, and CD-ROM, plus 3D
 through the GTE. It is one C and assembly library. Pascal and Kobold reach it
 through thin units that bind the C names and add no logic of their own.
 
-The complete function reference is in [the API reference](psx-api.md). This page
-covers the architecture, the memory budget, the driver modules, the asset path,
-how the SDK is tested, and what remains to build.
+The complete function reference is in [the API reference](psx-api.md), and
+[Setting up the PlayStation toolchain](psx-setup.md) is the step-by-step install
+and first-build guide. This page covers the architecture, the memory budget, the
+driver modules, the asset path, how the SDK is tested, and what remains to build.
 
 The SDK sits on the MIPS toolchain described in [the MIPS backend](mips.md): the
 MIPS I backend, the soft-float configuration for the FPU-less R3051, the
@@ -18,29 +19,22 @@ output mode (`skj-ld-mips -f ps-exe`), and the BIOS-TTY runtime
 
 ## Architecture
 
-```
-  C game      Pascal game         Kobold game
-    │            │ uses psx          │ uses psx
-    │      ┌─────┴────────┬──────────┘
-    │      │  psx.pas     │  psx.kp        thin units: external
-    │      │  unit        │  unit          declarations, no logic
-    │      └─────┬────────┴──────────┐
-    └────────────┴───────────────────┘
-                 │  one C ABI (the toolkit stack convention,
-                 │  which all three front ends already emit)
-          ┌──────┴───────────────────────────────────────┐
-          │  libpsx   (C compiled soft-float, plus asm)  │
-          │  gpu  dma  irq  spu  pad  timer  cd  fixed   │
-          │  gte.S  ot  tex  debug  fs glue  BIOS shims  │
-          └──────┬───────────────────────────────────────┘
-                 │  MMIO (volatile load/store) + BIOS calls
-          start_psx.S   +   skj-ld-mips -f ps-exe
-```
+libpsx sits between a game and the console hardware as four layers. Read the
+table top to bottom: each layer says how it reaches the one beneath it.
 
-C includes `psx.h` and calls `libpsx` directly; Pascal and Kobold reach the same
-entry points through the unit.
+| Layer | What is here | Reaches the layer below by |
+|-------|--------------|----------------------------|
+| **Game** | your program, in C, Pascal, or Kobold | in C, `#include "psx.h"` and call `libpsx` directly; in Pascal and Kobold, go through the unit below |
+| **Binding** (Pascal and Kobold only) | the `psx.pas` and `psx.kp` units: `external` declarations with no logic | the one calling convention all three front ends emit (below), so the unit is a name-binding layer, not a shim |
+| **`libpsx`** | one C-and-assembly library: the `gpu`, `dma`, `irq`, `spu`, `pad`, `timer`, `cd`, `fixed`, `gte`, `ot`, `tex`, and `debug` modules, plus the BIOS shims | `volatile` MMIO loads and stores, and BIOS A0/B0/C0 calls |
+| **Hardware** | the GPU, SPU, controllers, CD-ROM, timers, and the BIOS | — |
 
-Two design choices keep the SDK thin.
+The whole stack links into one PS-EXE image, the `start_psx.S` crt plus
+`skj-ld-mips -f ps-exe`, which a retail BIOS boots. Two things carry the design:
+all three languages meet at a single C ABI, so one `libpsx.a` serves them all,
+and the bindings add no code, so only C's direct path and the units differ.
+
+Both points, expanded:
 
 **One calling convention.** TinC, TinScheme, the C compiler, and the Kobold AOT
 path all emit the toolkit's own stack-passing convention (arguments pushed right
