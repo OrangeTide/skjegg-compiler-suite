@@ -1,0 +1,47 @@
+{ kasm.kp - Kobold extended inline assembly on the PlayStation (MIPS).
+
+  The Kobold counterpart of tests/mips_asm_ext.c. It computes a rectangle's X
+  position with inline asm and draws the rectangle there, so the framebuffer
+  position is the self-check: the rectangle only lands where the capture probes
+  it if the inline asm produced the right number. The value is built to exercise
+  the operand classes the AOT backend has to place: a write-only output ("=r"),
+  two plain register inputs ("r"), and an in-out operand ("+r") read and written
+  in place.
+
+  Inline asm in Kobold is an AOT feature, which is the PlayStation's path. The
+  template text is emitted verbatim, so it must be skj-as-mips syntax, and there
+  is no `volatile` keyword (write `asm(...)`, not `asm volatile(...)`). }
+
+program kasm;
+
+uses psx as _;
+
+var
+  a, b, xpos, frame: Integer;
+
+begin
+  GpuInit;
+  IrqInit;
+  SetBg(0, 0, 20);
+
+  a := 40;
+  b := 2;
+  xpos := 0;
+
+  { xpos := a + b  (write-only output, two register inputs) = 42 }
+  asm('addu %0, %1, %2' : '=r'(xpos) : 'r'(a), 'r'(b));
+
+  { xpos := xpos - 2, then xpos := xpos + 2  (in-out operand), still 42 }
+  asm('subu %0, %0, %1' : '+r'(xpos) : 'r'(b));
+  asm('addu %0, %0, %1' : '+r'(xpos) : 'r'(b));
+
+  { Draw a white 40x40 rectangle with its left edge at the asm-computed x. Its
+    centre is near (62,120) only when xpos is 42; a wrong asm result puts it
+    elsewhere and the probe reads the background instead. }
+  for frame := 0 to 119 do
+  begin
+    DrawRect(xpos, 100, 40, 40, 255, 255, 255);
+    Vsync;
+    DisplaySwap;
+  end;
+end.

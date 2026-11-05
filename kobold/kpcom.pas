@@ -14030,6 +14030,7 @@ begin
   CurTarget.Arch := '';
   {$IFDEF KP_TARGET_RV}    CurTarget.Arch := 'rv32';   {$ENDIF}
   {$IFDEF KP_TARGET_CF}    CurTarget.Arch := 'cf';     {$ENDIF}
+  {$IFDEF KP_TARGET_MIPS}  CurTarget.Arch := 'mips';   {$ENDIF}
   {$IFDEF KP_TARGET_X64}   CurTarget.Arch := 'x86-64'; {$ENDIF}
   {$IFDEF KP_TARGET_ARM64} CurTarget.Arch := 'arm64';  {$ENDIF}
 end;

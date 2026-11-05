@@ -117,6 +117,7 @@ enum fs_kind {
     FS_KIND_ROM,             /* romfs: read-only packed image (later)        */
     FS_KIND_9P,              /* 9pfs: served over the launcher channel (later) */
     FS_KIND_DEV,             /* devfs: null/zero/console/random (later)      */
+    FS_KIND_ISO,             /* isofs: read-only ISO 9660 (CD-ROM)           */
 };
 
 /* A mount-table entry.  Exactly 16 bytes, no padding.  The launcher populates

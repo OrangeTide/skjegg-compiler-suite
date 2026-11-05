@@ -1,0 +1,30 @@
+{ hello.kp - a milestone-5 libpsx sample in Kobold.
+
+  The bouncing square again, in Kobold, to show the Kobold front end
+  (skj-kpc-mips) and AOT backend (skj-kp-mips-sf) reaching the PlayStation. It
+  calls libpsx through external declarations and uses no managed Kobold runtime,
+  so it links against start_psx, libpsx, and the tiny kp_rt entry shim alone.
+  Kobold and libpsx share the toolkit stack calling convention. }
+
+program hellokp;
+procedure psx_gpu_init; external;
+procedure psx_irq_init; external;
+procedure psx_set_bg(r, g, b: integer); external;
+procedure psx_draw_rect(x, y, w, h, r, g, b: integer); external;
+procedure psx_vsync; external;
+procedure psx_display_swap; external;
+var f, x, dx: integer;
+begin
+  psx_gpu_init;
+  psx_irq_init;
+  psx_set_bg(0, 0, 40);
+  x := 0; dx := 2;
+  for f := 0 to 179 do
+  begin
+    psx_draw_rect(x, 136, 32, 32, 0, 200, 255);
+    psx_vsync;
+    psx_display_swap;
+    x := x + dx;
+    if (x <= 0) or (x >= 288) then dx := -dx;
+  end;
+end.

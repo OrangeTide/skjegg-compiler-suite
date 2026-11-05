@@ -1,0 +1,75 @@
+{ game.kp - the milestone-6 Kobold sample: the coin-chase game through the psx
+  unit. Mirrors the C game.c, but drives libpsx through `uses psx` instead of
+  inline externals, so it shows the thin Kobold unit in use. Move the player
+  with the d-pad onto the bobbing coin to score and beep; it ends after a time
+  limit or ten points. No managed Kobold runtime is used: every call goes to
+  libpsx, so it links freestanding like the C game. }
+
+program gamekp;
+
+uses psx as _;
+
+const
+  SZ = 20;
+  Frames = 900;
+  WinScore = 10;
+
+var
+  f, px, py, cx, cy, cby, score, b, rngv: Integer;
+
+function Rng: Integer;
+begin
+  rngv := rngv * 1103515245 + 12345;
+  Rng := (rngv div 65536) and $7FFF;
+end;
+
+function Overlap(ax, ay, bx, by: Integer): Boolean;
+begin
+  Overlap := (ax < bx + SZ) and (bx < ax + SZ) and
+             (ay < by + SZ) and (by < ay + SZ);
+end;
+
+begin
+  rngv := 1;
+  GpuInit;
+  IrqInit;
+  SetBg(0, 0, 40);
+
+  px := (320 - SZ) div 2;
+  py := (240 - SZ) div 2;
+  cx := 40;
+  cy := 40;
+  score := 0;
+
+  for f := 0 to Frames - 1 do
+  begin
+    if score >= WinScore then
+      break;
+
+    b := PadRead;
+    if (b and PadLeft) <> 0 then px := px - 2;
+    if (b and PadRight) <> 0 then px := px + 2;
+    if (b and PadUp) <> 0 then py := py - 2;
+    if (b and PadDown) <> 0 then py := py + 2;
+    if px < 0 then px := 0;
+    if px > 320 - SZ then px := 320 - SZ;
+    if py < 0 then py := 0;
+    if py > 240 - SZ then py := 240 - SZ;
+
+    { the coin bobs with a fixed-point sine, 6 pixels of travel }
+    cby := cy + (Fmul(Fsin(f * 8), 6 * FixOne) div FixOne);
+
+    if Overlap(px, py, cx, cby) then
+    begin
+      score := score + 1;
+      Beep;
+      cx := Rng mod (320 - SZ);
+      cy := (Rng mod (240 - SZ - 12)) + 6;
+    end;
+
+    DrawRect(cx, cby, SZ, SZ, 0, 200, 255);
+    DrawRect(px, py, SZ, SZ, 255, 220, 0);
+    Vsync;
+    DisplaySwap;
+  end;
+end.

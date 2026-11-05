@@ -4791,7 +4791,15 @@ lower_global_decl(struct cc_node *gn)
         if (gn->a && gn->a->kind == ND_INIT_LIST)
             g->inits = lower_aggregate_init(t, gn->a);
     } else if (t->kind == TY_ARRAY) {
-        g->base_type = type_to_ir(t->base);
+        /* The flat path emits one leaf per innermost scalar, so the element
+           type (and thus the directive width) is the scalar at the bottom of
+           every dimension, not the next dimension down.  A multidimensional
+           array such as `short v[4][3]` has t->base == short[3]; taking its IR
+           type gave the default word width and emitted .word for 2-byte shorts,
+           so v[0][1] read into the zero padding.  flat_elem_type walks all the
+           dimensions to the scalar. */
+        struct cc_type *et = flat_elem_type(t);
+        g->base_type = type_to_ir(et);
         if (t->array_len < 0 && gn->a &&
             gn->a->kind == ND_INIT_LIST) {
             /* one top-level initializer per element, whatever the element
@@ -4799,7 +4807,12 @@ lower_global_decl(struct cc_node *gn)
                mis-sized an 8-byte-element array). */
             t->array_len = infer_array_len(gn->a);
         }
-        g->arr_size = t->array_len > 0 ? t->array_len : 0;
+        /* arr_size counts the flattened scalar elements (not just the outer
+           dimension), so trailing zero-fill for a partial initializer is sized
+           in element units across every dimension. */
+        int esz = cc_type_size(et);
+        g->arr_size = (t->array_len > 0 && esz > 0)
+            ? cc_type_size(t) / esz : 0;
     } else if (t->kind == TY_PTR) {
         g->base_type = ADDR64 ? IR_I64 : IR_I32;
         g->is_ptr = 1;

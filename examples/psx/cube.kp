@@ -1,0 +1,70 @@
+{ cube.kp - a spinning 3D cube in Kobold through the psx unit's GTE helpers.
+
+  The Kobold counterpart of cube.c and cube.pas, driving the 3D path through
+  `uses psx` rather than inline externals. Kobold stays free of the matrix and
+  vertex arrays the raw GTE calls take, so it uses the pointer-free helpers: build
+  a rotation from two angles, project each cube corner, and read its screen
+  position and depth back as plain integers. The six faces go into the ordering
+  table at their average depth, so one swap draws them back to front. No backface
+  cull is needed; the painter's order of the table resolves a convex cube. }
+
+program cubekp;
+
+uses psx as _;
+
+const
+  V: array[0..7, 0..2] of Integer = (
+    (-40, -40, -40), ( 40, -40, -40), ( 40,  40, -40), (-40,  40, -40),
+    (-40, -40,  40), ( 40, -40,  40), ( 40,  40,  40), (-40,  40,  40));
+  F: array[0..5, 0..3] of Integer = (
+    (4, 5, 6, 7), (1, 0, 3, 2), (0, 4, 7, 3),
+    (5, 1, 2, 6), (0, 1, 5, 4), (3, 7, 6, 2));
+  CR: array[0..5] of Integer = (255, 0, 0, 255, 255, 0);
+  CG: array[0..5] of Integer = (0, 255, 0, 255, 0, 255);
+  CB: array[0..5] of Integer = (0, 0, 255, 0, 255, 255);
+
+var
+  frame, fi, angle: Integer;
+  ia, ib, ic, id, z: Integer;
+  x0, y0, x1, y1, x2, y2, x3, y3: Integer;
+
+begin
+  GpuInit;
+  IrqInit;
+  SetBg(0, 0, 20);
+  GteSetScreen(300, 160, 120);
+  angle := 0;
+
+  for frame := 0 to 179 do
+  begin
+    GteRotXyz(angle div 2, angle, 0);
+    GteSetTrans(0, 0, 220);
+    OtClear;
+
+    for fi := 0 to 5 do
+    begin
+      ia := F[fi, 0];
+      ib := F[fi, 1];
+      ic := F[fi, 2];
+      id := F[fi, 3];
+
+      { Quad vertex order is a, b, d, c. }
+      GteProject(V[ia, 0], V[ia, 1], V[ia, 2]);
+      x0 := GteSx; y0 := GteSy; z := GteSz;
+      GteProject(V[ib, 0], V[ib, 1], V[ib, 2]);
+      x1 := GteSx; y1 := GteSy; z := z + GteSz;
+      GteProject(V[id, 0], V[id, 1], V[id, 2]);
+      x2 := GteSx; y2 := GteSy; z := z + GteSz;
+      GteProject(V[ic, 0], V[ic, 1], V[ic, 2]);
+      x3 := GteSx; y3 := GteSy; z := z + GteSz;
+
+      OtAddPoly4(x0, y0, x1, y1, x2, y2, x3, y3,
+                 CR[fi], CG[fi], CB[fi], z div 4);
+    end;
+
+    OtLink;
+    Vsync;
+    DisplaySwap;
+    angle := (angle + 4) and 1023;
+  end;
+end.

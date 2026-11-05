@@ -28,6 +28,9 @@
 #ifdef FS_WITH_ROM
 #include "romfs.h"        /* read-only packed image                             */
 #endif
+#ifdef FS_WITH_ISO
+#include "isofs.h"        /* read-only ISO 9660 (CD-ROM)                        */
+#endif
 #ifdef FS_WITH_9P
 #include "ninefs.h"       /* 9P2000 client over the launcher channel            */
 #endif
@@ -125,6 +128,10 @@ backend_for(const struct fs_mount *mt)
 #ifdef FS_WITH_ROM
     case FS_KIND_ROM:
         return &romfs_backend;
+#endif
+#ifdef FS_WITH_ISO
+    case FS_KIND_ISO:
+        return &isofs_backend;
 #endif
 #ifdef FS_WITH_9P
     case FS_KIND_9P:

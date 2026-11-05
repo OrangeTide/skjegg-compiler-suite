@@ -39,7 +39,8 @@ static const char *const HOIST_SET[] = {
     "sw", "sb", "sh", NULL,
 };
 static const char *const LOADD_SET[] = {   /* delayed dest is the 1st operand */
-    "lw", "lb", "lbu", "lh", "lhu", "lwc1", "l.d", "l.s", "mfc1", "cfc1", NULL,
+    "lw", "lb", "lbu", "lh", "lhu", "lwc1", "l.d", "l.s", "mfc1", "cfc1",
+    "mfc2", "cfc2", NULL,
 };
 
 struct linevec {

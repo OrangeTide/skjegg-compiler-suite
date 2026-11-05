@@ -6,6 +6,45 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.44.0
+
+#### Added
+- The PlayStation 1 (R3051 / MIPS) game SDK, `libpsx`: C, Pascal, and Kobold now
+  write PS1 games over the MIPS PS-EXE tier, sharing one C and assembly runtime.
+  The driver set relies on documented hardware and revision-stable BIOS calls,
+  not a specific BIOS. It covers the GPU (double-buffered display, a DMA-linked
+  primitive chain, interrupt-driven vsync through an own exception vector), 2D
+  primitives (flat, textured, and semi-transparent rectangles; sprites;
+  sprite-sheet cells; rotated and scaled sprites), textures (TIM upload to VRAM),
+  the SPU (ADPCM sample upload by DMA, voice key-on and key-off, ADSR envelopes,
+  reverb presets, and the CD-audio mix), the CD-ROM (ISO 9660 reads through the
+  shared `fs/` layer, plus CD-DA track playback and XA-ADPCM streaming),
+  controllers (SIO0 digital pads and DualShock analog sticks), memory cards
+  (frame I/O and a save-file manager over the card directory format), the three
+  root-counter timers, fixed-point math, and 3D through the GTE (vertex
+  projection, rotation-matrix builders, a depth-sorted ordering table, and flat,
+  Gouraud, and textured faces with backface culling). A built-in 8x8 font draws
+  on-screen debug text, and inline assembly reaches the MIPS target from C and
+  Kobold.
+- Pascal and Kobold units (`units/psx.pas`, `units/psx.kp`) that bind the whole
+  API. Textures and the GTE 3D path are reached through integer handles and
+  pointer-free helper calls, so a managed-language program draws 2D and projects
+  3D with no pointer or array crossing the language boundary.
+- Host asset tools, all in-tree C: `vagconv` (PCM to SPU-ADPCM), `timconv` (PPM
+  to TIM, with a median-cut palette quantizer for paletted textures), `mkppm`
+  (test patterns), and `mkcdda` (a two-track CD-DA test disc).
+- A headless test tier on PCSX-Redux. Structural PS-EXE checks run always-on in
+  `check-mips-all`; a golden-framebuffer tier captures the displayed frame with
+  no window and checks pixels (`redux_shot.lua`, `shotcheck`), and a golden-audio
+  tier captures the SPU output and checks its pitch (`wavcheck`). The functional
+  runs are opt-in and need a BIOS.
+
+#### Fixed
+- cc: a static multidimensional array of a sub-word element type (for example
+  `short v[8][3]`) is laid out at the element's width instead of word width, so
+  indexing reads the intended values rather than padding. The fix is in the
+  shared lowering, so it covers every backend.
+
 ### 0.43.1
 
 #### Changed

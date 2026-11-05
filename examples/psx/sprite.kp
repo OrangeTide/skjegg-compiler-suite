@@ -1,0 +1,37 @@
+{ sprite.kp - the Kobold texture sample, showing the psx unit at parity.
+
+  Drives the texture and sprite API through the psx unit: it loads two textures
+  by handle (through the C accessor in sprite_asset.c, since the raw pointer
+  stays in C), draws one as a plain sprite and the other rotated, and ends after
+  a time limit. This is the Kobold counterpart of tex_rot.c, proving the unit
+  exposes the richer 2D draws, not only the flat rectangle. }
+
+program spritekp;
+
+uses psx as _;
+
+function psx_load_quad: Integer; external cdecl;
+function psx_load_solid: Integer; external cdecl;
+
+const
+  Frames = 120;
+
+var
+  f, quad, solid: Integer;
+
+begin
+  GpuInit;
+  IrqInit;
+  SetBg(0, 0, 20);
+
+  quad := psx_load_quad;
+  solid := psx_load_solid;
+
+  for f := 1 to Frames do
+  begin
+    TexDraw(quad, 40, 40);
+    TexRot(solid, 200, 120, 128, FixOne);
+    Vsync;
+    DisplaySwap;
+  end;
+end.

@@ -467,6 +467,42 @@ enc_cop1_move(const char *m, struct mips_operand *ops, int nops, uint32_t *w)
     return 4;
 }
 
+/* Moves between GPR and COP2 (the GTE): mfc2/mtc2 name a GTE data register and
+ * cfc2/ctc2 a GTE control register, both written as a plain numbered register
+ * ($0..$31) whose number fills the rd field.  Same sub-op layout as COP1, under
+ * the COP2 opcode (0x12). */
+static int
+enc_cop2_move(const char *m, struct mips_operand *ops, int nops, uint32_t *w)
+{
+    int sub = -1;
+
+    if (strcmp(m, "mfc2") == 0) sub = 0x00;
+    else if (strcmp(m, "cfc2") == 0) sub = 0x02;
+    else if (strcmp(m, "mtc2") == 0) sub = 0x04;
+    else if (strcmp(m, "ctc2") == 0) sub = 0x06;
+    else return -1;
+
+    NEED(nops == 2 && is_reg(&ops[0]) && is_reg(&ops[1]));
+
+    /* rs = sub, rt = gpr, rd = GTE register number */
+    *w = enc_r(0x12, sub, ops[0].reg, ops[1].reg, 0, 0);
+    return 4;
+}
+
+/* A GTE command: cop2 <imm>, where imm is the 25-bit command word (for example
+ * 0x0180001 for RTPS).  The backend never emits these, so the GTE helper library
+ * writes them by their command value, the way the COP0 handler writes its few
+ * instructions.  Encodes as the COP2 opcode with the CO bit set. */
+static int
+enc_cop2_cmd(const char *m, struct mips_operand *ops, int nops, uint32_t *w)
+{
+    if (strcmp(m, "cop2") != 0)
+        return -1;
+    NEED(nops == 1 && is_imm(&ops[0]) && ops[0].sym == NULL);
+    *w = 0x4A000000u | ((uint32_t)ops[0].imm & 0x1FFFFFFu);
+    return 4;
+}
+
 /* bc1f/bc1t: single condition code 0, 16-bit branch offset. */
 static int
 enc_cop1_branch(struct mips_asm *a, const char *m, struct mips_operand *ops,
@@ -773,7 +809,9 @@ mips_encode(struct mips_asm *a, const char *m, struct mips_operand *ops,
         || (r = enc_muldiv(m, ops, nops, &w)) >= 0
         || (r = enc_hilo(m, ops, nops, &w)) >= 0
         || (r = enc_cop1_move(m, ops, nops, &w)) >= 0
-        || (r = enc_cop1_fp(m, ops, nops, &w)) >= 0) {
+        || (r = enc_cop1_fp(m, ops, nops, &w)) >= 0
+        || (r = enc_cop2_move(m, ops, nops, &w)) >= 0
+        || (r = enc_cop2_cmd(m, ops, nops, &w)) >= 0) {
         if (emit) emit_word(a, w);
         return r;
     }
