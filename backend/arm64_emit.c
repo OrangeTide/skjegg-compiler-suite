@@ -33,7 +33,7 @@
 #include "ir.h"
 #include "target.h"
 
-/* The AArch64 stack-ABI backend is LP64 only (tinc/scheme/pascal carry no ISA
+/* The AArch64 stack-ABI backend is LP64 only (scheme/pascal carry no ISA
    macro target.h can key on, so the width check lives here). A build that omits
    -DSKJ_LP64 would otherwise emit 32-bit addresses on a 64-bit ISA. */
 #if !SKJ_LP64
@@ -1825,7 +1825,7 @@ emit_globals(FILE *out, struct ir_program *prog)
 /* Extended inline asm (an IR_ASM carrying asm_info) is produced only by cc,
    which uses the arm64_select backend; this stack-convention backend never
    sees one, so no register is reserved.  The stub keeps regalloc_arm64.c
-   (shared with arm64_select) linkable in the tinc/scheme tools that take
+   (shared with arm64_select) linkable in the scheme tools that take
    arm64_emit. */
 int
 arm64_asm_reserved_regs(struct ir_func *fn, int *out, int max)

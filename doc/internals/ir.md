@@ -440,7 +440,7 @@ right-to-left (a word each on 32-bit targets, 64-bit values taking two
 slots), caller pops after return, and the result comes back in the
 target's first return register (ColdFire d0, RISC-V a0, MIPS $v0, x86-64
 rax, AArch64 x0; float in fp0/xmm0/d0, and a 32-bit i64 in a register
-pair such as ColdFire d0:d1). The tinc, scheme, moo, and pascal front
+pair such as ColdFire d0:d1). The scheme, moo, and pascal front
 ends use this convention on every backend.
 
 External calls follow the platform psABI instead: the C compiler on

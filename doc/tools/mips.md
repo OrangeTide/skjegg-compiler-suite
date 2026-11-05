@@ -21,7 +21,7 @@ the BIOS-TTY runtime are in place, so the MIPS toolchain is binutils-free
 on the PCSX-Redux emulator booting a real BIOS, and the soft-float configuration
 runs float code there on the FPU-less R3051. The backend is complete: it
 passes the
-TinC and TinScheme suites (`make check-mips`), the `test-i64`, `test-ops`,
+TinScheme suite (`make check-mips`), the `test-i64`, `test-ops`,
 `test-fpu`, and `test-f32` integration tests, and the C compiler suite
 (`make check-cc-mips`, 73 tests), all under `qemu-mipsel`. A `.set
 noreorder` mode (`SKJ_MIPS_NOREORDER=1`) makes the backend fill the delay
@@ -35,7 +35,7 @@ the float suites through it. See "Roadmap" for what remains.
 ## Build and test
 
 ```sh
-make check-mips        # TinC + TinScheme, compiled, assembled, linked, run
+make check-mips        # TinScheme, compiled, assembled, linked, run
 make test-i64-mips     # 64-bit integers (IR builder -> asm -> qemu-mipsel)
 make test-ops-mips     # unsigned 32-bit ops
 make test-fpu-mips     # double float, conversions, compares, half round-trip
@@ -51,11 +51,11 @@ IR-builder integration tests the other backends run.
 Running one test by hand:
 
 ```sh
-./build/skj-tinc-mips -o build/mips/hello.s tests/hello.tc
-mipsel-none-elf-as -march=mips1 -EL -o build/mips/hello.o build/mips/hello.s
+./build/skj-sc-mips -o build/mips/scm_fact.s tests/scm_fact.scm
+mipsel-none-elf-as -march=mips1 -EL -o build/mips/scm_fact.o build/mips/scm_fact.s
 mipsel-none-elf-as -march=mips1 -EL -o build/mips/start.o runtime/start_mips.S
-mipsel-none-elf-ld -o build/mips/hello build/mips/start.o build/mips/hello.o
-qemu-mipsel build/mips/hello ; echo $?
+mipsel-none-elf-ld -o build/mips/scm_fact build/mips/start.o build/mips/scm_fact.o
+qemu-mipsel build/mips/scm_fact ; echo $?
 ```
 
 ## The toolchain
@@ -208,7 +208,7 @@ The default convention is the toolkit's own stack-passing one, shared with
 the ColdFire and the non-psABI RISC-V backends. It is not the o32 C ABI. That
 means this backend's functions call each other, and call the runtime in
 `start_mips.S`, but they do not interoperate with a `gcc`-compiled o32 object.
-TinC, TinScheme, and the C compiler use this convention. The `CC_PSABI`
+TinScheme and the C compiler use this convention. The `CC_PSABI`
 path (next section) emits the o32 ABI instead.
 
 The rules:
@@ -323,7 +323,7 @@ backend has to be careful:
 
 ## Continuations
 
-TinC and TinScheme both lower `call/cc`-style capture to three IR opcodes,
+TinScheme lowers `call/cc`-style capture to three IR opcodes,
 `IR_MARK`, `IR_CAPTURE`, and `IR_RESUME`, backed by two runtime routines. The
 backend and `start_mips.S` implement the same stack-copying protocol the
 RISC-V runtime uses:
@@ -505,7 +505,7 @@ runtime/softfloat.c        integer-only IEEE-754 binary64 (soft-float builds)
 tests/test_softfloat.c     host-only unit test of softfloat.c against native double
 ```
 
-The Makefile builds `skj-tinc-mips`, `skj-sc-mips`, `skj-cc-mips`,
+The Makefile builds `skj-sc-mips`, `skj-cc-mips`,
 and `skj-cc-mips-sf` (the soft-float C compiler) from these
 plus the shared IR, and the `check-*-mips` targets drive the suites through
 `mipsel-none-elf-{as,ld}` and `qemu-mipsel`. The FPU and C tests also link
@@ -627,7 +627,7 @@ The build order, all done:
 
 Verified: the encoding and macro fixtures and all real backend `.set noreorder`
 output are byte-identical to GNU as; the full 73-test C suite and the
-tinc/scheme programs assemble through `skj-as-mips` on `.set reorder` output,
+scheme programs assemble through `skj-as-mips` on `.set reorder` output,
 link, and run under `qemu-mipsel`; and the `spim` tier confirms the scheduled
 code is correct on the R2000 model the interlocked `qemu` cannot show.
 
@@ -776,7 +776,7 @@ configuration runs float code there without an FPU.
 ## Roadmap
 
 1. Integer core, control flow, calls, `alloca`, continuations. `check-mips`
-   passes TinC and TinScheme. (Done.)
+   passes TinScheme. (Done.)
 2. Floating point on the hardware coprocessor (o32 double pairs, the
    `l.d`/`s.d` macros since MIPS I has no `ldc1`/`sdc1`, FCSR-based truncation
    since it has no `trunc.w`, and `half.c` for `_Float16`) and 64-bit

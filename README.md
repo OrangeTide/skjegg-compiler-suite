@@ -11,7 +11,6 @@ Ahead-of-time compilers (lower source to target assembly):
 
 | Tool       | Description                                     | Status  |
 |------------|-------------------------------------------------|---------|
-| `skj-tinc` | TinC compiler (minimal C)                       | Working |
 | `skj-sc`   | TinScheme compiler                              | Working |
 | `skj-mooc` | MooScript compiler                              | Working |
 | `skj-pc`   | Pascal compiler                         | Working |
@@ -57,12 +56,12 @@ AArch64 targets, verified against GNU as and the qemu suites.
 ```
 front ends              shared IR              backends
 ──────────              ─────────              ────────
-tinc/    ──┐                               ┌── backend/cf_emit.c     (ColdFire/m68k)
-scheme/  ──┤                               │
-moo/     ──┼──▶  ir/ir.h  ──▶  regalloc  ──┼── backend/rv_emit.c     (RISC-V RV32IMFD+Zfh)
-pascal/  ──┤       │                       │
-cc/      ──┘       │                       ├── backend/x86_emit.c    (x86-64)
-  ▲                │                       │
+scheme/  ──┐                               ┌── backend/cf_emit.c     (ColdFire/m68k)
+moo/     ──┤                               │
+pascal/  ──┼──▶  ir/ir.h  ──▶  regalloc  ──┼── backend/rv_emit.c     (RISC-V RV32IMFD+Zfh)
+cc/      ──┘       │                       │
+  ▲                │                       ├── backend/x86_emit.c    (x86-64)
+  │                │                       │
   │                └── ir/ir.c, ir/util.c  ├── backend/arm64_emit.c  (AArch64)
   │                                        │
 cpp/  (preprocessor library)               └── backend/mips_emit.c   (MIPS I / R2000/R3000)
@@ -75,7 +74,7 @@ Adding a new front end means writing `lex.c`, `parse.c`, `lower.c`, and
 backend means writing a regalloc + emitter pair and a
 `runtime/start_*.S`.
 
-Not every front end targets every backend.  TinC and TinScheme run on
+Not every front end targets every backend.  TinScheme runs on
 every backend.  The C compiler runs on ColdFire, RISC-V, x86-64,
 AArch64, and MIPS.  Pascal builds for ColdFire, x86-64, AArch64, and
 MIPS, and its Kobold dialect (via `skj-kpc` and the Kobold JIT) also
@@ -150,7 +149,6 @@ emu/         emulator cores (ColdFire, RV32, MIPS), the KVM/HVF hypervisor, and 
 jit/         in-process JIT byte sinks and arena (doc/tools/jit.md)
 libc/        shared C standard library (doc/tools/libc.md)
 runtime/     target runtimes (start_*.S per target, pascal_rt.c, str.c, list.c, 64-bit helpers)
-tinc/        TinC front end (C-like)
 scheme/      TinScheme front end (Scheme subset with GC; doc/internals/closures.md)
 moo/         MooScript front end
 pascal/      Pascal front end (doc/languages/pascal.md)
@@ -230,8 +228,8 @@ requiring `m68k-linux-gnu-as` or `m68k-linux-gnu-ld`.
 ## Using the Tools Directly
 
 ```sh
-# TinC for ColdFire, using the in-tree assembler and linker
-./build/skj-tinc -o out.s tests/bsearch.tc
+# TinScheme for ColdFire, using the in-tree assembler and linker
+./build/skj-sc -o out.s tests/scm_fact.scm
 ./build/skj-as -o out.o out.s
 ./build/skj-as -o start.o runtime/start.S
 ./build/skj-ld -o prog start.o out.o
@@ -262,11 +260,11 @@ flat component tokens, which are still accepted directly so an older
 # A self-contained 64-bit C target running natively under the hypervisor
 ./vendor.sh --arch x86-64 --frontend cc --with toolchain,runtime,emulator
 
-# TinC + Pascal for ColdFire with the assembler (flat-component form)
-./vendor.sh coldfire tinc pascal as
+# TinScheme + Pascal for ColdFire with the assembler (flat-component form)
+./vendor.sh coldfire scheme pascal as
 
 # Vendor into a custom directory
-./vendor.sh -d lib/skjegg --arch coldfire --frontend tinc
+./vendor.sh -d lib/skjegg --arch coldfire --frontend scheme
 ```
 
 The `--with` features are `toolchain` (the in-tree assembler, linker,
@@ -301,7 +299,6 @@ The axes expand to these tokens, which may also be passed directly.
 | `mips`     | MIPS I backend + runtime (incl. the soft-float path)     |
 | `x86-64`   | x86-64 (LP64) backend + runtime                          |
 | `arm64`    | AArch64 (LP64) backend + runtime                         |
-| `tinc`     | TinC front end                                           |
 | `scheme`   | TinScheme front end (with GC)                            |
 | `moo`      | MooScript front end + `runtime/str.c`, `list.c`          |
 | `pascal`   | Pascal front end + `runtime/pascal_rt.c`         |

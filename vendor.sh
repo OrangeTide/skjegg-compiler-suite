@@ -9,7 +9,7 @@
 #        update-skjegg.sh                      (re-vendor)
 #
 # Backends:  coldfire  riscv  mips
-# Frontends: tinc  scheme  moo  pascal  cc
+# Frontends: scheme  moo  pascal  cc
 # Tools:     as  ld  cpp
 # Emulators: emu-cf  emu-rv  emu-mips
 # Kobold:    kp
@@ -39,7 +39,7 @@ features you want and the right tools come along:
                       (x86-64 and aarch64 are the hardware-virtualization
                       targets: with --with emulator they build the HV core, run
                       natively under the host hypervisor, not an emulated CPU)
-  --frontend LIST   language front ends:   tinc  scheme  moo  pascal  cc  kobold
+  --frontend LIST   language front ends:   scheme  moo  pascal  cc  kobold
   --with LIST       per-target or standalone features:
                       toolchain   in-tree assembler + linker (+ ar) for each
                                   selected --arch
@@ -62,7 +62,7 @@ older update-skjegg.sh keeps working):
 Backends:  coldfire  riscv  mips  x86-64  arm64
              (x86-64/arm64 are the LP64 cc backends; pair with their toolchain
               and runtime for a self-contained 64-bit C target)
-Frontends: tinc  scheme  moo  pascal  cc
+Frontends: scheme  moo  pascal  cc
 Tools:     as  ld  as-rv  ld-rv  as-mips  ld-mips  ar  cpp  addr2line
            as-x86-64  ld-x86-64  as-aarch64  ld-arm64
              (as-rv/ld-rv: the RISC-V RV32 toolchain; as-mips/ld-mips: the
@@ -139,9 +139,9 @@ done
 # Expand the front-end axis.
 for _f in $_frontends; do
     case "$_f" in
-        tinc|scheme|moo|pascal|cc) COMPONENTS="$COMPONENTS $_f" ;;
+        scheme|moo|pascal|cc) COMPONENTS="$COMPONENTS $_f" ;;
         kobold|kp)                 COMPONENTS="$COMPONENTS kp" ;;
-        *) die "unknown --frontend: $_f (tinc scheme moo pascal cc kobold)" ;;
+        *) die "unknown --frontend: $_f (scheme moo pascal cc kobold)" ;;
     esac
 done
 
@@ -169,7 +169,7 @@ for _w in $_features; do
         frontend=*)
             for _f in $(echo "${_w#frontend=}" | tr ',' ' '); do
                 case "$_f" in
-                    tinc|scheme|moo|pascal|cc) COMPONENTS="$COMPONENTS $_f" ;;
+                    scheme|moo|pascal|cc) COMPONENTS="$COMPONENTS $_f" ;;
                     kobold|kp)                 COMPONENTS="$COMPONENTS kp" ;;
                     *) die "unknown frontend: $_f" ;;
                 esac
@@ -190,7 +190,7 @@ fi
 # ---- parse and validate components ----
 
 has_cf=0 has_rv=0 has_mips=0 has_x64_be=0 has_a64_be=0
-has_tinc=0 has_scheme=0 has_moo=0 has_pascal=0 has_cc=0
+has_scheme=0 has_moo=0 has_pascal=0 has_cc=0
 has_as=0 has_ld=0 has_cpp=0
 has_as_rv=0 has_ld_rv=0
 has_as_mips=0 has_ld_mips=0 has_ar=0
@@ -206,7 +206,6 @@ for comp in $COMPONENTS; do
         x86-64)   has_x64_be=1 ;;
         arm64)    has_a64_be=1 ;;
         mips)     has_mips=1 ;;
-        tinc)     has_tinc=1 ;;
         scheme)   has_scheme=1 ;;
         moo)      has_moo=1 ;;
         pascal)   has_pascal=1 ;;
@@ -236,7 +235,7 @@ for comp in $COMPONENTS; do
     esac
 done
 
-has_fe=$((has_tinc + has_scheme + has_moo + has_pascal + has_cc))
+has_fe=$((has_scheme + has_moo + has_pascal + has_cc))
 has_be=$((has_cf + has_rv + has_mips + has_x64_be + has_a64_be))
 
 if [ "$has_fe" -gt 0 ] && [ "$has_be" -eq 0 ]; then
@@ -369,10 +368,6 @@ if [ "$has_a64_be" -eq 1 ]; then
 fi
 
 # frontends
-if [ "$has_tinc" -eq 1 ]; then
-    mkdir -p "$DEST/tinc"
-    cp "$S"/tinc/*.c "$S"/tinc/*.h "$DEST/tinc/"
-fi
 if [ "$has_scheme" -eq 1 ]; then
     mkdir -p "$DEST/scheme"
     cp "$S/scheme/lex.c" "$S/scheme/parse.c" "$S/scheme/print.c" \
@@ -841,12 +836,6 @@ if [ "$has_a64_be" -eq 1 ]; then
     printf 'SKJ_A64 := $(SKJEGG)backend/regalloc_arm64.c $(SKJEGG)backend/arm64_select.c $(SKJEGG)backend/arm64_mc_text.c\n' >> "$MK"
 fi
 
-if [ "$has_tinc" -eq 1 ]; then
-    cat >> "$MK" <<'MK'
-SKJ_TINC := $(SKJEGG)tinc/lex.c $(SKJEGG)tinc/parse.c \
-            $(SKJEGG)tinc/lower.c $(SKJEGG)tinc/main.c
-MK
-fi
 if [ "$has_scheme" -eq 1 ]; then
     cat >> "$MK" <<'MK'
 SKJ_SCHEME := $(SKJEGG)scheme/lex.c $(SKJEGG)scheme/parse.c \
@@ -956,15 +945,6 @@ fi
 # compiler binary rules (frontend x backend)
 printf '\nSKJ_ALL :=\n' >> "$MK"
 
-if [ "$has_tinc" -eq 1 ] && [ "$has_cf" -eq 1 ]; then
-    emit_compiler skj-tinc SKJ_TINC SKJ_CF '-I$(SKJEGG)ir -I$(SKJEGG)tinc'
-fi
-if [ "$has_tinc" -eq 1 ] && [ "$has_rv" -eq 1 ]; then
-    emit_compiler skj-tinc-rv SKJ_TINC SKJ_RV '-I$(SKJEGG)ir -I$(SKJEGG)tinc'
-fi
-if [ "$has_tinc" -eq 1 ] && [ "$has_mips" -eq 1 ]; then
-    emit_compiler skj-tinc-mips SKJ_TINC SKJ_MIPS '-I$(SKJEGG)ir -I$(SKJEGG)tinc'
-fi
 if [ "$has_scheme" -eq 1 ] && [ "$has_cf" -eq 1 ]; then
     emit_compiler skj-sc SKJ_SCHEME SKJ_CF '-I$(SKJEGG)scheme -I$(SKJEGG)ir'
 fi

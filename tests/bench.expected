@@ -5,7 +5,7 @@ cf/pascal_t052_set_basic 8147
 cf/pascal_t127_fibonacci 652906
 cf/pascal_t135_prime_sieve 65537
 cf/pascal_t177_deep_recursion 454343
-rv/fib 8024
-rv/loop 4399
+rv/scm_fact 392
 rv/scm_reset_heap 1713104
 rv/scm_reset_reclaim 4600603
+rv/scm_tailcall 395

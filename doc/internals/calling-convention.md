@@ -11,7 +11,7 @@ big ABI item after LP64 (`doc/internals/lp64.md`).
 1. **cc-specific, compile-time gated.** A flag (`CC_PSABI`) is defined only for
    the x86-64 and arm64 cc tools, exactly like `CC_LP64`. The backend picks the
    concrete ABI from its target (SysV on `X86_BITS==64`, AAPCS64 on arm64). The
-   other front-ends (tinc, scheme, moo, pascal) on those backends keep the
+   other front-ends (scheme, moo, pascal) on those backends keep the
    toolkit stack convention untouched; the calling convention is self-consistent
    within a program, so nothing else has to change.
 2. **Phased** (each phase keeps the whole suite green):
@@ -241,7 +241,7 @@ maps almost directly onto the Linux syscall (same registers, number in `rax`),
 so a psABI freestanding `start` is simpler than the stack version. cc tests
 link that psABI `start`; real programs link the system crt + libc, where `main`
 is already SysV. The other front-ends keep linking the stack `start`. Concretely
-this is a second start object selected for the cc-psabi tools (the tinc/scheme
+this is a second start object selected for the cc-psabi tools (the scheme
 runtime is unchanged).
 
 ## Interactions and risks

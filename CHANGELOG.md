@@ -6,6 +6,17 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.45.0
+
+#### Removed
+- The TinC front end. `skj-tinc` and its per-backend variants (`-rv`, `-mips`,
+  `-arm64`, `-x86-64`), the `.tc` test corpus, and the TinC-specific fuzz,
+  sanitizer, and debug-line lanes are gone. TinC predated the C compiler and the
+  Kobold dialect and overlapped both. The toolkit's front ends are now
+  TinScheme, MooScript, Pascal, C, and Kobold, and TinScheme keeps the stack-ABI
+  generic test lanes on every backend. `vendor.sh` no longer offers a `tinc`
+  component.
+
 ### 0.44.4
 
 #### Added

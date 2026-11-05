@@ -372,7 +372,7 @@ verb or effect as a green-thread coroutine: a small ColdFire VM context
 that runs, then suspends at a synchronization point (a channel send or
 receive) and resumes later. This is LambdaMOO's own task model (`suspend`,
 `fork`, tick budgets) rather than a new invention, and the capture and
-resume mechanism is already plumbed into TinScheme and TinC continuations.
+resume mechanism is already plumbed into TinScheme continuations.
 
 The consequence for the language is large. An effect's state lives on its
 suspended stack, so there is no stored closure that outlives the turn and

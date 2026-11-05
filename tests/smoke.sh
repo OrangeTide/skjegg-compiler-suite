@@ -5,7 +5,7 @@
 # No external cross toolchain needed (no m68k-linux-gnu-*).
 #
 # Usage: tests/smoke.sh [qemu-binary]
-# Requires: build/skj-tinc build/skj-sc build/skj-mooc build/skj-cc build/skj-as build/skj-ld
+# Requires: build/skj-sc build/skj-mooc build/skj-cc build/skj-as build/skj-ld
 #
 
 set -eu
@@ -69,15 +69,6 @@ run_test() {
         fail=$((fail + 1))
     fi
 }
-
-# TinC tests
-for f in "$HERE"/*.tc; do
-    name=$(basename "$f" .tc)
-    "$ROOT/build/skj-tinc" -o "$BDIR/${name}.s" "$f"
-    "$AS" -o "$BDIR/${name}.o" "$BDIR/${name}.s"
-    "$LD" -o "$BDIR/$name" "$BDIR/start.o" "$BDIR/${name}.o"
-    run_test "$name"
-done
 
 # Scheme tests
 for f in "$HERE"/scm_*.scm; do

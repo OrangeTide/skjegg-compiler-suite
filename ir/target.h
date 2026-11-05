@@ -18,7 +18,7 @@
  * The 64-bit ISAs are x86-64 (X86_BITS==64) and AArch64; the 32-bit ISAs are
  * x86-32 (X86_BITS==32), RISC-V RV32 (CC_RISCV), ColdFire/m68k (CC_M68K), and
  * MIPS (CC_MIPS). AArch64 is named by CC_ARM64 in the cc and Excelsior tools;
- * the tinc/scheme/pascal arm64 tools select it by compiling backend/arm64_emit.c
+ * the scheme/pascal arm64 tools select it by compiling backend/arm64_emit.c
  * (which asserts LP64 itself) and pass -DSKJ_LP64=1.
  *
  * AArch64 is always LP64 in this tree (there is no ILP32 arm64 build), so the
@@ -42,7 +42,7 @@
 
 /* An explicit (or derived) width must not contradict the ISA selector, so a
    wrong -DSKJ_LP64 fails the build instead of silently reading pointers at the
-   wrong width. The arm64 emitter front ends (tinc/scheme/pascal) carry no ISA
+   wrong width. The arm64 emitter front ends (scheme/pascal) carry no ISA
    macro here; backend/arm64_emit.c asserts LP64 for them. */
 #if defined(X86_BITS) && (X86_BITS == 64) && !SKJ_LP64
 #  error "x86-64 target must be LP64: an ILP32 x86-64 tool would reject LP64 modules"

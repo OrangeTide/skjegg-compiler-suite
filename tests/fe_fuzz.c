@@ -29,23 +29,7 @@
 
 #define FZ_FORK
 
-#if defined(FEFUZZ_TINC)
-#include "ir.h"
-#include "tinc.h"
-#define FE_LABEL "tinc"
-#define FE_RUN(ap, buf, out) do {                                       \
-        struct node *ast;                                               \
-        struct ir_program *prog;                                        \
-        struct ir_func *fn;                                             \
-        lex_init((ap), (buf), "<fuzz>");                                \
-        ast = parse_program(ap);                                        \
-        prog = lower_program((ap), ast);                                \
-        for (fn = prog->funcs; fn; fn = fn->next)                       \
-            regalloc(fn);                                               \
-        target_emit((out), prog);                                       \
-    } while (0)
-
-#elif defined(FEFUZZ_PASCAL)
+#if defined(FEFUZZ_PASCAL)
 #include "ir.h"
 #include "pascal.h"
 #define FE_LABEL "pascal"

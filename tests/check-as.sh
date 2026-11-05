@@ -5,7 +5,7 @@
 #
 # Assembles runtime/start.S and each compiler's .s output with skj-as,
 # links with m68k-linux-gnu-ld, runs under qemu, and checks results.
-# Requires: build/skj-{tinc,sc,mooc,pc,as} already built (run make first).
+# Requires: build/skj-{sc,mooc,pc,as} already built (run make first).
 
 set -eu
 
@@ -74,15 +74,6 @@ run_test() {
         fail=$((fail + 1))
     fi
 }
-
-# TinC tests
-for f in "$HERE"/*.tc; do
-    name=$(basename "$f" .tc)
-    "$ROOT/build/skj-tinc" -o "$BDIR/${name}.s" "$f"
-    "$AS" -o "$BDIR/${name}.o" "$BDIR/${name}.s"
-    $LD -o "$BDIR/$name" "$BDIR/start.o" "$BDIR/${name}.o" 2>/dev/null
-    run_test "$name"
-done
 
 # Scheme tests
 for f in "$HERE"/scm_*.scm; do

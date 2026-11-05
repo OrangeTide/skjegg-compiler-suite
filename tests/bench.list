@@ -18,7 +18,7 @@ cf/pascal_t177_deep_recursion   Pascal: deep recursion
 cf/pascal_t127_fibonacci        Pascal: recursive fibonacci
 
 # RISC-V (rv32) guests
-rv/loop                         tinc: loop
-rv/fib                          tinc: recursive fibonacci
+rv/scm_tailcall                 Scheme: iterative tail calls
+rv/scm_fact                     Scheme: recursion
 rv/scm_reset_heap               Scheme: heap churn
 rv/scm_reset_reclaim            Scheme: heap churn with reclaim

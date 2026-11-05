@@ -453,7 +453,7 @@ target_emit(FILE *out, struct ir_program *prog)
     struct rv_mc *m;
     int serial = 0;
 
-    fputs("# tinc: generated RISC-V (RV32IMFD + Zfh) assembly\n", out);
+    fputs("# skjegg: generated RISC-V (RV32IMFD + Zfh) assembly\n", out);
 
     /* Under -g a front end sets src_file; emit the DWARF .file hint once so the
        per-statement .loc directives (rv_mc_loc) attach to it.  The assembler

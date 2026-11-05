@@ -36,7 +36,7 @@ and the bindings add no code, so only C's direct path and the units differ.
 
 Both points, expanded:
 
-**One calling convention.** TinC, TinScheme, the C compiler, and the Kobold AOT
+**One calling convention.** TinScheme, the C compiler, and the Kobold AOT
 path all emit the toolkit's own stack-passing convention (arguments pushed right
 to left, caller pops, result in `$v0`; see "The calling convention" in
 [the MIPS backend](mips.md)). So a single `libpsx.a` built with `skj-cc-mips-sf`

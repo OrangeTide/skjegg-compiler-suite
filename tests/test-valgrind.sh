@@ -43,10 +43,6 @@ check() {
 
 # -- create broken input files -----------------------------------------
 
-cat >"$TMPDIR/bad.tc" <<'EOF'
-@@@
-EOF
-
 cat >"$TMPDIR/bad.pas" <<'EOF'
 @@@
 EOF
@@ -77,12 +73,6 @@ cat >"$TMPDIR/cpp_error.c" <<'EOF'
 EOF
 
 # valid inputs that exercise deeper pipeline stages
-cat >"$TMPDIR/ok.tc" <<'EOF'
-fn main() -> int {
-    return 42;
-}
-EOF
-
 cat >"$TMPDIR/ok.pas" <<'EOF'
 program ok;
 begin
@@ -112,13 +102,6 @@ cat >"$TMPDIR/ok_cpp.c" <<'EOF'
 #include "ok.h"
 int x = ANSWER;
 EOF
-
-# -- skj-tinc ----------------------------------------------------------
-
-check "tinc: happy path"       0  ./$BUILDDIR/skj-tinc -o /dev/null tests/hello.tc
-check "tinc: missing file"     1  ./$BUILDDIR/skj-tinc -o /dev/null "$TMPDIR/nonexistent.tc"
-check "tinc: syntax error"     1  ./$BUILDDIR/skj-tinc -o /dev/null "$TMPDIR/bad.tc"
-check "tinc: bad output path"  1  ./$BUILDDIR/skj-tinc -o /proc/nonexistent/out "$TMPDIR/ok.tc"
 
 # -- skj-pc (pascal) ---------------------------------------------------
 
@@ -156,7 +139,7 @@ check "cc: syntax error"       1  ./$BUILDDIR/skj-cc -o /dev/null "$TMPDIR/bad.c
 # -- skj-as -------------------------------------------------------------
 
 # generate valid assembly from a known-good source for the happy path
-./$BUILDDIR/skj-tinc -o "$TMPDIR/ok.s" tests/hello.tc
+./$BUILDDIR/skj-cc -o "$TMPDIR/ok.s" "$TMPDIR/ok.c"
 
 check "as: happy path"         0  ./$BUILDDIR/skj-as -o /dev/null "$TMPDIR/ok.s"
 check "as: missing file"       1  ./$BUILDDIR/skj-as "$TMPDIR/nonexistent.s"

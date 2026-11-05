@@ -1594,7 +1594,7 @@ emit_externs(FILE *out, struct ir_program *prog)
 /* Extended inline asm (an IR_ASM carrying asm_info) is produced only by cc,
    which uses the x86_select backend; this stack-convention backend never sees
    one, so no register is ever reserved.  The stub keeps regalloc_x86.c (shared
-   with x86_select) linkable in the tinc/scheme tools that take x86_emit. */
+   with x86_select) linkable in the scheme tools that take x86_emit. */
 int
 x86_asm_reserved_regs(struct ir_func *fn, int *out, int max)
 {

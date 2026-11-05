@@ -589,7 +589,7 @@ a content-addressable depot.
     Type checker ──► typed AST
         │
         ▼
-    Lowering ──► IR (extended TinC opcodes)
+    Lowering ──► IR (extended opcodes)
         │         - property access → host glue IR_CALL
         │         - verb calls → host dispatch IR_CALL
         │         - string/list ops → runtime library IR_CALL

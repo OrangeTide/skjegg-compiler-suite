@@ -46,7 +46,6 @@ the soft-float PlayStation configuration where it applies).
 | C | `skj-cc` (and `-rv`, `-x86-64`, `-arm64`, `-mips`, `-mips-sf`) | `doc/languages/c.md` |
 | Pascal | `skj-pc` | `doc/languages/pascal.md` |
 | Kobold-Pascal | `skj-kpc` (and per-target variants) | `doc/languages/kobold/` |
-| TinC | `skj-tinc` (and per-target variants) | front end under `tinc/` |
 | TinScheme | `skj-sc` (and per-target variants) | front end under `scheme/` |
 | MooScript | `skj-mooc` | front end under `moo/` |
 

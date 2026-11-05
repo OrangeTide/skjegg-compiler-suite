@@ -17,10 +17,9 @@ apart:
    variables by value into a heap record and can be stored, passed, and called
    later. This is closure support proper.
 2. **Delimited continuations** (implemented), exposed by TinScheme
-   (`reset` / `shift` / `resume`) and by TinC (the `mark` / `capture` /
-   `resume` intrinsics). A capture takes the current continuation up to the
-   enclosing delimiter as a resumable value. Both front ends drive the same IR
-   opcodes and the same runtime.
+   (`reset` / `shift` / `resume`). A capture takes the current continuation up to
+   the enclosing delimiter as a resumable value. They drive the IR
+   continuation opcodes and the shared runtime.
 3. **Excelsior func values** (implemented, non-capturing by decision). A
    `func(...) ... endfunc` is a first-class function value, but capture is
    **forbidden**, so it is a bare code pointer, not a closure. See
@@ -102,27 +101,13 @@ positions use `IR_TAILCALLI` / `IR_TAILCALL` when the total argument count fits
 
 ## Delimited continuations
 
-Two front ends expose the same three IR opcodes.
-
-**TinScheme** (`scheme/lower.c`) wraps them in the classic delimited forms:
+**TinScheme** (`scheme/lower.c`) wraps the three IR opcodes in the classic
+delimited forms:
 
 - `(reset body handler)` marks a delimiter.
 - `(shift)` captures the continuation from the `shift` up to the enclosing
   `reset` and returns it as a buffer value.
 - `(resume buf value)` re-enters a captured continuation, delivering `value`.
-
-**TinC** (`tinc/lower.c`, documented in `tinc/DESIGN.md`) exposes the raw
-intrinsics as ordinary-looking calls:
-
-- `mark()` places a delimiter, returning 0 on first entry and nonzero (the
-  buffer) on re-entry.
-- `capture()` captures the current continuation, returning the buffer.
-- `resume(buf, value)` re-enters a captured continuation.
-
-The two surfaces are independent (neither front end calls the other's code),
-but they lower to the same three IR opcodes and the same runtime. TinScheme's
-`reset` bundles the mark with the handler dispatch, where TinC's `mark` exposes
-that raw and leaves the branch to the programmer.
 
 ### IR opcodes (implemented)
 
@@ -290,7 +275,6 @@ send boundary.
 | Flat closures (analysis, record, lifting, calling) | `scheme/lower.c` (`find_free`, `emit_closure`, `closure_fn`, `lower_lambda`, `lower_function`, `lower_call`) |
 | Host-side closure GC (compile-time only) | `scheme/gc.c` (`gc_closure`, `mark_val` `OBJ_CLOSURE` arm), `scheme/gc.h`, `scheme/test_gc.c` (`make test-gc`) |
 | Continuation surface (TinScheme) | `scheme/lower.c` (`lower_reset`, `lower_shift`, `lower_resume`) |
-| Continuation surface (TinC) | `tinc/lower.c` (the `mark` / `capture` / `resume` intrinsics), `tinc/DESIGN.md` |
 | Continuation IR opcodes | `ir/ir.h`, documented in `doc/internals/ir.md` |
 | Continuation opcode emission | `backend/{cf,x86,arm64,rv,mips}_emit.c` |
 | Continuation runtime | `runtime/start.S`, `start_x86_64.s`, `start_arm64.S`, `start_rv.S`, `start_mips.S`, `start_psx.S` (`__cont_capture`, `__cont_resume`, `__cont_mark_sp`, `__cont_arena`) |

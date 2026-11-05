@@ -1,8 +1,8 @@
 # Makefile : build the Skjegg compiler tools and their test programs.
 #
-# Host build:         make          -> build/skj-tinc, build/skj-sc,
-#                                      build/skj-mooc
-# Target build+run:   make check    -> assembles/links each tests/*.tc
+# Host build:         make          -> build/skj-sc, build/skj-mooc,
+#                                      build/skj-pc, build/skj-cc
+# Target build+run:   make check    -> assembles/links each tests/*.scm
 #                                      with m68k-linux-gnu-{as,ld} and
 #                                      runs the result under qemu-m68k.
 #                     make check-rv -> same but for RISC-V (RV32IM)
@@ -155,7 +155,7 @@ BE_A64  := backend/regalloc_arm64.c backend/arm64_emit.c
 BE_X64  := backend/regalloc_x86.c backend/x86_emit.c
 
 # AArch64 selector + GAS text sink, driven by the shared AArch64 selector.
-# skj-cc-arm64 uses this; the stack-ABI arm64 tools (tinc/scheme)
+# skj-cc-arm64 uses this; the stack-ABI arm64 scheme tool
 # and the i64/ops/fpu integration tests keep BE_A64 (arm64_emit.c), the same
 # split x86 has between BE_X64_SEL and BE_X64.
 BE_A64_SEL := backend/regalloc_arm64.c backend/arm64_select.c backend/arm64_mc_text.c
@@ -164,20 +164,6 @@ BE_A64_SEL := backend/regalloc_arm64.c backend/arm64_select.c backend/arm64_mc_t
 # x86-64 tools still use BE_X64 (x86_emit.c) until M3 moves them over.
 BE_X64_SEL := backend/regalloc_x86.c backend/x86_select.c backend/mc_text.c \
               backend/x86_aot.c
-TC_SRC  := tinc/lex.c tinc/parse.c tinc/lower.c tinc/main.c
-# The TinC sources per target, keyed by the tool-name suffix (rv, mips, arm64,
-# x86-64) so one pattern rule builds every cross target; SRC is the ColdFire
-# base (the bare build/skj-tinc).  tinc_def_<suffix> carries the LP64/width
-# defines the 64-bit targets need (the 32-bit ones need none).
-SRC             := $(IR_SRC) $(BE_CF) $(TC_SRC)
-tinc_src_rv     := $(IR_SRC) $(BE_RV) $(TC_SRC)
-tinc_src_mips   := $(IR_SRC) $(BE_MIPS) $(TC_SRC)
-tinc_src_arm64  := $(IR_SRC) $(BE_A64) $(TC_SRC)
-tinc_src_x86-64 := $(IR_SRC) $(BE_X64) $(TC_SRC)
-tinc_def_arm64  := -DSKJ_LP64=1
-tinc_def_x86-64 := -DX86_BITS=64 -DSKJ_LP64=1
-
-TESTS     := $(wildcard tests/*.tc)
 SCM_TESTS := $(wildcard tests/scm_*.scm)
 MOO_TESTS := $(filter-out tests/moo_room.moo tests/moo_toy_%.moo,$(wildcard tests/moo_*.moo))
 MOO_TOY_TESTS := $(wildcard tests/moo_toy_*.moo)
@@ -190,8 +176,7 @@ PAS_TESTS := $(wildcard tests/pascal_*.pas)
 # are host-only too.
 PAS_TESTS_NOFLOAT := $(filter-out %_real.pas %_hostio.pas,$(PAS_TESTS))
 
-TOOLS := build/skj-tinc build/skj-tinc-rv build/skj-tinc-mips build/skj-tinc-arm64 \
-         build/skj-sc build/skj-sc-rv build/skj-sc-mips build/skj-sc-arm64 \
+TOOLS := build/skj-sc build/skj-sc-rv build/skj-sc-mips build/skj-sc-arm64 \
          build/skj-mooc build/skj-pc build/skj-as build/skj-ld \
          build/skj-as-rv build/skj-ld-rv build/skj-as-mips build/skj-ld-mips build/skj-ar \
          build/skj-as-x86-64 build/skj-as-aarch64 build/skj-ld-aarch64 \
@@ -227,14 +212,6 @@ help:
 # reference the stem through $$(...) so the per-arch source list stays a real
 # prerequisite (rebuild on source change), not just a recipe argument.
 .SECONDEXPANSION:
-
-build/skj-tinc: $(SRC) ir/ir.h tinc/tinc.h | build
-	$(CC) $(CFLAGS) -Iir -Itinc -o $@ $(SRC)
-
-# The cross TinC tools (suffix rv, mips, arm64, x86-64): one pattern rule over
-# the tinc_src_<suffix> / tinc_def_<suffix> knobs above.
-build/skj-tinc-%: $$(tinc_src_$$*) ir/ir.h tinc/tinc.h | build
-	$(CC) $(CFLAGS) $(tinc_def_$*) -Iir -Itinc -o $@ $(tinc_src_$*)
 
 ## C preprocessor
 CPP_SRC := cpp/tok.c cpp/macro.c cpp/cond.c cpp/dir.c ir/util.c ir/arena.c
@@ -1841,7 +1818,7 @@ build/skj-run: $(EMU_SRC) $(EMU_HDR) dwarf/dwread.h build/version.h | build
 ## the AArch64 C compiler follow the host arch (NATIVE_JIT, A64_CC), so an Apple
 ## Silicon Mac builds the arm64 JIT, never the x86 one.
 MACOS_TOOLS := build/skj-cpp build/skj-cc build/skj-cc-arm64 build/skj-pc \
-               build/skj-tinc build/skj-sc build/skj-mooc \
+               build/skj-sc build/skj-mooc \
                build/skj-as-aarch64 build/skj-as-x86-64 \
                $(NATIVE_JIT) build/skj-run
 .PHONY: macos
@@ -2304,11 +2281,8 @@ AR_SRC := ar/main.c ld/mapfile.c ir/util.c ir/arena.c
 build/skj-ar: $(AR_SRC) ld/mapfile.h ir/util.h ir/arena.h | build
 	$(CC) $(CFLAGS) -Ild -Iir -o $@ $(AR_SRC)
 
-# Per-test rules: tests/<name>.tc -> build/<name>.s -> build/<name>.o
-#                 + build/start.o -> build/<name>
-build/%.s: tests/%.tc build/skj-tinc | build
-	./build/skj-tinc -o $@ $<
-
+# Per-test rules: tests/<name>.scm -> build/<name>.s -> build/<name>.o
+#                 + build/start.o -> build/<name> (scheme; see build/scm_%.s)
 build/%.o: build/%.s
 	$(M68K_AS) -o $@ $<
 
@@ -2352,7 +2326,7 @@ build/version.h: FORCE | build
 # The skj-pc LP64 host variants are such tools: they are not in $(TOOLS) but
 # build/skj-kpc-rv, -cf, and -arm64 are built from build/skj-pc-x86-64, so a
 # bootstrap that starts from a kpcom seed reaches them without `make all` first.
-VERSIONED := $(TOOLS) build/skj-tinc-x86-64 build/skj-sc-x86-64 \
+VERSIONED := $(TOOLS) build/skj-sc-x86-64 \
              build/skj-pc-x86-64 build/skj-pc-arm64
 $(VERSIONED): build/version.h
 
@@ -2372,15 +2346,11 @@ release-check:
 
 FORCE:
 
-check: build/skj-tinc build/skj-mooc build/skj-pc $(TESTS:tests/%.tc=build/%) $(SCM_TESTS:tests/%.scm=build/%) $(MOO_TESTS:tests/%.moo=build/%) $(MOO_TOY_TESTS:tests/%.moo=build/%) $(PAS_TESTS_NOFLOAT:tests/%.pas=build/%)
+check: build/skj-mooc build/skj-pc $(SCM_TESTS:tests/%.scm=build/%) $(MOO_TESTS:tests/%.moo=build/%) $(MOO_TOY_TESTS:tests/%.moo=build/%) $(PAS_TESTS_NOFLOAT:tests/%.pas=build/%)
 	@sh tests/run-tests.sh "$(QEMU)"
 
-## RISC-V per-test rules: tests/<name>.tc -> build/rv/<name>.s -> .o -> binary
-RV_TESTS     := $(TESTS)
+## RISC-V per-test rules: tests/<name>.scm -> build/rv/<name>.s -> .o -> binary
 RV_SCM_TESTS := $(SCM_TESTS)
-
-build/rv/%.s: tests/%.tc build/skj-tinc-rv | build/rv
-	./build/skj-tinc-rv -o $@ $<
 
 build/rv/%.o: build/rv/%.s
 	$(RV_AS) -march=rv32im -mabi=ilp32 -o $@ $<
@@ -2391,7 +2361,7 @@ build/rv/start.o: runtime/start_rv.S runtime/crt_entry_rv.S runtime/syscall_rv.S
 build/rv/%: build/rv/%.o build/rv/start.o
 	$(RV_LD) -m elf32lriscv -o $@ build/rv/start.o $<
 
-check-rv: build/skj-tinc-rv build/skj-sc-rv $(RV_TESTS:tests/%.tc=build/rv/%) $(RV_SCM_TESTS:tests/%.scm=build/rv/%)
+check-rv: build/skj-sc-rv $(RV_SCM_TESTS:tests/%.scm=build/rv/%)
 	@sh tests/run-tests.sh "$(QEMU_RV)" build/rv
 
 ## Run an ELF under qemu-riscv32 configured to match the rv32.c emulator's ISA.
@@ -2400,15 +2370,11 @@ run-rv:
 	@test -n "$(ELF)" || { echo "usage: make run-rv ELF=<path> [ARGS='...']" >&2; exit 2; }
 	$(QEMU_RV) -cpu $(QEMU_RV_CPU) $(ELF) $(ARGS)
 
-## MIPS I per-test rules: tests/<name>.tc -> build/mips/<name>.s -> .o -> binary.
+## MIPS I per-test rules: tests/<name>.scm -> build/mips/<name>.s -> .o -> binary.
 ## The toolchain (mipsel-none-elf) defaults to -march=mips1, o32,
 ## little-endian; the generated asm leans on the assembler's default
 ## `.set reorder` to fill the load/branch delay slots for R2000/R3000.
-MIPS_TESTS     := $(TESTS)
 MIPS_SCM_TESTS := $(SCM_TESTS)
-
-build/mips/%.s: tests/%.tc build/skj-tinc-mips | build/mips
-	./build/skj-tinc-mips -o $@ $<
 
 build/mips/scm_%.s: tests/scm_%.scm build/skj-sc-mips | build/mips
 	./build/skj-sc-mips -o $@ $<
@@ -2426,7 +2392,7 @@ build/mips/start_psx.o: runtime/start_psx.S | build/mips
 build/mips/%: build/mips/%.o build/mips/start.o
 	$(MIPS_LD) -o $@ build/mips/start.o $<
 
-check-mips: build/skj-tinc-mips build/skj-sc-mips $(MIPS_TESTS:tests/%.tc=build/mips/%) $(MIPS_SCM_TESTS:tests/%.scm=build/mips/%)
+check-mips: build/skj-sc-mips $(MIPS_SCM_TESTS:tests/%.scm=build/mips/%)
 	@sh tests/run-tests.sh "$(QEMU_MIPS)" build/mips
 
 ## MIPS I integration tests (IR builder -> MIPS asm -> qemu-mipsel).
@@ -2792,13 +2758,12 @@ build/cf/%.o: runtime/%.c | build/cf
 CF_MOO_RT     := build/start.o build/cf/str.o build/cf/list.o build/cf/host_stub.o
 CF_MOO_TOY_RT := build/start.o build/cf/str.o build/cf/list.o build/cf/toy_host.o
 
-CF_TC_BINS  := $(TESTS:tests/%.tc=build/cf/%)
 CF_SCM_BINS := $(SCM_TESTS:tests/%.scm=build/cf/%)
 CF_MOO_BINS := $(MOO_TESTS:tests/%.moo=build/cf/%)
 CF_TOY_BINS := $(MOO_TOY_TESTS:tests/%.moo=build/cf/%)
 CF_PAS_BINS := $(PAS_TESTS_NOFLOAT:tests/%.pas=build/cf/%)
 
-$(CF_TC_BINS) $(CF_SCM_BINS): build/cf/%: build/%.o build/start.o build/skj-ld | build/cf
+$(CF_SCM_BINS): build/cf/%: build/%.o build/start.o build/skj-ld | build/cf
 	./build/skj-ld -o $@ build/start.o $<
 
 $(CF_MOO_BINS): build/cf/%: build/%.o $(CF_MOO_RT) build/skj-ld | build/cf
@@ -2810,25 +2775,27 @@ $(CF_TOY_BINS): build/cf/%: build/%.o $(CF_MOO_TOY_RT) build/skj-ld | build/cf
 $(CF_PAS_BINS): build/cf/%: build/%.o build/start.o build/cf/pascal_rt.o build/skj-ld | build/cf
 	./build/skj-ld -o $@ build/start.o build/cf/pascal_rt.o $<
 
-check-emu: build/skj-run build/skj-tinc build/skj-mooc build/skj-pc \
-           $(CF_TC_BINS) $(CF_SCM_BINS) $(CF_MOO_BINS) $(CF_TOY_BINS) $(CF_PAS_BINS)
+check-emu: build/skj-run build/skj-mooc build/skj-pc \
+           $(CF_SCM_BINS) $(CF_MOO_BINS) $(CF_TOY_BINS) $(CF_PAS_BINS)
 	@sh tests/run-tests.sh ./build/skj-run build/cf
 
 ## The RISC-V tests link no cross-compiled C, so the same binaries the
 ## qemu tier runs go straight to the emulator.
-check-rv-emu: build/skj-run build/skj-tinc-rv build/skj-sc-rv \
-              $(RV_TESTS:tests/%.tc=build/rv/%) $(RV_SCM_TESTS:tests/%.scm=build/rv/%)
+check-rv-emu: build/skj-run build/skj-sc-rv \
+              $(RV_SCM_TESTS:tests/%.scm=build/rv/%)
 	@sh tests/run-tests.sh ./build/skj-run build/rv
 
 ## The MIPS tests link no cross-compiled C, so the same binaries the qemu tier
 ## runs go straight to the in-tree emulator (the mips32 user-mode core).
-check-mips-emu: build/skj-run build/skj-tinc-mips build/skj-sc-mips \
-                $(MIPS_TESTS:tests/%.tc=build/mips/%) $(MIPS_SCM_TESTS:tests/%.scm=build/mips/%)
+check-mips-emu: build/skj-run build/skj-sc-mips \
+                $(MIPS_SCM_TESTS:tests/%.scm=build/mips/%)
 	@sh tests/run-tests.sh ./build/skj-run build/mips
 
 ## The cooperative blocking-read path: an echo guest fed buffered and delayed
 ## stdin on every sandbox core, proving read() parks and re-runs correctly (see
-## tests/run-coop-read.sh).
+## tests/run-coop-read.sh).  The guest is a small C program built through the
+## skjcc driver for each core; its build rules sit beside the DRIVER_LIB_*
+## definitions (below) so their prerequisite lists are non-empty when read.
 test-coop-read: build/skj-run build/coop_echo build/rv/coop_echo build/mips/coop_echo
 	@sh tests/run-coop-read.sh ./build/skj-run \
 	    cf=build/coop_echo rv=build/rv/coop_echo mips=build/mips/coop_echo
@@ -2849,10 +2816,9 @@ test-coop-read: build/skj-run build/coop_echo build/rv/coop_echo build/mips/coop
 ##
 ## The corpus reuses the guests check-emu and check-rv-emu already build, so
 ## these share their prerequisite sets.
-BENCH_CF_DEPS := $(CF_TC_BINS) $(CF_SCM_BINS) $(CF_MOO_BINS) $(CF_TOY_BINS) \
+BENCH_CF_DEPS := $(CF_SCM_BINS) $(CF_MOO_BINS) $(CF_TOY_BINS) \
                  $(CF_PAS_BINS)
-BENCH_RV_DEPS := build/skj-tinc-rv build/skj-sc-rv \
-                 $(RV_TESTS:tests/%.tc=build/rv/%) \
+BENCH_RV_DEPS := build/skj-sc-rv \
                  $(RV_SCM_TESTS:tests/%.scm=build/rv/%)
 
 bench: build/skj-run $(BENCH_CF_DEPS) $(BENCH_RV_DEPS)
@@ -3083,15 +3049,7 @@ build/san/as-aarch64-fuzz: as/as_fuzz.c $(AS_A64_FUZZ_LIB) as/aarch64.h as/asm_l
 # each front end's library, main.c dropped).  Lexer + parser + lowering, source
 # in, assembly out (discarded), so full ASan applies.  MOO_SRC and PC_SRC are
 # defined later than this rule, so the pascal and moo prerequisites list the
-# sources explicitly (the deferred-definition hazard noted on the san rules);
-# SRC (tinc) is defined earlier and used directly.
-FE_TINC_LIB := $(filter-out tinc/main.c,$(SRC))
-
-build/san/fe-tinc-fuzz: tests/fe_fuzz.c $(FE_TINC_LIB) tinc/tinc.h ir/ir.h \
-                        tests/fuzz_mutate.h build/version.h | build build/san
-	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DFEFUZZ_TINC -Itinc -Iir -Itests -o $@ \
-	    tests/fe_fuzz.c $(FE_TINC_LIB)
-
+# sources explicitly (the deferred-definition hazard noted on the san rules).
 build/san/fe-pascal-fuzz: tests/fe_fuzz.c pascal/lex.c pascal/parse.c pascal/lower.c \
                           $(IR_SRC) $(BE_CF) pascal/pascal.h ir/ir.h \
                           tests/fuzz_mutate.h build/version.h | build build/san
@@ -3117,18 +3075,15 @@ build/san/fe-cc-fuzz: tests/fe_fuzz.c cc/lex.c cc/parse.c cc/type.c cc/lower.c \
 build/san/skj-jit: $(JIT_SRC) cc/cc.h jit/jit_common.h jit/jit_arena.h jit/jit_x86.h jit/emit_x86.h jit/code.h backend/mc.h backend/x86_select.h ir/ir.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -DCC_PSABI -DCC_STRUCT_ABI $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ijit -Ibackend -o $@ $(JIT_SRC)
 
-# The remaining front ends (tinc, scheme, moo, Pascal) and the archive tool
+# The remaining front ends (scheme, moo, Pascal) and the archive tool
 # also take full ASan+UBSan; each is probed compile-only by run-compile-san.sh.
 # SC_SRC,
 # MOO_SRC, and PC_SRC are defined later in the Makefile than these rules, so a
 # prerequisite of them would expand empty at read time and never trigger a
 # rebuild (a deferred-definition hazard);
 # the source files are listed explicitly in the prerequisites here, while the
-# recipe's deferred $(VAR) expansion is fine.  SRC and AR_SRC are defined
+# recipe's deferred $(VAR) expansion is fine.  AR_SRC is defined
 # before this point, so those rules use the variable directly.
-build/san/skj-tinc: $(SRC) ir/ir.h tinc/tinc.h build/version.h | build build/san
-	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Iir -Itinc -o $@ $(SRC)
-
 build/san/skj-sc: scheme/lex.c scheme/parse.c scheme/print.c scheme/main.c \
                   scheme/gc.c scheme/lower.c $(IR_SRC) $(BE_CF) \
                   scheme/scheme.h scheme/gc.h ir/ir.h build/version.h | build build/san
@@ -3183,10 +3138,6 @@ check-san-kp: build/san/skj-kp
 check-san-jit: build/san/skj-jit
 	@echo "== check-san: C via the JIT (skj-jit, ASan+UBSan) =="
 	@$(SAN_RUNENV) JIT="$(CURDIR)/build/san/skj-jit" sh tests/run-jit-tests.sh
-
-check-san-tinc: build/san/skj-tinc
-	@echo "== check-san: TinC front end (skj-tinc, compile-only) =="
-	@$(SAN_RUNENV) sh tests/run-compile-san.sh "$(CURDIR)/build/san/skj-tinc" tinc $(TESTS)
 
 check-san-scheme: build/san/skj-sc
 	@echo "== check-san: TinScheme front end (skj-sc, compile-only) =="
@@ -3276,13 +3227,15 @@ test-cpp-fuzz: build/san/cpp-fuzz | build
 ## and the committed RV/MIPS encoding fixtures.  Same reproducible-PRNG contract.
 AS_FUZZ_ITERS ?= 20000
 AS_FUZZ_RNG   ?= 1
-## ColdFire seeds: a spread of tinc outputs (recursion, loops, spills, memory,
-## continuations) so the mutations reach a broad slice of the encoder.
-AS_FUZZ_CF_PROGS := fib loop spill bsearch cont multiret
+## ColdFire seeds: a spread of C compiler outputs (recursion, loops, arrays,
+## branches, nested structs, nested calls) so the mutations reach a broad slice
+## of the encoder.
+AS_FUZZ_CF_PROGS := cc_t018_recursive cc_t032_nested_loop cc_t010_array \
+                    cc_t030_switch_fallthrough cc_t025_nested_struct cc_t014_nested_call
 AS_FUZZ_CF_SEEDS := $(AS_FUZZ_CF_PROGS:%=build/as-fuzz-seeds/%.s)
-build/as-fuzz-seeds/%.s: tests/%.tc build/skj-tinc | build
+build/as-fuzz-seeds/%.s: tests/%.c build/skj-cc | build
 	@mkdir -p build/as-fuzz-seeds
-	@./build/skj-tinc -o $@ $<
+	@./build/skj-cc -o $@ $<
 test-as-fuzz: build/san/as-fuzz $(AS_FUZZ_CF_SEEDS)
 	@echo "== ColdFire assembler fuzz ($(AS_FUZZ_ITERS) iterations, rng $(AS_FUZZ_RNG)) =="
 	@$(SAN_RUNENV) ./build/san/as-fuzz --mutate $(AS_FUZZ_ITERS) --rng $(AS_FUZZ_RNG) \
@@ -3321,12 +3274,6 @@ test-as-aarch64-fuzz: build/san/as-aarch64-fuzz
 ## The IR front-end parser fuzzers.  Seeds are each front end's test sources.
 FE_FUZZ_ITERS ?= 20000
 FE_FUZZ_RNG   ?= 1
-test-fe-tinc-fuzz: build/san/fe-tinc-fuzz
-	@echo "== TinC parser fuzz ($(FE_FUZZ_ITERS) iterations, rng $(FE_FUZZ_RNG)) =="
-	@$(SAN_RUNENV) ./build/san/fe-tinc-fuzz --mutate $(FE_FUZZ_ITERS) --rng $(FE_FUZZ_RNG) \
-	   $(wildcard tests/*.tc) >/dev/null 2>build/fe-tinc-fuzz.log \
-	   || { echo "fe-tinc-fuzz: FAILED"; tail -40 build/fe-tinc-fuzz.log; exit 1; }
-	@tail -1 build/fe-tinc-fuzz.log
 
 test-fe-pascal-fuzz: build/san/fe-pascal-fuzz
 	@echo "== Pascal parser fuzz ($(FE_FUZZ_ITERS) iterations, rng $(FE_FUZZ_RNG)) =="
@@ -3350,12 +3297,11 @@ test-fe-cc-fuzz: build/san/fe-cc-fuzz
 	@tail -1 build/fe-cc-fuzz.log
 
 ## The pure compile-and-emit tools under the sanitizers: the preprocessor, the
-## C compiler, every IR front end (tinc, scheme, moo, Pascal, Excelsior), the
-## assembler and linker, and the archive tool.  skj-ld is exercised by the
-## Excelsior slice (the cc slice links with the system ld).  This is the CI
+## C compiler, every IR front end (scheme, moo, Pascal), the
+## assembler and linker, and the archive tool.  This is the CI
 ## slice: self-contained, no RISC-V reference assembler and no cross checkouts.
 check-san-tools: check-san-cpp check-san-cc \
-                 check-san-tinc check-san-scheme check-san-moo check-san-pc \
+                 check-san-scheme check-san-moo check-san-pc \
                  check-san-ar
 	@echo "check-san-tools: preprocessor, compilers, front ends, assembler, linker, and ar clean under the sanitizers."
 
@@ -3380,7 +3326,7 @@ check-san-mips: test-as-mips-fuzz
 check-san-arm64: test-as-aarch64-fuzz
 	@echo "check-san-arm64: the AArch64 assembler clean under the sanitizers."
 check-san-fuzz: test-kpm-fuzz test-cpp-fuzz \
-                test-fe-tinc-fuzz test-fe-pascal-fuzz test-fe-moo-fuzz test-fe-cc-fuzz
+                test-fe-pascal-fuzz test-fe-moo-fuzz test-fe-cc-fuzz
 	@echo "check-san-fuzz: the KPM1 reader, preprocessor, and front-end fuzzers clean under the sanitizers."
 
 ## Every sanitized slice.
@@ -3392,19 +3338,15 @@ check-san: check-san-cf check-san-rv check-san-x86-64 check-san-mips check-san-a
         check-san-mips check-san-arm64 check-san-fuzz \
         check-san-tools check-san-kobold \
         check-san-cpp check-san-cc check-san-rvas check-san-kp \
-        check-san-jit check-san-tinc check-san-scheme check-san-moo \
+        check-san-jit check-san-scheme check-san-moo \
         check-san-pc check-san-ar check-san-kp-corpus check-san-kp-multi \
         check-san-kp-io check-san-kp-inc test-kpm-fuzz test-cpp-fuzz \
         test-as-fuzz test-as-rv-fuzz test-as-mips-fuzz test-as-x86-64-fuzz test-as-aarch64-fuzz \
-        test-fe-tinc-fuzz test-fe-pascal-fuzz test-fe-moo-fuzz \
+        test-fe-pascal-fuzz test-fe-moo-fuzz \
         test-fe-cc-fuzz
 
-## arm64 per-test rules: tests/<name>.tc -> build/arm64/<name>.s -> .o -> binary
-A64_TESTS := $(TESTS)
+## arm64 per-test rules: tests/<name>.scm -> build/arm64/<name>.s -> .o -> binary
 A64_SCM_TESTS := $(SCM_TESTS)
-
-build/arm64/%.s: tests/%.tc build/skj-tinc-arm64 | build/arm64
-	./build/skj-tinc-arm64 -o $@ $<
 
 build/arm64/scm_%.s: tests/scm_%.scm build/skj-sc-arm64 | build/arm64
 	./build/skj-sc-arm64 -o $@ $<
@@ -3427,15 +3369,11 @@ build/arm64/soft64.o: runtime/soft64.c | build/arm64
 build/arm64/%: build/arm64/%.o build/arm64/start.o
 	$(A64_LD) -o $@ build/arm64/start.o $<
 
-check-arm64: build/skj-tinc-arm64 build/skj-sc-arm64 $(A64_TESTS:tests/%.tc=build/arm64/%) $(A64_SCM_TESTS:tests/%.scm=build/arm64/%)
+check-arm64: build/skj-sc-arm64 $(A64_SCM_TESTS:tests/%.scm=build/arm64/%)
 	@sh tests/run-tests.sh "$(QEMU_A64)" build/arm64
 
-## x86-64 per-test rules: tests/<name>.tc -> build/x86_64/<name>.s -> .o -> binary
-X64_TESTS := $(TESTS)
+## x86-64 per-test rules: tests/<name>.scm -> build/x86_64/<name>.s -> .o -> binary
 X64_SCM_TESTS := $(SCM_TESTS)
-
-build/x86_64/%.s: tests/%.tc build/skj-tinc-x86-64 | build/x86_64
-	./build/skj-tinc-x86-64 -o $@ $<
 
 build/x86_64/scm_%.s: tests/scm_%.scm build/skj-sc-x86-64 | build/x86_64
 	./build/skj-sc-x86-64 -o $@ $<
@@ -3455,7 +3393,7 @@ build/x86_64/va.o: runtime/va_x86_64.c | build/x86_64
 build/x86_64/%: build/x86_64/%.o build/x86_64/start.o
 	$(X64_LD) -m elf_x86_64 -o $@ build/x86_64/start.o $<
 
-check-x86-64: build/skj-tinc-x86-64 build/skj-sc-x86-64 $(X64_TESTS:tests/%.tc=build/x86_64/%) $(X64_SCM_TESTS:tests/%.scm=build/x86_64/%)
+check-x86-64: build/skj-sc-x86-64 $(X64_SCM_TESTS:tests/%.scm=build/x86_64/%)
 	@sh tests/run-tests.sh "$(QEMU_X64)" build/x86_64
 
 ## TinScheme compiler.  The front end plus IR is shared; only the backend and
@@ -4239,24 +4177,6 @@ test-moo-loc: build/skj-mooc build/skj-as
 	@./build/skj-as -o build/debug/mooloc_g.o build/debug/mooloc_g.s \
 	     && echo "PASS: moo -g assembly assembles"
 
-## Debug-info line markers (-g) on the TinC path: skj-tinc emits an IR_LOC per
-## statement and records the source file on each function; the ColdFire backend
-## records each marker as a DWARF ".loc" directive.  Assert the markers appear under
-## -g, are absent without it, and the -g assembly still assembles with skj-as.
-test-tinc-loc: build/skj-tinc build/skj-as
-	@mkdir -p build/debug
-	@./build/skj-tinc -g -o build/debug/tcloc_g.s tests/debug/loc.tc
-	@./build/skj-tinc    -o build/debug/tcloc_n.s tests/debug/loc.tc
-	@g=`grep -c '\.loc' build/debug/tcloc_g.s`; \
-	 n=`grep -c '\.loc' build/debug/tcloc_n.s`; \
-	 if [ "$$g" -ge 5 ] && [ "$$n" -eq 0 ]; then \
-	     echo "PASS: tinc -g line markers ($$g with -g, $$n without)"; \
-	 else \
-	     echo "FAIL: tinc -g line markers ($$g with -g, $$n without)"; exit 1; \
-	 fi
-	@./build/skj-as -o build/debug/tcloc_g.o build/debug/tcloc_g.s \
-	     && echo "PASS: tinc -g assembly assembles"
-
 ## DWARF 4 line-number serializer (item 2 of doc/tools/debugger.md): the
 ## dwarf/ serializer turns a (code address, line) row table into a .debug_line
 ## program.  dwline-emit writes the section bytes for a fixed table; the bytes
@@ -4919,6 +4839,16 @@ DRIVER_LIB_MIPS := build/lib/mips/crt0.o build/lib/mips/half.o build/lib/mips/va
 ## links the crt and runtime helpers only.
 DRIVER_LIB_X64  := build/lib/x86-64/crt0.o build/lib/x86-64/half.o build/lib/x86-64/va.o
 DRIVER_LIB_A64  := build/lib/arm64/crt0.o build/lib/arm64/va.o
+
+## The coop_echo guest for test-coop-read, built through the skjcc driver for
+## each sandbox core.  Placed here (not beside test-coop-read) so DRIVER_LIB_*
+## is already defined when these prerequisite lists are read.
+build/coop_echo: tests/coop_echo.c build/skjcc build/skj-cc build/skj-as build/skj-ld $(DRIVER_LIB_CF) | build
+	@./build/skjcc -target coldfire -o $@ $<
+build/rv/coop_echo: tests/coop_echo.c build/skjcc build/skj-cc-rv build/skj-as-rv build/skj-ld-rv $(DRIVER_LIB_RV) | build/rv
+	@./build/skjcc -target riscv -o $@ $<
+build/mips/coop_echo: tests/coop_echo.c build/skjcc build/skj-cc-mips build/skj-as-mips build/skj-ld-mips $(DRIVER_LIB_MIPS) | build/mips
+	@./build/skjcc -target mips -o $@ $<
 
 ## ---- install / uninstall: stage the built toolchain under a PREFIX ----
 ## Installs the host tools, the C headers, the per-target C runtime the skjcc
@@ -8279,9 +8209,6 @@ test-mips-psexe-redux: build/skj-cc-mips build/skj-cc-mips-sf build/skj-as-mips 
 ## verifies the scheduler functionally: a wrong hoist changes results and
 ## fails here even though qemu cannot see a raw R2000 load-delay hazard.
 ## A separate output tree so the reorder binaries are untouched.
-build/mips-nr/%.s: tests/%.tc build/skj-tinc-mips | build/mips-nr
-	SKJ_MIPS_NOREORDER=1 ./build/skj-tinc-mips -o $@ $<
-
 build/mips-nr/scm_%.s: tests/scm_%.scm build/skj-sc-mips | build/mips-nr
 	SKJ_MIPS_NOREORDER=1 ./build/skj-sc-mips -o $@ $<
 
@@ -8294,7 +8221,7 @@ build/mips-nr/start.o: runtime/start_mips.S | build/mips-nr
 build/mips-nr/%: build/mips-nr/%.o build/mips-nr/start.o
 	$(MIPS_LD) -o $@ build/mips-nr/start.o $<
 
-check-mips-noreorder: build/skj-tinc-mips build/skj-sc-mips $(MIPS_TESTS:tests/%.tc=build/mips-nr/%) $(MIPS_SCM_TESTS:tests/%.scm=build/mips-nr/%)
+check-mips-noreorder: build/skj-sc-mips $(MIPS_SCM_TESTS:tests/%.scm=build/mips-nr/%)
 	@sh tests/run-tests.sh "$(QEMU_MIPS)" build/mips-nr
 
 ## The C compiler suite under the noreorder scheduler (int, float, i64,
@@ -8333,11 +8260,11 @@ check-cpp: build/skj-cpp
 	@sh tests/run-cpp-tests.sh
 
 ## Smoke test: full in-tree toolchain (front end -> skj-as -> skj-ld -> qemu)
-check-smoke: build/skj-tinc build/skj-sc build/skj-mooc build/skj-cc build/skj-as build/skj-ld
+check-smoke: build/skj-sc build/skj-mooc build/skj-cc build/skj-as build/skj-ld
 	@sh tests/smoke.sh "$(QEMU)"
 
 ## skj-as validation: assemble everything with skj-as instead of m68k-linux-gnu-as
-check-as: build/skj-tinc build/skj-sc build/skj-mooc build/skj-pc build/skj-as
+check-as: build/skj-sc build/skj-mooc build/skj-pc build/skj-as
 	@sh tests/check-as.sh "$(QEMU)"
 
 ## RISC-V RV32 assembler + linker: encoding golden-master against the GNU
@@ -8393,7 +8320,7 @@ test-ld-arm64: build/skj-as-aarch64 build/skj-ld-arm64 | build
 ## representative per distinct entry point (the cross variants share a main.c
 ## with the host tool, and skj-kpc covers the kpcom seed).  This keeps the -h
 ## surface uniform as tools are added.
-HELP_TOOLS := skj-tinc skj-sc skj-mooc skj-pc skj-cc skj-cpp skj-jit \
+HELP_TOOLS := skj-sc skj-mooc skj-pc skj-cc skj-cpp skj-jit \
               skj-as skj-as-rv skj-as-mips skj-as-x86-64 skj-as-aarch64 skj-ld skj-ld-rv skj-ld-mips skj-ar \
               skj-run skj-addr2line skj-dbg skj-kp skj-kp-jit skj-kp-patrol \
               skj-kpc
@@ -8428,7 +8355,7 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 \
            check-rvas check-x86-64as check-aarch64as test-ld-x86-64 test-ld-arm64 \
            test-cc-driver-x86-64 test-cc-driver-arm64 check-cc-rv-skj \
-           test-cc-rv-loc test-kp-rv-loc test-kp-rv-dwarf test-kp-rv-trap-backtrace test-pc-loc test-moo-loc test-tinc-loc \
+           test-cc-rv-loc test-kp-rv-loc test-kp-rv-dwarf test-kp-rv-trap-backtrace test-pc-loc test-moo-loc \
            test-dwarf-line test-rv-stt-func test-rv-debug-sections \
            test-rv-debug-link test-rv-addr2line test-rv-backtrace test-rv-abort-backtrace \
            test-bt-loop test-bt-trim test-rv-wild-backtrace \
