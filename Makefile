@@ -7762,12 +7762,23 @@ test-psx-cube-lang: build/psx/cube_pas.exe build/psx/cube_kp.exe
 ## skj-as-mips -> skj-ld-mips -f ps-exe, linking start_psx.o and libpsx.a) in one
 ## command.  Stage the SDK where the in-tree driver looks (build/lib/ps1) and
 ## build the cube through it, matching the installed flow in doc/tools/psx-setup.md.
+## One `skjcc -target ps1` command per language, exercising the driver's
+## extension dispatch: C straight through, Pascal via skj-pc-mips, Kobold via
+## the KPM front end + codegen, resolving `uses psx` from the staged unit dir
+## and linking psx_unit.o.  The staged build/lib/ps1 mirrors the install layout.
 test-psx-cube-driver: build/skjcc build/mips/libpsx.a build/mips/start_psx.o \
-                      build/skj-cc-mips-sf build/skj-as-mips build/skj-ld-mips | build/psx
+                      build/skj-cc-mips-sf build/skj-pc-mips build/skj-kpc-mips \
+                      build/skj-kp-mips-sf build/skj-as-mips build/skj-ld-mips \
+                      build/psx-units/psx.kpm build/psx/psx_unit.o | build/psx
 	@mkdir -p build/lib/ps1
 	@cp build/mips/libpsx.a build/mips/start_psx.o libpsx/psx.h build/lib/ps1/
+	@cp build/psx-units/psx.kpm build/psx/psx_unit.o build/lib/ps1/
 	@./build/skjcc -target ps1 -o build/psx/cube_drv.exe examples/psx/cube.c
+	@./build/skjcc -target ps1 -o build/psx/cube_pas_drv.exe examples/psx/cube.pas
+	@./build/skjcc -target ps1 -o build/psx/cube_kp_drv.exe examples/psx/cube.kp
 	@OBJDUMP="$(MIPS_OBJDUMP)" sh tests/run-psx-tests.sh build/psx/cube_drv.exe
+	@OBJDUMP="$(MIPS_OBJDUMP)" sh tests/run-psx-tests.sh build/psx/cube_pas_drv.exe
+	@OBJDUMP="$(MIPS_OBJDUMP)" sh tests/run-psx-tests.sh build/psx/cube_kp_drv.exe
 
 ## Framebuffer check that both language cube samples project and draw 3D faces:
 ## at frame 40 the cube's centre shows a face colour (green with this compose

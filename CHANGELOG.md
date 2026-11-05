@@ -6,6 +6,21 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.44.4
+
+#### Added
+- The `skjcc` `ps1` target now builds Pascal and Kobold as well as C. The driver
+  dispatches on the source file extension, so `skjcc -target ps1 -o game.exe
+  game.pas` and `skjcc -target ps1 -o game.exe game.kp` build with one command,
+  the same as a C source. A Kobold program resolves `uses psx` from the installed
+  SDK and links the `psx_unit.o` binding automatically. The `.s` and `.kpm`
+  intermediates stay in a temporary directory and are removed; `-save-temps`
+  keeps them and `-S` stops at assembly.
+
+#### Changed
+- `doc/tools/psx-setup.md` now builds all three languages through the `skjcc`
+  driver, with the raw tool pipelines kept only as a reference.
+
 ### 0.44.3
 
 #### Added

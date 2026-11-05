@@ -36,9 +36,11 @@
 
 #define MAXARGV 256
 
+enum { LANG_C, LANG_PAS, LANG_KP };  /* source language, by file extension */
+
 struct target {
     const char *names[3];       /* canonical name plus aliases, NULL-terminated */
-    const char *cc;             /* compiler tool */
+    const char *cc;             /* C compiler tool */
     const char *as;             /* assembler tool */
     const char *as_pre[4];      /* assembler flags before "-o out in" */
     const char *ld;             /* linker tool */
@@ -47,6 +49,12 @@ struct target {
     const char *runtime[4];     /* runtime helper basenames, NULL-terminated */
     const char *libc;           /* libc archive basename, linked unless -ffreestanding */
     const char *inc;            /* extra -I subdir under <libdir>/, or NULL */
+    const char *pc;             /* Pascal front end (source -> asm), or NULL */
+    const char *kpc;            /* Kobold front end (source -> KPM), or NULL */
+    const char *kp;             /* Kobold codegen (KPM -> asm), or NULL */
+    const char *kp_units;       /* unit-search subdir under <libdir> for -U, or NULL */
+    const char *kp_link[3];     /* extra objects linked into a Kobold program
+                                   (basenames under <libdir>/<name>), NULL-term */
 };
 
 /* The table mirrors the check-cc-* Makefile recipes.  crt0/runtime names are
@@ -56,27 +64,32 @@ static const struct target targets[] = {
       "skj-cc",
       "skj-as", { NULL },
       "skj-ld", { NULL },
-      "crt0.o", { "half.o", "va_cf.o", NULL }, "libc.a", NULL },
+      "crt0.o", { "half.o", "va_cf.o", NULL }, "libc.a", NULL,
+      NULL, NULL, NULL, NULL, { NULL } },
     { { "riscv", "rv32", NULL },
       "skj-cc-rv",
       "skj-as-rv", { NULL },
       "skj-ld-rv", { NULL },
-      "crt0.o", { "va_rv.o", "soft64_div.o", NULL }, "libc.a", NULL },
+      "crt0.o", { "va_rv.o", "soft64_div.o", NULL }, "libc.a", NULL,
+      NULL, NULL, NULL, NULL, { NULL } },
     { { "mips", NULL },
       "skj-cc-mips",
       "skj-as-mips", { NULL },
       "skj-ld-mips", { NULL },
-      "crt0.o", { "half.o", "va_mips.o", "soft64_div.o", NULL }, "libc.a", NULL },
+      "crt0.o", { "half.o", "va_mips.o", "soft64_div.o", NULL }, "libc.a", NULL,
+      NULL, NULL, NULL, NULL, { NULL } },
     { { "x86-64", "x86_64", NULL },
       "skj-cc-x86-64",
       "skj-as-x86-64", { NULL },
       "skj-ld-x86-64", { NULL },
-      "crt0.o", { "half.o", "va.o", NULL }, NULL, NULL },
+      "crt0.o", { "half.o", "va.o", NULL }, NULL, NULL,
+      NULL, NULL, NULL, NULL, { NULL } },
     { { "arm64", "aarch64", NULL },
       "skj-cc-arm64",
       "skj-as-aarch64", { NULL },
       "skj-ld-arm64", { NULL },
-      "crt0.o", { "va.o", NULL }, NULL, NULL },
+      "crt0.o", { "va.o", NULL }, NULL, NULL,
+      NULL, NULL, NULL, NULL, { NULL } },
     /* The PlayStation (MIPS PS-EXE): soft-float C, the BIOS-TTY crt, and the
        libpsx SDK, linked into a PS-EXE.  There is no libc (the SDK and the
        program provide the environment), so libpsx.a rides the runtime slot and
@@ -85,7 +98,14 @@ static const struct target targets[] = {
       "skj-cc-mips-sf",
       "skj-as-mips", { NULL },
       "skj-ld-mips", { "-f", "ps-exe", NULL },
-      "start_psx.o", { "libpsx.a", NULL }, NULL, "ps1" },
+      "start_psx.o", { "libpsx.a", NULL }, NULL, "ps1",
+      /* Pascal and Kobold share the ps1 crt (start_psx.o) and runtime
+         (libpsx.a) with C.  Pascal compiles straight to asm; Kobold's front
+         end emits a KPM that the codegen turns into asm, and a Kobold program
+         that `uses psx` resolves the unit from <libdir>/ps1 and links the
+         prebuilt psx_unit.o binding. */
+      "skj-pc-mips", "skj-kpc-mips", "skj-kp-mips-sf",
+      "ps1", { "psx_unit.o", NULL } },
 };
 #define NTARGETS ((int)(sizeof(targets) / sizeof(targets[0])))
 
@@ -204,15 +224,27 @@ lib_dir(void)
     return "lib";
 }
 
-/* strip a directory and a trailing ".c" from a path, into a fresh string */
+static int
+has_suffix(const char *s, const char *suf)
+{
+    size_t ls = strlen(s), lu = strlen(suf);
+    return ls >= lu && strcmp(s + ls - lu, suf) == 0;
+}
+
+/* strip a directory and a trailing source suffix (.c/.pas/.kp) from a path,
+   into a fresh string */
 static char *
 stem(const char *path)
 {
+    static const char *const sufs[] = { ".c", ".pas", ".kp", NULL };
     const char *base = strrchr(path, '/');
     base = base ? base + 1 : path;
     size_t n = strlen(base);
-    if (n > 2 && base[n - 2] == '.' && base[n - 1] == 'c')
-        n -= 2;
+    for (int i = 0; sufs[i]; i++)
+        if (has_suffix(base, sufs[i])) {
+            n -= strlen(sufs[i]);
+            break;
+        }
     char *s = malloc(n + 1);
     if (!s)
         die("out of memory");
@@ -221,19 +253,12 @@ stem(const char *path)
     return s;
 }
 
-static int
-has_suffix(const char *s, const char *suf)
-{
-    size_t ls = strlen(s), lu = strlen(suf);
-    return ls >= lu && strcmp(s + ls - lu, suf) == 0;
-}
-
 static void
 usage(FILE *f)
 {
     fprintf(f,
         "usage: %s -target <name> [-c|-S|-E] [-o out] [-I dir] [-D name[=val]]\n"
-        "          [-ffreestanding] [-save-temps] file.c... [file.o...]\n"
+        "          [-ffreestanding] [-save-temps] file.c|.pas|.kp... [file.o...]\n"
         "targets:", progname);
     for (int i = 0; i < NTARGETS; i++)
         fprintf(f, " %s", targets[i].names[0]);
@@ -249,7 +274,8 @@ main(int argc, char **argv)
     int freestanding = 0;           /* -ffreestanding: link only the crt */
     const char *cc_opts[MAXARGV];   /* -I / -D passthrough to the compile */
     int ncc_opts = 0;
-    const char *srcs[MAXARGV];      /* .c inputs */
+    const char *srcs[MAXARGV];      /* .c/.pas/.kp inputs */
+    int srclang[MAXARGV];           /* LANG_* for each srcs[] entry */
     int nsrcs = 0;
     const char *objs[MAXARGV];      /* .o / .a inputs passed to the link */
     int nobjs = 0;
@@ -301,6 +327,15 @@ main(int argc, char **argv)
             /* ignore unknown -O/-W... flags the backends do not consume */
         } else if (has_suffix(a, ".c")) {
             if (nsrcs >= MAXARGV) die("too many inputs");
+            srclang[nsrcs] = LANG_C;
+            srcs[nsrcs++] = a;
+        } else if (has_suffix(a, ".pas")) {
+            if (nsrcs >= MAXARGV) die("too many inputs");
+            srclang[nsrcs] = LANG_PAS;
+            srcs[nsrcs++] = a;
+        } else if (has_suffix(a, ".kp")) {
+            if (nsrcs >= MAXARGV) die("too many inputs");
+            srclang[nsrcs] = LANG_KP;
             srcs[nsrcs++] = a;
         } else if (has_suffix(a, ".o") || has_suffix(a, ".a") ||
                    has_suffix(a, ".s")) {
@@ -324,8 +359,12 @@ main(int argc, char **argv)
     if (stop_s + stop_c + stop_e > 1)
         die("-c, -S and -E are mutually exclusive");
 
-    /* -E: preprocess each source to stdout (or -o), via skj-cpp */
+    /* -E: preprocess each source to stdout (or -o), via skj-cpp.  Only C has a
+       preprocessor here; Pascal and Kobold do not. */
     if (stop_e) {
+        for (int s = 0; s < nsrcs; s++)
+            if (srclang[s] != LANG_C)
+                die("-E is only for C sources");
         int outfd = 1;
         if (outpath && strcmp(outpath, "-") != 0) {
             outfd = creat(outpath, 0644);
@@ -351,13 +390,24 @@ main(int argc, char **argv)
     char incflag[1024] = "";
     if (t->inc)
         snprintf(incflag, sizeof incflag, "-I%s/%s", libd, t->inc);
+    /* the Kobold unit-search directory (-U), where `uses` resolves a unit's
+       KPM: the installed <libdir>/<kp_units> that stages the SDK units. */
+    char udir[1024] = "";
+    if (t->kp_units)
+        snprintf(udir, sizeof udir, "%s/%s", libd, t->kp_units);
 
-    /* a temp directory for intermediates, unless -save-temps.  -S needs none
-       (its only artifact is the .s); -c and a full link both produce an
+    /* a temp directory for intermediates, unless -save-temps.  -S usually needs
+       none (its only artifact is the .s), but a Kobold source always produces a
+       throwaway .kpm that is never a requested output, so -S on Kobold still
+       needs the temp dir to hold it; -c and a full link both produce an
        intermediate .s (and the link an intermediate .o). */
+    int have_kp = 0;
+    for (int s = 0; s < nsrcs; s++)
+        if (srclang[s] == LANG_KP)
+            have_kp = 1;
     char tmpl[] = "/tmp/skjccXXXXXX";
     char *tmpdir = NULL;
-    if (!save_temps && !stop_s) {
+    if (!save_temps && (!stop_s || have_kp)) {
         tmpdir = mkdtemp(tmpl);
         if (!tmpdir) die("mkdtemp: %s", strerror(errno));
     }
@@ -366,6 +416,7 @@ main(int argc, char **argv)
        artifact in the CWD (or -o); the link path uses the temp dir. */
     char link_objs[MAXARGV][1024];
     int nlink = 0;
+    int any_kp = 0;                 /* a Kobold object is in the link */
 
     for (int s = 0; s < nsrcs; s++) {
         char *st = stem(srcs[s]);
@@ -378,8 +429,11 @@ main(int argc, char **argv)
         else
             snprintf(spath, sizeof spath, "%s/%s.s", tmpdir, st);
 
-        /* compile: cc -o out.s [opts] in.c */
-        {
+        /* compile to assembly, dispatching on the source language.  C goes
+           straight through skj-cc; Pascal through skj-pc; Kobold is two stages,
+           a front end that emits a KPM module and a codegen that lowers it. */
+        if (srclang[s] == LANG_C) {
+            /* cc -o out.s [opts] [inc] in.c */
             const char *av[MAXARGV];
             int n = 0;
             av[n++] = tool_path(t->cc);
@@ -390,6 +444,58 @@ main(int argc, char **argv)
             av[n++] = srcs[s];
             av[n] = NULL;
             if (run(av, -1) != 0) die("compile failed for %s", srcs[s]);
+        } else if (srclang[s] == LANG_PAS) {
+            /* pc -o out.s in.pas */
+            if (!t->pc)
+                die("target '%s' has no Pascal front end", t->names[0]);
+            const char *av[MAXARGV];
+            int n = 0;
+            av[n++] = tool_path(t->pc);
+            av[n++] = "-o";
+            av[n++] = spath;
+            av[n++] = srcs[s];
+            av[n] = NULL;
+            if (run(av, -1) != 0) die("compile failed for %s", srcs[s]);
+        } else {        /* LANG_KP */
+            if (!t->kpc || !t->kp)
+                die("target '%s' has no Kobold front end", t->names[0]);
+            any_kp = 1;
+            /* the .kpm is a throwaway: in the temp dir unless -save-temps keeps
+               it beside the source (tmpdir is present here whenever !save_temps,
+               since a Kobold source forces it even under -S). */
+            char kpmpath[1024];
+            if (save_temps)
+                snprintf(kpmpath, sizeof kpmpath, "%s.kpm", st);
+            else
+                snprintf(kpmpath, sizeof kpmpath, "%s/%s.kpm", tmpdir, st);
+
+            /* front end: kpc [-U udir] --emit-kpm in.kp > out.kpm */
+            int kfd = open(kpmpath, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+            if (kfd < 0)
+                die("cannot create %s: %s", kpmpath, strerror(errno));
+            {
+                const char *av[MAXARGV];
+                int n = 0;
+                av[n++] = tool_path(t->kpc);
+                if (t->kp_units) { av[n++] = "-U"; av[n++] = udir; }
+                av[n++] = "--emit-kpm";
+                av[n++] = srcs[s];
+                av[n] = NULL;
+                if (run(av, kfd) != 0) die("compile failed for %s", srcs[s]);
+            }
+            close(kfd);
+
+            /* codegen: kp out.kpm -o out.s */
+            {
+                const char *av[MAXARGV];
+                int n = 0;
+                av[n++] = tool_path(t->kp);
+                av[n++] = kpmpath;
+                av[n++] = "-o";
+                av[n++] = spath;
+                av[n] = NULL;
+                if (run(av, -1) != 0) die("compile failed for %s", srcs[s]);
+            }
         }
         if (stop_s) { free(st); continue; }
 
@@ -428,6 +534,7 @@ main(int argc, char **argv)
         char fini[1024];
         char libc[1024];
         char rtbuf[8][1024];
+        char kplbuf[3][1024];
         snprintf(crt0, sizeof crt0, "%s/%s/%s", libd, t->names[0], t->crt0);
 
         const char *av[MAXARGV];
@@ -439,6 +546,17 @@ main(int argc, char **argv)
         av[n++] = crt0;
         for (int k = 0; k < nlink; k++) av[n++] = link_objs[k];
         for (int k = 0; k < nobjs; k++) av[n++] = objs[k];
+        /* A Kobold program links its unit binding object(s) after the program
+           objects that reference the wrappers and before the runtime archive
+           the wrappers call into (e.g. psx_unit.o between the program and
+           libpsx.a). */
+        if (any_kp) {
+            for (int k = 0; t->kp_link[k] && k < 3; k++) {
+                snprintf(kplbuf[k], sizeof kplbuf[0], "%s/%s/%s",
+                         libd, t->names[0], t->kp_link[k]);
+                av[n++] = kplbuf[k];
+            }
+        }
         /* The libc archive sits after the program objects (which reference it)
            and before the runtime helpers (which it may reference), so the
            pull-only archive linker resolves each in one left-to-right pass. */
@@ -464,11 +582,14 @@ main(int argc, char **argv)
     if (tmpdir) {
         for (int k = 0; k < nlink; k++)
             unlink(link_objs[k]);
-        /* the .s intermediates share the stem; remove them too */
+        /* the .s (and a Kobold .kpm) intermediates share the stem; remove
+           them too */
         for (int s = 0; s < nsrcs; s++) {
             char *st = stem(srcs[s]);
             char p[1024];
             snprintf(p, sizeof p, "%s/%s.s", tmpdir, st);
+            unlink(p);
+            snprintf(p, sizeof p, "%s/%s.kpm", tmpdir, st);
             unlink(p);
             free(st);
         }

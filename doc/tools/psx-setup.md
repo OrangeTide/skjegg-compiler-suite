@@ -54,51 +54,44 @@ is on `PATH` nothing else needs setting.
 The sample sources are in `examples/psx/` (`cube.c`, `cube.pas`, `cube.kp`). Copy
 the one you want into your project and build it.
 
-### C: through the driver
-
-The `skjcc` driver has a `ps1` target (alias `psx`) that runs the whole C
-pipeline (compile with the soft-float MIPS compiler, assemble, link the crt and
-`libpsx.a`, and write a PS-EXE), and finds `psx.h` and the SDK for you:
+The `skjcc` driver has a `ps1` target (alias `psx`) that runs the whole pipeline
+and writes a PS-EXE. It dispatches on the source extension, so the same command
+builds C, Pascal, or Kobold:
 
 ```sh
-skjcc -target ps1 -o cube.exe cube.c
+skjcc -target ps1 -o cube.exe cube.c      # C
+skjcc -target ps1 -o cube.exe cube.pas    # Pascal
+skjcc -target ps1 -o cube.exe cube.kp     # Kobold
 ```
 
-That one command is the C equivalent of the three-step Pascal and Kobold builds
-below.
+Each form runs the stages that language needs and links the crt and `libpsx.a`
+for you. C compiles with the soft-float MIPS compiler and finds `psx.h` through
+the installed SDK. Pascal compiles straight to assembly; the `cube.pas` sample
+declares the `libpsx` bindings inline (it copies the block from the installed
+`psx.pas`), so there is no unit to link. Kobold runs its two stages (the front
+end emits a KPM module, the codegen lowers it to assembly), resolves `uses psx`
+from the installed unit directory, and links the prebuilt `psx_unit.o` binding.
+The driver keeps the `.s` and `.kpm` intermediates in a temporary directory and
+removes them; pass `-save-temps` to keep them, or `-S` to stop at assembly.
 
-### Pascal: the front end and the in-tree linker
-
-The Pascal front end targets MIPS directly. The `cube.pas` sample declares the
-`libpsx` bindings inline (it copies the block from the installed `psx.pas`), so
-there is no unit to link, just the program, the crt, and `libpsx.a`:
+Under the driver, the three raw pipelines look like this. You do not need to run
+them by hand, but they show what each `skjcc` call does:
 
 ```sh
 LIB="$HOME/.local/lib/skjegg/ps1"
+
+# Pascal: front end to assembly, assemble, link.
 skj-pc-mips -o cube.s cube.pas
 skj-as-mips -o cube.o cube.s
 skj-ld-mips -f ps-exe -o cube.exe "$LIB/start_psx.o" cube.o "$LIB/libpsx.a"
-```
 
-### Kobold: the two-stage front end and the psx unit
-
-Kobold compiles in two steps (the front end emits a KPM module, then the
-codegen emits assembly). The `cube.kp` sample does `uses psx`, so point the unit
-search at the installed SDK directory (which holds `psx.kpm`) and link the
-prebuilt `psx_unit.o`:
-
-```sh
-LIB="$HOME/.local/lib/skjegg/ps1"
+# Kobold: front end to KPM, codegen to assembly, assemble, link the unit.
 skj-kpc-mips -U "$LIB" --emit-kpm cube.kp > cube.kpm
 skj-kp-mips-sf cube.kpm -o cube.s
 skj-as-mips -o cube.o cube.s
 skj-ld-mips -f ps-exe -o cube.exe \
     "$LIB/start_psx.o" cube.o "$LIB/psx_unit.o" "$LIB/libpsx.a"
 ```
-
-(A single driver target for Pascal and Kobold, so these also build with one
-`skjcc` command, is planned. For now the C path uses the driver and these two
-use the tools directly.)
 
 ## 3. Run it
 
@@ -120,44 +113,34 @@ PS-EXE will run it, and so will real hardware through the usual loaders.
 ## 4. An example project Makefile
 
 A self-contained Makefile for a project that keeps its sources beside it. Set
-`PREFIX` to wherever you installed skjegg. It builds the C program through the
-driver and includes the Pascal and Kobold rules for reference; delete the ones
-you do not use.
+`PREFIX` to wherever you installed skjegg. Each language builds with one `skjcc`
+call; keep whichever rule matches your source and delete the rest.
 
 ```make
 # A libpsx game project. Expects skjegg installed under $(PREFIX).
 PREFIX ?= $(HOME)/.local
 BIN    := $(PREFIX)/bin
-LIB    := $(PREFIX)/lib/skjegg/ps1
 
 BIOS   ?= $(HOME)/.pcsx/bios/bios.bin
 REDUX  ?= pcsx-redux
 
-# --- C: one command through the driver ---
+# One command per language; the driver picks the pipeline from the extension.
 game.exe: game.c
 	$(BIN)/skjcc -target ps1 -o $@ $<
 
-# --- Pascal: front end, assemble, link (bindings declared inline) ---
-game_pas.exe: game.pas
-	$(BIN)/skj-pc-mips -o game_pas.s $<
-	$(BIN)/skj-as-mips -o game_pas.o game_pas.s
-	$(BIN)/skj-ld-mips -f ps-exe -o $@ \
-	    $(LIB)/start_psx.o game_pas.o $(LIB)/libpsx.a
+# For a Pascal game, swap the prerequisite and source:
+#   game.exe: game.pas
+#       $(BIN)/skjcc -target ps1 -o $@ $<
+# For a Kobold game (its `uses psx` resolves from the installed SDK):
+#   game.exe: game.kp
+#       $(BIN)/skjcc -target ps1 -o $@ $<
 
-# --- Kobold: emit KPM, codegen, assemble, link the psx unit ---
-game_kp.exe: game.kp
-	$(BIN)/skj-kpc-mips -U $(LIB) --emit-kpm $< > game_kp.kpm
-	$(BIN)/skj-kp-mips-sf game_kp.kpm -o game_kp.s
-	$(BIN)/skj-as-mips -o game_kp.o game_kp.s
-	$(BIN)/skj-ld-mips -f ps-exe -o $@ \
-	    $(LIB)/start_psx.o game_kp.o $(LIB)/psx_unit.o $(LIB)/libpsx.a
-
-# Run the C build in the emulator.
+# Run the build in the emulator.
 run: game.exe
 	$(REDUX) -bios $(BIOS) -exe game.exe
 
 clean:
-	rm -f *.exe *.o *.s *.kpm
+	rm -f *.exe
 
 .PHONY: run clean
 ```
