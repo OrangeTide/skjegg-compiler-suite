@@ -5,6 +5,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "ir.h"
 
@@ -69,6 +70,12 @@ struct kpm_module {
     uint32_t iface_fp;  /* the .interface fingerprint, or 0 without an interface */
     struct kp_dep *deps;    /* direct unit dependencies and their expected fingerprints */
     int ndeps;
+    /* The body of the .interface block, one entry line per element, carried
+       verbatim.  kpm_read does not fill this (it keeps only iface_fp and skips
+       the body); the module builder sets it so kpm_write can re-emit the block
+       for a unit.  The lines do not include the .interface/.endinterface wrapper. */
+    char **iface_lines;
+    int niface_lines;
 };
 
 /** Parse a KPM1 text image into a module.
@@ -85,7 +92,34 @@ int kpm_read(struct kpm_module *m, const char *text, size_t len,
 /* Release everything the module owns. */
 void kpm_free(struct kpm_module *m);
 
+/** Serialize a module back to KPM1 text.
+ *
+ * The inverse of kpm_read: writes a valid KPM1 image that kpm_read parses
+ * back to an equivalent module and that the Kobold front end's unit loader
+ * reads for the .interface block.  The output is canonical, not necessarily
+ * byte-identical to a particular front end's historical formatting; what it
+ * guarantees is that a reader restores the same module.  A field left at its
+ * ir_emit default (temp/slot/label index -1, imm 0, nargs 0, NULL sym) is
+ * omitted, since the reader restores that default.  Returns 0, or -1 on a
+ * write error.
+ */
+int kpm_write(FILE *out, const struct kpm_module *m);
+
 /* The mnemonic for an ir_op, e.g. "ADD" (without the IR_ prefix), or NULL. */
 const char *kpm_op_name(int op);
+
+/* The ir_op for a KPM mnemonic, e.g. "ADD" -> IR_ADD, or -1 if unknown. */
+int kpm_op_by_name(const char *name);
+
+/* The ir base-type for a KPM type name, e.g. "i32" -> IR_I32, or -1. */
+int kpm_base_type_by_name(const char *name);
+
+/* Parse one ASM instruction line (it begins with "ASM") into a fresh IR_ASM
+   instruction on fn, using arena a for strings.  The one asm-line grammar has
+   one parser, shared by the reader and the module builder.  The line is mutated
+   in place.  Returns 1 when it parsed an ASM line, 0 when the line is not ASM,
+   or -1 with *errmsg set to a static message on a malformed ASM line. */
+int kpm_emit_asm_line(struct arena *a, struct ir_func *fn, char *line,
+                      const char **errmsg);
 
 #endif /* KPM_H */

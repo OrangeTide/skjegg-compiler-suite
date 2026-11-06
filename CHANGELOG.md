@@ -6,6 +6,35 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.46.0
+
+#### Changed
+- Every Kobold compiler is now single-step. The front end builds a KPM1 module
+  directly through an in-memory module builder (`kobold/kpbuild.c`) and the
+  backend is assembled into the same tool at compile time, so a Kobold program
+  compiles to native code in one invocation of `skj-kpc`. The old two-stage
+  model, where the front end emitted KPM text and a separate backend read it
+  back, is gone. The `skjcc` driver compiles Kobold source in a single step to
+  match.
+- The x86-64 `skj-kp-jit` links the native `kpcom` object directly instead of
+  embedding a built seed. The cross JITs (`skj-kp-jit-rv`, `skj-kp-jit-arm64`)
+  still carry a per-arch seed built from source at build time.
+- Dynamic arrays grow geometrically with a tracked capacity, so repeated
+  `SetLength` growth is amortized rather than reallocating on every step. The
+  capacity is kept correct across `Delete` and `Insert` as well.
+- `bootstrap-fpc` is now a dialect check: it confirms the FPC-built and
+  skj-built front ends agree, with a portable external-declaration order.
+
+#### Removed
+- The KPM text emitter. Modules are only ever built in memory now, never written
+  as text and parsed back.
+
+#### Fixed
+- The seeded Kobold JIT read its front end's return value as a full 64-bit word.
+  `CompileModule` returns a 32-bit `LongInt`, and the high word is undefined on
+  rv32 and arm64, so a clean compile could be misread as an error (and an error
+  as success) on those cross JITs. The return is now masked to 32 bits.
+
 ### 0.45.0
 
 #### Removed

@@ -137,6 +137,102 @@ strncpy(char *dst, const char *src, size_t n)
     return dst;
 }
 
+int
+strncmp(const char *a, const char *b, size_t n)
+{
+    while (n && *a && *a == *b) {
+        a++;
+        b++;
+        n--;
+    }
+    if (n == 0)
+        return 0;
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+char *
+strchr(const char *s, int c)
+{
+    for (;; s++) {
+        if (*s == (char)c)
+            return (char *)s;
+        if (!*s)
+            return 0;
+    }
+}
+
+char *
+strrchr(const char *s, int c)
+{
+    const char *last = 0;
+
+    for (;; s++) {
+        if (*s == (char)c)
+            last = s;
+        if (!*s)
+            return (char *)last;
+    }
+}
+
+/* The strtol family the KPM text reader (kpm.c) parses numbers with.  A single
+   signed 64-bit core with base 0 / 8 / 10 / 16 detection; the narrower and
+   unsigned entry points wrap it.  Freestanding, with no errno and no overflow
+   saturation (the reader's inputs are in range). */
+long long
+strtoll(const char *s, char **end, int base)
+{
+    const char *p = s;
+    int neg = 0;
+    long long v = 0;
+
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' ||
+           *p == '\f' || *p == '\v')
+        p++;
+    if (*p == '+' || *p == '-') {
+        neg = (*p == '-');
+        p++;
+    }
+    if ((base == 0 || base == 16) && p[0] == '0' &&
+        (p[1] == 'x' || p[1] == 'X')) {
+        p += 2;
+        base = 16;
+    } else if (base == 0 && p[0] == '0') {
+        base = 8;
+    } else if (base == 0) {
+        base = 10;
+    }
+    for (;; p++) {
+        int d;
+
+        if (*p >= '0' && *p <= '9')
+            d = *p - '0';
+        else if (*p >= 'a' && *p <= 'z')
+            d = *p - 'a' + 10;
+        else if (*p >= 'A' && *p <= 'Z')
+            d = *p - 'A' + 10;
+        else
+            break;
+        if (d >= base)
+            break;
+        v = v * base + d;
+    }
+    if (end)
+        *end = (char *)p;
+    return neg ? -v : v;
+}
+
+long
+strtol(const char *s, char **end, int base)
+{
+    return (long)strtoll(s, end, base);
+}
+
+unsigned long
+strtoul(const char *s, char **end, int base)
+{
+    return (unsigned long)strtoll(s, end, base);
+}
+
 /****************************************************************
  * Traps
  *
@@ -178,6 +274,12 @@ void kp_trap_index(void)    { trap_die("skj-kp: runtime fault: array index out o
    same symbolized backtrace the arithmetic and index traps do. */
 void kp_abort(void) { trap_die("skj-kp: aborted"); }
 void kp_assert(uint32_t cond) { if (!cond) trap_die("skj-kp: assertion failed"); }
+
+/* The C-library abort() the linked compiler infrastructure reaches through
+   assert() (ir/arena.c) and the stdio layer.  It routes through the same trap as
+   kp_abort, so a failed invariant in the in-guest compiler prints the symbolized
+   backtrace and exits 70. */
+void abort(void) { trap_die("skj-kp: aborted"); }
 
 /****************************************************************
  * Guest heap: the shared coalescing allocator over the program break

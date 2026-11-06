@@ -680,4 +680,14 @@ kpd_close(int h)
         kpd_tab[h].inuse = 0;
     }
 }
+
+/* kpc_ aliases for the self-hosted compiler's compile-time file I/O.  kpcom
+ * prefixes those imports kpc_ so they stay distinct from the runtime's own
+ * ReadFileStr/WriteFileStr/kpd_* when kpcom links this runtime (the freestanding
+ * self-host ELF).  They forward to the runtime functions above. */
+kp_gptr kpc_ReadFileStr(kp_gptr pathstr)             { return ReadFileStr(pathstr); }
+int     kpc_WriteFileStr(kp_gptr pathstr, kp_gptr d) { return WriteFileStr(pathstr, d); }
+int     kpc_kpd_open(kp_gptr pathstr)                { return kpd_open(pathstr); }
+kp_gptr kpc_kpd_next(int h)                          { return kpd_next(h); }
+void    kpc_kpd_close(int h)                         { kpd_close(h); }
 #endif /* KP_HAVE_FILE_IO */

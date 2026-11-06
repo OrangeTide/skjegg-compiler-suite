@@ -171,6 +171,12 @@ op_by_name(const char *name)
     return -1;
 }
 
+int
+kpm_op_by_name(const char *name)
+{
+    return op_by_name(name);
+}
+
 static int
 base_type_by_name(const char *name)
 {
@@ -181,6 +187,12 @@ base_type_by_name(const char *name)
     if (strcmp(name, "f32") == 0) return IR_F32;
     if (strcmp(name, "f64") == 0) return IR_F64;
     return -1;
+}
+
+int
+kpm_base_type_by_name(const char *name)
+{
+    return base_type_by_name(name);
 }
 
 /****************************************************************
@@ -641,6 +653,108 @@ parse_asm_op(struct arena *a, char *desc, struct ir_asm_op *op, int ntemps)
     return 0;
 }
 
+/* Parse one ASM instruction line (it begins with "ASM") into a fresh IR_ASM
+   instruction on fn.  Shared by the KPM reader (read_func) and the module
+   builder (kpb_asm_text), so the one asm-line grammar has one parser.  The line
+   is mutated in place (quoted_body and tokenize write NULs).  Returns 1 when it
+   parsed an ASM line, 0 when the line is not ASM, or -1 with *errmsg set to a
+   static message on a malformed ASM line. */
+int
+kpm_emit_asm_line(struct arena *a, struct ir_func *fn, char *line,
+                  const char **errmsg)
+{
+    struct ir_insn *in;
+    int slen;
+    char *p;
+
+    if (!(strncmp(line, "ASM", 3) == 0 && (line[3] == ' ' || line[3] == '\t')))
+        return 0;
+    p = line + 3;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p == '"') {
+        /* basic asm: the template is the whole quoted body */
+        char *body = quoted_body(line);
+        if (!body) {
+            *errmsg = "malformed ASM";
+            return -1;
+        }
+        in = ir_emit(fn, IR_ASM);
+        in->sym = unescape(a, body, &slen);
+        return 1;
+    }
+    /* extended asm: operand and clobber metadata, then the quoted template last.
+       Decode the template first (quoted_body takes the first and last quote of
+       the q.. tail), then terminate the metadata region at the opening quote and
+       tokenize it. */
+    {
+        char *q = strchr(p, '"');
+        char *body, *mtok[MAX_TOKENS];
+        struct ir_asm_info *info;
+        int mn, mi, no = -1, ni = -1, vol = 1, nc = 0, nops, ci, k;
+
+        if (!q || !(body = quoted_body(q))) {
+            *errmsg = "malformed ASM";
+            return -1;
+        }
+        *q = '\0';
+        mn = tokenize(p, mtok);
+        for (mi = 0; mi < mn; mi++) {
+            if (strncmp(mtok[mi], "nout=", 5) == 0)
+                no = (int)strtol(mtok[mi] + 5, NULL, 10);
+            else if (strncmp(mtok[mi], "nin=", 4) == 0)
+                ni = (int)strtol(mtok[mi] + 4, NULL, 10);
+            else if (strncmp(mtok[mi], "vol=", 4) == 0)
+                vol = (int)strtol(mtok[mi] + 4, NULL, 10);
+            else if (mtok[mi][0] == 'c' && kpm_isdigit(mtok[mi][1]))
+                nc++;
+        }
+        if (no < 0 || ni < 0 || no > KPM_MAX_COUNT || ni > KPM_MAX_COUNT) {
+            *errmsg = "malformed ASM operand counts";
+            return -1;
+        }
+        nops = no + ni;
+        info = arena_zalloc(a, sizeof *info);
+        info->noutputs = no;
+        info->ninputs = ni;
+        info->is_volatile = vol;
+        info->nclobbers = nc;
+        info->ops = nops ? arena_zalloc(a,
+            (size_t)nops * sizeof *info->ops) : NULL;
+        info->clobbers = nc ? arena_zalloc(a,
+            (size_t)nc * sizeof *info->clobbers) : NULL;
+        ci = 0;
+        for (mi = 0; mi < mn; mi++) {
+            char *eq = strchr(mtok[mi], '=');
+            if (!eq)
+                continue;
+            if (mtok[mi][0] == 'o' && kpm_isdigit(mtok[mi][1])) {
+                int oi = (int)strtol(mtok[mi] + 1, NULL, 10);
+                if (oi < 0 || oi >= nops ||
+                    parse_asm_op(a, eq + 1, &info->ops[oi], fn->ntemps) != 0) {
+                    *errmsg = "malformed ASM operand";
+                    return -1;
+                }
+            } else if (mtok[mi][0] == 'c' && kpm_isdigit(mtok[mi][1])) {
+                if (ci < nc)
+                    info->clobbers[ci++] = arena_strdup(a, eq + 1);
+            }
+        }
+        /* every operand slot must have been filled (a truncated or missing
+           descriptor would leave a NULL constraint) */
+        for (k = 0; k < nops; k++) {
+            if (!info->ops[k].constraint) {
+                *errmsg = "missing ASM operand";
+                return -1;
+            }
+        }
+        in = ir_emit(fn, IR_ASM);
+        in->sym = unescape(a, body, &slen);
+        in->asm_info = info;
+        return 1;
+    }
+}
+
 static int
 read_func(struct reader *r, struct ir_func *fn)
 {
@@ -724,102 +838,19 @@ read_func(struct reader *r, struct ir_func *fn)
             }
         } else {
             struct ir_insn *in;
-            int op;
+            int op, ar;
+            const char *amsg = NULL;
             /* ASM carries verbatim assembly text as a C-escaped quoted string
-               that may contain spaces, so it is read from the raw line like a
-               .string rather than split into key=value tokens (which tokenize,
-               below, would do destructively). */
-            if (strncmp(line, "ASM", 3) == 0 &&
-                (line[3] == ' ' || line[3] == '\t')) {
-                char *p = line + 3;
-                int slen;
-                while (*p == ' ' || *p == '\t')
-                    p++;
-                if (*p == '"') {
-                    /* basic asm: the template is the whole quoted body */
-                    char *body = quoted_body(line);
-                    if (!body) {
-                        fail(r, r->pos + 1, "malformed ASM");
-                        return -1;
-                    }
-                    in = ir_emit(fn, IR_ASM);
-                    in->sym = unescape(a, body, &slen);
-                    continue;
-                }
-                /* extended asm: operand and clobber metadata, then the quoted
-                   template last.  Decode the template first (quoted_body takes the
-                   first and last quote of the q.. tail), then terminate the
-                   metadata region at the opening quote and tokenize it. */
-                {
-                    char *q = strchr(p, '"');
-                    char *body, *mtok[MAX_TOKENS];
-                    struct ir_asm_info *info;
-                    int mn, mi, no = -1, ni = -1, vol = 1, nc = 0, nops, ci, k;
-
-                    if (!q || !(body = quoted_body(q))) {
-                        fail(r, r->pos + 1, "malformed ASM");
-                        return -1;
-                    }
-                    *q = '\0';
-                    mn = tokenize(p, mtok);
-                    for (mi = 0; mi < mn; mi++) {
-                        if (strncmp(mtok[mi], "nout=", 5) == 0)
-                            no = (int)strtol(mtok[mi] + 5, NULL, 10);
-                        else if (strncmp(mtok[mi], "nin=", 4) == 0)
-                            ni = (int)strtol(mtok[mi] + 4, NULL, 10);
-                        else if (strncmp(mtok[mi], "vol=", 4) == 0)
-                            vol = (int)strtol(mtok[mi] + 4, NULL, 10);
-                        else if (mtok[mi][0] == 'c' && kpm_isdigit(mtok[mi][1]))
-                            nc++;
-                    }
-                    if (no < 0 || ni < 0 || no > KPM_MAX_COUNT ||
-                        ni > KPM_MAX_COUNT) {
-                        fail(r, r->pos + 1, "malformed ASM operand counts");
-                        return -1;
-                    }
-                    nops = no + ni;
-                    info = arena_zalloc(a, sizeof *info);
-                    info->noutputs = no;
-                    info->ninputs = ni;
-                    info->is_volatile = vol;
-                    info->nclobbers = nc;
-                    info->ops = nops ? arena_zalloc(a,
-                        (size_t)nops * sizeof *info->ops) : NULL;
-                    info->clobbers = nc ? arena_zalloc(a,
-                        (size_t)nc * sizeof *info->clobbers) : NULL;
-                    ci = 0;
-                    for (mi = 0; mi < mn; mi++) {
-                        char *eq = strchr(mtok[mi], '=');
-                        if (!eq)
-                            continue;
-                        if (mtok[mi][0] == 'o' && kpm_isdigit(mtok[mi][1])) {
-                            int oi = (int)strtol(mtok[mi] + 1, NULL, 10);
-                            if (oi < 0 || oi >= nops ||
-                                parse_asm_op(a, eq + 1, &info->ops[oi],
-                                             fn->ntemps) != 0) {
-                                fail(r, r->pos + 1, "malformed ASM operand");
-                                return -1;
-                            }
-                        } else if (mtok[mi][0] == 'c' &&
-                                   kpm_isdigit(mtok[mi][1])) {
-                            if (ci < nc)
-                                info->clobbers[ci++] = arena_strdup(a, eq + 1);
-                        }
-                    }
-                    /* every operand slot must have been filled (a truncated or
-                       missing descriptor would leave a NULL constraint) */
-                    for (k = 0; k < nops; k++) {
-                        if (!info->ops[k].constraint) {
-                            fail(r, r->pos + 1, "missing ASM operand");
-                            return -1;
-                        }
-                    }
-                    in = ir_emit(fn, IR_ASM);
-                    in->sym = unescape(a, body, &slen);
-                    in->asm_info = info;
-                    continue;
-                }
+               that may contain spaces, so it is parsed from the raw line (the
+               shared asm-line parser) rather than split into key=value tokens
+               (which tokenize, below, would do destructively). */
+            ar = kpm_emit_asm_line(a, fn, line, &amsg);
+            if (ar < 0) {
+                fail(r, r->pos + 1, amsg);
+                return -1;
             }
+            if (ar > 0)
+                continue;
             n = tokenize(line, tok);
             if (n == 0)
                 continue;

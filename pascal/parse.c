@@ -1335,15 +1335,22 @@ parse_block(void)
                 expect(T_SEMI, ";");
             }
 
+            /* `cdecl;` may come before `external;` (the mainstream Pascal order,
+               what fpc accepts) as well as after it.  cdecl names the C/SysV
+               calling convention, which is already how the compiler emits an
+               external call, so it is accepted and ignored either way.  `cdecl`
+               is not a reserved word. */
+            if (cur.kind == T_IDENT && strcmp(cur.sval, "cdecl") == 0) {
+                advance();
+                expect(T_SEMI, ";");
+            }
+
             if (accept(T_FORWARD)) {
                 decl->is_forward = 1;
                 expect(T_SEMI, ";");
             } else if (cur.kind == T_IDENT &&
                        strcmp(cur.sval, "external") == 0) {
-                /* a host import: `external [cdecl];` has no body.  cdecl names
-                   the C/SysV calling convention, which is already how the
-                   compiler emits an external call, so it is accepted and
-                   ignored.  `external`/`cdecl` are not reserved words. */
+                /* a host import: `external [cdecl];` has no body. */
                 decl->is_external = 1;
                 advance();
                 if (cur.kind == T_IDENT && strcmp(cur.sval, "cdecl") == 0)

@@ -28,7 +28,7 @@ static const char *pstr_bytes(const void *s)
     return (const char *)s + PSTR_HDR;
 }
 
-void *ReadFileStr(const void *path)
+void *kpc_ReadFileStr(const void *path)
 {
     char p[4096];
     int n = pstr_len(path);
@@ -52,7 +52,7 @@ void *ReadFileStr(const void *path)
     return r;
 }
 
-int WriteFileStr(const void *path, const void *data)
+int kpc_WriteFileStr(const void *path, const void *data)
 {
     char p[4096];
     int n = pstr_len(path);
@@ -71,7 +71,7 @@ int WriteFileStr(const void *path, const void *data)
 #define KPD_MAX 16
 static DIR *kpd_tab[KPD_MAX];
 
-int kpd_open(const void *path)
+int kpc_kpd_open(const void *path)
 {
     char p[4096];
     int n = pstr_len(path);
@@ -88,7 +88,7 @@ int kpd_open(const void *path)
     return kpd_tab[i] ? i : -1;
 }
 
-void *kpd_next(int handle)
+void *kpc_kpd_next(int handle)
 {
     struct dirent *e;
     if (handle < 0 || handle >= KPD_MAX || !kpd_tab[handle])
@@ -99,7 +99,7 @@ void *kpd_next(int handle)
     return __pascal_str_new(e->d_name, (int)strlen(e->d_name));
 }
 
-void kpd_close(int handle)
+void kpc_kpd_close(int handle)
 {
     if (handle >= 0 && handle < KPD_MAX && kpd_tab[handle]) {
         closedir(kpd_tab[handle]);

@@ -321,6 +321,18 @@ KP_HDRS := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue
 # and entropy, not the freestanding 32-bit syscall seam those files use on rv/cf.
 KP_CFLAGS := $(CFLAGS) -DX86_BITS=64 -DKP_FREESTANDING -DKP_REAL=double -DKP_GLUE_HOSTED -Iir -Ijit -Ibackend -Ikobold
 
+## The native Kobold front end linked into the in-process JIT: kpcom (compiled by
+## skj-pc, the same object skj-kpc uses) plus the host Pascal runtime, the C module
+## builder, the KPM writer, and the AOT emit helper kpb_fe references.  This
+## replaces the embedded seed and the JIT-of-the-compiler: kpcom runs as linked
+## native code and compiles straight into the builder (kp_compile_pas calls its
+## CompileModule export and serializes kpb_module_ptr() with kpm_write).  kpcom's
+## compile-time file I/O is the kpc_* host shim in pascal_kpcom_host.c, named apart
+## from the JIT runtime's own ReadFileStr so the two coexist in one binary.  kpm.c
+## is already in KP_RT, so it is not repeated here.
+KP_FE_SRC := tests/pascal_kpcom_host.c kobold/kpbuild.c kobold/kpb_fe.c kobold/kpm_write.c
+KP_FE_HDRS := kobold/kpbuild.h
+
 ## co.c is vendored unchanged from the Kobold tree, which builds with -Wall -Wextra
 ## (no -Wpedantic).  Compile it with that same set so it stays byte-identical and
 ## re-syncable, while the rest of the kobold/ glue keeps Skjegg's full -Wpedantic.
@@ -357,14 +369,17 @@ KPCOM_SRCS    := kobold/kpcom.pas kobold/version.inc kobold/stdlib.inc
 ## with its architecture (there is no shared ilp32 or lp64 seed).  skj-pc is the
 ## bootstrap root, so the front ends are built from source with no prior seed.  Each
 ## seed feeds that target's JIT (bin2c embeds it) and/or self-host ELF.
-build/kpcom-x86-64.kpm: build/skj-kpc $(KPCOM_SRCS) | build
-	build/skj-kpc -D KP_TARGET_X64 --emit-kpm $(KPCOM_SRC_PAS) > $@
-build/kpcom-arm64.kpm: build/skj-kpc-arm64 $(KPCOM_SRCS) | build
-	build/skj-kpc-arm64 -D KP_TARGET_ARM64 --emit-kpm $(KPCOM_SRC_PAS) > $@
-build/kpcom-rv.kpm: build/skj-kpc-rv $(KPCOM_SRCS) | build
-	build/skj-kpc-rv -D KP_TARGET_RV --emit-kpm $(KPCOM_SRC_PAS) > $@
-build/kpcom-cf.kpm: build/skj-kpc-cf $(KPCOM_SRCS) | build
-	build/skj-kpc-cf -D KP_TARGET_CF --emit-kpm $(KPCOM_SRC_PAS) > $@
+## The seed is the single-step kpcom (built -D KP_ONESTEP), so a JIT that embeds
+## it drives the C module builder through the bound kpbp_* and carries no text
+## emitter.  -D KP_TARGET_<x> stamps the matching .target tag / pointer width.
+build/kpcom-x86-64.kpm: build/skj-kpc $(KPCOM_SRCS) Makefile | build
+	build/skj-kpc -D KP_ONESTEP -D KP_TARGET_X64 --emit-kpm $(KPCOM_SRC_PAS) > $@
+build/kpcom-arm64.kpm: build/skj-kpc-arm64 $(KPCOM_SRCS) Makefile | build
+	build/skj-kpc-arm64 -D KP_ONESTEP -D KP_TARGET_ARM64 --emit-kpm $(KPCOM_SRC_PAS) > $@
+build/kpcom-rv.kpm: build/skj-kpc-rv $(KPCOM_SRCS) Makefile | build
+	build/skj-kpc-rv -D KP_ONESTEP -D KP_TARGET_RV --emit-kpm $(KPCOM_SRC_PAS) > $@
+build/kpcom-cf.kpm: build/skj-kpc-cf $(KPCOM_SRCS) Makefile | build
+	build/skj-kpc-cf -D KP_ONESTEP -D KP_TARGET_CF --emit-kpm $(KPCOM_SRC_PAS) > $@
 
 ## bin2c embeds the seed per architecture (same symbol and header name; each JIT
 ## compiles with its own -Ibuild/<arch> ahead of -Ibuild so frontend.c's
@@ -376,12 +391,23 @@ build/arm64/kpcom_kpm.c: build/kpcom-arm64.kpm build/bin2c | build
 	@mkdir -p build/arm64
 	build/bin2c kpcom_kpm build/kpcom-arm64.kpm build/arm64/kpcom_kpm.c build/arm64/kpcom_kpm.h
 
+## kpcom-fe-jit.o: the skj-pc-built kpcom object with its program entry `main`
+## renamed aside, so it links beside jit_main.c's own main.  kpcom's main never
+## runs in the JIT (kp_compile_pas calls CompileModule directly, which sets the
+## target itself), so the renamed entry is simply unreferenced.  build/skj-kpc
+## leaves build/kpcom-x86-64-fe.o beside itself; depend on skj-kpc to keep it
+## fresh, then rename its main.
+build/x86-64/kpcom-fe-jit.o: build/skj-kpc | build
+	@mkdir -p build/x86-64
+	objcopy --redefine-sym main=kpcom_prog_main build/kpcom-x86-64-fe.o $@
+
 ## skj-kp-jit: the native (x86-64, LP64) in-process JIT.  Runtime and front end
 ## compiled for x86-64 (-DX86_BITS=64 in KP_CFLAGS) so guest pointers are full
-## 64-bit; the embedded seed is the x86-64 one and kp_co is the LP64 coroutine
-## object.
-build/skj-kp-jit: kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o kobold/frontend.h $(KP_HDRS) Makefile | build
-	$(CC) $(KP_CFLAGS) $(KP_FS_FLAGS) -Ibuild/x86-64 -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o -lm
+## 64-bit; kp_co is the LP64 coroutine object.  No seed: kpcom is linked in as
+## native code (kpcom-fe-jit.o + the host Pascal runtime + the C builder) and
+## compiles straight into the builder in one step.
+build/skj-kp-jit: kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom-fe-jit.o build/pascal_rt_host.o $(KP_FE_SRC) $(KP_RT) build/kp_co_lp64.o kobold/frontend.h $(KP_HDRS) $(KP_FE_HDRS) Makefile | build
+	$(CC) $(KP_CFLAGS) $(KP_FS_FLAGS) $(HOST_NO_PIE) -DKP_FE_LINKED -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom-fe-jit.o build/pascal_rt_host.o $(KP_FE_SRC) $(KP_RT) build/kp_co_lp64.o -lm
 
 ## kp_co_lp64.o: the coroutine core compiled LP64 (-DX86_BITS=64: native 64-bit
 ## guest pointer/handle, guest stacks in full memory), linked into the x86-64
@@ -407,31 +433,56 @@ HOST_ASM_DEP := $(A64_ASM_DEP)
 host_assemble = $(A64_AS) -o $(2) $(1)
 endif
 
-## skj-kpc: the native Kobold front end, the host compiler for the x86-64 target.
-## Plan 9 style, the target baked at build: skj-pc compiles kpcom.pas with
-## -d KP_TARGET_X64, so CurTarget is x86-64 (8-byte pointers, width derived from
-## the target) and every module it emits is stamped `.target x86-64`.  No seed and
-## no libkpaot; it links
-## the host-import shim (ReadFileStr, WriteFileStr, kpd_*) and skj-pc's Pascal
-## runtime, the same ones check-pc-kpcom uses.  skj-kpc-x86-64 is the explicit arch
-## name for the same binary.  Built host-native (HOST_PC/host_assemble) so it runs
-## on this host whatever its architecture.
-build/skj-kpc: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(HOST_ASM_DEP) | build
-	$(HOST_PC) -d KOBOLD -d KP_TARGET_X64 -o build/kpcom-x86-64-fe.s $(KPCOM_SRC_PAS)
+## skj-kpc: the native single-step Kobold compiler, the host compiler for the
+## x86-64 target.  Plan 9 style, the target baked at build: skj-pc compiles
+## kpcom.pas with -d KP_TARGET_X64, so CurTarget is x86-64 (8-byte pointers, width
+## derived from the target) and every module it emits is stamped `.target x86-64`.
+## -d KP_ONESTEP links the C module builder, the AOT emit pipeline, and the x86-64
+## backend into the front-end binary, so kpcom drives the builder directly
+## (EmitModuleViaBuilder) and emits in one process: .kp -> assembly with -o out.s,
+## or the serialized KPM image with --emit-kpm (through kpm_write, for a seed or a
+## stored unit), no KPM text round trip.  It links the host-import shim
+## (ReadFileStr, WriteFileStr, kpd_*) and skj-pc's Pascal runtime, the same ones
+## check-pc-kpcom uses.  skj-kpc-x86-64 is the explicit arch name for the same
+## binary.  Built host-native (HOST_PC/host_assemble) so it runs on this host
+## whatever its architecture.
+build/skj-kpc: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) \
+               kobold/kpbuild.c kobold/kpb_fe.c kobold/kpb_native.c kobold/kp_aot.c kobold/kpm.c \
+               kobold/kpm_write.c $(IR_SRC) $(BE_X64_SEL) \
+               kobold/kpbuild.h kobold/kpm.h kobold/kp_aot.h $(HOST_ASM_DEP) | build
+	$(HOST_PC) -d KOBOLD -d KP_TARGET_X64 -d KP_ONESTEP -o build/kpcom-x86-64-fe.s $(KPCOM_SRC_PAS)
 	$(call host_assemble,build/kpcom-x86-64-fe.s,build/kpcom-x86-64-fe.o)
-	$(CC) $(HOST_NO_PIE) build/kpcom-x86-64-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
+	$(CC) $(CFLAGS) $(HOST_NO_PIE) -DX86_BITS=64 -Iir -Ibackend -Ikobold \
+	    build/kpcom-x86-64-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o \
+	    kobold/kpbuild.c kobold/kpb_fe.c kobold/kpb_native.c kobold/kp_aot.c kobold/kpm.c kobold/kpm_write.c \
+	    $(IR_SRC) $(BE_X64_SEL) -lm -o $@
 
 ## skj-kpc-arm64: the host front end for the AArch64 target.  Same LP64 width as
 ## skj-kpc, but KP_TARGET_ARM64 stamps `.target arm64`, so the arm64 backend accepts
 ## its modules and rejects the x86-64 ones.  The arch it names is the target it
 ## emits for, not where it runs; it is built host-native like skj-kpc.
-build/skj-kpc-arm64: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(HOST_ASM_DEP) | build
-	$(HOST_PC) -d KOBOLD -d KP_TARGET_ARM64 -o build/kpcom-arm64-fe.s $(KPCOM_SRC_PAS)
+build/skj-kpc-arm64: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) \
+                     kobold/kpbuild.c kobold/kpb_fe.c kobold/kpb_native.c kobold/kp_aot.c kobold/kpm.c \
+                     kobold/kpm_write.c $(IR_SRC) $(BE_A64_SEL) \
+                     kobold/kpbuild.h kobold/kpm.h kobold/kp_aot.h $(HOST_ASM_DEP) | build
+	$(HOST_PC) -d KOBOLD -d KP_TARGET_ARM64 -d KP_ONESTEP -o build/kpcom-arm64-fe.s $(KPCOM_SRC_PAS)
 	$(call host_assemble,build/kpcom-arm64-fe.s,build/kpcom-arm64-fe.o)
-	$(CC) $(HOST_NO_PIE) build/kpcom-arm64-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
+	$(CC) $(CFLAGS) $(HOST_NO_PIE) -DCC_ARM64 -Iir -Ibackend -Ikobold \
+	    build/kpcom-arm64-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o \
+	    kobold/kpbuild.c kobold/kpb_fe.c kobold/kpb_native.c kobold/kp_aot.c kobold/kpm.c kobold/kpm_write.c \
+	    $(IR_SRC) $(BE_A64_SEL) -lm -o $@
 
 build/skj-kpc-x86-64: build/skj-kpc | build
 	cp -f build/skj-kpc $@
+
+## check-onestep: the single-step equivalence gate.  skj-kpc emits in one step
+## (.kp -> .s); that assembly must byte-match the assembly its serialized module
+## reaches through the backend (skj-kpc --emit-kpm | skj-kp), so the direct
+## kp_aot_emit path and the kpm_write + kpm_read round trip agree.  The reference
+## and the single-step tool are now the same binary.
+check-onestep: build/skj-kpc build/skj-kp
+	@KPC=build/skj-kpc KP=build/skj-kp ONESTEP=build/skj-kpc \
+	    sh tests/run-onestep.sh $(KPM_RT_SRCS)
 
 
 ## skj-kpc-rv / skj-kpc-cf: the per-target host front ends for the rv32 and
@@ -441,30 +492,54 @@ build/skj-kpc-x86-64: build/skj-kpc | build
 ## the cc model: a unit built for rv32 is not a unit for ColdFire, so there is no
 ## shared "ilp32" front end.  (The architecture decides the pointer width; both
 ## happen to be 4 bytes, but that is a consequence, not a shared category.)
-build/skj-kpc-rv: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(HOST_ASM_DEP) | build
-	$(HOST_PC) -d KOBOLD -d KP_TARGET_RV -o build/kpcom-rv-fe.s $(KPCOM_SRC_PAS)
+## Each per-target skj-kpc is single-step like the x86-64 one: -d KP_ONESTEP plus
+## the C module builder, the AOT emit pipeline, and that target's backend linked
+## into the host-native front-end binary.  The C sources carry the same arch
+## flags as the matching skj-kp-<arch> backend tool (the FE object is host-native;
+## only the baked target and the linked backend change per arch).
+build/skj-kpc-rv: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) \
+                  kobold/kpbuild.c kobold/kpb_fe.c kobold/kpb_native.c kobold/kp_aot.c kobold/kpm.c \
+                  kobold/kpm_write.c $(IR_SRC) $(BE_RV) \
+                  kobold/kpbuild.h kobold/kpm.h kobold/kp_aot.h $(HOST_ASM_DEP) | build
+	$(HOST_PC) -d KOBOLD -d KP_TARGET_RV -d KP_ONESTEP -o build/kpcom-rv-fe.s $(KPCOM_SRC_PAS)
 	$(call host_assemble,build/kpcom-rv-fe.s,build/kpcom-rv-fe.o)
-	$(CC) $(HOST_NO_PIE) build/kpcom-rv-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
+	$(CC) $(CFLAGS) $(HOST_NO_PIE) -DKP_AOT_RV -DSKJ_KPM_ARCH='"rv32"' -Iir -Ibackend -Ikobold \
+	    build/kpcom-rv-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o \
+	    kobold/kpbuild.c kobold/kpb_fe.c kobold/kpb_native.c kobold/kp_aot.c kobold/kpm.c kobold/kpm_write.c \
+	    $(IR_SRC) $(BE_RV) -lm -o $@
 
-build/skj-kpc-cf: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(HOST_ASM_DEP) | build
-	$(HOST_PC) -d KOBOLD -d KP_TARGET_CF -o build/kpcom-cf-fe.s $(KPCOM_SRC_PAS)
+build/skj-kpc-cf: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) \
+                  kobold/kpbuild.c kobold/kpb_fe.c kobold/kpb_native.c kobold/kp_aot.c kobold/kpm.c \
+                  kobold/kpm_write.c $(IR_SRC) $(BE_CF) \
+                  kobold/kpbuild.h kobold/kpm.h kobold/kp_aot.h $(HOST_ASM_DEP) | build
+	$(HOST_PC) -d KOBOLD -d KP_TARGET_CF -d KP_ONESTEP -o build/kpcom-cf-fe.s $(KPCOM_SRC_PAS)
 	$(call host_assemble,build/kpcom-cf-fe.s,build/kpcom-cf-fe.o)
-	$(CC) $(HOST_NO_PIE) build/kpcom-cf-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
+	$(CC) $(CFLAGS) $(HOST_NO_PIE) -DSKJ_KPM_ARCH='"cf"' -Iir -Ibackend -Ikobold \
+	    build/kpcom-cf-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o \
+	    kobold/kpbuild.c kobold/kpb_fe.c kobold/kpb_native.c kobold/kp_aot.c kobold/kpm.c kobold/kpm_write.c \
+	    $(IR_SRC) $(BE_CF) -lm -o $@
 
-## skj-kpc-mips: the Kobold front end for the MIPS / PlayStation target.  HOST_PC
-## compiles kpcom.pas with KP_TARGET_MIPS, so the modules it emits stamp
-## `.target mips` (ILP32) and bind to the MIPS backend.
-build/skj-kpc-mips: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) $(HOST_ASM_DEP) | build
-	$(HOST_PC) -d KOBOLD -d KP_TARGET_MIPS -o build/kpcom-mips-fe.s $(KPCOM_SRC_PAS)
+## skj-kpc-mips: the single-step Kobold compiler for the MIPS / PlayStation
+## target.  HOST_PC compiles kpcom.pas with KP_TARGET_MIPS, so the modules it
+## emits stamp `.target mips` (ILP32) and bind to the MIPS backend, which is built
+## soft-float (the PlayStation R3051 has no FPU).
+build/skj-kpc-mips: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $(KPCOM_SRCS) \
+                    kobold/kpbuild.c kobold/kpb_fe.c kobold/kpb_native.c kobold/kp_aot.c kobold/kpm.c \
+                    kobold/kpm_write.c $(IR_SRC) $(BE_MIPS) \
+                    kobold/kpbuild.h kobold/kpm.h kobold/kp_aot.h $(HOST_ASM_DEP) | build
+	$(HOST_PC) -d KOBOLD -d KP_TARGET_MIPS -d KP_ONESTEP -o build/kpcom-mips-fe.s $(KPCOM_SRC_PAS)
 	$(call host_assemble,build/kpcom-mips-fe.s,build/kpcom-mips-fe.o)
-	$(CC) $(HOST_NO_PIE) build/kpcom-mips-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o -lm -o $@
+	$(CC) $(CFLAGS) $(HOST_NO_PIE) -DMIPS_SOFTFLOAT -DSKJ_KPM_ARCH='"mips"' -Iir -Ibackend -Ikobold \
+	    build/kpcom-mips-fe.o tests/pascal_kpcom_host.c build/pascal_rt_host.o \
+	    kobold/kpbuild.c kobold/kpb_fe.c kobold/kpb_native.c kobold/kp_aot.c kobold/kpm.c kobold/kpm_write.c \
+	    $(IR_SRC) $(BE_MIPS) -lm -o $@
 
 ## skj-kp-mips-sf: the Kobold AOT codegen for MIPS, soft-float (the PlayStation
 ## R3051 has no FPU), the counterpart of skj-kp-cf.  Reads a `.target mips` KPM
 ## and emits soft-float MIPS assembly through the shared backend.
-build/skj-kp-mips-sf: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_MIPS) kobold/kpm.h ir/ir.h Makefile | build
+build/skj-kp-mips-sf: kobold/aot_main.c kobold/kp_aot.c kobold/kpm.c $(IR_SRC) $(BE_MIPS) kobold/kpm.h kobold/kp_aot.h ir/ir.h Makefile | build
 	$(CC) $(CFLAGS) -DMIPS_SOFTFLOAT -DSKJ_KPM_ARCH='"mips"' -Iir -Ibackend -Ikobold -o $@ \
-	    kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_MIPS)
+	    kobold/aot_main.c kobold/kp_aot.c kobold/kpm.c $(IR_SRC) $(BE_MIPS)
 
 ## skj-kp-jit-san: build/skj-kp-jit with the guest-heap write-after-free instrument
 ## (GH_POISON, kobold/rt_host.c) plus ASan/UBSan, at -O1 -g so a report carries a usable
@@ -475,8 +550,13 @@ build/skj-kp-mips-sf: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_MIPS) kobold
 ## check-kp-corpus-san.
 ## It is the native (LP64) JIT, so a width-8 truncation (a 64-bit guest address
 ## narrowed to 32 bits dereferencing wild) also trips here under ASan.
-build/skj-kp-jit-san: kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o kobold/frontend.h $(KP_HDRS) Makefile | build
-	$(CC) $(KP_CFLAGS) $(KP_FS_FLAGS) -Ibuild/x86-64 -O1 -g -DGH_POISON $(SAN_CFLAGS) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o -lm
+## The sanitizer JIT keeps the seed path: it validates the run module's kp-runtime
+## heap (GH_POISON + ASan), and it instruments that best by JIT'ing kpcom as
+## kp-runtime code, where ASan can see it.  The linked native kpcom uses the
+## malloc-based host Pascal runtime that ASan does not instrument, so it stays on
+## the seed here until the runtime unification lets the san build link it cleanly.
+build/skj-kp-jit-san: kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c kobold/kpbuild.c kobold/kpm_write.c $(KP_RT) build/kp_co_lp64.o kobold/frontend.h kobold/kpbuild.h $(KP_HDRS) Makefile | build
+	$(CC) $(KP_CFLAGS) $(KP_FS_FLAGS) -Ibuild/x86-64 -O1 -g -DGH_POISON $(SAN_CFLAGS) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c kobold/kpbuild.c kobold/kpm_write.c $(KP_RT) build/kp_co_lp64.o -lm
 
 build/skj-kp-patrol: kobold/patrol_main.c $(KP_RT) build/kp_co.o $(KP_HDRS) Makefile | build
 	$(CC) $(KP_CFLAGS) $(KP_FS_FLAGS) -o $@ kobold/patrol_main.c $(KP_RT) build/kp_co.o -lm
@@ -503,8 +583,8 @@ KP_CFLAGS_RV := $(CFLAGS) -DKP_FREESTANDING -DKP_REAL=double -Iir -Ijit -Ibacken
 build/kp_co_rv.o: kobold/co.c kobold/co.h kobold/handle.h kobold/lowmem.h Makefile | build
 	$(RVJIT_CC) -std=c99 -O2 -Wall -Wextra -Wno-unused-parameter -Iir -Ijit -Ibackend -Ikobold -c kobold/co.c -o $@
 
-build/skj-kp-jit-rv: kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c $(KP_RT_RV) build/kp_co_rv.o kobold/frontend.h $(KP_HDRS_RV) runtime/i64_rv.S Makefile | build
-	$(RVJIT_CC) $(KP_CFLAGS_RV) $(KP_FS_FLAGS) -DSKJ_KPM_ARCH='"rv32"' -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c $(KP_RT_RV) build/kp_co_rv.o -lm
+build/skj-kp-jit-rv: kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c kobold/kpbuild.c kobold/kpm_write.c $(KP_RT_RV) build/kp_co_rv.o kobold/frontend.h kobold/kpbuild.h $(KP_HDRS_RV) runtime/i64_rv.S Makefile | build
+	$(RVJIT_CC) $(KP_CFLAGS_RV) $(KP_FS_FLAGS) -DSKJ_KPM_ARCH='"rv32"' -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/kpcom_kpm.c kobold/kpbuild.c kobold/kpm_write.c $(KP_RT_RV) build/kp_co_rv.o -lm
 
 ## skj-kp-jit-arm64: the in-process AArch64 JIT for Kobold modules, the cross-arch
 ## counterpart of skj-kp-jit.  Same driver, ported runtime, and selector, over the
@@ -547,8 +627,8 @@ build/kp_co_cf.o: kobold/co.c kobold/co.h kobold/handle.h kobold/lowmem.h Makefi
 ## runtime and front end are compiled -DCC_ARM64 (8-byte pointers), the embedded
 ## seed is the arm64 one, and kp_co is the LP64 coroutine object.  Runs under
 ## qemu-aarch64.
-build/skj-kp-jit-arm64: kobold/jit_main.c kobold/frontend.c build/arm64/kpcom_kpm.c $(KP_RT_A64) build/kp_co_a64_lp64.o kobold/frontend.h $(KP_HDRS_A64) Makefile | build
-	$(A64_CC) $(KP_CFLAGS_A64) $(KP_FS_FLAGS) -DCC_ARM64 -Ibuild/arm64 -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/arm64/kpcom_kpm.c $(KP_RT_A64) build/kp_co_a64_lp64.o -lm
+build/skj-kp-jit-arm64: kobold/jit_main.c kobold/frontend.c build/arm64/kpcom_kpm.c kobold/kpbuild.c kobold/kpm_write.c $(KP_RT_A64) build/kp_co_a64_lp64.o kobold/frontend.h kobold/kpbuild.h $(KP_HDRS_A64) Makefile | build
+	$(A64_CC) $(KP_CFLAGS_A64) $(KP_FS_FLAGS) -DCC_ARM64 -Ibuild/arm64 -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/arm64/kpcom_kpm.c kobold/kpbuild.c kobold/kpm_write.c $(KP_RT_A64) build/kp_co_a64_lp64.o -lm
 
 ## skj-kp: the x86-64 ahead-of-time compiler for Kobold modules.  It reads a KPM1
 ## module and writes GNU intel assembly through the same selector the JIT drives, over
@@ -562,10 +642,10 @@ build/skj-kp-jit-arm64: kobold/jit_main.c kobold/frontend.c build/arm64/kpcom_kp
 ## trick).  The x86 selector keeps every integer temp in a uniform 64-bit home, so
 ## skj-kp is built -DX86_BITS=64 (its LP64 width); the LP64-ness also lives in the
 ## KPM it reads and in libkpaot.a (built for x86-64 below).
-build/skj-kp: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL) kobold/kpm.h ir/ir.h \
+build/skj-kp: kobold/aot_main.c kobold/kp_aot.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL) kobold/kpm.h kobold/kp_aot.h ir/ir.h \
               backend/mc_text.h backend/x86_select.h Makefile | build
 	$(CC) $(CFLAGS) -DX86_BITS=64 -Iir -Ibackend -Ikobold -o $@ \
-	    kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL)
+	    kobold/aot_main.c kobold/kp_aot.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL)
 
 ## Exercise the KPM1 module reader's input validation (kobold/kpm.c) through skj-kp.
 ## Self-contained: no external Kobold repo, no qemu, no assembler or linker.  The
@@ -573,6 +653,52 @@ build/skj-kp: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL) kobold/kpm.
 ## must be rejected with the pinned message; a well-formed one must compile).
 check-kp: build/skj-kp
 	@sh tests/run-kp-tests.sh
+
+## skj-kpm-roundtrip: a reader/writer check tool.  It reads a KPM1 module and
+## writes it back out through kpm_write (the inverse of kpm_read), so the test
+## can confirm the pair is faithful by diffing the assembly skj-kp emits for the
+## original and the re-serialized module.  Links the reader, the writer, and the
+## IR core only (no backend).  Built -DX86_BITS=64, matching skj-kp, so it reads
+## the x86-64 modules skj-kpc emits with -D KP_TARGET_X64.
+build/skj-kpm-roundtrip: tests/kpm_roundtrip.c kobold/kpm.c kobold/kpm_write.c $(IR_SRC) \
+                         kobold/kpm.h kobold/kp_aot.h ir/ir.h Makefile | build
+	$(CC) $(CFLAGS) -DX86_BITS=64 -Iir -Ibackend -Ikobold -o $@ \
+	    tests/kpm_roundtrip.c kobold/kpm.c kobold/kpm_write.c $(IR_SRC)
+
+## check-kpm-roundtrip: the KPM reader/writer round-trip gate.  For each source
+## module, skj-kp's assembly for the original module must byte-match its assembly
+## for the module after a kpm_read -> kpm_write round trip, and a second round
+## trip must change nothing (a fixpoint).  Backend-free proof that kpm_write
+## preserves everything the backend reads.
+KPM_RT_SRCS := tests/kp-corpus/arrays.pas tests/kp-corpus/casts.pas \
+               tests/kp-corpus/records.pas tests/kp-corpus/conds.pas \
+               tests/kp-corpus/combo.pas tests/kp-corpus/reals.pas \
+               tests/kp-corpus/mathfn.pas tests/kp-corpus/sets.pas \
+               tests/kp-corpus/strappend.pas tests/kp-corpus/mapbasic.pas \
+               tests/kp-corpus/dynarray.pas tests/kp-corpus/strconv.pas
+check-kpm-roundtrip: build/skj-kpm-roundtrip build/skj-kp build/skj-kpc
+	@KPC=build/skj-kpc KP=build/skj-kp RT=build/skj-kpm-roundtrip \
+	    sh tests/run-kpm-roundtrip.sh $(KPM_RT_SRCS)
+
+## skj-kpbuild-selftest: exercise the in-memory module builder (kpbuild.c) end
+## to end without the front end.  It reads a .kpm, replays it through the kpb_*
+## entry points, and checks kp_aot_emit's assembly for the rebuilt module matches
+## the assembly for the module read straight from the file.  Links the reader,
+## builder, emit pipeline, and the x86-64 selector backend.
+build/skj-kpbuild-selftest: tests/kpbuild_selftest.c kobold/kpbuild.c kobold/kpm.c \
+                            kobold/kp_aot.c $(IR_SRC) $(BE_X64_SEL) \
+                            kobold/kpbuild.h kobold/kpm.h kobold/kp_aot.h ir/ir.h Makefile | build
+	$(CC) $(CFLAGS) -DX86_BITS=64 -Iir -Ibackend -Ikobold -o $@ \
+	    tests/kpbuild_selftest.c kobold/kpbuild.c kobold/kpm.c kobold/kp_aot.c \
+	    $(IR_SRC) $(BE_X64_SEL)
+
+## check-kpbuild: the module-builder gate.  For each corpus module, the assembly
+## kp_aot_emit produces after a read -> replay-through-the-builder rebuild must
+## byte-match the assembly for the module read straight from the file.  Proves
+## the builder carries everything the backend reads, before the front-end cutover.
+check-kpbuild: build/skj-kpbuild-selftest build/skj-kpc
+	@KPC=build/skj-kpc SELF=build/skj-kpbuild-selftest \
+	    sh tests/run-kpbuild.sh $(KPM_RT_SRCS)
 
 ## libkpaot.a: the Kobold runtime an AOT program links against.  It is the same
 ## ported runtime the JIT binds (strings, arrays, maps, coroutines, ARC, the guest
@@ -603,19 +729,19 @@ build/libkpaot.a: $(KP_AOT_RT) build/kp_co_lp64.o $(KP_HDRS) Makefile | build
 ## toolchain then assembles and links it against the target runtime.  aot_main.c is
 ## arch-neutral; -DKP_AOT_RV only picks the rv entries of its guest-name remap (the
 ## soft-float real ABI bridge and the stack-ABI 64-bit multiply/shift helpers).
-build/skj-kp-rv: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_RV) kobold/kpm.h ir/ir.h \
+build/skj-kp-rv: kobold/aot_main.c kobold/kp_aot.c kobold/kpm.c $(IR_SRC) $(BE_RV) kobold/kpm.h kobold/kp_aot.h ir/ir.h \
                  backend/rv_mc_text.h backend/rv_select.h Makefile | build
 	$(CC) $(CFLAGS) -DKP_AOT_RV -DSKJ_KPM_ARCH='"rv32"' -Iir -Ibackend -Ikobold -o $@ \
-	    kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_RV)
+	    kobold/aot_main.c kobold/kp_aot.c kobold/kpm.c $(IR_SRC) $(BE_RV)
 
 ## AArch64 is LP64, so this AOT compiler is built -DCC_ARM64 (its 8-byte pointer
 ## width).  arm64_select.c uses a uniform 64-bit integer home (INT_HOME_X:
 ## ldrx/strx/mov x reloads and call-result captures) unconditionally, since every
 ## arm64 build is LP64, so a width-8 pointer is never truncated to 32 bits.
-build/skj-kp-arm64: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_A64_SEL) kobold/kpm.h ir/ir.h \
+build/skj-kp-arm64: kobold/aot_main.c kobold/kp_aot.c kobold/kpm.c $(IR_SRC) $(BE_A64_SEL) kobold/kpm.h kobold/kp_aot.h ir/ir.h \
                     backend/arm64_mc_text.h backend/arm64_select.h Makefile | build
 	$(CC) $(CFLAGS) -DCC_ARM64 -Iir -Ibackend -Ikobold -o $@ \
-	    kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_A64_SEL)
+	    kobold/aot_main.c kobold/kp_aot.c kobold/kpm.c $(IR_SRC) $(BE_A64_SEL)
 
 ## skj-kp-cf: the ColdFire ahead-of-time compiler for Kobold modules, the AOT
 ## counterpart over the classic ColdFire backend (BE_CF: regalloc_cf + cf_emit).
@@ -624,9 +750,9 @@ build/skj-kp-arm64: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_A64_SEL) kobol
 ## classic emitter, not a selector, so it ignores aot_main.c's guarded-trap flag:
 ## Kobold's integer-overflow traps are not enforced on ColdFire for now, which is
 ## off the kpcom bootstrap critical path.  Output is GAS assembly for skj-as.
-build/skj-kp-cf: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_CF) kobold/kpm.h ir/ir.h Makefile | build
+build/skj-kp-cf: kobold/aot_main.c kobold/kp_aot.c kobold/kpm.c $(IR_SRC) $(BE_CF) kobold/kpm.h kobold/kp_aot.h ir/ir.h Makefile | build
 	$(CC) $(CFLAGS) -DSKJ_KPM_ARCH='"cf"' -Iir -Ibackend -Ikobold -o $@ \
-	    kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_CF)
+	    kobold/aot_main.c kobold/kp_aot.c kobold/kpm.c $(IR_SRC) $(BE_CF)
 
 ## libkpaot-rv.a / libkpaot-arm64.a: the target runtimes an AOT program links
 ## against, the cross-compiled siblings of libkpaot.a.  Same sources (the ported
@@ -697,20 +823,22 @@ build/libkpaot-cf.a: $(KP_AOT_RT_CF) build/kp_co_cf.o $(KP_HDRS) Makefile | buil
 ## checks that the seed, run on the target, reproduces the host front end's
 ## reference byte for byte.
 
-## Compiler-independence proof: rebuild kpcom from source with fpc, a toolchain
-## independent of both skjegg and a working Kobold, targeting rv32, and check it
-## emits the same module as the skj-pc-built rv32 front end.  Since the module
-## kpcom emits is fixed by its own logic, not by which compiler built it,
-## build/kpcom.kpm.fpc must match build/kpcom-rv.kpm byte for byte.
+## Dialect-conformance check: kpcom.pas is the self-hosting compiler, so it must
+## stay within the Pascal subset common to skj-pc and a mainstream Pascal compiler
+## (fpc), and not drift into a private skj-pc dialect.  Compile it under BOTH and
+## require both to accept it.  skj-pc compiles it to assembly (the same step the
+## normal build runs); fpc compiles only (-Cn, no link), since the single-step
+## externals (kpbp_*) resolve against C objects the fpc build does not link, and
+## the check is about the dialect, not a runnable fpc binary.  This is not a seed
+## comparison: there is no committed or byte-compared seed (the single-step
+## compiler serializes any seed through the C builder, which fpc cannot drive).
 FPC ?= fpc
-bootstrap-fpc: build/kpcom-rv.kpm | build
+bootstrap-fpc: $(HOST_PC) $(KPCOM_SRCS) $(HOST_ASM_DEP) | build
 	@command -v $(FPC) >/dev/null 2>&1 || { echo "bootstrap-fpc: '$(FPC)' required" >&2; exit 1; }
-	$(FPC) -dKP_TARGET_RV -Fikobold -FEbuild -FUbuild -O2 -Xs -veiwn kobold/kpcom.pas
-	build/kpcom -D KP_TARGET_RV --emit-kpm kobold/kpcom.pas > build/kpcom.kpm.fpc
-	@echo "bootstrap-fpc: wrote build/kpcom.kpm.fpc ($$(wc -c < build/kpcom.kpm.fpc | tr -d ' ') bytes, sha256 $$(sha256sum build/kpcom.kpm.fpc | cut -d' ' -f1))"
-	@cmp build/kpcom.kpm.fpc build/kpcom-rv.kpm \
-	    && echo "bootstrap-fpc: fpc module matches the skj-built rv32 seed (compiler-independent)" \
-	    || { echo "bootstrap-fpc: FAIL fpc module differs from build/kpcom-rv.kpm" >&2; exit 1; }
+	$(HOST_PC) -d KOBOLD -d KP_TARGET_RV -d KP_ONESTEP -o build/kpcom-dialect.s $(KPCOM_SRC_PAS)
+	@echo "bootstrap-fpc: skj-pc accepts kobold/kpcom.pas"
+	$(FPC) -dKP_TARGET_RV -dKP_ONESTEP -Cn -Fikobold -FEbuild -FUbuild -O2 -Xs -veiwn kobold/kpcom.pas
+	@echo "bootstrap-fpc: fpc accepts kobold/kpcom.pas (both compilers agree on the dialect)"
 
 ## ---- Kobold source fixtures (tests/kp-src/*.pas + *.expected) ----
 ## The source-compilation counterpart of check-kp (which exercises the KPM1
@@ -1368,6 +1496,16 @@ build/kpfree-rv/%.o: kobold/%.c $(KP_HDRS_RV) build/skj-cc-rv build/skj-as-rv Ma
 	./build/skj-cc-rv $(KPFREE_RV_SKJFLAGS) -o $(@:.o=.s) $<
 	./build/skj-as-rv -o $@ $(@:.o=.s)
 
+# The single-step module builder the freestanding self-host compiler links: the
+# in-memory IR builder (ir/), the C module builder (kpbuild.c + kpb_fe.c), the
+# builder's output driver (kpb_native.c, KPM only here, no backend), and the KPM
+# serializer and reader (kpm_write.c, kpm.c).  These let the in-guest kpcom lower
+# straight into the builder and --emit-kpm through kpm_write, with no seed.  The
+# kobold/ sources above already match the kobold pattern rule; ir/ needs its own.
+build/kpfree-rv/%.o: ir/%.c $(wildcard ir/*.h) build/skj-cc-rv build/skj-as-rv Makefile | build/kpfree-rv
+	./build/skj-cc-rv $(KPFREE_RV_SKJFLAGS) -o $(@:.o=.s) $<
+	./build/skj-as-rv -o $@ $(@:.o=.s)
+
 # soft64.c supplies only the 64-bit divide family here (-DSOFT64_NO_MULSHIFT);
 # the mul/shift helpers are the hand-written .S aliases below, which the rv
 # backend's internal stack ABI calls.
@@ -1459,7 +1597,13 @@ KPFREE_RV_ARCHIVE := build/kpfree-rv/rt_free.o build/kpfree-rv/io_free.o build/k
                      build/kpfree-rv/rv_i64_aot_alias.o build/kpfree-rv/rv_jit_i64.o \
                      build/kpfree-rv/co_free.o build/kpfree-rv/co_switch_rv.o \
                      build/kpfree-rv/math_free.o build/kpfree-rv/rng.o \
-                     build/kpfree-rv/rng_glue.o build/kpfree-rv/sched_glue.o
+                     build/kpfree-rv/rng_glue.o build/kpfree-rv/sched_glue.o \
+                     build/kpfree-rv/kpbuild.o build/kpfree-rv/kpb_fe.o \
+                     build/kpfree-rv/kpb_native.o build/kpfree-rv/kpm_write.o \
+                     build/kpfree-rv/kpm.o build/kpfree-rv/ir.o \
+                     build/kpfree-rv/util.o build/kpfree-rv/arena.o \
+                     build/kpfree-rv/stdio_core.o build/kpfree-rv/stdio.o \
+                     build/kpfree-rv/printf.o build/kpfree-rv/va_rv.o
 
 build/libkpaot-rv-free.a: $(KPFREE_RV_ARCHIVE) | build/kpfree-rv
 	@rm -f $@
@@ -1489,6 +1633,13 @@ KP_HDRS_CF := kobold/str.h kobold/dynarr.h kobold/map.h kobold/obj.h kobold/ghea
 KPFREE_CF_SKJFLAGS := -DKP_FREESTANDING -DKP_REAL=double -Ikobold -Iir
 
 build/kpfree-cf/%.o: kobold/%.c $(KP_HDRS_CF) build/skj-cc build/skj-as Makefile | build/kpfree-cf
+	./build/skj-cc $(KPFREE_CF_SKJFLAGS) -o $(@:.o=.s) $<
+	./build/skj-as -o $@ $(@:.o=.s)
+
+# The single-step module builder the freestanding self-host compiler links (the
+# cf sibling of the rv ir/%.o rule): the in-memory IR builder (ir/) feeding the C
+# module builder and KPM serializer in the kobold/ pattern above.
+build/kpfree-cf/%.o: ir/%.c $(wildcard ir/*.h) build/skj-cc build/skj-as Makefile | build/kpfree-cf
 	./build/skj-cc $(KPFREE_CF_SKJFLAGS) -o $(@:.o=.s) $<
 	./build/skj-as -o $@ $(@:.o=.s)
 
@@ -1573,6 +1724,12 @@ KPFREE_CF_ARCHIVE := build/kpfree-cf/rt_free.o build/kpfree-cf/io_free.o build/k
                      build/kpfree-cf/co_free.o build/kpfree-cf/math_free.o \
                      build/kpfree-cf/rng.o build/kpfree-cf/rng_glue.o \
                      build/kpfree-cf/sched_glue.o \
+                     build/kpfree-cf/kpbuild.o build/kpfree-cf/kpb_fe.o \
+                     build/kpfree-cf/kpb_native.o build/kpfree-cf/kpm_write.o \
+                     build/kpfree-cf/kpm.o build/kpfree-cf/ir.o \
+                     build/kpfree-cf/util.o build/kpfree-cf/arena.o \
+                     build/kpfree-cf/stdio_core.o build/kpfree-cf/stdio.o \
+                     build/kpfree-cf/printf.o build/kpfree-cf/va_cf.o \
                      build/co_switch_cf.o
 
 build/libkpaot-cf-free.a: $(KPFREE_CF_ARCHIVE) | build/kpfree-cf
@@ -1864,6 +2021,20 @@ test-vmm: build/vmm_selftest build/vmm_selftest_guest.bin
 	 elif [ $$ec -eq 0 ]; then echo "SKIP: vmm selftest (no hypervisor)"; \
 	 else echo "FAIL: vmm selftest (exit $$ec)"; exit 1; fi
 
+## Functional-hypervisor probe for the HV test guards below.  An openable /dev/kvm
+## (what `[ -r /dev/kvm ]` checks) is not enough: a host can expose the device yet
+## be unable to create a vcpu (no nested virtualization), so an accessibility check
+## lets those tests run and then fail spuriously.  build/vmm_selftest runs a tiny
+## guest under the VMM and exits 42 only when a vcpu actually executed (0 when
+## there is no hypervisor at all, another code when /dev/kvm is present but a vcpu
+## cannot be created).  A guard that requires exit 42 SKIPs cleanly on a present-
+## but-dead hypervisor.  Targets using vmm_works list VMM_PROBE_DEPS as prereqs so
+## the probe is built before the guard runs.  The probe is x86-64-KVM specific (it
+## links emu/vmm_kvm.c and its guest blob is x86-64 long-mode asm), so it gates the
+## x86-64 HV tests; the aarch64-host guards keep their own uname + /dev/kvm check.
+VMM_PROBE_DEPS := build/vmm_selftest build/vmm_selftest_guest.bin
+vmm_works = { ./build/vmm_selftest build/vmm_selftest_guest.bin >/dev/null 2>&1; [ $$? -eq 42 ]; }
+
 ## The x86-64 hardware-virtualization guest tier: a bare-asm guest and a C guest
 ## (skj-cc-x86-64) that both reach the host through the doorbell syscall seam
 ## (runtime/syscall_x86_64_hv.S) and run under skj-run on real KVM.  The guest
@@ -1891,8 +2062,8 @@ build/hv-x86_64/hello_c.elf: tests/hv/hello_c.c build/skj-cc-x86-64 \
 	$(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none -o $@ \
 	    build/hv-x86_64/start.o build/hv-x86_64/hello_c.o build/hv-x86_64/syscall.o
 
-test-hv-x86-64: build/skj-run build/hv-x86_64/hello.elf build/hv-x86_64/hello_c.elf
-	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: hv x86-64 (no accessible /dev/kvm)"; exit 0; fi; \
+test-hv-x86-64: $(VMM_PROBE_DEPS) build/skj-run build/hv-x86_64/hello.elf build/hv-x86_64/hello_c.elf
+	@if ! $(vmm_works); then echo "SKIP: hv x86-64 (no functional KVM vcpu)"; exit 0; fi; \
 	 out=$$(./build/skj-run build/hv-x86_64/hello.elf 2>/dev/null); ec=$$?; \
 	 if [ "$$out" != "hello hv x86" ] || [ $$ec -ne 42 ]; then \
 	    echo "FAIL: hv x86-64 asm guest (out='$$out' exit=$$ec)"; exit 1; fi; \
@@ -1940,9 +2111,9 @@ test-hv-arm64: build/skj-run build/hv-arm64/hello_c.elf
 ## with it, skj-run stops at the instruction cap within a few 10 ms slices.  The
 ## `timeout` guard turns a regression (lost preemption) into a clean failure
 ## instead of a hang.  Needs /dev/kvm (an x86-64 host); skips otherwise.
-test-hv-preempt: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
+test-hv-preempt: $(VMM_PROBE_DEPS) build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
                  build/hv-x86_64/start.o build/hv-x86_64/syscall.o
-	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: test-hv-preempt (no accessible /dev/kvm)"; exit 0; fi; \
+	@if ! $(vmm_works); then echo "SKIP: test-hv-preempt (no functional KVM vcpu)"; exit 0; fi; \
 	 ./build/skj-cc-x86-64 -o build/hv-x86_64/spin.s tests/hv/spin.c; \
 	 ./build/skj-as-x86-64 -o build/hv-x86_64/spin.o build/hv-x86_64/spin.s; \
 	 $(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none \
@@ -1961,10 +2132,10 @@ test-hv-preempt: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
 ## run_x86_64hv on NSANDBOX threads.  With a process-global preemption timer some
 ## sandboxes would run away and the driver would hang (caught by `timeout`); with
 ## the per-vcpu timer each is preempted and stops at the instruction limit.
-test-hv-parallel: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
+test-hv-parallel: $(VMM_PROBE_DEPS) build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
                   build/hv-x86_64/start.o build/hv-x86_64/syscall.o \
                   tests/hv/parallel.c tests/hv/spin.c $(EMU_HDR) | build/hv-x86_64
-	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: test-hv-parallel (no accessible /dev/kvm)"; exit 0; fi; \
+	@if ! $(vmm_works); then echo "SKIP: test-hv-parallel (no functional KVM vcpu)"; exit 0; fi; \
 	 ./build/skj-cc-x86-64 -o build/hv-x86_64/spin.s tests/hv/spin.c; \
 	 ./build/skj-as-x86-64 -o build/hv-x86_64/spin.o build/hv-x86_64/spin.s; \
 	 $(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none \
@@ -1991,9 +2162,9 @@ test-hv-parallel: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
 ## no debuggable fault frame to check, unlike the emulated cores.  Needs
 ## /dev/kvm (so an x86-64 host) and gdb; skips cleanly otherwise.
 HV_GDB ?= gdb
-test-hv-gdb: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
+test-hv-gdb: $(VMM_PROBE_DEPS) build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
              build/hv-x86_64/start.o build/hv-x86_64/syscall.o
-	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: test-hv-gdb (no accessible /dev/kvm)"; exit 0; fi; \
+	@if ! $(vmm_works); then echo "SKIP: test-hv-gdb (no functional KVM vcpu)"; exit 0; fi; \
 	 if ! command -v $(HV_GDB) >/dev/null 2>&1; then \
 	     echo "SKIP: test-hv-gdb ($(HV_GDB) not found)"; exit 0; fi; \
 	 mkdir -p build/debug; \
@@ -2023,9 +2194,9 @@ test-hv-gdb: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
 ## FP (SSE) registers and a write watchpoint over the HV x86-64 stub: an xmm
 ## register round-trips through g/G, and a Z2 watchpoint on a global stops the
 ## guest at the write (snapshot/compare while single-stepping the vcpu).
-test-hv-gdb-fpwatch: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
+test-hv-gdb-fpwatch: $(VMM_PROBE_DEPS) build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
                      build/hv-x86_64/start.o build/hv-x86_64/syscall.o
-	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: test-hv-gdb-fpwatch (no accessible /dev/kvm)"; exit 0; fi; \
+	@if ! $(vmm_works); then echo "SKIP: test-hv-gdb-fpwatch (no functional KVM vcpu)"; exit 0; fi; \
 	 if ! command -v $(HV_GDB) >/dev/null 2>&1; then \
 	     echo "SKIP: test-hv-gdb-fpwatch ($(HV_GDB) not found)"; exit 0; fi; \
 	 mkdir -p build/debug; \
@@ -2992,14 +3163,14 @@ build/san/skj-as-rv: $(AS_RV_SRC) as/rv.h as/asm_lex.h as/asm_obj.h dwarf/dwarf.
 build/san/skj-ld-rv: $(LD_RV_SRC) ld/ld.h ld/rv_ld.h ld/mapfile.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Ild -Iir -o $@ $(LD_RV_SRC)
 
-build/san/skj-kp: kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL) kobold/kpm.h ir/ir.h \
+build/san/skj-kp: kobold/aot_main.c kobold/kp_aot.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL) kobold/kpm.h kobold/kp_aot.h ir/ir.h \
                   backend/mc_text.h backend/x86_select.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -DX86_BITS=64 -Iir -Ibackend -Ikobold -o $@ \
-	    kobold/aot_main.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL)
+	    kobold/aot_main.c kobold/kp_aot.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL)
 
 # The KPM1 reader-pipeline fuzz harness (kpm_read -> regalloc -> target_emit).
 # This path maps no executable memory, so full ASan applies beside UBSan.
-build/san/kpm-fuzz: kobold/kpm_fuzz.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL) kobold/kpm.h ir/ir.h \
+build/san/kpm-fuzz: kobold/kpm_fuzz.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL) kobold/kpm.h kobold/kp_aot.h ir/ir.h \
                     backend/mc_text.h backend/x86_select.h tests/fuzz_mutate.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -DX86_BITS=64 -Iir -Ibackend -Ikobold -Itests -o $@ \
 	    kobold/kpm_fuzz.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL)
@@ -3104,8 +3275,8 @@ build/san/skj-ar: $(AR_SRC) ld/mapfile.h ir/util.h ir/arena.h build/version.h | 
 # shipped host so cross-module .kpm loads width-check clean.  kp_co_lp64.o stays
 # unsanitized (raw stack-switch coroutine assembly); the sanitizers are
 # per-TU, so linking it into a sanitized binary is fine.
-build/san/skj-kp-jit: kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o kobold/frontend.h $(KP_HDRS) build/version.h Makefile | build build/san
-	$(CC) $(KP_CFLAGS) $(KP_FS_FLAGS) -Ibuild/x86-64 $(SAN_CFLAGS) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c $(KP_RT) build/kp_co_lp64.o -lm
+build/san/skj-kp-jit: kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c kobold/kpbuild.c kobold/kpm_write.c $(KP_RT) build/kp_co_lp64.o kobold/frontend.h kobold/kpbuild.h $(KP_HDRS) build/version.h Makefile | build build/san
+	$(CC) $(KP_CFLAGS) $(KP_FS_FLAGS) -Ibuild/x86-64 $(SAN_CFLAGS) -Ibuild -o $@ kobold/jit_main.c kobold/frontend.c build/x86-64/kpcom_kpm.c kobold/kpbuild.c kobold/kpm_write.c $(KP_RT) build/kp_co_lp64.o -lm
 
 ## Each sanitized suite is its own target over the build/san tools, so a failing
 ## slice fails on its own (a single recipe line returns the script's status, no
@@ -3943,15 +4114,18 @@ check-pc-host-leak: build/skj-pc-x86-64 build/pascal_rt_host_asan.o
 	    NASM="$(X64_ASM)" ASMFLAGS="$(X64_ASMFLAGS)" CC="$(CC)" sh tests/run-pc-host.sh $(PAS_TESTS)
 .PHONY: check-pc-host-leak
 
-## kpcom acceptance: compile the real Kobold compiler (kobold/kpcom.pas) with
-## the skj-pc front end and check it emits byte-identical KPM to the reference
-## front end (build/skj-kp-jit) over the whole behavioral corpus.  Prints the
-## kpcom build wall time (the long pole) as a metric line.  x86-64 host only.
-check-pc-kpcom: build/skj-pc-x86-64 build/pascal_rt_host.o build/skj-kp-jit
-	@PC=build/skj-pc-x86-64 RT=build/pascal_rt_host.o \
-	    HOST=tests/pascal_kpcom_host.c SRC=$(KPCOM_SRC_PAS) \
-	    REF=build/skj-kp-jit CORPUS=tests/kp-corpus OUT=build \
-	    NASM="$(X64_ASM)" ASMFLAGS="$(X64_ASMFLAGS)" CC="$(CC)" sh tests/run-pc-kpcom.sh
+## kpcom acceptance: the Kobold compiler assembled two independent ways must emit
+## the same module.  Both are single-step (driving the C builder, serializing with
+## kpm_write, no text emitter), but from different pipelines: skj-kpc-rv is kpcom
+## compiled ahead-of-time by skj-pc and linked to the builder (a host binary, rv32
+## KPM); skj-kp-jit-rv is kpcom JIT'd from its embedded rv32 seed, driving the same
+## builder through its bound kpbp_* (a cross binary, run under qemu-riscv32).  Both
+## target rv32, so a byte-identical KPM over the corpus proves the native-link path
+## and the JIT'd-seed path agree.  rv, not x86-64: the x86-64 skj-kp-jit links the
+## same kpcom object as skj-kpc, so that pair would only compare a build to itself.
+check-pc-kpcom: build/skj-kpc-rv build/skj-kp-jit-rv
+	@KPC=build/skj-kpc-rv REF=build/skj-kp-jit-rv QEMU="$(QEMU_RV)" \
+	    CORPUS=tests/kp-corpus OUT=build sh tests/run-pc-kpcom.sh
 .PHONY: check-pc-kpcom
 
 ## Pascal runtime (cross-compiled C)
@@ -5462,31 +5636,42 @@ test-cf-selfhost-toolchain: test-cf-selfhost build/selfhost-cf/skj-as-cf.elf \
 ## kobold/io_free.c already supplies ParamStr/ParamCount, ReadFileStr/
 ## WriteFileStr and the kpd_* directory surface over open/read/write/lseek.
 
-build/selfhost/skj-kpc-rv.elf: build/kpcom-rv.kpm build/skj-kp-rv build/skj-as-rv \
+## The freestanding self-host compiler, built single-step with no seed: the host
+## skj-kpc-rv compiles kpcom's own source straight to RISC-V assembly, which links
+## against the freestanding runtime (the module builder and KPM serializer are in
+## libkpaot-rv-free.a, so the in-guest compiler --emit-kpm runs through kpm_write).
+build/selfhost/skj-kpc-rv.elf: kobold/kpcom.pas build/skj-kpc-rv build/skj-as-rv \
                                build/skj-ld-rv build/kpfree-rv/kp_crt_rv.o \
                                build/libkpaot-rv-free.a | build
 	@mkdir -p build/selfhost
-	./build/skj-kp-rv build/kpcom-rv.kpm -o build/selfhost/kpcom-free-rv.s
+	./build/skj-kpc-rv -D KP_ONESTEP -D KP_TARGET_RV kobold/kpcom.pas -o build/selfhost/kpcom-free-rv.s
 	./build/skj-as-rv -o build/selfhost/kpcom-free-rv.o build/selfhost/kpcom-free-rv.s
 	./build/skj-ld-rv -o $@ build/kpfree-rv/kp_crt_rv.o \
 	    build/selfhost/kpcom-free-rv.o build/libkpaot-rv-free.a
 
-build/selfhost-cf/skj-kpc-cf.elf: build/kpcom-cf.kpm build/skj-kp-cf build/skj-as \
+## The ColdFire freestanding self-host compiler, built single-step with no seed
+## (the sibling of the rv rule above): the host skj-kpc-cf compiles kpcom's own
+## source straight to ColdFire assembly, linked against the freestanding runtime
+## whose archive carries the module builder and KPM serializer.
+build/selfhost-cf/skj-kpc-cf.elf: kobold/kpcom.pas build/skj-kpc-cf build/skj-as \
                                   build/skj-ld build/kpfree-cf/kp_crt_cf.o \
                                   build/libkpaot-cf-free.a | build
 	@mkdir -p build/selfhost-cf
-	./build/skj-kp-cf build/kpcom-cf.kpm -o build/selfhost-cf/kpcom-free-cf.s
+	./build/skj-kpc-cf -D KP_ONESTEP -D KP_TARGET_CF kobold/kpcom.pas -o build/selfhost-cf/kpcom-free-cf.s
 	./build/skj-as -o build/selfhost-cf/kpcom-free-cf.o build/selfhost-cf/kpcom-free-cf.s
 	./build/skj-ld -o $@ build/kpfree-cf/kp_crt_cf.o \
 	    build/selfhost-cf/kpcom-free-cf.o build/libkpaot-cf-free.a
 
 ## test-{rv,cf}-selfhost-kpc: run the freestanding skj-kpc guest ELF under
 ## skj-run to --emit-kpm a small unit-free program (hello.pas) and assert the
-## emitted KPM1 is byte-identical to the host skj-kpc output.  This proves the
-## Kobold compiler compiles in-guest over the guest file I/O (ParamStr, the
-## source read, the KPM write).  The far heavier self-compile of kpcom's own
-## 480 KB source is the opt-in -full target below (minutes under the RV32
-## interpreter), kept out of the routine suite.
+## in-guest compiler emits byte-for-byte the same module the host does.  The
+## freestanding guest is now the single-step compiler (kpcom compiled with
+## KP_ONESTEP straight to native code, no seed), lowering into the C module
+## builder and serializing through the same kpm_write the host uses, so the two
+## KPM1 images are identical bytes.  This checks the Kobold compiler runs in-guest
+## over the guest file I/O (ParamStr, the source read, the KPM write).  The far
+## heavier self-compile of kpcom's own 480 KB source is the opt-in -full target
+## below (minutes under the RV32/ColdFire interpreter), kept out of the suite.
 test-rv-selfhost-kpc: build/selfhost/skj-kpc-rv.elf build/skj-kpc-rv build/skj-run \
                       tests/kp-corpus/hello.pas
 	@mkdir -p build/selfhost
@@ -5495,8 +5680,9 @@ test-rv-selfhost-kpc: build/selfhost/skj-kpc-rv.elf build/skj-kpc-rv build/skj-r
 	    > build/selfhost/hello.guest.kpm 2>build/selfhost/kpc.err \
 	    || { echo "FAIL: in-guest skj-kpc (hello)"; cat build/selfhost/kpc.err; exit 1; }
 	@cmp -s build/selfhost/hello.host.kpm build/selfhost/hello.guest.kpm \
-	    || { echo "FAIL: in-guest KPM differs from host (hello)"; exit 1; }
-	@echo "PASS: skj-kpc self-hosts under skj-run (RV32): hello KPM == host"
+	    || { echo "FAIL: in-guest module differs from host (hello)"; \
+	         diff build/selfhost/hello.host.kpm build/selfhost/hello.guest.kpm | head -20; exit 1; }
+	@echo "PASS: skj-kpc self-hosts under skj-run (RV32): hello emits byte-identical KPM"
 
 test-cf-selfhost-kpc: build/selfhost-cf/skj-kpc-cf.elf build/skj-kpc-cf build/skj-run \
                       tests/kp-corpus/hello.pas
@@ -5506,34 +5692,45 @@ test-cf-selfhost-kpc: build/selfhost-cf/skj-kpc-cf.elf build/skj-kpc-cf build/sk
 	    > build/selfhost-cf/hello.guest.kpm 2>build/selfhost-cf/kpc.err \
 	    || { echo "FAIL: in-guest skj-kpc (hello)"; cat build/selfhost-cf/kpc.err; exit 1; }
 	@cmp -s build/selfhost-cf/hello.host.kpm build/selfhost-cf/hello.guest.kpm \
-	    || { echo "FAIL: in-guest KPM differs from host (hello)"; exit 1; }
-	@echo "PASS: skj-kpc self-hosts under skj-run (ColdFire): hello KPM == host"
+	    || { echo "FAIL: in-guest module differs from host (hello)"; \
+	         diff build/selfhost-cf/hello.host.kpm build/selfhost-cf/hello.guest.kpm | head -20; exit 1; }
+	@echo "PASS: skj-kpc self-hosts under skj-run (ColdFire): hello emits byte-identical KPM"
 
 ## The full self-compile: the in-guest skj-kpc compiles kpcom's own source and
-## the emitted KPM1 must match the host.  Opt-in and slow (the 480 KB source
-## through the RV32/ColdFire interpreter takes minutes), and it needs a larger
-## guest heap than the 16M default, so --heap 256M.
+## the emitted module must be byte-for-byte the host's (both serialize the same
+## C-builder module through kpm_write now).  Opt-in and slow (the 480 KB source
+## through the RV32/ColdFire interpreter takes tens of minutes), so it lives in
+## check-slow, not check-all; the light hello.pas self-host (in check-all) proves
+## the single-step guest mechanism cheaply.
+##
+## The single-step guest holds the whole program's IR in memory (the old
+## streaming text front end did not).  kp_dynarr grows its storage geometrically
+## (dynarr.c), so the one-at-a-time append pattern reallocs O(log n) times and the
+## guest's heap tracks its ~50 MB live set rather than the O(N^2) that a
+## realloc-per-append would commit on the non-coalescing freestanding gheap.  The
+## budget below is generous headroom over that, not a workaround.
+KPC_SELFHOST_BUDGET := --heap 256M --mem 512M
 test-rv-selfhost-kpc-full: build/selfhost/skj-kpc-rv.elf build/skj-kpc-rv build/skj-run \
                            kobold/kpcom.pas
 	@mkdir -p build/selfhost
 	@./build/skj-kpc-rv --emit-kpm kobold/kpcom.pas > build/selfhost/kpcom.host.kpm
-	@./build/skj-run --heap 256M build/selfhost/skj-kpc-rv.elf --emit-kpm kobold/kpcom.pas \
+	@./build/skj-run $(KPC_SELFHOST_BUDGET) build/selfhost/skj-kpc-rv.elf --emit-kpm kobold/kpcom.pas \
 	    > build/selfhost/kpcom.guest.kpm 2>build/selfhost/kpc2.err \
 	    || { echo "FAIL: in-guest skj-kpc (kpcom self-compile)"; cat build/selfhost/kpc2.err; exit 1; }
 	@cmp -s build/selfhost/kpcom.host.kpm build/selfhost/kpcom.guest.kpm \
-	    || { echo "FAIL: in-guest kpcom KPM differs from host"; exit 1; }
-	@echo "PASS: skj-kpc compiles its own source in-guest under skj-run (RV32): KPM == host"
+	    || { echo "FAIL: in-guest kpcom module differs from host"; exit 1; }
+	@echo "PASS: skj-kpc compiles its own source in-guest under skj-run (RV32): byte-identical KPM"
 
 test-cf-selfhost-kpc-full: build/selfhost-cf/skj-kpc-cf.elf build/skj-kpc-cf build/skj-run \
                            kobold/kpcom.pas
 	@mkdir -p build/selfhost-cf
 	@./build/skj-kpc-cf --emit-kpm kobold/kpcom.pas > build/selfhost-cf/kpcom.host.kpm
-	@./build/skj-run --heap 256M build/selfhost-cf/skj-kpc-cf.elf --emit-kpm kobold/kpcom.pas \
+	@./build/skj-run $(KPC_SELFHOST_BUDGET) build/selfhost-cf/skj-kpc-cf.elf --emit-kpm kobold/kpcom.pas \
 	    > build/selfhost-cf/kpcom.guest.kpm 2>build/selfhost-cf/kpc2.err \
 	    || { echo "FAIL: in-guest skj-kpc (kpcom self-compile)"; cat build/selfhost-cf/kpc2.err; exit 1; }
 	@cmp -s build/selfhost-cf/kpcom.host.kpm build/selfhost-cf/kpcom.guest.kpm \
-	    || { echo "FAIL: in-guest kpcom KPM differs from host"; exit 1; }
-	@echo "PASS: skj-kpc compiles its own source in-guest under skj-run (ColdFire): KPM == host"
+	    || { echo "FAIL: in-guest kpcom module differs from host"; exit 1; }
+	@echo "PASS: skj-kpc compiles its own source in-guest under skj-run (ColdFire): byte-identical KPM"
 
 ## Umbrella: the full in-guest self-host suite (opt-in, not part of make check).
 ## The slow kpcom self-compile (-full targets) is left out; run it on demand.
@@ -6220,11 +6417,11 @@ test-mips-jsh: build/skj-cc-mips build/skj-as-mips build/skj-ld-mips build/skj-a
 ## x86-64 runs the guest where /dev/kvm is reachable and skips cleanly otherwise;
 ## arm64 can only run on an aarch64 KVM host, so it verifies the build everywhere
 ## and runs the guest only there.
-test-x86-64-jsh: build/skj-cc-x86-64 build/skj-as-x86-64 \
+test-x86-64-jsh: $(VMM_PROBE_DEPS) build/skj-cc-x86-64 build/skj-as-x86-64 \
                  build/hv-x86_64/start.o build/hv-x86_64/syscall.o build/hv-x86_64/setjmp.o \
                  build/x86_64/half.o build/x86_64/va.o build/x86_64/soft64.o build/x86_64/co_switch.o \
                  build/skj-run
-	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: x86-64 jsh (no accessible /dev/kvm)"; exit 0; fi; \
+	@if ! $(vmm_works); then echo "SKIP: x86-64 jsh (no functional KVM vcpu)"; exit 0; fi; \
 	 CCBIN="$(CURDIR)/build/skj-cc-x86-64" \
 	 ASM="$(CURDIR)/build/skj-as-x86-64 -o" \
 	 LD="$(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none -o" \
@@ -6242,11 +6439,11 @@ test-x86-64-jsh: build/skj-cc-x86-64 build/skj-as-x86-64 \
 ## park the caller and let the sibling run instead of blocking the shared thread
 ## (the HV syscall suspend/resume path; see emu/hvcore.c and emu/guest.c).  SKIPs
 ## without an accessible /dev/kvm, like the other HV tests.
-test-hv-x86-64-pump: build/skj-cc-x86-64 build/skj-as-x86-64 \
+test-hv-x86-64-pump: $(VMM_PROBE_DEPS) build/skj-cc-x86-64 build/skj-as-x86-64 \
                  build/hv-x86_64/start.o build/hv-x86_64/syscall.o build/hv-x86_64/setjmp.o \
                  build/x86_64/half.o build/x86_64/va.o build/x86_64/soft64.o build/x86_64/co_switch.o \
                  build/skj-run
-	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: x86-64 hv-pump (no accessible /dev/kvm)"; exit 0; fi; \
+	@if ! $(vmm_works); then echo "SKIP: x86-64 hv-pump (no functional KVM vcpu)"; exit 0; fi; \
 	 CCBIN="$(CURDIR)/build/skj-cc-x86-64" \
 	 ASM="$(CURDIR)/build/skj-as-x86-64 -o" \
 	 LD="$(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none -o" \
@@ -6405,11 +6602,11 @@ test-mips-vdso: build/skjcc $(DRIVER_LIB_MIPS) build/mips/vdso.elf build/skj-run
 ## read-only hypervisor memory slot at SKJ_HV_VDSO, shared across every VM.  The
 ## guest links the syscall seam's weak write plus getenv.o/string.o for environ
 ## (the crt sets environ from the envp the scheduler laid down); no stdio or fs.
-test-hv-x86-64-vdso: build/skj-cc-x86-64 build/skj-as-x86-64 build/skj-run \
+test-hv-x86-64-vdso: $(VMM_PROBE_DEPS) build/skj-cc-x86-64 build/skj-as-x86-64 build/skj-run \
                      build/hv-x86_64/start.o build/hv-x86_64/syscall.o \
                      build/x86_64/vdso.elf examples/vdso_test.c libc/getenv.c \
                      libc/string.c include/skj_vdso.h $(X64_ASM_DEP) | build/x86_64
-	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: hv x86-64 vdso (no accessible /dev/kvm)"; exit 0; fi; \
+	@if ! $(vmm_works); then echo "SKIP: hv x86-64 vdso (no functional KVM vcpu)"; exit 0; fi; \
 	 ./build/skj-cc-x86-64 -Iinclude -Ilibc -o build/x86_64/vdso_test.s examples/vdso_test.c; \
 	 $(X64_ASM) $(X64_ASMFLAGS) -o build/x86_64/vdso_test.o build/x86_64/vdso_test.s; \
 	 ./build/skj-cc-x86-64 -Ilibc -o build/x86_64/vdso_getenv.s libc/getenv.c; \
@@ -6468,11 +6665,11 @@ test-cf-env: build/skjcc $(DRIVER_LIB_CF) build/skj-run examples/env_test.c | bu
 	     echo "PASS: env passing (cf): big-endian guest read its injected environment"; \
 	 else echo "FAIL: test-cf-env got '$$out'"; exit 1; fi
 
-test-hv-x86-64-env: build/skj-cc-x86-64 build/skj-as-x86-64 build/skj-run \
+test-hv-x86-64-env: $(VMM_PROBE_DEPS) build/skj-cc-x86-64 build/skj-as-x86-64 build/skj-run \
                     build/hv-x86_64/start.o build/hv-x86_64/syscall.o \
                     examples/env_test.c libc/getenv.c libc/string.c \
                     $(X64_ASM_DEP) | build/env-test
-	@if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then echo "SKIP: hv x86-64 env (no accessible /dev/kvm)"; exit 0; fi; \
+	@if ! $(vmm_works); then echo "SKIP: hv x86-64 env (no functional KVM vcpu)"; exit 0; fi; \
 	 d=build/env-test; \
 	 ./build/skj-cc-x86-64 -Iinclude -Ilibc -o $$d/env_x86.s examples/env_test.c; \
 	 $(X64_ASM) $(X64_ASMFLAGS) -o $$d/env_x86.o $$d/env_x86.s; \
@@ -6877,10 +7074,10 @@ check-libc-x86-64: build/skj-cc-x86-64 build/x86_64/start_sysv.o build/x86_64/ha
 ## by bare path (FS_AMBIENT_DEFAULT), the same way the rv and cf freestanding
 ## tiers run it.  This is VMM parity with the emulated sandboxes.  Skips cleanly
 ## without /dev/kvm.  The arm64 sibling has no host here to run on.
-check-libc-hv-x86-64: build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
+check-libc-hv-x86-64: $(VMM_PROBE_DEPS) build/skj-run build/skj-cc-x86-64 build/skj-as-x86-64 \
                       build/hv-x86_64/start.o build/hv-x86_64/syscall.o \
                       build/x86_64/half.o build/x86_64/va.o build/x86_64/soft64.o build/x86_64/co_switch.o
-	@if [ ! -e /dev/kvm ]; then echo "SKIP: libc hv x86-64 (no /dev/kvm)"; exit 0; fi; \
+	@if ! $(vmm_works); then echo "SKIP: libc hv x86-64 (no functional KVM vcpu)"; exit 0; fi; \
 	 CCBIN="$(CURDIR)/build/skj-cc-x86-64" \
 	 ASM="$(CURDIR)/build/skj-as-x86-64 -o" \
 	 LD="$(X64_LD) -m elf_x86_64 -e _start -Ttext=0x100000 --build-id=none -o" \

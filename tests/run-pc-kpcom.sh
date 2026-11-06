@@ -1,68 +1,35 @@
 #!/bin/sh
-# Acceptance test: compile the real Kobold compiler, kobold/kpcom.pas, with the
-# skj-pc Pascal front end (KOBOLD defined, so its file I/O is external cdecl),
-# link it against the host runtime and the host-import shims, then check that
-# the resulting kpcom emits byte-identical KPM modules to the reference front
-# end (build/skj-kp-jit) for every module in the behavioral corpus.
+# Acceptance test: the Kobold compiler assembled two independent ways must emit
+# the same module.  Both sides are single-step (they drive the C module builder
+# and serialize with kpm_write; neither has a text emitter), but they are built
+# from genuinely different pipelines, so a byte-for-byte match proves the two
+# agree rather than being the same binary twice.
 #
-# The kpcom build is the long pole here (~1 minute), so its wall time is printed
-# as a "pc-kpcom: build ..." metric line for CI and development tracking, with a
-# per-stage breakdown (front end, assembler, link).
+#   KPC  the native-linked compiler: kpcom compiled ahead-of-time by the skj-pc
+#        Pascal front end (build/skj-kpc-rv), linked directly to the C builder.
+#        A host binary that emits rv32 KPM.
+#   REF  the JIT'd-seed compiler: kpcom JIT'd from its embedded rv32 seed
+#        (build/skj-kp-jit-rv), driving the same C builder through its bound
+#        kpbp_* imports.  A cross binary, so it runs under QEMU.
+#
+# Both target rv32, so their KPM is byte-comparable.  The x86-64 skj-kp-jit links
+# the same kpcom object as skj-kpc and would only compare a build to itself; the
+# rv pair is the real native-link vs JIT'd-seed check.
 #
 # Env:
-#   PC      the skj-pc x86-64 binary                 (required)
-#   RT      the host Pascal runtime object           (required)
-#   HOST    the host-import shim C source            (required)
-#   SRC     kpcom.pas                                (required)
-#   REF     the reference emitter, run as `REF --emit-kpm f` (required)
-#   CORPUS  directory of .pas modules to compare     (required)
-#   OUT     a writable directory for build artifacts (required)
-#   NASM    the x86-64 assembler (host as, intel mode) (default: as)
-#   CC      the host C linker driver                  (default: cc)
+#   KPC     the skj-pc-built native-linked compiler  (required)
+#   REF     the JIT'd-seed compiler, run as `[QEMU] REF --emit-kpm f` (required)
+#   QEMU    emulator prefix for REF (e.g. qemu-riscv32); empty to run REF natively
+#   CORPUS  directory of .pas modules to compare      (required)
+#   OUT     a writable directory for build artifacts  (required)
 
 set -u
-PC=${PC:?PC not set}
-RT=${RT:?RT not set}
-HOST=${HOST:?HOST not set}
-SRC=${SRC:?SRC not set}
+KPC=${KPC:?KPC not set}
 REF=${REF:?REF not set}
+QEMU=${QEMU:-}
 CORPUS=${CORPUS:?CORPUS not set}
 OUT=${OUT:?OUT not set}
-NASM=${NASM:-as}
-ASMFLAGS=${ASMFLAGS:---64}
-CC=${CC:-cc}
 
-asm="$OUT/pc-kpcom.asm"
-obj="$OUT/pc-kpcom.o"
-bin="$OUT/pc-kpcom"
-elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", b - a }'; }
-
-# ---- build kpcom with the skj-pc front end, timing each stage ----
-t0=$(date +%s.%N)
-if ! "$PC" -d KOBOLD -o "$asm" "$SRC" 2>"$OUT/pc-kpcom.feerr"; then
-    echo "pc-kpcom: FAIL front end did not compile $SRC" >&2
-    sed 's/^/  /' "$OUT/pc-kpcom.feerr" >&2
-    exit 1
-fi
-t1=$(date +%s.%N)
-if ! "$NASM" $ASMFLAGS "$asm" -o "$obj" 2>"$OUT/pc-kpcom.aserr"; then
-    echo "pc-kpcom: FAIL assembler rejected the emitted module" >&2
-    exit 1
-fi
-t2=$(date +%s.%N)
-if ! "$CC" -no-pie "$obj" "$HOST" "$RT" -lm -o "$bin" 2>"$OUT/pc-kpcom.lderr"; then
-    echo "pc-kpcom: FAIL link" >&2
-    sed 's/^/  /' "$OUT/pc-kpcom.lderr" >&2
-    exit 1
-fi
-t3=$(date +%s.%N)
-
-echo "pc-kpcom: build $(elapsed "$t0" "$t3")s" \
-     "(front end $(elapsed "$t0" "$t1")s," \
-     "assemble $(elapsed "$t1" "$t2")s," \
-     "link $(elapsed "$t2" "$t3")s)"
-
-# ---- compare emitted modules to the reference, byte for byte ----
 ours="$OUT/pc-kpcom.ours.kpm"
 ref="$OUT/pc-kpcom.ref.kpm"
 same=0
@@ -73,10 +40,10 @@ for f in "$CORPUS"/*.pas; do
     b=$(basename "$f" .pas)
     # Modules the reference itself cannot emit are not ours to match; skip them
     # so this gate tracks only agreement, not the reference's own coverage.
-    if ! "$REF" --emit-kpm "$f" >"$ref" 2>/dev/null; then
+    if ! $QEMU "$REF" --emit-kpm "$f" >"$ref" 2>/dev/null; then
         refskip=$((refskip+1)); continue
     fi
-    "$bin" --emit-kpm "$f" >"$ours" 2>/dev/null
+    "$KPC" --emit-kpm "$f" >"$ours" 2>/dev/null
     rc=$?
     if [ "$rc" -ge 132 ]; then
         failed="$failed $b(crash:$rc)"; fail=$((fail+1)); continue

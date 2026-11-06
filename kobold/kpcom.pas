@@ -513,6 +513,11 @@ var
     consumer can name them without using that dependency directly (doc/languages/kobold/kp-units.md). }
   ReexportCount: LongInt;
   ReexportSym: array of LongInt;
+  { the computed .interface entry lines and fingerprint, filled by ComputeInterface
+    and consumed by both the text emitter and the module builder }
+  IfaceEnt: array of string;
+  IfaceNe: LongInt;
+  IfaceFpv: Int64;
   { methods attached to a type by a receiver: parallel arrays }
   MethRecv: array of LongInt;
   MethName: array of string;
@@ -861,24 +866,27 @@ end;
   the self-hosted compiler needs no `file` type. Under the FPC bootstrap it is a
   self-contained body, keeping kpcom a single file with no companion object. Both
   return the whole file as a string, or the empty string when it cannot be read. }
+{ The compile-time file read is prefixed kpc_ so a compiler that also links the
+  Kobold runtime (the in-process JIT) keeps kpcom's file I/O distinct from the
+  runtime's own ReadFileStr; the call sites name kpc_ReadFileStr directly. }
 {$IFDEF KOBOLD}
-function ReadFileStr(const path: string): string; external cdecl;
+function kpc_ReadFileStr(const path: string): string; cdecl; external;
 {$ELSE}
-function ReadFileStr(const path: string): string;
+function kpc_ReadFileStr(const path: string): string;
 var
   f: file;
   n, got: LongInt;
 begin
-  ReadFileStr := '';
+  kpc_ReadFileStr := '';
   Assign(f, path);
   {$I-} Reset(f, 1); {$I+}
   if IOResult <> 0 then Exit;
   n := FileSize(f);
-  SetLength(ReadFileStr, n);
+  SetLength(kpc_ReadFileStr, n);
   got := n;
-  if n > 0 then BlockRead(f, ReadFileStr[1], n, got);
+  if n > 0 then BlockRead(f, kpc_ReadFileStr[1], n, got);
   Close(f);
-  if got <> n then ReadFileStr := '';
+  if got <> n then kpc_ReadFileStr := '';
 end;
 {$ENDIF}
 
@@ -886,39 +894,41 @@ function ReadWholeFile(const path: string; out data: string): Boolean;
 { Read the whole file into data, returning False when it is missing or unreadable. An
   empty file also reads as False, which for a source or include is harmless. }
 begin
-  data := ReadFileStr(path);
+  data := kpc_ReadFileStr(path);
   ReadWholeFile := data <> '';
 end;
 
 { Write data to a host file, 1 on success and 0 on failure. Host-provided when
-  self-hosted (the JIT and AOT runtimes bind it beside ReadFileStr), native when
-  built with fpc. Used by the -o output path. }
+  self-hosted (the JIT and AOT runtimes bind it beside kpc_ReadFileStr), native
+  when built with fpc. The call sites name kpc_WriteFileStr directly, keeping it
+  distinct from the Kobold runtime's own WriteFileStr. Used by the -o output. }
 {$IFDEF KOBOLD}
-function WriteFileStr(const path, data: string): LongInt; external cdecl;
+function kpc_WriteFileStr(const path, data: string): LongInt; cdecl; external;
 {$ELSE}
-function WriteFileStr(const path, data: string): LongInt;
+function kpc_WriteFileStr(const path, data: string): LongInt;
 var
   f: file;
 begin
-  WriteFileStr := 0;
+  kpc_WriteFileStr := 0;
   Assign(f, path);
   {$I-} Rewrite(f, 1); {$I+}
   if IOResult <> 0 then Exit;
   if Length(data) > 0 then BlockWrite(f, data[1], Length(data));
   Close(f);
-  WriteFileStr := 1;
+  kpc_WriteFileStr := 1;
 end;
 {$ENDIF}
 
 { Directory enumeration for the `uses ns.*` namespace wildcard. Under Kobold these are the
-  same host imports the io.dirs unit uses: kpd_open returns a small handle (or -1), kpd_next
-  the next entry name ('' at the end), kpd_close releases it. Under the FPC bootstrap they
-  are a self-contained FindFirst/FindNext wrapper, keeping kpcom a single file with no
-  companion object. }
+  same host imports the io.dirs unit uses: kpc_kpd_open returns a small handle (or -1),
+  kpc_kpd_next the next entry name ('' at the end), kpc_kpd_close releases it. Under the FPC
+  bootstrap they are a self-contained FindFirst/FindNext wrapper, keeping kpcom a single file
+  with no companion object. The kpc_ prefix keeps them distinct from any runtime of the same
+  role when the compiler also links the Kobold runtime; the call sites name them directly. }
 {$IFDEF KOBOLD}
-function kpd_open(const path: string): LongInt; external cdecl;
-function kpd_next(handle: LongInt): string; external cdecl;
-procedure kpd_close(handle: LongInt); external cdecl;
+function kpc_kpd_open(const path: string): LongInt; cdecl; external;
+function kpc_kpd_next(handle: LongInt): string; cdecl; external;
+procedure kpc_kpd_close(handle: LongInt); cdecl; external;
 {$ELSE}
 const
   KPD_MAX = 16;
@@ -927,32 +937,32 @@ var
   kpd_used: array[0 .. KPD_MAX - 1] of Boolean;
   kpd_pending: array[0 .. KPD_MAX - 1] of Boolean;   { a prefetched entry awaits in kpd_rec }
 
-function kpd_open(const path: string): LongInt;
+function kpc_kpd_open(const path: string): LongInt;
 var
   h: LongInt;
 begin
-  kpd_open := -1;
+  kpc_kpd_open := -1;
   for h := 0 to KPD_MAX - 1 do
     if not kpd_used[h] then begin
       if FindFirst(path + '/*', faAnyFile, kpd_rec[h]) = 0 then begin
         kpd_used[h] := True;
         kpd_pending[h] := True;
-        kpd_open := h;
+        kpc_kpd_open := h;
       end;
       Exit;
     end;
 end;
 
-function kpd_next(handle: LongInt): string;
+function kpc_kpd_next(handle: LongInt): string;
 begin
-  kpd_next := '';
+  kpc_kpd_next := '';
   if (handle < 0) or (handle >= KPD_MAX) or not kpd_used[handle] then Exit;
   if not kpd_pending[handle] then Exit;
-  kpd_next := kpd_rec[handle].Name;
+  kpc_kpd_next := kpd_rec[handle].Name;
   if FindNext(kpd_rec[handle]) <> 0 then kpd_pending[handle] := False;
 end;
 
-procedure kpd_close(handle: LongInt);
+procedure kpc_kpd_close(handle: LongInt);
 begin
   if (handle >= 0) and (handle < KPD_MAX) and kpd_used[handle] then begin
     FindClose(kpd_rec[handle]);
@@ -2693,12 +2703,17 @@ begin
     if isFunc then begin Expect(tkColon); Nodes[d].B := ParseType; end;
     if IsDirective('fails') then begin Nodes[d].Failable := 1; NextToken; end;
     Expect(tkSemicolon);
+    { `cdecl;` may come before `external;` (the mainstream Pascal order, what fpc
+      accepts) as well as after it.  Consume a leading one here; it names the
+      C/SysV convention and bridges through the host FFI either way. }
+    if IsDirective('cdecl') then begin
+      Nodes[d].CConv := 1; NextToken; Expect(tkSemicolon);
+    end;
     if Accept(tkForward) then begin
       Nodes[d].Flag := 1; Expect(tkSemicolon);
     end
     else if (Tok.Kind = tkExternal) or IsDirective('cdecl') then begin
-      { a host import. `cdecl` names the C/SysV calling convention explicitly; it may
-        appear before or after `external`. Both spellings bridge through the host FFI. }
+      { a host import. `cdecl` may also follow `external`; both bridge the FFI. }
       Nodes[d].Flag := 2;
       while (Tok.Kind = tkExternal) or IsDirective('cdecl') do
         if Tok.Kind = tkExternal then NextToken
@@ -6806,9 +6821,9 @@ begin
     else if d > High(UnitPath) then dir := KP_STDLIB
     else dir := UnitPath[d];
     if dir = '' then Continue;
-    text := ReadFileStr(dir + DotToSlash(uname) + '.kpm');
+    text := kpc_ReadFileStr(dir + DotToSlash(uname) + '.kpm');
     if text <> '' then Exit(True);
-    text := ReadFileStr(dir + DotToSlash(LowerStr(uname)) + '.kpm');
+    text := kpc_ReadFileStr(dir + DotToSlash(LowerStr(uname)) + '.kpm');
     if text <> '' then Exit(True);
   end;
 end;
@@ -7178,10 +7193,10 @@ begin
     else if d > High(UnitPath) then dir := KP_STDLIB
     else dir := UnitPath[d];
     if dir = '' then Continue;
-    h := kpd_open(dir + DotToSlash(ns));
+    h := kpc_kpd_open(dir + DotToSlash(ns));
     if h < 0 then Continue;
     repeat
-      entry := kpd_next(h);
+      entry := kpc_kpd_next(h);
       if entry = '' then Break;
       if HasKpmExt(entry) then begin
         base := Copy(entry, 1, Length(entry) - 4);   { strip '.kpm' }
@@ -7194,7 +7209,7 @@ begin
         end;
       end;
     until False;
-    kpd_close(h);
+    kpc_kpd_close(h);
   end;
   if Length(names) = 0 then begin
     SemErr(item, 'no units found in namespace ''' + ns + '.*''');
@@ -7340,7 +7355,13 @@ end;
 type
   TIrInsn = record
     Op: string;
-    Args: string;
+    Args: string;                   { transitional: the text operand form, kept
+                                      while the emitter still writes KPM text }
+    Dst, Ar, Br: LongInt;           { structured operands; -1 is the none sentinel }
+    Imm: Int64;
+    Slot, Lab, Nargs: LongInt;      { -1 slot/label sentinel; 0 nargs }
+    Sym: string;                    { call target or address symbol, '' if none }
+    IsAsm: Boolean;                 { ASM: Args holds the preformatted asm line text }
   end;
 
   TIrFunc = record
@@ -7396,8 +7417,6 @@ var
   IrImportCount: LongInt;
   IrExports: array of string;
   IrExportCount: LongInt;
-  ModLines: array of string;    { the KPM1 module text, one line per element (no newline) }
-  ModLineCount: LongInt;
   NeedGlobalInit: Boolean;      { the program has const-array globals whose setup (__init)
                                   every entry point must run before it touches them }
   ModIsUnit: Boolean;           { the compilation unit is a `unit`, emitted as an object module }
@@ -7530,11 +7549,6 @@ function LowerDirectCall(s: LongInt; const argNodes: array of LongInt;
   wantVal: Boolean): LongInt; forward;
 function LowerMethodCall(field: LongInt; const argNodes: array of LongInt;
   wantVal: Boolean): LongInt; forward;
-
-function PadOp(const op: string): string;
-begin
-  if Length(op) >= 4 then PadOp := op else PadOp := op + Spaces(4 - Length(op));
-end;
 
 function IsRealType(ty: LongInt): Boolean;
 begin
@@ -8048,7 +8062,57 @@ begin
   NewSlot := n;
 end;
 
+function InsnArgs(dst, a, b: LongInt; imm: Int64;
+  slot, lab, nargs: LongInt; const sym: string): string;
+{ The text operand form of an instruction's structured fields, in the order the
+  reader accepts, omitting a field left at its default (index -1, imm 0, nargs 0,
+  empty sym), which the reader restores.  Transitional: used while the emitter
+  still writes KPM text. }
+var
+  s: string;
+begin
+  s := '';
+  if dst >= 0 then s := s + ' dst=' + IntToStr(dst);
+  if a >= 0 then s := s + ' a=' + IntToStr(a);
+  if b >= 0 then s := s + ' b=' + IntToStr(b);
+  if imm <> 0 then s := s + ' imm=' + IntToStr(imm);
+  if slot >= 0 then s := s + ' slot=' + IntToStr(slot);
+  if lab >= 0 then s := s + ' label=' + IntToStr(lab);
+  if nargs <> 0 then s := s + ' nargs=' + IntToStr(nargs);
+  if sym <> '' then s := s + ' sym=' + sym;
+  if Length(s) > 0 then s := Copy(s, 2, Length(s) - 1);   { drop the leading space }
+  InsnArgs := s;
+end;
+
+procedure PushI(const op: string; dst, a, b: LongInt; imm: Int64;
+  slot, lab, nargs: LongInt; const sym: string);
+{ Append an instruction from structured operands.  Also fills the transitional
+  Args text so the KPM-text emitter keeps working until it reads structured
+  fields directly. }
+var
+  n: LongInt;
+begin
+  n := IrFuncs[CurFn].NInsns;
+  SetLength(IrFuncs[CurFn].Insns, n + 1);
+  IrFuncs[CurFn].Insns[n].Op := op;
+  IrFuncs[CurFn].Insns[n].Dst := dst;
+  IrFuncs[CurFn].Insns[n].Ar := a;
+  IrFuncs[CurFn].Insns[n].Br := b;
+  IrFuncs[CurFn].Insns[n].Imm := imm;
+  IrFuncs[CurFn].Insns[n].Slot := slot;
+  IrFuncs[CurFn].Insns[n].Lab := lab;
+  IrFuncs[CurFn].Insns[n].Nargs := nargs;
+  IrFuncs[CurFn].Insns[n].Sym := sym;
+  IrFuncs[CurFn].Insns[n].IsAsm := False;
+  IrFuncs[CurFn].Insns[n].Args := InsnArgs(dst, a, b, imm, slot, lab, nargs, sym);
+  Inc(IrFuncs[CurFn].NInsns);
+end;
+
 procedure PushInsn(const op, args: string);
+{ Transitional: append an instruction from a preformatted operand string.  Still
+  used by the call-lowering sites and ASM until they move to structured operands;
+  it sets the structured fields to their sentinels so a function built with a mix
+  of PushI and PushInsn has no stale structured data. }
 var
   n: LongInt;
 begin
@@ -8056,6 +8120,15 @@ begin
   SetLength(IrFuncs[CurFn].Insns, n + 1);
   IrFuncs[CurFn].Insns[n].Op := op;
   IrFuncs[CurFn].Insns[n].Args := args;
+  IrFuncs[CurFn].Insns[n].Dst := -1;
+  IrFuncs[CurFn].Insns[n].Ar := -1;
+  IrFuncs[CurFn].Insns[n].Br := -1;
+  IrFuncs[CurFn].Insns[n].Imm := 0;
+  IrFuncs[CurFn].Insns[n].Slot := -1;
+  IrFuncs[CurFn].Insns[n].Lab := -1;
+  IrFuncs[CurFn].Insns[n].Nargs := 0;
+  IrFuncs[CurFn].Insns[n].Sym := '';
+  IrFuncs[CurFn].Insns[n].IsAsm := (op = 'ASM');
   Inc(IrFuncs[CurFn].NInsns);
 end;
 
@@ -8064,7 +8137,7 @@ var
   d: LongInt;
 begin
   d := NewTemp;
-  PushInsn('LIC', 'dst=' + IntToStr(d) + ' imm=' + IntToStr(imm));
+  PushI('LIC', d, -1, -1, imm, -1, -1, 0, '');
   EmitLIC := d;
 end;
 
@@ -8077,9 +8150,9 @@ var
 begin
   d := NewTemp;
   if CurTarget.PtrBytes = 8 then
-    PushInsn('LEA64', 'dst=' + IntToStr(d) + ' sym=' + sym)
+    PushI('LEA64', d, -1, -1, 0, -1, -1, 0, sym)
   else
-    PushInsn('LEA', 'dst=' + IntToStr(d) + ' sym=' + sym);
+    PushI('LEA', d, -1, -1, 0, -1, -1, 0, sym);
   EmitLEA := d;
 end;
 
@@ -8088,7 +8161,7 @@ var
   d: LongInt;
 begin
   d := NewTemp;
-  PushInsn('LDL', 'dst=' + IntToStr(d) + ' slot=' + IntToStr(slot));
+  PushI('LDL', d, -1, -1, 0, slot, -1, 0, '');
   EmitLDL := d;
 end;
 
@@ -8100,15 +8173,15 @@ var
 begin
   d := NewTemp;
   if CurTarget.PtrBytes = 8 then
-    PushInsn('ADL64', 'dst=' + IntToStr(d) + ' slot=' + IntToStr(slot))
+    PushI('ADL64', d, -1, -1, 0, slot, -1, 0, '')
   else
-    PushInsn('ADL', 'dst=' + IntToStr(d) + ' slot=' + IntToStr(slot));
+    PushI('ADL', d, -1, -1, 0, slot, -1, 0, '');
   EmitADL := d;
 end;
 
 procedure EmitSTL(a, slot: LongInt);
 begin
-  PushInsn('STL', 'a=' + IntToStr(a) + ' slot=' + IntToStr(slot));
+  PushI('STL', -1, a, -1, 0, slot, -1, 0, '');
 end;
 
 function EmitLW(a: LongInt): LongInt;
@@ -8116,13 +8189,13 @@ var
   d: LongInt;
 begin
   d := NewTemp;
-  PushInsn('LW', 'dst=' + IntToStr(d) + ' a=' + IntToStr(a));
+  PushI('LW', d, a, -1, 0, -1, -1, 0, '');
   EmitLW := d;
 end;
 
 procedure EmitSW(addr, val: LongInt);
 begin
-  PushInsn('SW', 'a=' + IntToStr(addr) + ' b=' + IntToStr(val));
+  PushI('SW', -1, addr, val, 0, -1, -1, 0, '');
 end;
 
 function EmitLB(a: LongInt): LongInt;
@@ -8131,7 +8204,7 @@ var
   d: LongInt;
 begin
   d := NewTemp;
-  PushInsn('LB', 'dst=' + IntToStr(d) + ' a=' + IntToStr(a));
+  PushI('LB', d, a, -1, 0, -1, -1, 0, '');
   EmitLB := d;
 end;
 
@@ -8140,7 +8213,7 @@ var
   d: LongInt;
 begin
   d := NewTemp;
-  PushInsn(op, 'dst=' + IntToStr(d) + ' a=' + IntToStr(a));
+  PushI(op, d, a, -1, 0, -1, -1, 0, '');
   EmitUn := d;
 end;
 
@@ -8149,7 +8222,7 @@ var
   d: LongInt;
 begin
   d := NewTemp;
-  PushInsn(op, 'dst=' + IntToStr(d) + ' a=' + IntToStr(a) + ' b=' + IntToStr(b));
+  PushI(op, d, a, b, 0, -1, -1, 0, '');
   EmitBin := d;
 end;
 
@@ -8171,12 +8244,12 @@ end;
 
 procedure EmitLabel(l: LongInt);
 begin
-  PushInsn('LABEL', 'label=' + IntToStr(l));
+  PushI('LABEL', -1, -1, -1, 0, -1, l, 0, '');
 end;
 
 procedure EmitJmp(l: LongInt);
 begin
-  PushInsn('JMP', 'label=' + IntToStr(l));
+  PushI('JMP', -1, -1, -1, 0, -1, l, 0, '');
 end;
 
 function EmitLabAddr(l: LongInt): LongInt;
@@ -8185,14 +8258,14 @@ var
   d: LongInt;
 begin
   d := NewTemp;
-  PushInsn('LABADDR', 'dst=' + IntToStr(d) + ' label=' + IntToStr(l));
+  PushI('LABADDR', d, -1, -1, 0, -1, l, 0, '');
   EmitLabAddr := d;
 end;
 
 procedure EmitIJmp(a: LongInt);
 { an indirect jump through the address in temp a (a computed goto) }
 begin
-  PushInsn('IJMP', 'a=' + IntToStr(a));
+  PushI('IJMP', -1, a, -1, 0, -1, -1, 0, '');
 end;
 
 function LowerLabelId(const name: string): LongInt;
@@ -8209,53 +8282,53 @@ end;
 
 procedure EmitBZ(a, l: LongInt);
 begin
-  PushInsn('BZ', 'a=' + IntToStr(a) + ' label=' + IntToStr(l));
+  PushI('BZ', -1, a, -1, 0, -1, l, 0, '');
 end;
 
 procedure EmitBNZ(a, l: LongInt);
 begin
-  PushInsn('BNZ', 'a=' + IntToStr(a) + ' label=' + IntToStr(l));
+  PushI('BNZ', -1, a, -1, 0, -1, l, 0, '');
 end;
 
 procedure EmitArg(a: LongInt);
 begin
-  PushInsn('ARG', 'a=' + IntToStr(a));
+  PushI('ARG', -1, a, -1, 0, -1, -1, 0, '');
 end;
 
 procedure EmitLoc(line: LongInt);
 { A -g source-line marker. It emits no code; the backend records it in the
   module's address-to-line table so a trap can name this line. }
 begin
-  PushInsn('LOC', 'imm=' + IntToStr(line));
+  PushI('LOC', -1, -1, -1, line, -1, -1, 0, '');
 end;
 
 procedure EmitRet;
 begin
-  PushInsn('RET', '');
+  PushI('RET', -1, -1, -1, 0, -1, -1, 0, '');
 end;
 
 procedure EmitRetv(a: LongInt);
 begin
-  PushInsn('RETV', 'a=' + IntToStr(a));
+  PushI('RETV', -1, a, -1, 0, -1, -1, 0, '');
 end;
 
 procedure EmitFRetv(a: LongInt; single: Boolean);
 begin
-  if single then PushInsn('FRETV', 'a=' + IntToStr(a) + ' imm=4')
-  else PushInsn('FRETV', 'a=' + IntToStr(a));
+  if single then PushI('FRETV', -1, a, -1, 4, -1, -1, 0, '')
+  else PushI('FRETV', -1, a, -1, 0, -1, -1, 0, '');
 end;
 
 procedure EmitRetv2(a, b: LongInt);
 { Return a failable routine's two results: the value in a, the error in b. a and b both go to
   integer return registers (doc/languages/kobold/kp-errors.md: failable function values are integer-class). }
 begin
-  PushInsn('RETV2', 'a=' + IntToStr(a) + ' b=' + IntToStr(b));
+  PushI('RETV2', -1, a, b, 0, -1, -1, 0, '');
 end;
 
 procedure EmitFArgSingle(a: LongInt);
 { Pass a float argument to a single-precision parameter: the JIT narrows it to f32. }
 begin
-  PushInsn('FARG', 'a=' + IntToStr(a) + ' imm=4');
+  PushI('FARG', -1, a, -1, 4, -1, -1, 0, '');
 end;
 
 function EmitFLDL(slot: LongInt): LongInt;
@@ -8263,13 +8336,13 @@ var
   d: LongInt;
 begin
   d := NewTemp;
-  PushInsn('FLDL', 'dst=' + IntToStr(d) + ' slot=' + IntToStr(slot));
+  PushI('FLDL', d, -1, -1, 0, slot, -1, 0, '');
   EmitFLDL := d;
 end;
 
 procedure EmitFSTL(a, slot: LongInt);
 begin
-  PushInsn('FSTL', 'a=' + IntToStr(a) + ' slot=' + IntToStr(slot));
+  PushI('FSTL', -1, a, -1, 0, slot, -1, 0, '');
 end;
 
 function EmitFLD(a: LongInt): LongInt;
@@ -8277,13 +8350,13 @@ var
   d: LongInt;
 begin
   d := NewTemp;
-  PushInsn('FLD', 'dst=' + IntToStr(d) + ' a=' + IntToStr(a));
+  PushI('FLD', d, a, -1, 0, -1, -1, 0, '');
   EmitFLD := d;
 end;
 
 procedure EmitFSD(addr, val: LongInt);
 begin
-  PushInsn('FSD', 'a=' + IntToStr(addr) + ' b=' + IntToStr(val));
+  PushI('FSD', -1, addr, val, 0, -1, -1, 0, '');
 end;
 
 function EmitFLS(addr: LongInt): LongInt;
@@ -8292,19 +8365,19 @@ var
   d: LongInt;
 begin
   d := NewTemp;
-  PushInsn('FLS', 'dst=' + IntToStr(d) + ' a=' + IntToStr(addr));
+  PushI('FLS', d, addr, -1, 0, -1, -1, 0, '');
   EmitFLS := d;
 end;
 
 procedure EmitFSS(addr, val: LongInt);
 { Store the f64 value narrowed to a single (4-byte f32) at addr. }
 begin
-  PushInsn('FSS', 'a=' + IntToStr(addr) + ' b=' + IntToStr(val));
+  PushI('FSS', -1, addr, val, 0, -1, -1, 0, '');
 end;
 
 procedure EmitFArg(a: LongInt);
 begin
-  PushInsn('FARG', 'a=' + IntToStr(a));
+  PushI('FARG', -1, a, -1, 0, -1, -1, 0, '');
 end;
 
 { 64-bit helpers, used for small sets (a set is an i64 bitmask). }
@@ -8314,7 +8387,7 @@ var
   d: LongInt;
 begin
   d := NewTemp;
-  PushInsn('LIC64', 'dst=' + IntToStr(d) + ' imm=' + IntToStr(imm));
+  PushI('LIC64', d, -1, -1, imm, -1, -1, 0, '');
   EmitLIC64 := d;
 end;
 
@@ -8323,13 +8396,13 @@ var
   d: LongInt;
 begin
   d := NewTemp;
-  PushInsn('LDL64', 'dst=' + IntToStr(d) + ' slot=' + IntToStr(slot));
+  PushI('LDL64', d, -1, -1, 0, slot, -1, 0, '');
   EmitLDL64 := d;
 end;
 
 procedure EmitSTL64(a, slot: LongInt);
 begin
-  PushInsn('STL64', 'a=' + IntToStr(a) + ' slot=' + IntToStr(slot));
+  PushI('STL64', -1, a, -1, 0, slot, -1, 0, '');
 end;
 
 function EmitLD64(a: LongInt): LongInt;
@@ -8337,13 +8410,13 @@ var
   d: LongInt;
 begin
   d := NewTemp;
-  PushInsn('LD64', 'dst=' + IntToStr(d) + ' a=' + IntToStr(a));
+  PushI('LD64', d, a, -1, 0, -1, -1, 0, '');
   EmitLD64 := d;
 end;
 
 procedure EmitST64(addr, val: LongInt);
 begin
-  PushInsn('ST64', 'a=' + IntToStr(addr) + ' b=' + IntToStr(val));
+  PushI('ST64', -1, addr, val, 0, -1, -1, 0, '');
 end;
 
 function EmitLDLAddr(slot: LongInt): LongInt;
@@ -8401,20 +8474,20 @@ end;
 
 procedure EmitArg64(a: LongInt);
 begin
-  PushInsn('ARG64', 'a=' + IntToStr(a));
+  PushI('ARG64', -1, a, -1, 0, -1, -1, 0, '');
 end;
 
 procedure EmitArgPtr(a: LongInt);
 { Pass a pointer-width argument (a handle, a receiver, or a hidden sret/args
   pointer): ARG64 under LP64, the 32-bit ARG under ILP32. }
 begin
-  if CurTarget.PtrBytes = 8 then PushInsn('ARG64', 'a=' + IntToStr(a))
-  else PushInsn('ARG', 'a=' + IntToStr(a));
+  if CurTarget.PtrBytes = 8 then PushI('ARG64', -1, a, -1, 0, -1, -1, 0, '')
+  else PushI('ARG', -1, a, -1, 0, -1, -1, 0, '');
 end;
 
 procedure EmitRetv64(a: LongInt);
 begin
-  PushInsn('RETV64', 'a=' + IntToStr(a));
+  PushI('RETV64', -1, a, -1, 0, -1, -1, 0, '');
 end;
 
 { ---- IR program tables ---- }
@@ -8778,7 +8851,7 @@ begin
   EnsureHelper(name, 1, 'int');
   EmitArg(a);
   d := NewTemp;
-  PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=' + name + ' nargs=1');
+  PushI('CALL', d, -1, -1, 0, -1, -1, 1, name);
   EmitStrCall1 := d;
 end;
 
@@ -8793,7 +8866,7 @@ begin
   EnsureHelper(name, 1, 'int64');
   EmitArg(a);
   d := NewTemp;
-  PushInsn('CALL64', 'dst=' + IntToStr(d) + ' sym=' + name + ' nargs=1');
+  PushI('CALL64', d, -1, -1, 0, -1, -1, 1, name);
   EmitStrCall1I64 := d;
 end;
 
@@ -8806,7 +8879,7 @@ begin
   EnsureHelperF(name);
   EmitFArg(AsFloat(argNode));
   d := NewTemp;
-  PushInsn('FCALL', 'dst=' + IntToStr(d) + ' sym=' + name + ' nargs=1');
+  PushI('FCALL', d, -1, -1, 0, -1, -1, 1, name);
   EmitMathCall := d;
 end;
 
@@ -8819,7 +8892,7 @@ begin
   EmitArg(a);
   EmitArg(b);
   d := NewTemp;
-  PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=' + name + ' nargs=2');
+  PushI('CALL', d, -1, -1, 0, -1, -1, 2, name);
   EmitStrCall2 := d;
 end;
 
@@ -8834,7 +8907,7 @@ begin
   EmitArg(b);
   EmitArg(c);
   d := NewTemp;
-  PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=' + name + ' nargs=3');
+  PushI('CALL', d, -1, -1, 0, -1, -1, 3, name);
   EmitStrCall3 := d;
 end;
 
@@ -8858,7 +8931,7 @@ begin
   EmitJmp(lOk);
   EmitLabel(lBad);
   EnsureHelper('kp_trap_index', 0, 'void');
-  PushInsn('CALL', 'sym=kp_trap_index nargs=0');
+  PushI('CALL', -1, -1, -1, 0, -1, -1, 0, 'kp_trap_index');
   EmitLabel(lOk);
 end;
 
@@ -8912,14 +8985,14 @@ procedure EmitRetain(v: LongInt);
 begin
   EnsureHelper('kp_retain', 1, 'void');
   EmitArg(v);
-  PushInsn('CALL', 'sym=kp_retain nargs=1');
+  PushI('CALL', -1, -1, -1, 0, -1, -1, 1, 'kp_retain');
 end;
 
 procedure EmitRelease(v: LongInt);
 begin
   EnsureHelper('kp_release', 1, 'void');
   EmitArg(v);
-  PushInsn('CALL', 'sym=kp_release nargs=1');
+  PushI('CALL', -1, -1, -1, 0, -1, -1, 1, 'kp_release');
 end;
 
 procedure ReleaseIfOwned(node, handle: LongInt);
@@ -9103,15 +9176,16 @@ end;
 
 procedure ReleaseOwnedArgs(const owned: TIntArray); forward;
 
-procedure EmitTypedCall(d, ret: LongInt; const base, args: string);
+procedure EmitTypedCall(d, ret: LongInt; const base, sym: string; fp, nargs: LongInt);
 { Emit a value-returning call into temp d, choosing the opcode by result class.
-  base is the plain opcode ('CALL' direct, 'CALLI' indirect): a single widens to
-  'F'+base with imm=4, a real to 'F'+base, a 64-bit result to base+'64'. }
+  base is the plain opcode ('CALL' direct, sym names the target; 'CALLI' indirect,
+  fp holds the code pointer in operand a): a single widens to 'F'+base with imm=4,
+  a real to 'F'+base, a 64-bit result to base+'64'. }
 begin
-  if IsSingle(ret) then PushInsn('F' + base, 'dst=' + IntToStr(d) + ' imm=4 ' + args)
-  else if IsRealType(ret) then PushInsn('F' + base, 'dst=' + IntToStr(d) + ' ' + args)
-  else if WideStore(ret) then PushInsn(base + '64', 'dst=' + IntToStr(d) + ' ' + args)
-  else PushInsn(base, 'dst=' + IntToStr(d) + ' ' + args);
+  if IsSingle(ret) then PushI('F' + base, d, fp, -1, 4, -1, -1, nargs, sym)
+  else if IsRealType(ret) then PushI('F' + base, d, fp, -1, 0, -1, -1, nargs, sym)
+  else if WideStore(ret) then PushI(base + '64', d, fp, -1, 0, -1, -1, nargs, sym)
+  else PushI(base, d, fp, -1, 0, -1, -1, nargs, sym);
 end;
 
 procedure ClassifyArg(sig, i, argNode: LongInt; var at, ak: LongInt;
@@ -9213,11 +9287,11 @@ function LowerMethodCall(field: LongInt; const argNodes: array of LongInt;
   vtable entry of the same name, which is how a script method wins. }
 var
   recv, bt, m, sig, scriptSig, na, i, ret, d, r0, ownRecv, errSlot: LongInt;
-  retbuf, z: LongInt;
+  retbuf, z, nn: LongInt;
   aggRet, wideFail: Boolean;
   argt, argk: array of LongInt;
   owned, roffs: TIntArray;
-  args, symName: string;
+  symName: string;
 begin
   LowerMethodCall := -1;
   ownRecv := -1;
@@ -9291,14 +9365,12 @@ begin
   else if wideFail then
     retbuf := NewSlot(TypeSize(ret));   { a real or 64-bit value buffer (no handle fields) }
   if aggRet or wideFail then EmitArgPtr(EmitADL(retbuf));
-  if aggRet or wideFail then
-    args := 'sym=' + symName + ' nargs=' + IntToStr(na + 2)
-  else
-    args := 'sym=' + symName + ' nargs=' + IntToStr(na + 1);
+  if aggRet or wideFail then nn := na + 2
+  else nn := na + 1;
   if wideFail then begin
     { ordinary call: the integer return register holds the error, the value is in retbuf }
     d := NewTemp;
-    PushInsn('CALL', 'dst=' + IntToStr(d) + ' ' + args);
+    PushI('CALL', d, -1, -1, 0, -1, -1, nn, symName);
     EmitSTL(d, errSlot);
     if wantVal and (ret >= 0) then begin
       if aggRet then LowerMethodCall := EmitADL(retbuf)
@@ -9309,23 +9381,23 @@ begin
     { failable integer-class: CALL2 puts the value in dst and the error into errSlot }
     if wantVal and (ret >= 0) then begin
       d := NewTemp;
-      PushInsn('CALL2', 'dst=' + IntToStr(d) + ' slot=' + IntToStr(errSlot) + ' ' + args);
+      PushI('CALL2', d, -1, -1, 0, errSlot, -1, nn, symName);
       LowerMethodCall := d;
     end
     else
-      PushInsn('CALL2', 'dst=-1 slot=' + IntToStr(errSlot) + ' ' + args);
+      PushI('CALL2', -1, -1, -1, 0, errSlot, -1, nn, symName);
   end
   else if aggRet then begin
-    PushInsn('CALL', args);        { the callee fills the buffer; its value is the buffer }
+    PushI('CALL', -1, -1, -1, 0, -1, -1, nn, symName);   { the callee fills the buffer }
     LowerMethodCall := EmitADL(retbuf);
   end
   else if wantVal and (ret >= 0) then begin
     d := NewTemp;
-    EmitTypedCall(d, ret, 'CALL', args);
+    EmitTypedCall(d, ret, 'CALL', symName, -1, nn);
     LowerMethodCall := d;
   end
   else
-    PushInsn('CALL', args);
+    PushI('CALL', -1, -1, -1, 0, -1, -1, nn, symName);
   ReleaseOwnedArgs(owned);
   if ownRecv >= 0 then EmitRelease(ownRecv);
 end;
@@ -9367,21 +9439,19 @@ function LowerIndirectCall(fp, sig: LongInt; const argNodes: array of LongInt;
   environment, so there are no capture arguments. }
 var
   na, ret, d: LongInt;
-  args: string;
   owned: TIntArray;
 begin
   na := Length(argNodes);
   StageArgs(sig, argNodes, owned);
   ret := -1;
   if (sig >= 0) and (SemTypes[sig].Kind = skProc) then ret := SemTypes[sig].RetType;
-  args := 'a=' + IntToStr(fp) + ' nargs=' + IntToStr(na);
   if wantVal and (ret >= 0) then begin
     d := NewTemp;
-    EmitTypedCall(d, ret, 'CALLI', args);
+    EmitTypedCall(d, ret, 'CALLI', '', fp, na);
     LowerIndirectCall := d;
   end
   else
-    PushInsn('CALLI', args);
+    PushI('CALLI', -1, fp, -1, 0, -1, -1, na, '');
   ReleaseOwnedArgs(owned);
 end;
 
@@ -9452,7 +9522,7 @@ begin
   EmitArg(EmitLIC(TypeSize(elem)));
   EmitArg(EmitArrLayout(elem));
   newid := NewTemp;
-  PushInsn('CALL', 'dst=' + IntToStr(newid) + ' sym=kp_arr_setlen nargs=4');
+  PushI('CALL', newid, -1, -1, 0, -1, -1, 4, 'kp_arr_setlen');
   { store the owned result back over the previous value; AddrOf reaches a nested array
     element the same way it reaches any other designator }
   if Nodes[target].Kind = nkIdent then begin
@@ -9502,7 +9572,7 @@ begin
     EmitArg(EmitLIC(TypeSize(elem)));
     EmitArg(EmitArrLayout(elem));
     newid := NewTemp;
-    PushInsn('CALL', 'dst=' + IntToStr(newid) + ' sym=kp_arr_insert nargs=5');
+    PushI('CALL', newid, -1, -1, 0, -1, -1, 5, 'kp_arr_insert');
   end
   else begin
     EnsureHelper('kp_arr_delete', 3, 'int');
@@ -9510,7 +9580,7 @@ begin
     EmitArg(idxv);
     EmitArg(cntv);
     newid := NewTemp;
-    PushInsn('CALL', 'dst=' + IntToStr(newid) + ' sym=kp_arr_delete nargs=3');
+    PushI('CALL', newid, -1, -1, 0, -1, -1, 3, 'kp_arr_delete');
   end;
   if Nodes[target].Kind = nkIdent then begin
     s := Nodes[target].Sym;
@@ -9547,7 +9617,7 @@ begin
   EmitArg(cur);
   if isStr then EmitArg(key) else EmitArg64(key64);
   newmap := NewTemp;
-  PushInsn('CALL', 'dst=' + IntToStr(newmap) + ' sym=' + dsym + ' nargs=2');
+  PushI('CALL', newmap, -1, -1, 0, -1, -1, 2, dsym);
   if Nodes[mapDesig].Kind = nkIdent then begin
     s := Nodes[mapDesig].Sym;
     old := LoadSym(s);
@@ -9619,7 +9689,7 @@ begin
     EnsureHelper('kp_str_val_real', 1, 'float');
     EmitArg(sv);
     d := NewTemp;
-    PushInsn('FCALL', 'dst=' + IntToStr(d) + ' sym=kp_str_val_real nargs=1');
+    PushI('FCALL', d, -1, -1, 0, -1, -1, 1, 'kp_str_val_real');
     StoreScalarDesig(destNode, d);
     kind := 1;
   end
@@ -9736,7 +9806,7 @@ begin
       EmitArg(delta);
       EmitArg(av);
       d := NewTemp;
-      PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_map_tryget nargs=3');
+      PushI('CALL', d, -1, -1, 0, -1, -1, 3, 'kp_map_tryget');
       ReleaseIfOwned(argNodes[1], delta);
     end
     else begin
@@ -9745,7 +9815,7 @@ begin
       EmitArg64(AsInt64(argNodes[1]));   { the key by value }
       EmitArg(av);
       d := NewTemp;
-      PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_imap_tryget nargs=3');
+      PushI('CALL', d, -1, -1, 0, -1, -1, 3, 'kp_imap_tryget');
     end;
     ReleaseIfOwned(argNodes[0], cur);
     LowerBuiltin := d;
@@ -9777,7 +9847,7 @@ begin
       EmitArg(av);
       EmitArg(delta);
       d := NewTemp;
-      PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_mapiter_next nargs=3');
+      PushI('CALL', d, -1, -1, 0, -1, -1, 3, 'kp_mapiter_next');
     end
     else begin
       rawk := NewSlot(8);
@@ -9786,7 +9856,7 @@ begin
       EmitArg(EmitADL(rawk));
       EmitArg(delta);
       d := NewTemp;
-      PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_imapiter_next nargs=3');
+      PushI('CALL', d, -1, -1, 0, -1, -1, 3, 'kp_imapiter_next');
       kv := EmitLDL64(rawk);          { the raw int64 key }
       av := AddrOf(argNodes[1]);
       if WideStore(Nodes[argNodes[1]].Ty) then
@@ -9805,7 +9875,7 @@ begin
       EnsureHelperI64('kp_str_from_int64', 'int');
       EmitArg64(AsInt64(argNodes[0]));
       d := NewTemp;
-      PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_str_from_int64 nargs=1');
+      PushI('CALL', d, -1, -1, 0, -1, -1, 1, 'kp_str_from_int64');
       StoreHandleDesig(argNodes[1], d);
     end
     else
@@ -10014,20 +10084,20 @@ begin
         av := LowerExpr(arg);
         EnsureFunc('io_write_str', 2, 'void');
         EmitArg(strm); EmitArg(av);
-        PushInsn('CALL', 'sym=io_write_str nargs=2');
+        PushI('CALL', -1, -1, -1, 0, -1, -1, 2, 'io_write_str');
         ReleaseIfOwned(arg, av);   { a written string temporary is not kept }
       end
       else if aTy = tyChar then begin
         av := LowerExpr(arg);
         EnsureFunc('io_write_char', 2, 'void');
         EmitArg(strm); EmitArg(av);
-        PushInsn('CALL', 'sym=io_write_char nargs=2');
+        PushI('CALL', -1, -1, -1, 0, -1, -1, 2, 'io_write_char');
       end
       else if IsRealType(aTy) then begin
         av := AsFloat(arg);
         EnsureFuncIF('io_write_real');
         EmitArg(strm); EmitFArg(av);
-        PushInsn('CALL', 'sym=io_write_real nargs=2');
+        PushI('CALL', -1, -1, -1, 0, -1, -1, 2, 'io_write_real');
       end
       else if IsInt64(aTy) then begin
         { format the full 64-bit value as a string and write that; io_write_int is
@@ -10035,17 +10105,17 @@ begin
         EnsureHelperI64('kp_str_from_int64', 'int');
         EmitArg64(AsInt64(arg));
         av := NewTemp;
-        PushInsn('CALL', 'dst=' + IntToStr(av) + ' sym=kp_str_from_int64 nargs=1');
+        PushI('CALL', av, -1, -1, 0, -1, -1, 1, 'kp_str_from_int64');
         EnsureFunc('io_write_str', 2, 'void');
         EmitArg(strm); EmitArg(av);
-        PushInsn('CALL', 'sym=io_write_str nargs=2');
+        PushI('CALL', -1, -1, -1, 0, -1, -1, 2, 'io_write_str');
         EmitRelease(av);   { the formatted string temporary is not kept }
       end
       else begin
         av := LowerExpr(arg);
         EnsureFunc('io_write_int', 2, 'void');
         EmitArg(strm); EmitArg(av);
-        PushInsn('CALL', 'sym=io_write_int nargs=2');
+        PushI('CALL', -1, -1, -1, 0, -1, -1, 2, 'io_write_int');
       end;
       Inc(i);
     end;
@@ -10055,7 +10125,7 @@ begin
       av := EmitLIC(10);
       EnsureFunc('io_write_char', 2, 'void');
       EmitArg(strm); EmitArg(av);
-      PushInsn('CALL', 'sym=io_write_char nargs=2');
+      PushI('CALL', -1, -1, -1, 0, -1, -1, 2, 'io_write_char');
     end;
     LowerBuiltin := -1;
     Exit;
@@ -10071,34 +10141,34 @@ begin
       if aTy = tyStr then begin
         EnsureFunc('io_read_str', 0, 'int');
         d := NewTemp;
-        PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=io_read_str nargs=0');
+        PushI('CALL', d, -1, -1, 0, -1, -1, 0, 'io_read_str');
         StoreHandleDesig(arg, d);
       end
       else if IsRealType(aTy) then begin
         EnsureFunc('io_read_real', 0, 'float');
         d := NewTemp;
-        PushInsn('FCALL', 'dst=' + IntToStr(d) + ' sym=io_read_real nargs=0');
+        PushI('FCALL', d, -1, -1, 0, -1, -1, 0, 'io_read_real');
         StoreScalarDesig(arg, d);
       end
       else if aTy = tyChar then begin
         EnsureFunc('io_read_char', 0, 'int');
         d := NewTemp;
-        PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=io_read_char nargs=0');
+        PushI('CALL', d, -1, -1, 0, -1, -1, 0, 'io_read_char');
         StoreScalarDesig(arg, d);
       end
       else begin
         EnsureFunc('io_read_int', 0, 'int');
         d := NewTemp;
         if IsInt64(aTy) then
-          PushInsn('CALL64', 'dst=' + IntToStr(d) + ' sym=io_read_int nargs=0')
+          PushI('CALL64', d, -1, -1, 0, -1, -1, 0, 'io_read_int')
         else
-          PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=io_read_int nargs=0');
+          PushI('CALL', d, -1, -1, 0, -1, -1, 0, 'io_read_int');
         StoreScalarDesig(arg, d);
       end;
     end;
     if bname = 'readln' then begin
       EnsureFunc('io_read_ln', 0, 'void');
-      PushInsn('CALL', 'sym=io_read_ln nargs=0');
+      PushI('CALL', -1, -1, -1, 0, -1, -1, 0, 'io_read_ln');
     end;
     LowerBuiltin := -1;
     Exit;
@@ -10108,7 +10178,7 @@ begin
     if Length(argNodes) >= 1 then strm := LowerExpr(argNodes[0]) else strm := EmitLIC(1);
     EnsureFunc('io_flush', 1, 'void');
     EmitArg(strm);
-    PushInsn('CALL', 'sym=io_flush nargs=1');
+    PushI('CALL', -1, -1, -1, 0, -1, -1, 1, 'io_flush');
     LowerBuiltin := -1;
     Exit;
   end;
@@ -10117,7 +10187,7 @@ begin
     if Length(argNodes) >= 1 then av := LowerExpr(argNodes[0]) else av := EmitLIC(0);
     EnsureFunc('io_halt', 1, 'void');
     EmitArg(av);
-    PushInsn('CALL', 'sym=io_halt nargs=1');
+    PushI('CALL', -1, -1, -1, 0, -1, -1, 1, 'io_halt');
     LowerBuiltin := -1;
     Exit;
   end;
@@ -10125,7 +10195,7 @@ begin
     where the host has one) }
   if (bname = 'abort') then begin
     EnsureFunc('kp_abort', 0, 'void');
-    PushInsn('CALL', 'sym=kp_abort nargs=0');
+    PushI('CALL', -1, -1, -1, 0, -1, -1, 0, 'kp_abort');
     LowerBuiltin := -1;
     Exit;
   end;
@@ -10134,7 +10204,7 @@ begin
   if (bname = 'assert') and (Length(argNodes) = 1) then begin
     EnsureFunc('kp_assert', 1, 'void');
     EmitArg(LowerExpr(argNodes[0]));
-    PushInsn('CALL', 'sym=kp_assert nargs=1');
+    PushI('CALL', -1, -1, -1, 0, -1, -1, 1, 'kp_assert');
     LowerBuiltin := -1;
     Exit;
   end;
@@ -10142,7 +10212,7 @@ begin
   if (bname = 'paramcount') then begin
     EnsureFunc('ParamCount', 0, 'int');
     d := NewTemp;
-    PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=ParamCount nargs=0');
+    PushI('CALL', d, -1, -1, 0, -1, -1, 0, 'ParamCount');
     LowerBuiltin := d;
     Exit;
   end;
@@ -10152,7 +10222,7 @@ begin
     EnsureFunc('ParamStr', 1, 'int');
     EmitArg(LowerExpr(argNodes[0]));
     d := NewTemp;
-    PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=ParamStr nargs=1');
+    PushI('CALL', d, -1, -1, 0, -1, -1, 1, 'ParamStr');
     LowerBuiltin := d;
     Exit;
   end;
@@ -10166,10 +10236,10 @@ function LowerDirectCall(s: LongInt; const argNodes: array of LongInt;
   through caller storage (sret), staged arguments, a nested routine's captured
   variables passed as hidden by-pointer arguments, and result-class call emission. }
 var
-  i, sig, ret, d, na, retbuf, z, extra, errSlot: LongInt;
+  i, sig, ret, d, na, retbuf, z, extra, errSlot, nn: LongInt;
   aggRet, wideFail: Boolean;
   roffs, owned: TIntArray;
-  args: string;
+  snm: string;
 begin
   LowerDirectCall := -1;
   sig := Syms[s].TypeId;
@@ -10216,11 +10286,12 @@ begin
   for i := 0 to High(RoutineCaptures[s]) do EmitArg(VarAddr(RoutineCaptures[s][i]));
   extra := Length(RoutineCaptures[s]);
   if aggRet or wideFail then begin EmitArgPtr(EmitADL(retbuf)); Inc(extra); end;
-  args := 'sym=' + EmittedRoutineName(s) + ' nargs=' + IntToStr(na + extra);
+  snm := EmittedRoutineName(s);
+  nn := na + extra;
   if wideFail then begin
     { ordinary call: the integer return register holds the error, the value is in retbuf }
     d := NewTemp;
-    PushInsn('CALL', 'dst=' + IntToStr(d) + ' ' + args);
+    PushI('CALL', d, -1, -1, 0, -1, -1, nn, snm);
     EmitSTL(d, errSlot);
     if wantVal and (ret >= 0) then begin
       if aggRet then LowerDirectCall := EmitADL(retbuf)
@@ -10231,23 +10302,23 @@ begin
     { failable: CALL2 puts the value in dst (integer-class) and the error into errSlot }
     if wantVal and (ret >= 0) then begin
       d := NewTemp;
-      PushInsn('CALL2', 'dst=' + IntToStr(d) + ' slot=' + IntToStr(errSlot) + ' ' + args);
+      PushI('CALL2', d, -1, -1, 0, errSlot, -1, nn, snm);
       LowerDirectCall := d;
     end
     else
-      PushInsn('CALL2', 'dst=-1 slot=' + IntToStr(errSlot) + ' ' + args);
+      PushI('CALL2', -1, -1, -1, 0, errSlot, -1, nn, snm);
   end
   else if aggRet then begin
-    PushInsn('CALL', args);        { the callee fills the buffer; its value is the buffer }
+    PushI('CALL', -1, -1, -1, 0, -1, -1, nn, snm);   { the callee fills the buffer }
     LowerDirectCall := EmitADL(retbuf);
   end
   else if wantVal and (ret >= 0) then begin
     d := NewTemp;
-    EmitTypedCall(d, ret, 'CALL', args);
+    EmitTypedCall(d, ret, 'CALL', snm, -1, nn);
     LowerDirectCall := d;
   end
   else
-    PushInsn('CALL', args);
+    PushI('CALL', -1, -1, -1, 0, -1, -1, nn, snm);
   ReleaseOwnedArgs(owned);
 end;
 
@@ -10520,7 +10591,7 @@ begin
   if CurCancelLabel < 0 then Exit;
   EnsureHelper('kp_co_cancelling', 0, 'int');
   c := NewTemp;
-  PushInsn('CALL', 'dst=' + IntToStr(c) + ' sym=kp_co_cancelling nargs=0');
+  PushI('CALL', c, -1, -1, 0, -1, -1, 0, 'kp_co_cancelling');
   EmitBNZ(c, CurCancelLabel);
 end;
 
@@ -10551,7 +10622,7 @@ begin
   else if vkind = 2 then EmitArg64(v)
   else EmitArg(v);
   d := NewTemp;
-  PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_co_yield nargs=1');
+  PushI('CALL', d, -1, -1, 0, -1, -1, 1, 'kp_co_yield');
   EmitCancelCheck;
   LowerYield := d;
 end;
@@ -10584,7 +10655,7 @@ begin
   else if vkind = 2 then EmitArg64(v)
   else EmitArg(v);
   d := NewTemp;
-  PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_co_resume nargs=2');
+  PushI('CALL', d, -1, -1, 0, -1, -1, 2, 'kp_co_resume');
   LowerResume := d;
 end;
 
@@ -10598,7 +10669,7 @@ begin
   EmitArgPtr(argsPtr);   { a buffer address }
   EmitArg(EmitLIC(na));
   d := NewTemp;
-  PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_co_new nargs=3');
+  PushI('CALL', d, -1, -1, 0, -1, -1, 3, 'kp_co_new');
   EmitSpawn := d;
 end;
 
@@ -10674,7 +10745,7 @@ var
 begin
   EnsureHelper('kp_co_self', 0, 'int');
   selfId := NewTemp;
-  PushInsn('CALL', 'dst=' + IntToStr(selfId) + ' sym=kp_co_self nargs=0');
+  PushI('CALL', selfId, -1, -1, 0, -1, -1, 0, 'kp_co_self');
   s := Nodes[node].Sym;
   if s >= 0 then begin
     Syms[s].Slot := NewSlot(4);
@@ -10684,7 +10755,7 @@ begin
   EnsureHelper('kp_co_yield', 1, 'int');
   EmitArg(ev);
   d := NewTemp;
-  PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_co_yield nargs=1');
+  PushI('CALL', d, -1, -1, 0, -1, -1, 1, 'kp_co_yield');
   EmitCancelCheck;
   LowerBind := d;
 end;
@@ -10879,7 +10950,7 @@ begin
     EnsureHelperI64('kp_str_from_int64', 'int');
     EmitArg64(AsInt64(Nodes[node].A));
     d := NewTemp;
-    PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=kp_str_from_int64 nargs=1');
+    PushI('CALL', d, -1, -1, 0, -1, -1, 1, 'kp_str_from_int64');
     LowerToStr := d;
   end
   else
@@ -11022,7 +11093,7 @@ begin
           EmitArg(a);
           EmitArg64(AsInt64(Nodes[node].A));   { the key by value, nothing to release }
           r := NewTemp;
-          PushInsn('CALL', 'dst=' + IntToStr(r) + ' sym=kp_imap_has nargs=2');
+          PushI('CALL', r, -1, -1, 0, -1, -1, 2, 'kp_imap_has');
         end;
         LowerExpr := r;
       end
@@ -11242,7 +11313,7 @@ begin
     EmitArg(EmitLIC(TypeSize(vt)));
     EmitArg(EmitArrLayout(vt));
     newmap := NewTemp;
-    PushInsn('CALL', 'dst=' + IntToStr(newmap) + ' sym=' + rsym + ' nargs=4');
+    PushI('CALL', newmap, -1, -1, 0, -1, -1, 4, rsym);
     { store the owned map back over the designator, releasing the previous handle }
     if Nodes[mapDesig].Kind = nkIdent then begin
       s := Nodes[mapDesig].Sym;
@@ -11262,7 +11333,7 @@ begin
   EmitArg(cur);
   if isStr then EmitArg(key) else EmitArg64(key64);
   slot := NewTemp;
-  PushInsn('CALL', 'dst=' + IntToStr(slot) + ' sym=' + gsym + ' nargs=2');
+  PushI('CALL', slot, -1, -1, 0, -1, -1, 2, gsym);
   if isStr then ReleaseIfOwned(keykid, key);   { an int key is a plain value, nothing to release }
   MapSlotAddr := slot;
 end;
@@ -12694,7 +12765,7 @@ begin
     global-init first (main and an export never both run in one process, so one call is
     enough and no guard is needed) }
   if (Nodes[node].Exported = 1) and NeedGlobalInit then
-    PushInsn('CALL', 'sym=__init nargs=0');
+    PushI('CALL', -1, -1, -1, 0, -1, -1, 0, '__init');
   comp := BodyCompound(block);
   { A routine that can suspend (yields, or calls something that can) gets a cleanup
     label, so a cancel-unwind (dropping a suspended coroutine) can jump straight to the
@@ -13147,20 +13218,18 @@ begin
     if (Syms[s].Kind = syFunc) and (ret >= 0) and not IsRealType(ret) then begin
       d := NewTemp;
       if WideStore(ret) then begin
-        PushInsn('CALL64', 'dst=' + IntToStr(d) + ' sym=' + wname +
-          ' nargs=' + IntToStr(np));
+        PushI('CALL64', d, -1, -1, 0, -1, -1, np, wname);
         EmitRetv64(d);
       end
       else begin
-        PushInsn('CALL', 'dst=' + IntToStr(d) + ' sym=' + wname +
-          ' nargs=' + IntToStr(np));
+        PushI('CALL', d, -1, -1, 0, -1, -1, np, wname);
         EmitRetv(d);
       end;
     end
     else begin
       { a procedure worker, or a real-returning one whose value cannot ride the
         int64 completion channel: call and complete with zero }
-      PushInsn('CALL', 'sym=' + wname + ' nargs=' + IntToStr(np));
+      PushI('CALL', -1, -1, -1, 0, -1, -1, np, wname);
       EmitRetv(EmitLIC(0));
     end;
     Inc(q);
@@ -13468,7 +13537,7 @@ begin
   CurCancelLabel := -1;   { the main program body cannot yield, so it never unwinds }
   CurExitLabel := -1;     { `Exit` in the program body jumps to the final return }
   CurExitFunc := -1;
-  if NeedGlobalInit then PushInsn('CALL', 'sym=__init nargs=0')
+  if NeedGlobalInit then PushI('CALL', -1, -1, -1, 0, -1, -1, 0, '__init')
   else begin
     EmitStrConstArrayInits;
     EmitRecConstArrayInits;
@@ -13541,73 +13610,7 @@ begin
   LowerCoThunks;
 end;
 
-{ ---- KPM1 writer ---- }
-
-procedure EmitLine(const s: string);
-{ Append one line of module text to the in-memory buffer. The buffer holds the whole
-  module so the core is a pure source-to-module routine: the driver decides where the
-  bytes go (stdout here, an in-memory string for an embedding host). }
-begin
-  if ModLineCount >= Length(ModLines) then begin
-    if Length(ModLines) = 0 then SetLength(ModLines, 256)
-    else SetLength(ModLines, Length(ModLines) * 2);
-  end;
-  ModLines[ModLineCount] := s;
-  Inc(ModLineCount);
-end;
-
-procedure WriteInsns(fi: LongInt);
-var
-  i: LongInt;
-begin
-  for i := 0 to IrFuncs[fi].NInsns - 1 do
-    if IrFuncs[fi].Insns[i].Args = '' then
-      EmitLine('    ' + IrFuncs[fi].Insns[i].Op)
-    else
-      EmitLine('    ' + PadOp(IrFuncs[fi].Insns[i].Op) + '  ' +
-        IrFuncs[fi].Insns[i].Args);
-end;
-
-procedure WriteFunc(fi: LongInt);
-var
-  i, ns: LongInt;
-  hdr, line: string;
-  anyFW: Boolean;
-begin
-  ns := Length(IrFuncs[fi].SlotSize);
-  hdr := '.func ' + IrFuncs[fi].Name;
-  if IrFuncs[fi].IsLocal then hdr := hdr + ' local';
-  hdr := hdr + ' params ' + IntToStr(IrFuncs[fi].Nparams) +
-    ' slots ' + IntToStr(ns) +
-    ' temps ' + IntToStr(IrFuncs[fi].Ntemps) +
-    ' labels ' + IntToStr(IrFuncs[fi].Nlabels);
-  EmitLine(hdr);
-  if ns > 0 then begin
-    line := '    .slotsize';
-    for i := 0 to ns - 1 do line := line + ' ' + IntToStr(IrFuncs[fi].SlotSize[i]);
-    EmitLine(line);
-  end;
-  if IrFuncs[fi].Nparams > 0 then begin
-    line := '    .paramclass';
-    for i := 0 to IrFuncs[fi].Nparams - 1 do
-      line := line + ' ' + IntToStr(IrFuncs[fi].ParamClass[i]);
-    EmitLine(line);
-  end;
-  if (IrFuncs[fi].Nparams > 0) and
-     (Length(IrFuncs[fi].ParamFW) = IrFuncs[fi].Nparams) then begin
-    anyFW := False;
-    for i := 0 to IrFuncs[fi].Nparams - 1 do
-      if IrFuncs[fi].ParamFW[i] <> 0 then anyFW := True;
-    if anyFW then begin
-      line := '    .paramfw';
-      for i := 0 to IrFuncs[fi].Nparams - 1 do
-        line := line + ' ' + IntToStr(IrFuncs[fi].ParamFW[i]);
-      EmitLine(line);
-    end;
-  end;
-  WriteInsns(fi);
-  EmitLine('.endfunc');
-end;
+{ ---- module builder ---- }
 
 function StrHash32(const s: string): Int64;
 { A 32-bit multiply-add rolling hash over the bytes of s. The interface fingerprint is
@@ -13727,21 +13730,20 @@ begin
     Syms[Nodes[node].Sym].Name + ' ' + ProcSigRef(Syms[Nodes[node].Sym].TypeId);
 end;
 
-procedure EmitInterfaceSection;
-{ Emit the `.interface` section of an object module: the exported types, consts, vars, and
-  routine signatures a consumer compiles against, plus the names re-exported from a
-  dependency, prefixed by a fingerprint over the section text. Type entries come first so a
-  routine or const that references an exported type resolves when the consumer reads it in
-  order. }
+procedure ComputeInterface;
+{ Fill IfaceEnt / IfaceNe / IfaceFpv with the `.interface` section of an object
+  module: the exported types, consts, vars, and routine signatures a consumer
+  compiles against, plus the names re-exported from a dependency, and the
+  fingerprint over the section text. Type entries come first so a forward type
+  reference is defined before it is used when the consumer reads it in order.
+  Shared by the text emitter and the module builder. }
 var
   intf, i, s, vk, pass: LongInt;
-  ent: array of string;
-  ne: LongInt;
   line, blob: string;
   wantType: Boolean;
 begin
   intf := Nodes[ModUnitNode].B;
-  ne := 0; SetLength(ent, 0);
+  IfaceNe := 0; SetLength(IfaceEnt, 0);
   { pass 0 emits type entries, pass 1 the rest, so a forward type reference is defined
     before it is used when the consumer reads the section top to bottom }
   for pass := 0 to 1 do begin
@@ -13753,19 +13755,19 @@ begin
           nkTypeDecl, nkConstDecl:
             if Nodes[s].Sym >= 0 then begin
               line := InterfaceEntryFromSym(Nodes[s].Sym, False);
-              if line <> '' then begin SetLength(ent, ne + 1); ent[ne] := line; Inc(ne); end;
+              if line <> '' then begin SetLength(IfaceEnt, IfaceNe + 1); IfaceEnt[IfaceNe] := line; Inc(IfaceNe); end;
             end;
           nkProcDecl, nkFuncDecl:
             if Nodes[s].Sym >= 0 then begin
               if Nodes[s].A >= 0 then line := MethodEntry(s)
               else line := InterfaceEntryFromSym(Nodes[s].Sym, False);
-              if line <> '' then begin SetLength(ent, ne + 1); ent[ne] := line; Inc(ne); end;
+              if line <> '' then begin SetLength(IfaceEnt, IfaceNe + 1); IfaceEnt[IfaceNe] := line; Inc(IfaceNe); end;
             end;
           nkVarDecl:
             for vk := 0 to High(Nodes[s].Kids) do
               if Nodes[Nodes[s].Kids[vk]].Sym >= 0 then begin
                 line := InterfaceEntryFromSym(Nodes[Nodes[s].Kids[vk]].Sym, Nodes[s].Flag = 1);
-                if line <> '' then begin SetLength(ent, ne + 1); ent[ne] := line; Inc(ne); end;
+                if line <> '' then begin SetLength(IfaceEnt, IfaceNe + 1); IfaceEnt[IfaceNe] := line; Inc(IfaceNe); end;
               end;
         end;
     end;
@@ -13773,130 +13775,133 @@ begin
     for i := 0 to ReexportCount - 1 do
       if (Syms[ReexportSym[i]].Kind = syType) = wantType then begin
         line := InterfaceEntryFromSym(ReexportSym[i], False);
-        if line <> '' then begin SetLength(ent, ne + 1); ent[ne] := line; Inc(ne); end;
+        if line <> '' then begin SetLength(IfaceEnt, IfaceNe + 1); IfaceEnt[IfaceNe] := line; Inc(IfaceNe); end;
       end;
   end;
   blob := '';
-  for i := 0 to ne - 1 do blob := blob + ent[i] + #10;
-  EmitLine('');
-  EmitLine('.interface fingerprint ' + IntToStr(StrHash32(blob)));
-  for i := 0 to ne - 1 do EmitLine(ent[i]);
-  EmitLine('.endinterface');
+  for i := 0 to IfaceNe - 1 do blob := blob + IfaceEnt[i] + #10;
+  IfaceFpv := StrHash32(blob);
 end;
 
-procedure BuildModuleLines;
-{ Render the lowered IR into the in-memory line buffer. It writes no output itself, so a
-  caller can send the module to stdout, to a file, or take it as a string in memory. }
+{ The single-step compiler links the C module builder (kpbuild.c) beside this
+  front end and drives it directly, so a compiled module is never formatted as KPM
+  text here: it is built in C and serialized by the C kpm_write.  These are the
+  builder's entry points (kpb_fe.c, or the JIT's bound shims); the front end hands
+  structured IR and module metadata across, passing strings as runtime
+  descriptors. }
+procedure kpbp_begin; cdecl; external;
+procedure kpbp_target(const tag: string); cdecl; external;
+procedure kpbp_kind(kind: LongInt; const name: string); cdecl; external;
+procedure kpbp_entry(const name: string); cdecl; external;
+procedure kpbp_file(const src: string); cdecl; external;
+procedure kpbp_dep(const name: string; fp: Int64); cdecl; external;
+procedure kpbp_export(const name: string); cdecl; external;
+procedure kpbp_import_begin(kind: LongInt; const name: string); cdecl; external;
+procedure kpbp_import_param(const cls: string); cdecl; external;
+procedure kpbp_import_ret(const cls: string); cdecl; external;
+procedure kpbp_method_begin(const name: string); cdecl; external;
+procedure kpbp_method_param(const cls: string); cdecl; external;
+procedure kpbp_method_ret(const cls: string); cdecl; external;
+procedure kpbp_global_begin(const name, base: string; arr, align, flags: LongInt); cdecl; external;
+procedure kpbp_global_init_int(v: Int64); cdecl; external;
+procedure kpbp_global_string(const s: string); cdecl; external;
+procedure kpbp_global_end; cdecl; external;
+procedure kpbp_iface_begin(fp: Int64); cdecl; external;
+procedure kpbp_iface_line(const line: string); cdecl; external;
+procedure kpbp_func_begin(const name: string; isLocal, isVariadic, nparams, nslots, ntemps, nlabels: LongInt); cdecl; external;
+procedure kpbp_slotsize(size: LongInt); cdecl; external;
+procedure kpbp_paramclass(cls: LongInt); cdecl; external;
+procedure kpbp_paramfw(fw: LongInt); cdecl; external;
+procedure kpbp_insn(const mnem: string; dst, a, b: LongInt; imm: Int64; slot, lab, nargs: LongInt; const sym: string); cdecl; external;
+function kpbp_asm(const args: string): LongInt; cdecl; external;
+procedure kpbp_func_end; cdecl; external;
+
+procedure EmitModuleViaBuilder;
+{ Drive the C module builder from the lowered IR: the module header, imports,
+  exports, globals, interface and functions all go across as structured calls.
+  Each instruction's operands go through kpbp_insn; an ASM instruction hands its
+  preformatted text through kpbp_asm (the one text exception). }
 var
-  i, j, k: LongInt;
-  line: string;
+  i, j, k, fi, flags: LongInt;
+  tgt: string;
+  anyFW: Boolean;
 begin
-  ModLineCount := 0;
-  EmitLine('.kpm 1');
-  { The target tag, authoritative (not a hint). A unit is bound to one target:
-    its opcodes bake in the guest pointer width, and it carries native-code and
-    ABI assumptions beyond that, so the reader rejects a module built for another
-    target. A binary built for a specific architecture stamps it ('rv32', 'cf',
-    'x86-64', 'arm64'); otherwise the module carries only the pointer-width class
-    (ilp32 for rv32/cf/mips, lp64 for x86-64/arm64), the legacy width-only tag. }
-  if CurTarget.Arch <> '' then
-    EmitLine('.target ' + CurTarget.Arch)
-  else if CurTarget.PtrBytes = 8 then
-    EmitLine('.target lp64')
-  else
-    EmitLine('.target ilp32');
-  { A compiled program is a linked executable image whose entry is `main`; a unit is an
-    object module a consumer links against, with no entry. }
-  if ModIsUnit then
-    EmitLine('.module object ' + CompilingUnitName)
-  else begin
-    EmitLine('.module executable');
-    EmitLine('.entry main');
-  end;
-  { the direct dependencies and the interface fingerprint each was compiled against, so a
-    link can traverse the graph and reject a stale interface (doc/languages/kobold/kp-units.md) }
-  for i := 0 to DepCount - 1 do
-    EmitLine('.uses ' + DepName[i] + ' fingerprint ' + IntToStr(DepFingerprint[i]));
-  if OptDebug then
-    EmitLine('.file "' + SrcName + '"');
-  if IrImportCount > 0 then begin
-    EmitLine('');
-    for i := 0 to IrImportCount - 1 do begin
-      if IrImports[i].IsType then begin
-        EmitLine('.import type ' + IrImports[i].Name + ' methods ' +
-          IntToStr(Length(IrImports[i].Methods)));
-        for j := 0 to High(IrImports[i].Methods) do begin
-          line := '    .method ' + IntToStr(j) + ' ' +
-            IrImports[i].Methods[j].MName + ' (';
-          for k := 0 to High(IrImports[i].Methods[j].ParamCls) do
-            line := line + ' ' + IrImports[i].Methods[j].ParamCls[k];
-          line := line + ' ) -> ' + IrImports[i].Methods[j].RetCls;
-          EmitLine(line);
-        end;
-      end
-      else begin
-        if IrImports[i].IsHelper then line := '.import helper ' + IrImports[i].Name + ' ('
-        else line := '.import func ' + IrImports[i].Name + ' (';
-        for j := 0 to High(IrImports[i].ParamCls) do
-          line := line + ' ' + IrImports[i].ParamCls[j];
-        line := line + ' ) -> ' + IrImports[i].RetCls;
-        EmitLine(line);
+  kpbp_begin;
+  if CurTarget.Arch <> '' then tgt := CurTarget.Arch
+  else if CurTarget.PtrBytes = 8 then tgt := 'lp64'
+  else tgt := 'ilp32';
+  kpbp_target(tgt);
+  if ModIsUnit then kpbp_kind(0, CompilingUnitName)    { 0 = object }
+  else begin kpbp_kind(2, ''); kpbp_entry('main'); end; { 2 = executable }
+  for i := 0 to DepCount - 1 do kpbp_dep(DepName[i], DepFingerprint[i]);
+  if OptDebug then kpbp_file(SrcName);
+  for i := 0 to IrImportCount - 1 do begin
+    if IrImports[i].IsType then begin
+      kpbp_import_begin(2, IrImports[i].Name);          { 2 = KP_IMPORT_TYPE }
+      for j := 0 to High(IrImports[i].Methods) do begin
+        kpbp_method_begin(IrImports[i].Methods[j].MName);
+        for k := 0 to High(IrImports[i].Methods[j].ParamCls) do
+          kpbp_method_param(IrImports[i].Methods[j].ParamCls[k]);
+        kpbp_method_ret(IrImports[i].Methods[j].RetCls);
       end;
+    end
+    else begin
+      if IrImports[i].IsHelper then kpbp_import_begin(1, IrImports[i].Name)
+      else kpbp_import_begin(0, IrImports[i].Name);
+      for j := 0 to High(IrImports[i].ParamCls) do
+        kpbp_import_param(IrImports[i].ParamCls[j]);
+      kpbp_import_ret(IrImports[i].RetCls);
     end;
   end;
-  if IrExportCount > 0 then begin
-    EmitLine('');
-    for i := 0 to IrExportCount - 1 do EmitLine('.export ' + IrExports[i]);
+  for i := 0 to IrExportCount - 1 do kpbp_export(IrExports[i]);
+  for i := 0 to IrGlobalCount - 1 do begin
+    flags := 0;
+    if IrGlobals[i].Exported then flags := flags or 1;   { KPB_G_EXPORT }
+    if IrGlobals[i].ReadOnly then flags := flags or 4;   { KPB_G_RODATA }
+    if IrGlobals[i].IsStrObj then flags := flags or 8;   { KPB_G_STROBJ }
+    kpbp_global_begin(IrGlobals[i].Name, IrGlobals[i].BaseType,
+      IrGlobals[i].ArrSize, 0, flags);
+    if IrGlobals[i].HasInit then kpbp_global_init_int(IrGlobals[i].InitBits);
+    for j := 0 to High(IrGlobals[i].InitVals) do
+      kpbp_global_init_int(IrGlobals[i].InitVals[j]);
+    if IrGlobals[i].HasStr then kpbp_global_string(IrGlobals[i].InitStr);
+    kpbp_global_end;
   end;
-  if IrGlobalCount > 0 then begin
-    EmitLine('');
-    for i := 0 to IrGlobalCount - 1 do begin
-      line := '.global ' + IrGlobals[i].Name + ' ' + IrGlobals[i].BaseType;
-      if IrGlobals[i].ArrSize > 0 then
-        line := line + ' array ' + IntToStr(IrGlobals[i].ArrSize);
-      if IrGlobals[i].Exported then line := line + ' export'
-      else line := line + ' local';   { module-private: local linkage so two modules'
-                                         auto-named globals (_const<n>, _str<n>) do not
-                                         collide at link }
-      if IrGlobals[i].ReadOnly then line := line + ' rodata';
-      if IrGlobals[i].IsStrObj then line := line + ' strobj';
-      EmitLine(line);
-      if IrGlobals[i].HasInit then
-        EmitLine('    .init ' + IntToStr(IrGlobals[i].InitBits));
-      for j := 0 to High(IrGlobals[i].InitVals) do
-        EmitLine('    .init ' + IntToStr(IrGlobals[i].InitVals[j]));
-      if IrGlobals[i].HasStr then
-        EmitLine('    .string ' + EscapeStr(IrGlobals[i].InitStr));
-      EmitLine('.endglobal');
+  if ModIsUnit then begin
+    ComputeInterface;
+    kpbp_iface_begin(IfaceFpv);
+    for i := 0 to IfaceNe - 1 do kpbp_iface_line(IfaceEnt[i]);
+  end;
+  for fi := 0 to IrFuncCount - 1 do begin
+    kpbp_func_begin(IrFuncs[fi].Name, Ord(IrFuncs[fi].IsLocal), 0,
+      IrFuncs[fi].Nparams, Length(IrFuncs[fi].SlotSize),
+      IrFuncs[fi].Ntemps, IrFuncs[fi].Nlabels);
+    for j := 0 to Length(IrFuncs[fi].SlotSize) - 1 do
+      kpbp_slotsize(IrFuncs[fi].SlotSize[j]);
+    for j := 0 to IrFuncs[fi].Nparams - 1 do
+      kpbp_paramclass(IrFuncs[fi].ParamClass[j]);
+    if (IrFuncs[fi].Nparams > 0) and
+       (Length(IrFuncs[fi].ParamFW) = IrFuncs[fi].Nparams) then begin
+      anyFW := False;
+      for j := 0 to IrFuncs[fi].Nparams - 1 do
+        if IrFuncs[fi].ParamFW[j] <> 0 then anyFW := True;
+      if anyFW then
+        for j := 0 to IrFuncs[fi].Nparams - 1 do
+          kpbp_paramfw(IrFuncs[fi].ParamFW[j]);
     end;
+    for j := 0 to IrFuncs[fi].NInsns - 1 do begin
+      if IrFuncs[fi].Insns[j].IsAsm then begin
+        if kpbp_asm(IrFuncs[fi].Insns[j].Args) <> 0 then Inc(ErrCount);
+      end
+      else
+        kpbp_insn(IrFuncs[fi].Insns[j].Op, IrFuncs[fi].Insns[j].Dst,
+          IrFuncs[fi].Insns[j].Ar, IrFuncs[fi].Insns[j].Br,
+          IrFuncs[fi].Insns[j].Imm, IrFuncs[fi].Insns[j].Slot,
+          IrFuncs[fi].Insns[j].Lab, IrFuncs[fi].Insns[j].Nargs,
+          IrFuncs[fi].Insns[j].Sym);
+    end;
+    kpbp_func_end;
   end;
-  if ModIsUnit then EmitInterfaceSection;
-  for i := 0 to IrFuncCount - 1 do begin
-    EmitLine('');
-    WriteFunc(i);
-  end;
-end;
-
-function JoinModuleLines(lo, hi: LongInt): string;
-{ Concatenate lines [lo, hi], each with its trailing newline, by a balanced split so the
-  total copying is O(n log k) rather than the O(n^2) of a left-to-right append. }
-var
-  mid: LongInt;
-begin
-  if lo = hi then
-    JoinModuleLines := ModLines[lo] + #10
-  else begin
-    mid := (lo + hi) div 2;
-    JoinModuleLines := JoinModuleLines(lo, mid) + JoinModuleLines(mid + 1, hi);
-  end;
-end;
-
-function AssembleModuleText: string;
-{ The whole module as one string, newline-terminated per line. Empty when there are no
-  lines (nothing was built). }
-begin
-  if ModLineCount = 0 then AssembleModuleText := ''
-  else AssembleModuleText := JoinModuleLines(0, ModLineCount - 1);
 end;
 
 { ---- Driver ---- }
@@ -13975,33 +13980,29 @@ begin
   WriteLn('kobold-pascal ', KP_VERSION);
 end;
 
-function CompileSource(const srcName, srcText: string; debug: Boolean;
-  var moduleText: string): Boolean;
-{ The compiler core: parse, analyze, and lower srcText, returning the KPM1 module in
-  moduleText. It reads no file and writes no output, so an embedding host can feed source
-  in and take the module out in memory. Returns True on a clean compile; on an error it
-  returns False with moduleText empty and the diagnostics already reported. }
+function kpb_emit_native(const outpath: string; emitKpm: LongInt): LongInt; cdecl; external;
+
+function CompileToBuilder(const srcName, srcText: string; debug: Boolean): Boolean;
+{ The single-step compiler core: parse, analyze, and lower srcText, then drive
+  the C module builder (EmitModuleViaBuilder) instead of writing KPM text.  The
+  driver then calls kpb_emit_native to write assembly or the KPM image.  Returns
+  True on a clean compile, the diagnostics already reported. }
 var
   prog, parseErrs, blocker: LongInt;
   why: string;
 begin
-  CompileSource := False;
-  moduleText := '';
+  CompileToBuilder := False;
   OptDebug := debug;
-  ModLineCount := 0;
-  UnitSrcDir := DirOf(srcName);   { a dependency .kpm is searched here first }
+  UnitSrcDir := DirOf(srcName);
   InitScanner(srcName, srcText);
-  if OptVerbose then
-    WriteLn(ErrOutput, 'kpcom: reading ', srcName, ' (', SrcLen, ' bytes)');
   InitParser;
-  NextToken;              { load the first token }
+  NextToken;
   parseErrs := ErrCount;
   prog := ParseCompilationUnit;
   if ErrCount <> parseErrs then Exit;
   ModIsUnit := Nodes[prog].Kind = nkUnit;
   ModUnitNode := -1;
   if ModIsUnit then ModUnitNode := prog;
-  { only run semantic analysis on a clean parse, to avoid cascades }
   Analyze(prog);
   if ErrCount <> parseErrs then Exit;
   blocker := FirstUnlowerable(prog, why);
@@ -14011,9 +14012,8 @@ begin
   end;
   if ModIsUnit then LowerUnit(prog) else LowerProgram(prog);
   if ErrCount <> parseErrs then Exit;
-  BuildModuleLines;
-  moduleText := AssembleModuleText;
-  CompileSource := True;
+  EmitModuleViaBuilder;
+  CompileToBuilder := True;
 end;
 
 procedure InitTarget;
@@ -14035,41 +14035,25 @@ begin
   {$IFDEF KP_TARGET_ARM64} CurTarget.Arch := 'arm64';  {$ENDIF}
 end;
 
-function compile(const srcName, srcText: string): string; export;
-{ The module entry an embedding host calls across the FFI: compile srcText and
-  return the KPM1 module text, or the empty string on a compile error (the
-  diagnostics went to standard error). The target is this binary's native width,
-  so the export sets it itself (unlike the native driver, it never runs the
-  program body). This is the two-stage boot's hand-off, so the host neither writes
-  a temporary file nor forks the front end. }
-var
-  moduleText: string;
+function CompileModule(const srcName, srcText: string): LongInt; export;
+{ The module entry an embedding host calls when it links or binds the C builder
+  beside this front end: the native single-step compiler, the in-process JIT, and
+  the cross JITs that JIT this module and bind the builder's kpbp_*.  Compile
+  srcText straight into the builder, leaving the finished module in
+  kpb_module_ptr() for the host to serialize with kpm_write, with no KPM text
+  hand-off.  Returns 1 on a clean compile, 0 on a compile error (diagnostics
+  already on standard error).  Sets the target itself, since it never runs the
+  program body. }
 begin
   InitTarget;
-  if CompileSource(srcName, srcText, False, moduleText) then compile := moduleText
-  else compile := '';
-end;
-
-procedure EmitModuleText(const moduleText: string);
-{ Write the module. With -o it goes to that file; otherwise to standard output.
-  The text already carries a trailing newline per line, so write it as is. }
-begin
-  if OptOut <> '' then begin
-    if WriteFileStr(OptOut, moduleText) = 0 then begin
-      WriteLn(ErrOutput, 'kpcom: cannot write ', OptOut);
-      Inc(ErrCount);
-    end;
-  end
-  else begin
-    Write(Output, moduleText);
-    Flush(Output);
-  end;
+  if CompileToBuilder(srcName, srcText, False) then CompileModule := 1
+  else CompileModule := 0;
 end;
 
 procedure ProcessFile(const path: string);
 var
-  text, moduleText: string;
-  prog, parseErrs: LongInt;
+  text: string;
+  prog: LongInt;
 begin
   if not ReadWholeFile(path, text) then begin
     WriteLn(ErrOutput, 'kpcom: cannot read ', path);
@@ -14077,32 +14061,30 @@ begin
     Exit;
   end;
   UnitSrcDir := DirOf(path);   { a dependency .kpm is searched here first }
-  if OptEmitKpm then begin
-    if CompileSource(path, text, OptDebug, moduleText) then
-      EmitModuleText(moduleText);
-    Exit;
-  end;
-  InitScanner(path, text);
   if OptVerbose then
-    WriteLn(ErrOutput, 'kpcom: reading ', path, ' (', SrcLen, ' bytes)');
+    WriteLn(ErrOutput, 'kpcom: reading ', path, ' (', Length(text), ' bytes)');
   if OptDump then begin
     { lexer only: dump the token stream }
+    InitScanner(path, text);
     repeat
       NextToken;
       DumpToken(Tok);
     until Tok.Kind = tkEOF;
     Exit;
   end;
-  InitParser;
-  NextToken;              { load the first token }
-  parseErrs := ErrCount;
-  prog := ParseCompilationUnit;
   if OptDumpAst then begin
+    InitScanner(path, text);
+    InitParser;
+    NextToken;
+    prog := ParseCompilationUnit;
     DumpTree(prog);
     Exit;
   end;
-  if (ErrCount = parseErrs) and
-     (Nodes[prog].Kind in [nkProgram, nkUnit]) then Analyze(prog);
+  { Single-step: lower straight into the C module builder and emit in one process,
+    no KPM text round trip.  The default writes assembly; --emit-kpm serializes the
+    same builder module as KPM through the C kpm_write (for a seed or stored unit). }
+  if CompileToBuilder(path, text, OptDebug) then
+    if kpb_emit_native(OptOut, Ord(OptEmitKpm)) <> 0 then Inc(ErrCount);
 end;
 
 var

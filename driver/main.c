@@ -396,18 +396,14 @@ main(int argc, char **argv)
     if (t->kp_units)
         snprintf(udir, sizeof udir, "%s/%s", libd, t->kp_units);
 
-    /* a temp directory for intermediates, unless -save-temps.  -S usually needs
-       none (its only artifact is the .s), but a Kobold source always produces a
-       throwaway .kpm that is never a requested output, so -S on Kobold still
-       needs the temp dir to hold it; -c and a full link both produce an
-       intermediate .s (and the link an intermediate .o). */
-    int have_kp = 0;
-    for (int s = 0; s < nsrcs; s++)
-        if (srclang[s] == LANG_KP)
-            have_kp = 1;
+    /* a temp directory for intermediates, unless -save-temps.  -S needs none
+       (its only artifact is the .s, in the CWD or -o); -c and a full link both
+       produce an intermediate .s (and the link an intermediate .o).  Kobold
+       compiles straight to assembly like the other languages, so it no longer
+       forces a temp dir under -S. */
     char tmpl[] = "/tmp/skjccXXXXXX";
     char *tmpdir = NULL;
-    if (!save_temps && (!stop_s || have_kp)) {
+    if (!save_temps && !stop_s) {
         tmpdir = mkdtemp(tmpl);
         if (!tmpdir) die("mkdtemp: %s", strerror(errno));
     }
@@ -430,8 +426,8 @@ main(int argc, char **argv)
             snprintf(spath, sizeof spath, "%s/%s.s", tmpdir, st);
 
         /* compile to assembly, dispatching on the source language.  C goes
-           straight through skj-cc; Pascal through skj-pc; Kobold is two stages,
-           a front end that emits a KPM module and a codegen that lowers it. */
+           straight through skj-cc; Pascal through skj-pc; Kobold through the
+           single-step skj-kpc, which lowers source to assembly in one step. */
         if (srclang[s] == LANG_C) {
             /* cc -o out.s [opts] [inc] in.c */
             const char *av[MAXARGV];
@@ -457,45 +453,19 @@ main(int argc, char **argv)
             av[n] = NULL;
             if (run(av, -1) != 0) die("compile failed for %s", srcs[s]);
         } else {        /* LANG_KP */
-            if (!t->kpc || !t->kp)
-                die("target '%s' has no Kobold front end", t->names[0]);
+            if (!t->kpc)
+                die("target '%s' has no Kobold compiler", t->names[0]);
             any_kp = 1;
-            /* the .kpm is a throwaway: in the temp dir unless -save-temps keeps
-               it beside the source (tmpdir is present here whenever !save_temps,
-               since a Kobold source forces it even under -S). */
-            char kpmpath[1024];
-            if (save_temps)
-                snprintf(kpmpath, sizeof kpmpath, "%s.kpm", st);
-            else
-                snprintf(kpmpath, sizeof kpmpath, "%s/%s.kpm", tmpdir, st);
-
-            /* front end: kpc [-U udir] --emit-kpm in.kp > out.kpm */
-            int kfd = open(kpmpath, O_CREAT | O_TRUNC | O_WRONLY, 0644);
-            if (kfd < 0)
-                die("cannot create %s: %s", kpmpath, strerror(errno));
-            {
-                const char *av[MAXARGV];
-                int n = 0;
-                av[n++] = tool_path(t->kpc);
-                if (t->kp_units) { av[n++] = "-U"; av[n++] = udir; }
-                av[n++] = "--emit-kpm";
-                av[n++] = srcs[s];
-                av[n] = NULL;
-                if (run(av, kfd) != 0) die("compile failed for %s", srcs[s]);
-            }
-            close(kfd);
-
-            /* codegen: kp out.kpm -o out.s */
-            {
-                const char *av[MAXARGV];
-                int n = 0;
-                av[n++] = tool_path(t->kp);
-                av[n++] = kpmpath;
-                av[n++] = "-o";
-                av[n++] = spath;
-                av[n] = NULL;
-                if (run(av, -1) != 0) die("compile failed for %s", srcs[s]);
-            }
+            /* kpc [-U udir] in.kp -o out.s: single step, source to assembly */
+            const char *av[MAXARGV];
+            int n = 0;
+            av[n++] = tool_path(t->kpc);
+            if (t->kp_units) { av[n++] = "-U"; av[n++] = udir; }
+            av[n++] = "-o";
+            av[n++] = spath;
+            av[n++] = srcs[s];
+            av[n] = NULL;
+            if (run(av, -1) != 0) die("compile failed for %s", srcs[s]);
         }
         if (stop_s) { free(st); continue; }
 
@@ -582,14 +552,11 @@ main(int argc, char **argv)
     if (tmpdir) {
         for (int k = 0; k < nlink; k++)
             unlink(link_objs[k]);
-        /* the .s (and a Kobold .kpm) intermediates share the stem; remove
-           them too */
+        /* the .s intermediates share the stem; remove them too */
         for (int s = 0; s < nsrcs; s++) {
             char *st = stem(srcs[s]);
             char p[1024];
             snprintf(p, sizeof p, "%s/%s.s", tmpdir, st);
-            unlink(p);
-            snprintf(p, sizeof p, "%s/%s.kpm", tmpdir, st);
             unlink(p);
             free(st);
         }

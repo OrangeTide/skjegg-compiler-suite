@@ -17,7 +17,8 @@ struct kp_dynarr {
     int32_t  len;       /* element count */
     int32_t  elemsize;  /* element width in bytes */
     kp_gptr  layout;    /* guest address of the handle-field map, 0 when none */
-    kp_gptr  base;      /* guest address of the element storage, 0 when len == 0 */
+    kp_gptr  base;      /* guest address of the element storage, 0 when cap == 0 */
+    int32_t  cap;       /* elements the storage at base holds (>= len); runtime-only */
 };
 
 /* The array object at a guest address, or NULL for nil. */
@@ -111,10 +112,15 @@ arr_new(KP_VM_P int32_t len, int32_t elemsize, kp_gptr layout)
     d->elemsize = elemsize;
     d->layout = layout;
     d->base = 0;
+    d->cap = 0;
     if (len > 0) {
+        /* An explicit size allocates exactly that many elements (a one-shot
+           SetLength does not over-allocate); the geometric growth in
+           arr_resize_inplace is what the one-at-a-time append pattern needs. */
         d->base = RT_ALLOC((uint32_t)len * (uint32_t)elemsize);
         memset(RT_PTR(d->base), 0, (unsigned long)len * (unsigned long)elemsize);
         d->len = len;
+        d->cap = len;
     }
     return a;
 }
@@ -161,23 +167,37 @@ kp_arr_base(KP_VM_P kp_gptr a)
 
 /* Resize the storage of array object d to len elements, in place. Only the separate storage
    block reallocs, so the object address (the value every owner holds) stays put. A shrink
-   releases the elements that fall off; a grow zero-fills the new tail. */
+   releases the elements that fall off and keeps the capacity (no realloc); a grow zero-fills
+   the new tail, reallocating only when len outgrows the capacity.
+
+   The storage holds `cap` elements, cap >= len. Growth is geometric (doubling), so the
+   one-at-a-time append pattern (SetLength(a, Length(a)+1) in a loop) reallocs O(log n) times
+   over n appends, not once per append. This matters most on the freestanding tier, whose
+   gheap does not coalesce freed blocks: a realloc-per-append there orphans every intermediate
+   block and commits O(n^2) bytes for one array; doubling bounds that to O(n). */
 static void
 arr_resize_inplace(KP_VM_P struct kp_dynarr *d, int32_t len)
 {
     uint32_t es;
-    kp_gptr nbase;
+    int32_t oldlen = d->len;
 
-    if (len == d->len)
+    if (len == oldlen)
         return;
     es = (uint32_t)d->elemsize;
-    if (len < d->len)
-        release_elems(KP_VM_A d, len, d->len);    /* drop the shrunk-away elements */
-    nbase = RT_REALLOC(d->base, (uint32_t)len * es);
-    if (len > d->len)       /* zero-fill the grown tail */
-        memset((char *)RT_PTR(nbase) + (unsigned long)d->len * es, 0,
-               (unsigned long)(len - d->len) * es);
-    d->base = nbase;
+    if (len < oldlen) {
+        release_elems(KP_VM_A d, len, oldlen);    /* drop the shrunk-away elements */
+        d->len = len;                             /* keep the storage and capacity */
+        return;
+    }
+    if (len > d->cap) {                           /* outgrew the storage: grow geometrically */
+        int32_t ncap = d->cap > 0 ? d->cap * 2 : len;
+        if (ncap < len)
+            ncap = len;
+        d->base = RT_REALLOC(d->base, (uint32_t)ncap * es);
+        d->cap = ncap;
+    }
+    memset((char *)RT_PTR(d->base) + (unsigned long)oldlen * es, 0,
+           (unsigned long)(len - oldlen) * es);   /* zero-fill the grown tail [oldlen, len) */
     d->len = len;
 }
 
@@ -234,6 +254,7 @@ arr_delete_inplace(KP_VM_P struct kp_dynarr *d, int32_t index, int32_t count)
     else
         d->base = RT_REALLOC(d->base, (uint32_t)newlen * es);
     d->len = newlen;
+    d->cap = newlen;    /* the storage was reallocated to exactly newlen elements */
 }
 
 /* Open count zero-filled element slots at index in array object d, in place: grow the storage,
@@ -252,6 +273,7 @@ arr_insert_inplace(KP_VM_P struct kp_dynarr *d, int32_t index, int32_t count)
                 (unsigned long)(d->len - index) * es);
     memset(elem_ptr(KP_VM_A d, index), 0, (unsigned long)count * es);
     d->len = newlen;
+    d->cap = newlen;    /* the storage was reallocated to exactly newlen elements */
 }
 
 /* Delete count elements at index from array a (0-based), copy-on-write. A shared array is cloned
@@ -369,6 +391,7 @@ kp_buf_new(KP_VM_P kp_gptr base, int32_t len, int32_t elemsize)
     d->elemsize = elemsize;
     d->layout = 0;              /* reference-free elements: no managed-field map */
     d->base = base;
+    d->cap = len;               /* host-owned region, never resized; kept consistent */
     return a;
 }
 
@@ -399,6 +422,7 @@ kp_buf_new_nd(KP_VM_P kp_gptr base, int32_t ndim, const int32_t *dims,
     d->elemsize = elemsize;
     d->layout = blob;
     d->base = base;
+    d->cap = dims[0];           /* host-owned region, never resized; kept consistent */
     {
         int32_t *b = (int32_t *)RT_PTR(blob);
         b[0] = ndim;
