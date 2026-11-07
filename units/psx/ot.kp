@@ -1,0 +1,45 @@
+unit psx.ot;
+{ psx.ot - the ordering-table leaf for depth-sorted drawing. Clear it, add each
+  face at its depth bucket, link it, then swap. Colours for OtAddGouraud4 are
+  packed $RRGGBB. Reached through `uses psx`; pulling a name here links this
+  object and the ordering-table libpsx member. }
+
+interface
+
+procedure OtClear;
+procedure OtAddPoly4(x0, y0, x1, y1, x2, y2, x3, y3, r, g, b, z: Integer);
+procedure OtAddGouraud4(x0, y0, c0, x1, y1, c1,
+                        x2, y2, c2, x3, y3, c3, z: Integer);
+procedure OtLink;
+
+implementation
+
+procedure psx_ot_clear; external cdecl;
+procedure psx_ot_add_poly4(x0, y0, x1, y1, x2, y2, x3, y3,
+                           r, g, b, z: Integer); external cdecl;
+procedure psx_ot_add_gouraud4(x0, y0, c0, x1, y1, c1,
+                              x2, y2, c2, x3, y3, c3, z: Integer); external cdecl;
+procedure psx_ot_link; external cdecl;
+
+procedure OtClear;
+begin
+  psx_ot_clear;
+end;
+
+procedure OtAddPoly4(x0, y0, x1, y1, x2, y2, x3, y3, r, g, b, z: Integer);
+begin
+  psx_ot_add_poly4(x0, y0, x1, y1, x2, y2, x3, y3, r, g, b, z);
+end;
+
+procedure OtAddGouraud4(x0, y0, c0, x1, y1, c1,
+                        x2, y2, c2, x3, y3, c3, z: Integer);
+begin
+  psx_ot_add_gouraud4(x0, y0, c0, x1, y1, c1, x2, y2, c2, x3, y3, c3, z);
+end;
+
+procedure OtLink;
+begin
+  psx_ot_link;
+end;
+
+end.

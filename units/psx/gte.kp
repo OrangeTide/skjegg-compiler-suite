@@ -1,0 +1,64 @@
+unit psx.gte;
+{ psx.gte - the 3D leaf, through the GTE using the pointer-free helpers
+  (libpsx/gte_easy.c) so the unit stays free of matrix and vertex arrays. Set
+  the view once, build a rotation from three angles, project each vertex, and
+  read its screen position and depth back. See examples/psx/cube.kp. Reached
+  through `uses psx`; pulling a name here links this object and the GTE libpsx
+  members, kept out of a 2D program. }
+
+interface
+
+procedure GteSetScreen(h, ofx, ofy: Integer);
+procedure GteSetTrans(tx, ty, tz: Integer);
+procedure GteRotXyz(ax, ay, az: Integer);
+procedure GteProject(vx, vy, vz: Integer);
+function  GteSx: Integer;
+function  GteSy: Integer;
+function  GteSz: Integer;
+
+implementation
+
+procedure psx_gte_set_screen(h, ofx, ofy: Integer); external cdecl;
+procedure psx_gte_set_trans(tx, ty, tz: Integer); external cdecl;
+procedure psx_gte_rot_xyz(ax, ay, az: Integer); external cdecl;
+procedure psx_gte_project(vx, vy, vz: Integer); external cdecl;
+function  psx_gte_sx: Integer; external cdecl;
+function  psx_gte_sy: Integer; external cdecl;
+function  psx_gte_sz: Integer; external cdecl;
+
+procedure GteSetScreen(h, ofx, ofy: Integer);
+begin
+  psx_gte_set_screen(h, ofx, ofy);
+end;
+
+procedure GteSetTrans(tx, ty, tz: Integer);
+begin
+  psx_gte_set_trans(tx, ty, tz);
+end;
+
+procedure GteRotXyz(ax, ay, az: Integer);
+begin
+  psx_gte_rot_xyz(ax, ay, az);
+end;
+
+procedure GteProject(vx, vy, vz: Integer);
+begin
+  psx_gte_project(vx, vy, vz);
+end;
+
+function GteSx: Integer;
+begin
+  GteSx := psx_gte_sx;
+end;
+
+function GteSy: Integer;
+begin
+  GteSy := psx_gte_sy;
+end;
+
+function GteSz: Integer;
+begin
+  GteSz := psx_gte_sz;
+end;
+
+end.

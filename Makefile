@@ -2408,7 +2408,7 @@ BUILD_DIRS := build/kpfree-rv build/kpfree-cf build/hv-x86_64 build/hv-arm64 \
 	build/rv-skj build/sandbox build/spawn-argv build/spawn-wait build/spawn-kill build/spawn-backtrace \
 	build/env-test build/xlang-sandbox build/sandbox-mips build/sandbox-cf \
 	build/mips-nr build/mips-asm build/cf-asm build/rv-asm build/x86-asm build/arm64-asm \
-	build/mips/libpsx build/psx build/psx-units
+	build/mips/libpsx build/psx build/psx-units build/psx-units/psx
 $(BUILD_DIRS):
 	mkdir -p $@
 
@@ -4984,11 +4984,18 @@ INSTALL_KPAOT := build/libkpaot.a build/libkpaot-rv.a build/libkpaot-arm64.a \
 # outside the tree can build PS1 programs. The skjcc `ps1` target drives the C
 # path; skj-pc-mips and skj-kpc-mips build Pascal and Kobold.
 # See doc/tools/psx-setup.md.
+# The psx unit's per-subsystem leaves (see the psx-units rules below); the SDK
+# ships the umbrella psx.a (which carries the leaf objects) plus each leaf's
+# interface archive, which a consumer's `uses psx` needs on the -U path to
+# resolve the re-exports.
+PSX_SUBS   := gpu pad spu fixed tex cd gte ot
+PSX_LEAF_A := $(PSX_SUBS:%=build/psx-units/psx/%.a)
+PSX_LEAF_O := $(PSX_SUBS:%=build/psx/psx_%.o)
 INSTALL_PSX_TOOLS := build/skj-cc-mips-sf build/skj-pc-mips build/skj-kpc-mips \
                      build/skj-kpc-mips build/skj-mkromfs \
                      build/skj-timconv build/skj-vagconv build/skj-mkcdda
 INSTALL_PSX_SDK := build/mips/libpsx.a build/mips/start_psx.o \
-                   build/psx-units/psx.a build/psx/psx_unit.o
+                   build/psx-units/psx.a $(PSX_LEAF_A)
 
 install: $(TOOLS) \
          $(DRIVER_LIB_CF) $(DRIVER_LIB_RV) $(DRIVER_LIB_MIPS) \
@@ -5012,10 +5019,12 @@ install: $(TOOLS) \
 	@echo "  INSTALL  PlayStation toolchain -> $(DESTDIR)$(bindir)"
 	@$(INSTALL) -m 755 $(INSTALL_PSX_TOOLS) $(DESTDIR)$(bindir)/
 	@echo "  INSTALL  libpsx SDK -> $(DESTDIR)$(libdir)/ps1"
-	@$(INSTALL) -d $(DESTDIR)$(libdir)/ps1
+	@$(INSTALL) -d $(DESTDIR)$(libdir)/ps1 $(DESTDIR)$(libdir)/ps1/psx
 	@$(INSTALL) -m 644 build/mips/libpsx.a build/mips/start_psx.o $(DESTDIR)$(libdir)/ps1/
 	@$(INSTALL) -m 644 libpsx/psx.h units/psx.pas units/psx.kp $(DESTDIR)$(libdir)/ps1/
-	@$(INSTALL) -m 644 build/psx-units/psx.a build/psx/psx_unit.o $(DESTDIR)$(libdir)/ps1/
+	@$(INSTALL) -m 644 units/psx/*.kp $(DESTDIR)$(libdir)/ps1/psx/
+	@$(INSTALL) -m 644 build/psx-units/psx.a $(DESTDIR)$(libdir)/ps1/
+	@$(INSTALL) -m 644 $(PSX_LEAF_A) $(DESTDIR)$(libdir)/ps1/psx/
 	@echo
 	@echo "Installed skjegg $(SKJ_VERSION) under $(DESTDIR)$(PREFIX)."
 	@echo "The tools find their headers and runtime relative to their own"
@@ -7504,14 +7513,14 @@ build/psx/hello_kp.exe: examples/psx/hello.kp build/skj-kpc-mips build/skj-kpc-m
 ## The Kobold inline-assembly sample: extended asm (write-only output, register
 ## inputs, an in-out operand) computes a rectangle's X position, drawn through
 ## the psx unit, so the framebuffer verifies the asm result.
-build/psx/kasm.exe: examples/psx/kasm.kp build/psx-units/psx.a build/psx/psx_unit.o \
+build/psx/kasm.exe: examples/psx/kasm.kp build/psx-units/psx.a \
                  build/skj-kpc-mips build/skj-kpc-mips build/mips/libpsx.a \
                  build/mips/start_psx.o build/skj-as-mips build/skj-ld-mips | build/psx
 	@./build/skj-kpc-mips -U build/psx-units --emit-kpm examples/psx/kasm.kp > build/psx/kasm.kpm
 	@./build/skj-kpc-mips build/psx/kasm.kpm -o build/psx/kasm.s
 	@./build/skj-as-mips -o build/psx/kasm.o build/psx/kasm.s
 	@./build/skj-ld-mips -f ps-exe -o $@ \
-	    build/mips/start_psx.o build/psx/kasm.o build/psx/psx_unit.o build/mips/libpsx.a
+	    build/mips/start_psx.o build/psx/kasm.o build/psx-units/psx.a build/mips/libpsx.a
 
 ## Milestone 6: the thin language units and a game in each language.
 ## The Pascal game declares the psx bindings inline (Pascal has no unit
@@ -7544,37 +7553,45 @@ build/psx/sprite_pas.exe: examples/psx/sprite.pas build/psx/sprite_asset.o \
 	    build/mips/start_psx.o build/psx/sprite_pas.o \
 	    build/psx/sprite_asset.o build/psx/rtex.o build/psx/stex.o build/mips/libpsx.a
 
-## The psx unit: its interface is build/psx-units/psx.a (what `uses psx` resolves,
-## via -U build/psx-units), carrying the KPM payload as the reserved .kpm member;
-## the .kpm is left on disk for the standalone lowering into psx_unit.o, the object
-## linked beside each Kobold program.
-build/psx-units/psx.a: units/psx.kp build/skj-kpc-mips build/skj-ar | build/psx-units
-	@./build/skj-kpc-mips --emit-kpm units/psx.kp > build/psx-units/psx.kpm
-	@sh tests/kp-archive.sh build/skj-ar $@ build/psx-units/psx.kpm
+## The psx unit, split per subsystem so a program links only what it calls.
+## Each leaf (psx.gpu, psx.pad, ...) resolves from build/psx-units/psx/<sub>.a
+## (its interface in the reserved .kpm member) and lowers to its own object
+## build/psx/psx_<sub>.o.  The umbrella build/psx-units/psx.a is what `uses psx`
+## resolves (via -U build/psx-units): its .kpm re-exports the leaves, and it
+## carries every leaf object as a member, so the pull-only linker draws in just
+## the subsystems the program references (and thus only their libpsx members).
+## PSX_SUBS / PSX_LEAF_A / PSX_LEAF_O are defined up by INSTALL_PSX_SDK.
+build/psx-units/psx/%.a: units/psx/%.kp build/skj-kpc-mips build/skj-ar | build/psx-units/psx
+	@./build/skj-kpc-mips --emit-kpm $< > build/psx-units/psx/$*.kpm
+	@sh tests/kp-archive.sh build/skj-ar $@ build/psx-units/psx/$*.kpm
 
-build/psx/psx_unit.o: build/psx-units/psx.a build/skj-kpc-mips build/skj-as-mips | build/psx
-	@./build/skj-kpc-mips build/psx-units/psx.kpm -o build/psx/psx_unit.s
-	@./build/skj-as-mips -o $@ build/psx/psx_unit.s
+build/psx/psx_%.o: build/psx-units/psx/%.a build/skj-kpc-mips build/skj-as-mips | build/psx
+	@./build/skj-kpc-mips build/psx-units/psx/$*.kpm -o build/psx/psx_$*.s
+	@./build/skj-as-mips -o $@ build/psx/psx_$*.s
 
-build/psx/game_kp.exe: examples/psx/game.kp build/psx-units/psx.a build/psx/psx_unit.o \
+build/psx-units/psx.a: units/psx.kp $(PSX_LEAF_A) $(PSX_LEAF_O) build/skj-kpc-mips build/skj-ar | build/psx-units
+	@./build/skj-kpc-mips -U build/psx-units --emit-kpm units/psx.kp > build/psx-units/psx.kpm
+	@sh tests/kp-archive.sh build/skj-ar $@ build/psx-units/psx.kpm $(PSX_LEAF_O)
+
+build/psx/game_kp.exe: examples/psx/game.kp build/psx-units/psx.a \
                  build/skj-kpc-mips build/skj-kpc-mips build/mips/libpsx.a \
                  build/mips/start_psx.o build/skj-as-mips build/skj-ld-mips | build/psx
 	@./build/skj-kpc-mips -U build/psx-units --emit-kpm examples/psx/game.kp > build/psx/game_kp.kpm
 	@./build/skj-kpc-mips build/psx/game_kp.kpm -o build/psx/game_kp.s
 	@./build/skj-as-mips -o build/psx/game_kp.o build/psx/game_kp.s
 	@./build/skj-ld-mips -f ps-exe -o $@ \
-	    build/mips/start_psx.o build/psx/game_kp.o build/psx/psx_unit.o build/mips/libpsx.a
+	    build/mips/start_psx.o build/psx/game_kp.o build/psx-units/psx.a build/mips/libpsx.a
 
 ## The Kobold 3D sample: the same spinning cube through the psx unit's GTE
 ## helpers and ordering table.
-build/psx/cube_kp.exe: examples/psx/cube.kp build/psx-units/psx.a build/psx/psx_unit.o \
+build/psx/cube_kp.exe: examples/psx/cube.kp build/psx-units/psx.a \
                  build/skj-kpc-mips build/skj-kpc-mips build/mips/libpsx.a \
                  build/mips/start_psx.o build/skj-as-mips build/skj-ld-mips | build/psx
 	@./build/skj-kpc-mips -U build/psx-units --emit-kpm examples/psx/cube.kp > build/psx/cube_kp.kpm
 	@./build/skj-kpc-mips build/psx/cube_kp.kpm -o build/psx/cube_kp.s
 	@./build/skj-as-mips -o build/psx/cube_kp.o build/psx/cube_kp.s
 	@./build/skj-ld-mips -f ps-exe -o $@ \
-	    build/mips/start_psx.o build/psx/cube_kp.o build/psx/psx_unit.o build/mips/libpsx.a
+	    build/mips/start_psx.o build/psx/cube_kp.o build/psx-units/psx.a build/mips/libpsx.a
 
 ## The C accessor that loads the sprite samples' textures by handle (the pointer
 ## to the embedded TIM stays in C; Pascal and Kobold draw by the returned handle).
@@ -7584,7 +7601,7 @@ build/psx/sprite_asset.o: examples/psx/sprite_asset.c libpsx/psx.h \
 	@./build/skj-as-mips -o $@ build/psx/sprite_asset.s
 
 ## The Kobold texture sample: drives the richer sprite draws through the psx unit.
-build/psx/sprite_kp.exe: examples/psx/sprite.kp build/psx-units/psx.a build/psx/psx_unit.o \
+build/psx/sprite_kp.exe: examples/psx/sprite.kp build/psx-units/psx.a \
                  build/psx/sprite_asset.o build/psx/rtex.o build/psx/stex.o \
                  build/skj-kpc-mips build/skj-kpc-mips build/mips/libpsx.a \
                  build/mips/start_psx.o build/skj-as-mips build/skj-ld-mips | build/psx
@@ -7592,7 +7609,7 @@ build/psx/sprite_kp.exe: examples/psx/sprite.kp build/psx-units/psx.a build/psx/
 	@./build/skj-kpc-mips build/psx/sprite_kp.kpm -o build/psx/sprite_kp.s
 	@./build/skj-as-mips -o build/psx/sprite_kp.o build/psx/sprite_kp.s
 	@./build/skj-ld-mips -f ps-exe -o $@ \
-	    build/mips/start_psx.o build/psx/sprite_kp.o build/psx/psx_unit.o \
+	    build/mips/start_psx.o build/psx/sprite_kp.o build/psx-units/psx.a \
 	    build/psx/sprite_asset.o build/psx/rtex.o build/psx/stex.o build/mips/libpsx.a
 
 ## Milestone 7: ISO 9660 assets through the shared fs/ layer.  genisoimage packs
@@ -7825,6 +7842,25 @@ test-psx-cube-lang: build/psx/cube_pas.exe build/psx/cube_kp.exe
 	@OBJDUMP="$(MIPS_OBJDUMP)" sh tests/run-psx-tests.sh build/psx/cube_pas.exe
 	@OBJDUMP="$(MIPS_OBJDUMP)" sh tests/run-psx-tests.sh build/psx/cube_kp.exe
 
+## Size guard for the per-subsystem psx unit split.  A Kobold PS1 binary binds
+## libpsx the same way its Pascal twin does, so the two stay close in size.  Before
+## the split the monolithic binding dragged all of libpsx in and the Kobold builds
+## ran about 3x larger; this fails if a Kobold exe regresses past 1.5x its Pascal
+## twin, which would mean the linker stopped pulling only the leaves a game calls.
+test-psx-size: build/psx/cube_pas.exe build/psx/cube_kp.exe \
+               build/psx/game_pas.exe build/psx/game_kp.exe \
+               build/psx/sprite_pas.exe build/psx/sprite_kp.exe
+	@rc=0; for pair in cube game sprite; do \
+	   p=$$(wc -c < build/psx/$${pair}_pas.exe); \
+	   k=$$(wc -c < build/psx/$${pair}_kp.exe); \
+	   limit=$$(( p * 3 / 2 )); \
+	   if [ "$$k" -gt "$$limit" ]; then \
+	     echo "FAIL psx-size: $${pair}_kp.exe $$k > 1.5x $${pair}_pas.exe $$p (limit $$limit)"; rc=1; \
+	   else \
+	     echo "PASS psx-size: $${pair}_kp.exe $$k <= 1.5x $${pair}_pas.exe $$p"; \
+	   fi; \
+	 done; exit $$rc
+
 ## The skjcc `ps1` driver target: the whole C pipeline (skj-cc-mips-sf ->
 ## skj-as-mips -> skj-ld-mips -f ps-exe, linking start_psx.o and libpsx.a) in one
 ## command.  Stage the SDK where the in-tree driver looks (build/lib/ps1) and
@@ -7832,14 +7868,15 @@ test-psx-cube-lang: build/psx/cube_pas.exe build/psx/cube_kp.exe
 ## One `skjcc -target ps1` command per language, exercising the driver's
 ## extension dispatch: C straight through, Pascal via skj-pc-mips, Kobold via
 ## the KPM front end + codegen, resolving `uses psx` from the staged unit dir
-## and linking psx_unit.o.  The staged build/lib/ps1 mirrors the install layout.
+## and linking psx.a.  The staged build/lib/ps1 mirrors the install layout.
 test-psx-cube-driver: build/skjcc build/mips/libpsx.a build/mips/start_psx.o \
                       build/skj-cc-mips-sf build/skj-pc-mips build/skj-kpc-mips \
                       build/skj-kpc-mips build/skj-as-mips build/skj-ld-mips \
-                      build/psx-units/psx.a build/psx/psx_unit.o | build/psx
-	@mkdir -p build/lib/ps1
+                      build/psx-units/psx.a $(PSX_LEAF_A) | build/psx
+	@mkdir -p build/lib/ps1/psx
 	@cp build/mips/libpsx.a build/mips/start_psx.o libpsx/psx.h build/lib/ps1/
-	@cp build/psx-units/psx.a build/psx/psx_unit.o build/lib/ps1/
+	@cp build/psx-units/psx.a build/lib/ps1/
+	@cp $(PSX_LEAF_A) build/lib/ps1/psx/
 	@./build/skjcc -target ps1 -o build/psx/cube_drv.exe examples/psx/cube.c
 	@./build/skjcc -target ps1 -o build/psx/cube_pas_drv.exe examples/psx/cube.pas
 	@./build/skjcc -target ps1 -o build/psx/cube_kp_drv.exe examples/psx/cube.kp
@@ -8389,7 +8426,7 @@ check-mips-all: check-mips check-mips-noreorder check-mips-emu test-mips-fs-cap 
                 check-cc-mips check-cc-mips-noreorder \
                 check-mipsas check-cc-mips-skj test-mips-archive test-mips-psexe \
                 test-psx-gpu test-psx-tex test-psx-rot test-psx-alpha test-psx-cd test-psx-audio test-psx-timconv test-psx-adpcm test-psx-m2 test-psx-assets \
-                test-psx-fixed test-psx-game test-psx-lang test-psx-units test-psx-sprite-lang test-psx-gte test-psx-timer test-psx-cdda test-psx-mc test-psx-pad test-psx-shade test-psx-env test-psx-dbgtext test-psx-cube-lang test-psx-kasm test-psx-cube-driver \
+                test-psx-fixed test-psx-game test-psx-lang test-psx-units test-psx-sprite-lang test-psx-gte test-psx-timer test-psx-cdda test-psx-mc test-psx-pad test-psx-shade test-psx-env test-psx-dbgtext test-psx-cube-lang test-psx-kasm test-psx-cube-driver test-psx-size \
                 test-cc-mips-asm check-mips-sf test-threaded-mips
 	@echo "All MIPS test suites passed."
 

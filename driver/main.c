@@ -102,10 +102,12 @@ static const struct target targets[] = {
       /* Pascal and Kobold share the ps1 crt (start_psx.o) and runtime
          (libpsx.a) with C.  Pascal compiles straight to asm; Kobold's front
          end emits a KPM that the codegen turns into asm, and a Kobold program
-         that `uses psx` resolves the unit from <libdir>/ps1 and links the
-         prebuilt psx_unit.o binding. */
+         that `uses psx` resolves the unit from <libdir>/ps1 and links the psx.a
+         binding archive.  psx.a carries each subsystem leaf (gpu, pad, spu, ...)
+         as its own object member, so the linker pulls only the subsystems the
+         program calls rather than the whole binding. */
       "skj-pc-mips", "skj-kpc-mips", "skj-kp-mips-sf",
-      "ps1", { "psx_unit.o", NULL } },
+      "ps1", { "psx.a", NULL } },
 };
 #define NTARGETS ((int)(sizeof(targets) / sizeof(targets[0])))
 
@@ -518,7 +520,7 @@ main(int argc, char **argv)
         for (int k = 0; k < nobjs; k++) av[n++] = objs[k];
         /* A Kobold program links its unit binding object(s) after the program
            objects that reference the wrappers and before the runtime archive
-           the wrappers call into (e.g. psx_unit.o between the program and
+           the wrappers call into (e.g. psx.a between the program and
            libpsx.a). */
         if (any_kp) {
             for (int k = 0; t->kp_link[k] && k < 3; k++) {

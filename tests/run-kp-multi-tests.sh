@@ -80,11 +80,16 @@ while [ -n "$(echo "$remaining" | tr -d ' ')" ]; do
     next=
     progress=0
     for u in $remaining; do
+        # A dotted unit name resolves to a dot->slash archive path (uses dx.base
+        # -> dx/base.a), matching the front end's DotToSlash search; the source
+        # file keeps its flat dotted name in the fixture directory.
+        apath="$BDIR/$(printf '%s' "$u" | tr . /).a"
         if "$FRONTEND" --emit-kpm "$BDIR/$u.pas" >"$BDIR/$u.kpm" 2>"$BDIR/$u.uerr"; then
-            sh "$ROOT/tests/kp-archive.sh" "$AR" "$BDIR/$u.a" "$BDIR/$u.kpm"
+            mkdir -p "$(dirname "$apath")"
+            sh "$ROOT/tests/kp-archive.sh" "$AR" "$apath" "$BDIR/$u.kpm"
             progress=1
         else
-            rm -f "$BDIR/$u.kpm" "$BDIR/$u.a"
+            rm -f "$BDIR/$u.kpm" "$apath"
             next="$next $u"
         fi
     done

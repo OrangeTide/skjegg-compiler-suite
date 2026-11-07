@@ -25,7 +25,7 @@ table top to bottom: each layer says how it reaches the one beneath it.
 | Layer | What is here | Reaches the layer below by |
 |-------|--------------|----------------------------|
 | **Game** | your program, in C, Pascal, or Kobold | in C, `#include "psx.h"` and call `libpsx` directly; in Pascal and Kobold, go through the unit below |
-| **Binding** (Pascal and Kobold only) | the `psx.pas` and `psx.kp` units: `external` declarations with no logic | the one calling convention all three front ends emit (below), so the unit is a name-binding layer, not a shim |
+| **Binding** (Pascal and Kobold only) | the `psx.pas` unit, and the `psx.kp` umbrella over its per-subsystem leaves (`psx.gpu`, `psx.pad`, ...): `external` declarations with no logic | the one calling convention all three front ends emit (below), so the unit is a name-binding layer, not a shim |
 | **`libpsx`** | one C-and-assembly library: the `gpu`, `dma`, `irq`, `spu`, `pad`, `timer`, `cd`, `fixed`, `gte`, `ot`, `tex`, and `debug` modules, plus the BIOS shims | `volatile` MMIO loads and stores, and BIOS A0/B0/C0 calls |
 | **Hardware** | the GPU, SPU, controllers, CD-ROM, timers, and the BIOS | — |
 

@@ -1,0 +1,41 @@
+unit psx.pad;
+{ psx.pad - the digital controller leaf: read the button bitmask and the pad id.
+  Reached through `uses psx`; pulling a name here links this object and the pad
+  libpsx member alone. }
+
+interface
+
+const
+  { Digital controller buttons (1 = pressed), matching libpsx. }
+  PadSelect   = $0001;
+  PadStart    = $0008;
+  PadUp       = $0010;
+  PadRight    = $0020;
+  PadDown     = $0040;
+  PadLeft     = $0080;
+  PadL1       = $0400;
+  PadR1       = $0800;
+  PadTriangle = $1000;
+  PadCircle   = $2000;
+  PadCross    = $4000;
+  PadSquare   = $8000;
+
+function PadRead: Integer;
+function PadId: Integer;
+
+implementation
+
+function psx_pad_read: Integer; external cdecl;
+function psx_pad_id: Integer; external cdecl;
+
+function PadRead: Integer;
+begin
+  PadRead := psx_pad_read;
+end;
+
+function PadId: Integer;
+begin
+  PadId := psx_pad_id;
+end;
+
+end.

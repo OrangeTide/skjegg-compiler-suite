@@ -6,6 +6,28 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.47.1
+
+#### Changed
+- The Kobold `psx` unit (the PlayStation SDK binding) is split into per-subsystem
+  leaves (`psx.gpu`, `psx.pad`, `psx.spu`, `psx.fixed`, `psx.tex`, `psx.cd`,
+  `psx.gte`, `psx.ot`), with `psx.kp` now an umbrella that re-exports them. A game
+  keeps its single `uses psx` and every name, but each leaf lowers to its own
+  object in the binding archive `psx.a`, so the linker pulls only the subsystems
+  the game calls instead of the whole binding. A Kobold PS1 binary that used to
+  run about 3x its C and Pascal twins (the monolithic binding dragged all of
+  libpsx in) now matches them: `cube.kp` and `game.kp` fall from roughly 100 KB to
+  38 KB, `sprite.kp` from 108 KB to 34 KB. The installed SDK ships each leaf's
+  interface archive under `ps1/psx/` beside `psx.a`. See `doc/tools/psx-api.md`
+  and `doc/tools/psx-setup.md`.
+
+#### Fixed
+- A `reexport` clause now accepts a dotted unit name (`reexport psx.gpu`), so an
+  umbrella can re-export a namespaced leaf. The clause previously read a single
+  identifier and failed at the dot, though the `uses` clause already accepted
+  dotted names. See the `ReexportItem` production in
+  `doc/languages/kobold/kp-grammar.md`.
+
 ### 0.47.0
 
 #### Changed

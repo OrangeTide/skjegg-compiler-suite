@@ -1,0 +1,45 @@
+unit psx.spu;
+{ psx.spu - the sound leaf: the built-in beep and the voice play/stop calls.
+  Reached through `uses psx`; pulling a name here links this object and the spu
+  libpsx member, kept out of a program that makes no sound. }
+
+interface
+
+const
+  { Voice pitch for a sample's recorded rate (see SpuPlay). }
+  SpuPitch44100 = $1000;
+  SpuPitch22050 = $0800;
+
+procedure Beep;
+procedure SpuInit;
+procedure SpuPlay(voice, addr, pitch, vol: Integer);
+procedure SpuStop(voice: Integer);
+
+implementation
+
+procedure psx_beep; external cdecl;
+procedure psx_spu_init; external cdecl;
+procedure psx_spu_play(voice, addr, pitch, vol: Integer); external cdecl;
+procedure psx_spu_stop(voice: Integer); external cdecl;
+
+procedure Beep;
+begin
+  psx_beep;
+end;
+
+procedure SpuInit;
+begin
+  psx_spu_init;
+end;
+
+procedure SpuPlay(voice, addr, pitch, vol: Integer);
+begin
+  psx_spu_play(voice, addr, pitch, vol);
+end;
+
+procedure SpuStop(voice: Integer);
+begin
+  psx_spu_stop(voice);
+end;
+
+end.

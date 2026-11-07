@@ -99,9 +99,10 @@ AccessorSpec     = 'read' Identifier [ 'write' Identifier ] .
                     deferred (kp-property.md). *)
 
 ReexportClause   = 'reexport' ReexportItem { ',' ReexportItem } ';' .
-ReexportItem     = Identifier [ '(' Identifier { ',' Identifier } ')' ] .
+ReexportItem     = UnitName [ '(' Identifier { ',' Identifier } ')' ] .
                  (* promote names from a used unit into this unit's public surface,
-                    selectively: 'reexport geometry (Vec)'. *)
+                    selectively: 'reexport geometry (Vec)'. The unit is named as in
+                    the uses clause, so a dotted namespace works: 'reexport psx.gpu'. *)
 
 ImplementationPart = 'implementation' { DeclSection } .
                  (* supplies the bodies for the interface headings and the full

@@ -43,8 +43,12 @@ The install places, for the PlayStation:
   asset converters `skj-timconv` (PPM to TIM), `skj-vagconv` (PCM to SPU-ADPCM),
   and `skj-mkcdda` (a CD-DA test disc).
 - **SDK in `$(PREFIX)/lib/skjegg/ps1`:** `libpsx.a`, the `start_psx.o` crt,
-  `psx.h`, the `psx.pas` and `psx.kp` units, and the prebuilt Kobold unit archive
-  `psx.a` (carrying the unit module as its `.kpm` member) with its object `psx_unit.o`.
+  `psx.h`, the `psx.pas` and `psx.kp` units, and the Kobold binding archive
+  `psx.a`. `psx.a` carries the umbrella unit's interface as its `.kpm` member and
+  each per-subsystem leaf (gpu, pad, spu, fixed, tex, cd, gte, ot) as its own
+  object member, so a program links only the subsystems it calls. The leaves'
+  interface archives live beside it under `psx/` (`psx/gpu.a` and so on), which a
+  consumer's `uses psx` reads to resolve the re-exports.
 
 The driver finds that SDK directory relative to its own location, so once `bin`
 is on `PATH` nothing else needs setting.
@@ -70,8 +74,9 @@ the installed SDK. Pascal compiles straight to assembly; the `cube.pas` sample
 declares the `libpsx` bindings inline (it copies the block from the installed
 `psx.pas`), so there is no unit to link. Kobold runs its two stages (the front
 end emits a KPM module, the codegen lowers it to assembly), resolves `uses psx`
-from the installed unit directory (reading `psx.a`), and links the prebuilt
-`psx_unit.o` binding.
+from the installed unit directory (reading `psx.a` and its `psx/` leaves), and
+links the `psx.a` binding archive, from which the linker pulls only the subsystem
+objects the program references.
 The driver keeps the `.s` and `.kpm` intermediates in a temporary directory and
 removes them; pass `-save-temps` to keep them, or `-S` to stop at assembly.
 
@@ -92,7 +97,7 @@ skj-kpc-mips -U "$LIB" --emit-kpm cube.kp > cube.kpm
 skj-kpc-mips cube.kpm -o cube.s
 skj-as-mips -o cube.o cube.s
 skj-ld-mips -f ps-exe -o cube.exe \
-    "$LIB/start_psx.o" cube.o "$LIB/psx_unit.o" "$LIB/libpsx.a"
+    "$LIB/start_psx.o" cube.o "$LIB/psx.a" "$LIB/libpsx.a"
 ```
 
 ## 3. Run it

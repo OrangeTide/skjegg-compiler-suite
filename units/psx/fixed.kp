@@ -1,0 +1,36 @@
+unit psx.fixed;
+{ psx.fixed - the 16.16 fixed-point leaf: multiply and the sine/cosine table
+  lookups. Reached through `uses psx`; pulling a name here links this object and
+  the fixed-point libpsx member with its trig table. }
+
+interface
+
+const
+  FixOne = $00010000;        { 1.0 in 16.16 fixed point }
+
+function Fmul(a, b: Integer): Integer;
+function Fsin(angle: Integer): Integer;
+function Fcos(angle: Integer): Integer;
+
+implementation
+
+function psx_fmul(a, b: Integer): Integer; external cdecl;
+function psx_fsin(angle: Integer): Integer; external cdecl;
+function psx_fcos(angle: Integer): Integer; external cdecl;
+
+function Fmul(a, b: Integer): Integer;
+begin
+  Fmul := psx_fmul(a, b);
+end;
+
+function Fsin(angle: Integer): Integer;
+begin
+  Fsin := psx_fsin(angle);
+end;
+
+function Fcos(angle: Integer): Integer;
+begin
+  Fcos := psx_fcos(angle);
+end;
+
+end.

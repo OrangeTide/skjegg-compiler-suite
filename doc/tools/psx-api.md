@@ -22,7 +22,11 @@ units that re-export the same code, adding no logic.
   function that takes a C pointer or struct).
 - **Kobold** does `uses psx as _` (`units/psx.kp`) and calls PascalCase names:
   `psx_gpu_init` becomes `GpuInit`, `psx_draw_rect` becomes `DrawRect`, and so
-  on. The unit exposes the same pointer-free subset.
+  on. The unit exposes the same pointer-free subset. `psx.kp` is an umbrella over
+  per-subsystem leaves (`psx.gpu`, `psx.pad`, `psx.spu`, `psx.fixed`, `psx.tex`,
+  `psx.cd`, `psx.gte`, `psx.ot`) that it re-exports, so one `uses psx` reaches
+  every name while the linker pulls only the subsystems a game calls. A game that
+  wants to be explicit can `uses psx.gte as _` for just the 3D leaf instead.
 
 Pascal has no pointers and the Kobold unit stays pointer-free, so the handful of
 entry points that take a C pointer (a `psx_texinfo`, a matrix, a raw buffer) are

@@ -2938,9 +2938,9 @@ end;
 
 function ParseReexportClause: LongInt;
 { ReexportClause = 'reexport' ReexportItem, ... ';'.
-  ReexportItem = Identifier [ '(' Identifier, ... ')' ]. Each item's
-  Text is the source unit; its Kids are the promoted name idents (empty for a bare
-  item). }
+  ReexportItem = DottedName [ '(' Identifier, ... ')' ]. Each item's
+  Text is the source unit (a full dotted name, matching a `uses` dependency); its
+  Kids are the promoted name idents (empty for a bare item). }
 var
   rx, it, nm: LongInt;
 begin
@@ -2949,6 +2949,10 @@ begin
   repeat
     it := NewNode(nkReexportItem);
     Nodes[it].Text := EatIdent('a unit name');
+    while Tok.Kind = tkDot do begin
+      NextToken;                        { consume '.' }
+      Nodes[it].Text := Nodes[it].Text + '.' + EatIdent('a unit name segment');
+    end;
     if Accept(tkLParen) then begin
       repeat
         nm := NewNode(nkIdent);

@@ -1,0 +1,20 @@
+unit psx.cd;
+{ psx.cd - the CD-ROM leaf: bring the drive up. Mounting the disc as a
+  filesystem is a C call, since it takes a path string. Reached through
+  `uses psx`; pulling CdInit links this object and the CD libpsx member, kept
+  out of a cartridge-style program that never touches the drive. }
+
+interface
+
+procedure CdInit;
+
+implementation
+
+procedure psx_cd_init; external cdecl;
+
+procedure CdInit;
+begin
+  psx_cd_init;
+end;
+
+end.

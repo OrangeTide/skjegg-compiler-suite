@@ -1,0 +1,77 @@
+unit psx.gpu;
+{ psx.gpu - the GPU and display leaf of the psx binding: bring the GPU and
+  interrupt path up, set the background, draw rectangles, and swap the display.
+  A program reaches these through `uses psx`; the umbrella re-exports this leaf.
+  Pulling any name here links this one object, which draws in the gpu and irq
+  libpsx members and no others. }
+
+interface
+
+const
+  { Blend modes for DrawRectAlpha. }
+  BlendHalf = 0;             { half back + half front }
+  BlendAdd  = 1;             { back + front }
+  BlendSub  = 2;             { back - front }
+  BlendQuarter = 3;          { back + quarter front }
+
+procedure GpuInit;
+procedure IrqInit;
+procedure SetBg(r, g, b: Integer);
+procedure DrawRect(x, y, w, h, r, g, b: Integer);
+procedure DrawRectAlpha(x, y, w, h, r, g, b, mode: Integer);
+procedure Vsync;
+procedure DisplaySwap;
+function  VblankCount: Integer;
+
+implementation
+
+procedure psx_gpu_init; external cdecl;
+procedure psx_irq_init; external cdecl;
+procedure psx_set_bg(r, g, b: Integer); external cdecl;
+procedure psx_draw_rect(x, y, w, h, r, g, b: Integer); external cdecl;
+procedure psx_draw_rect_alpha(x, y, w, h, r, g, b, mode: Integer); external cdecl;
+procedure psx_vsync; external cdecl;
+procedure psx_display_swap; external cdecl;
+function  psx_vblank_count: Integer; external cdecl;
+
+procedure GpuInit;
+begin
+  psx_gpu_init;
+end;
+
+procedure IrqInit;
+begin
+  psx_irq_init;
+end;
+
+procedure SetBg(r, g, b: Integer);
+begin
+  psx_set_bg(r, g, b);
+end;
+
+procedure DrawRect(x, y, w, h, r, g, b: Integer);
+begin
+  psx_draw_rect(x, y, w, h, r, g, b);
+end;
+
+procedure DrawRectAlpha(x, y, w, h, r, g, b, mode: Integer);
+begin
+  psx_draw_rect_alpha(x, y, w, h, r, g, b, mode);
+end;
+
+procedure Vsync;
+begin
+  psx_vsync;
+end;
+
+procedure DisplaySwap;
+begin
+  psx_display_swap;
+end;
+
+function VblankCount: Integer;
+begin
+  VblankCount := psx_vblank_count;
+end;
+
+end.

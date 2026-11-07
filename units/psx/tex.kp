@@ -1,0 +1,35 @@
+unit psx.tex;
+{ psx.tex - the texture leaf: draw an uploaded texture by its integer handle,
+  optionally with a source rectangle or a rotation. Textures are reached by a
+  handle from a C accessor that calls psx_tex_upload; see the handle note in
+  psx.h. Reached through `uses psx`; pulling a name here links this object and
+  the texture libpsx member. }
+
+interface
+
+procedure TexDraw(tex, x, y: Integer);
+procedure TexDrawUv(tex, x, y, u, v, w, h: Integer);
+procedure TexRot(tex, cx, cy, angle, scale: Integer);
+
+implementation
+
+procedure psx_tex_draw(tex, x, y: Integer); external cdecl;
+procedure psx_tex_draw_uv(tex, x, y, u, v, w, h: Integer); external cdecl;
+procedure psx_tex_rot(tex, cx, cy, angle, scale: Integer); external cdecl;
+
+procedure TexDraw(tex, x, y: Integer);
+begin
+  psx_tex_draw(tex, x, y);
+end;
+
+procedure TexDrawUv(tex, x, y, u, v, w, h: Integer);
+begin
+  psx_tex_draw_uv(tex, x, y, u, v, w, h);
+end;
+
+procedure TexRot(tex, cx, cy, angle, scale: Integer);
+begin
+  psx_tex_rot(tex, cx, cy, angle, scale);
+end;
+
+end.
