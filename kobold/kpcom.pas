@@ -11371,6 +11371,14 @@ begin
         AddrOf := EmitLEA(ConstArrayGlobal(s))   { an ordinal array's read-only image }
       else if (Syms[s].Kind = syConst) and IsLargeSet(Syms[s].TypeId) then
         AddrOf := EmitLEA(ConstSetGlobal(s))     { a large set's read-only word image }
+      else if (Syms[s].Kind = syFunc) and (s <> CurFuncSym) then
+        { a bare parameterless function used as a value is a call, not a variable; an
+          aggregate result returns through its sret buffer, whose address is the value's
+          location, like the aggregate property and computed-field cases above. Without
+          this, a record-returning function called bare (`t := origin`) fell to VarAddr,
+          which read the current function's result slot (CurResultSlot) and emitted no
+          call at all; the parenthesized `origin()` already lowers correctly as an nkCall. }
+        AddrOf := LowerExpr(node)
       else AddrOf := VarAddr(s);
     end;
     nkField:

@@ -6,6 +6,18 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.46.2
+
+#### Fixed
+- A no-argument function returning a record by value, called without parentheses
+  (`r := make`), was addressed as if it were the enclosing function's own result
+  rather than lowered as a call, so no call was emitted and the record came back
+  uninitialized. The bare call now lowers exactly like the parenthesized form
+  (`r := make()`), returning through the callee's result buffer. This also covers
+  a bare call whose record result is immediately read (`make.field`) or passed by
+  const-reference. The defect predates the single-step compiler (present since at
+  least 0.45.0).
+
 ### 0.46.1
 
 #### Changed
