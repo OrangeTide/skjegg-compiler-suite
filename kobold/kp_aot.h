@@ -2,10 +2,10 @@
 
    kp_aot_emit takes a parsed KPM module and writes native assembly for the
    linked backend, through the same instruction selector the JIT drives.  It is
-   the stage after kpm_read, shared by skj-kp (which reads a module from a file)
-   and the single-step skj-kpc (which builds the module in memory from the front
-   end), so the two agree on entry renaming, export linkage, the guest-name
-   remap, register allocation, and the overflow-trap policy. */
+   the stage after a module is in memory, whether skj-kpc read it from a `.kpm`
+   file or built it there from source through the front end, so both paths agree
+   on entry renaming, export linkage, the guest-name remap, register allocation,
+   and the overflow-trap policy. */
 
 #ifndef KP_AOT_H
 #define KP_AOT_H

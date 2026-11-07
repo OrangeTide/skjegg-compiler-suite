@@ -6,7 +6,7 @@
    and argv from the entry sp, switches to the stack reserved here, and calls
    main(argc, argv).  For a Kobold guest, main is the entry shim in
    kobold/io_free.c: it records the args for ParamCount / ParamStr, runs the
-   program through kp_guest_entry (the name skj-kp-rv gives the program's
+   program through kp_guest_entry (the name skj-kpc-rv gives the program's
    entry), and returns 0.  A normal return flushes buffered stdio through the
    weak __libc_fini (also io_free.c) and exits 0; a program ends nonzero only
    by calling Halt(code), which exits through io_halt.

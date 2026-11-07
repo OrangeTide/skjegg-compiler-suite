@@ -43,6 +43,7 @@ SRCDIR=${KP_SRCDIR:-"$HERE/kp-multi"}
 MODE=${MODE:-jit}
 FRONTEND=${FRONTEND:-"$ROOT/build/skj-kp-jit"}
 JIT=${JIT:-"$ROOT/build/skj-kp-jit"}
+AR=${AR:-"$ROOT/build/skj-ar"}
 QEMU=${QEMU:-}
 
 # Scratch is keyed on the fixture set, the mode, and the runner binary, so that
@@ -65,9 +66,11 @@ export KOBOLD_UNITS="$BDIR"
 
 is_unit() { head -1 "$1" | grep -q '^unit '; }
 
-# Compile every unit to a module, in dependency order: a unit that `uses` another
-# needs that one's .kpm present first, so iterate to a fixpoint (a unit whose
+# Compile every unit to its archive, in dependency order: a unit that `uses`
+# another needs that one's .a present first, so iterate to a fixpoint (a unit whose
 # dependency is not compiled yet fails and is retried once the dependency lands).
+# Each unit becomes <u>.a carrying its interface in the reserved .kpm member, which
+# is what the front end and the loader resolve (KOBOLD_UNITS below).
 units=
 for f in "$BDIR"/*.pas; do
     is_unit "$f" && units="$units $(basename "$f" .pas)"
@@ -78,9 +81,10 @@ while [ -n "$(echo "$remaining" | tr -d ' ')" ]; do
     progress=0
     for u in $remaining; do
         if "$FRONTEND" --emit-kpm "$BDIR/$u.pas" >"$BDIR/$u.kpm" 2>"$BDIR/$u.uerr"; then
+            sh "$ROOT/tests/kp-archive.sh" "$AR" "$BDIR/$u.a" "$BDIR/$u.kpm"
             progress=1
         else
-            rm -f "$BDIR/$u.kpm"
+            rm -f "$BDIR/$u.kpm" "$BDIR/$u.a"
             next="$next $u"
         fi
     done

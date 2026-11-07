@@ -16,8 +16,8 @@ From a clean skjegg checkout, with no external trees and without an
 already-working Kobold compiler, a downstream builds this pipeline:
 
 ```
-hello.pas -> kpcom -> hello.kpm -> skj-kp-rv -> hello.s
-          -> skj-as-rv -> hello.o -> skj-ld-rv -> hello.elf
+hello.pas -> skj-kpc-rv --emit-kpm -> hello.kpm -> skj-kpc-rv -> hello.s
+           -> skj-as-rv -> hello.o -> skj-ld-rv -> hello.elf
 ```
 
 and runs `hello.elf` on a host that supplies only a small, documented syscall
@@ -28,10 +28,11 @@ the seam.
 
 This is proven in-tree by `make check-kp-free` (RV32, under qemu-riscv32) and
 `make check-kp-free-cf` (ColdFire, under the in-tree skj-run), which run the
-whole `tests/kp-src` corpus through the freestanding pipeline. The front end
-runs in process rather than as a separate `kpcom` binary: `skj-kpc-rv` JITs the
-committed kpcom seed and emits the module, so `.pas -> .kpm` needs nothing past
-the skj tools.
+whole `tests/kp-src` corpus through the freestanding pipeline. `skj-kpc-rv` is the
+single-step Kobold compiler for RV32, built on the host from `kobold/kpcom.pas`
+source: it reads source and emits the module, then reads that module back and lowers
+it to RV32 assembly, so `.pas -> .kpm -> .s` needs nothing past the skj tools and no
+committed seed.
 
 ## The seam contract (authoritative)
 

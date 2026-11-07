@@ -4,7 +4,7 @@ This note describes the design of the unit system: how a script is split across
 several source files that compile separately and link together, so game scripts can
 share and link against common material instead of living in one translation unit.
 
-> Status: implemented. `kpcom` compiles a `program` or a `unit` separately to a KPM1 module and links precompiled units through `uses`, resolved by the `-U` search path and interface fingerprints; cross-unit routines, methods, types, and exported globals link and run, `implement I for R` trait conformance is checked, and `kpbundle` packages a program with its units into one self-contained module. A single translation unit plus `{$I}` includes still works as before. The surface and rules below match what the compiler accepts; the KPM1 framework this builds on is in `kp-module-format.md`, and the grammar is in `kp-grammar.md`. The `property` feature is a separate feature, specified in `kp-property.md`; it is not required for units, though it shares object-format inlining machinery with them (see Mapping to KPM1).
+> Status: implemented. `kpcom` compiles a `program` or a `unit` separately and links precompiled units through `uses`, resolved by the `-U` search path and interface fingerprints; cross-unit routines, methods, types, and exported globals link and run, `implement I for R` trait conformance is checked, and `kpbundle` packages a program with its units into one self-contained module. A compiled unit on disk is a `.a` archive (see [On-disk form](#on-disk-form-the-unit-archive)) carrying its KPM1 module as a reserved member; a program module stays a bare `.kpm`. A single translation unit plus `{$I}` includes still works as before. The surface and rules below match what the compiler accepts; the KPM1 framework this builds on is in `kp-module-format.md`, and the grammar is in `kp-grammar.md`. The `property` feature is a separate feature, specified in `kp-property.md`; it is not required for units, though it shares object-format inlining machinery with them (see Mapping to KPM1).
 
 ## What a unit is
 
@@ -31,6 +31,36 @@ This is the Borland-family split.
 
 A unit has no `initialization` or `finalization` section. Setup is an exported routine
 the program or host calls explicitly.
+
+## On-disk form: the unit archive
+
+A compiled unit is a GNU `ar` archive, a `.a` file, not a bare module file. The archive
+carries the unit's KPM1 module (`kp-module-format.md`) as a reserved member named `.kpm`:
+a short archive name that never routes through the long-name table, so a reader finds it by
+that exact name. The `.kpm` member is the whole object module, interface section and
+function bodies together, exactly the bytes a standalone unit module held before. So the
+archive is a wrapper: the resolver and the loader read the `.a`, pull its `.kpm` member, and
+proceed against that module as they always have.
+
+```
+geometry.a                 ; the unit on disk, an ar archive
+  .kpm                     ; reserved metadata member: the KPM1 object module
+```
+
+The archive form exists so a unit can carry more than its metadata. The reserved `.kpm`
+member holds the interface and the inlinable IR a consumer compiles and links against; the
+same archive can hold compiled object members (`.o`) beside it, so a target whose linker is
+driven by an object's symbol index pulls only the objects a program actually references
+rather than one monolithic blob. The `.kpm` member is deliberately not an ELF object and
+carries no symbol table, so `skj-ar` does not index it and a symbol-driven linker never
+pulls it; it is found by name, by the parts of the toolchain that want the interface. A unit
+compiled today carries only the `.kpm` member; the object members are the format's room to
+grow, and the mechanism that enables the per-object split (for example splitting a large
+binding unit so a program links only the subsystems it uses).
+
+A program module is not wrapped: it stays a bare `.kpm`. The archive form is for a unit,
+the thing other code resolves by name through `uses`. A program is the root a runner or
+host loads directly, so it has nothing to carry beside its own module.
 
 ## Opaque types
 
@@ -415,7 +445,9 @@ every private edit.
 ## Mapping to KPM1
 
 A unit compiles to a KPM1 `object` module: `.module object`, with unresolved imports for
-the units it uses. Its `.interface` section carries:
+the units it uses. On disk that module is the `.kpm` member of the unit's `.a` archive (see
+[On-disk form](#on-disk-form-the-unit-archive)); the mapping below describes the module the
+member holds. Its `.interface` section carries:
 
 - exported routine and method headings (bodies go in the `functions` section);
 - exported type names: a transparent type carries its full definition; an opaque record
@@ -460,16 +492,18 @@ Linking happens in the backend, at load. The split is:
 - **Compile against interfaces.** kpcom compiles one unit at a time. It reads the
   `.interface` sections of the units in the dependency closure to resolve and type-check,
   and it does not need their `functions` bodies. It records the fingerprint it saw for
-  each dependency and emits an `object` `.kpm` for the unit.
-- **Link objects at load.** The backend loads a set of `object` `.kpm` modules and links
-  them into a runnable form: it checks each consumer's expected dependency fingerprints,
+  each dependency and emits an `object` module, wrapped in the unit's `.a` archive as its
+  `.kpm` member.
+- **Link objects at load.** The backend loads a set of `object` modules (each the `.kpm`
+  member pulled from a unit's `.a`) and links them into a runnable form: it checks each
+  consumer's expected dependency fingerprints,
   folds definitions, resolves call sites and data symbols across modules, binds dispatch,
   and lays out globals. This reuses the load/link and symbol-table machinery that already
   resolves host imports.
 
-So a `.kpm` is read at two stages: by kpcom for its interface when compiling a dependent
-unit, and by the backend for its bodies when linking a runnable set. This is what makes a
-precompiled `library` `.kpm` usable by a third party with no source, and it is why the
+So a unit's module is read at two stages: by kpcom for its interface when compiling a
+dependent unit, and by the backend for its bodies when linking a runnable set. This is what
+makes a precompiled unit usable by a third party with no source, and it is why the
 `library` and `executable` module kinds in `kp-module-format.md` pay off. The method fold
 rule keeps the backend's new guest-to-guest resolution cheap, because it is an insert
 into the existing symbol table (see [the fold rule](#definition-uniqueness-the-comdat-style-fold)).
@@ -477,15 +511,17 @@ into the existing symbol table (see [the fold rule](#definition-uniqueness-the-c
 ### Building and running a unit set
 
 The runner links the set. It loads a program `.kpm`, reads its `.uses` list, and loads
-each dependency `.kpm` by name from the program's directory, following each dependency's own
-`.uses` so a transitive unit is loaded once. It then links and runs the whole set in one
+each dependency by name from the program's directory, pulling the `.kpm` member from the
+dependency's `.a` archive and following that dependency's own `.uses` so a transitive unit
+is loaded once. It then links and runs the whole set in one
 `kp_link`. An embedding host does the same through the public API: `kp_module_dep_count` and
 `kp_module_dep_name` walk a loaded module's dependencies, and `kp_module_name` tells which
 units are already loaded. There is no separate build tool. The compile step is
-`kpcom --emit-kpm -U<dir>` per unit, and the recompile-only-on-interface-change property is a
+`kpcom --emit-kpm -U<dir>` per unit (then archiving the module into the unit's `.a`), and
+the recompile-only-on-interface-change property is a
 build-system concern: extract each object's `.interface fingerprint` to a stamp file rewritten
 only when it changes, and make a consumer depend on that stamp rather than the dependency's
-whole `.kpm`. `examples/units` is a worked Makefile that does exactly this, and it doubles as
+whole archive. `examples/units` is a worked Makefile that does exactly this, and it doubles as
 the end-to-end multi-unit test in `make check`.
 
 The alternative packaging model is a self-contained bundle. `kpbundle <out> <program> <unit>...`
@@ -499,27 +535,29 @@ above). The `examples/units` Makefile builds and runs both the object set and th
 A unit is found by name at two stages, and both stages search the same order: explicit
 directories first, then the installed standard library.
 
-- **Compile time.** `kpcom` resolves each `uses` name to an interface `.kpm` by searching, in
+- **Compile time.** `kpcom` resolves each `uses` name to a unit archive by searching, in
   order, the directory of the source being compiled, every `-U<dir>` given on the command
   line, then a directory baked in at build time (the install location,
-  `$(PREFIX)/lib/kobold`). A flat name is tried as `<dir>/<name>.kpm` and then its lowercased
+  `$(PREFIX)/lib/kobold`). A flat name is tried as `<dir>/<name>.a` and then its lowercased
   form; a dotted name maps its dots to path separators, so `io.files` is tried as
-  `<dir>/io/files.kpm` (and the lowercased fallback). A wildcard `io.*` lists the `<dir>/io/`
-  directory for its `.kpm` members (one level); the namespace is read from every search
+  `<dir>/io/files.a` (and the lowercased fallback). The interface is read from the archive's
+  `.kpm` member. A wildcard `io.*` lists the `<dir>/io/`
+  directory for its `.a` members (one level); the namespace is read from every search
   directory in that same order, each unit taken from the first directory that has it (as a
   single `uses` would), and the members are sorted so the resulting dependency list is
   deterministic regardless of the directory's own order.
 - **Run time.** The runner resolves each dependency in the `.uses` list by searching, in order,
   the main module's own directory, every colon-separated entry of the `KOBOLD_UNITS`
-  environment variable, then the same baked-in standard library directory. A dotted dependency
-  maps its dots to path separators the same way; a wildcard has already been expanded to
-  concrete dependency names at compile time, so the runtime sees no `*`. An embedding host
-  that walks dependencies with `kp_module_dep_name` chooses its own lookup.
+  environment variable, then the same baked-in standard library directory. Each dependency
+  resolves to `<dir>/<name>.a`, and the loader pulls its `.kpm` member to get the module. A
+  dotted dependency maps its dots to path separators the same way; a wildcard has already
+  been expanded to concrete dependency names at compile time, so the runtime sees no `*`. An
+  embedding host that walks dependencies with `kp_module_dep_name` chooses its own lookup.
 
 So a program that `uses strings` compiles and runs with no flags once the library is installed,
 builds against a local copy with `-Ubuild/lib`, and runs against a local copy with
 `KOBOLD_UNITS=build/lib`. The lowercase fallback keeps a `uses Strings` working on a
-case-sensitive filesystem where the file is `strings.kpm`.
+case-sensitive filesystem where the file is `strings.a`.
 
 ### Namespaces and the standard-library tiers
 
@@ -556,7 +594,8 @@ wants the whole category, not the default way to depend on one unit.
 ### The standard library
 
 The standard library is a set of ordinary units installed under `$(PREFIX)/lib/kobold`, both as
-source (`.pas`) and as a precompiled interface (`.kpm`), laid out by namespace (`core/`, `io/`,
+source (`.pas`) and as a precompiled unit archive (`.a`, carrying the interface in its `.kpm`
+member), laid out by namespace (`core/`, `io/`,
 `std/`, ...). It uses no privileged mechanism: a standard-library unit is found and linked
 exactly like any other unit on the search path, and a program could supply its own unit of the
 same name ahead of it with `-U` or `KOBOLD_UNITS`.
@@ -638,7 +677,11 @@ The units, by tier:
 These units wrap runtime glue (`kp_random_*`, `kp_now_ms`, `kp_sleep_ms`, the console
 `io_eof`/`io_read_str`/`io_read_char`/`io_write_str`/`io_write_char`,
 the `kpf_*` file primitives) declared `external cdecl` in each unit's implementation, so the compiler core carries no knowledge of them and no
-builtin grows (see the units-over-builtins direction in `kobold.md`).
+builtin grows (see the units-over-builtins direction in `kobold.md`). A glue declaration may
+give the C symbol its own link name with `external cdecl name '<csym>'`, so a unit can expose
+a routine under a Kobold name that differs from the runtime symbol it binds (for example a
+tidy `Emit` over `io_write_str`); the routine is reached as its Kobold name in source and
+imported and linked as `<csym>`. See the `HostImport` production in `kp-grammar.md`.
 
 What stays a builtin. An operation moves into a unit when it is an ordinary call: a concrete
 (non-generic) signature, reached through `external cdecl` glue or written in Kobold itself.

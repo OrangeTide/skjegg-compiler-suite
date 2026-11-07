@@ -823,19 +823,24 @@ begin
 end.
 ```
 
-A unit is compiled to a module first, then the program is compiled against it. The
-dotted unit name maps its dots to directory separators, so `core.strings` is
-sought as `core/strings` under the unit path:
+A unit is compiled to a module first, archived as the unit's `.a` file, then the program
+is compiled against that archive. A compiled unit on disk is a GNU `ar` archive carrying
+its module as a reserved `.kpm` member (see `kp-units.md`, "On-disk form"); a program stays
+a bare `.kpm`. The dotted unit name maps its dots to directory separators, so `core.strings`
+is sought as `core/strings` under the unit path:
 
 ```sh
-# compile the unit to a module in a unit directory
-skj-kpc --emit-kpm geometry.pas -o units/geometry.kpm
+# compile the unit to a module, then archive it as the unit's .a.
+# the member must be named .kpm (ar takes the member name from the file name),
+# so stage the module under that reserved name before archiving:
+skj-kpc --emit-kpm geometry.pas -o units/.kpm
+skj-ar rcs units/geometry.a units/.kpm && rm units/.kpm
 
 # then compile the program with that directory on the unit path
 skj-kpc -U units --emit-kpm app.pas -o app.kpm
 ```
 
-Under the quick JIT loop, the compiled `units/geometry.kpm` must sit beside the
+Under the quick JIT loop, the compiled `units/geometry.a` must sit beside the
 program source (in the same dotted-path layout), because the JIT front end
 resolves units from the source's own directory.
 

@@ -1,6 +1,6 @@
-/* aot_rt.c : the C start file and link-time runtime surface for skj-kp output.
+/* aot_rt.c : the C start file and link-time runtime surface for skj-kpc output.
 
-   An AOT-compiled Kobold program (the assembly skj-kp emits) is a set of guest
+   An AOT-compiled Kobold program (the assembly skj-kpc emits) is a set of guest
    functions that call the Kobold runtime by symbol: the string, array, map,
    coroutine, and ARC routines (str_core.c, dynarr.c, map.c, co.c, co_shim.c,
    rt_host.c) and the console I/O (kp_host.c), all linked in directly rather than
@@ -30,7 +30,7 @@
 #include <string.h>
 #include <sys/mman.h>
 
-/* The renamed guest entry (skj-kp emits the program's entry under this name). */
+/* The renamed guest entry (skj-kpc emits the program's entry under this name). */
 extern void kp_guest_entry(void);
 
 /* From jit/call_guest_x86.S and kobold/co_shim.c. */

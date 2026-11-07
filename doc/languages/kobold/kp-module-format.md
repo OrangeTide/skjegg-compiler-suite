@@ -1,9 +1,17 @@
 # Kobold-Pascal Module Format (KPM1)
 
 A KPM1 module is the serialized IR that passes from the Kobold front end (Pascal)
-to the VM backend (C). It is the interface between the two halves, and the unit a
+to the VM backend (C). It is the interface between the two halves, and the module a
 host ships when a program is built ahead of time. See `kobold.md` for how it
 fits the pipeline.
+
+A compiled program on disk is a bare KPM1 module (a `.kpm` file). A compiled **unit** on
+disk is instead a GNU `ar` archive (a `.a` file) that carries its KPM1 module as a reserved
+member named `.kpm`; the resolver and loader pull that member and read it as the module
+described here. The archive form lets a unit carry compiled object members beside its
+metadata; it is specified in `kp-units.md` under "On-disk form". Everything in this document
+describes the module itself, whether it is a bare `.kpm` or the `.kpm` member of a unit's
+archive.
 
 This document specifies **format version 1**. It is a work in progress; anything
 here can change while the project is pre-1.0.

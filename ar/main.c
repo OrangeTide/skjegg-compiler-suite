@@ -383,8 +383,24 @@ ar_num(const uint8_t *p, int w)
     return v;
 }
 
+/* True if name is wanted: an empty filter (nmemb == 0) wants every member. */
 static int
-walk_archive(const char *path, int extract)
+member_wanted(const char *name, int nmemb, const char **membs)
+{
+    if (nmemb == 0)
+        return 1;
+    for (int i = 0; i < nmemb; i++)
+        if (strcmp(name, membs[i]) == 0)
+            return 1;
+    return 0;
+}
+
+/* mode 't' lists member names, 'x' extracts each to a file of its own name, 'p'
+ * prints each member's bytes to stdout.  For 'x' and 'p' an optional member-name
+ * filter (membs[0..nmemb)) selects which; 't' lists all.  'p' is how a Kobold
+ * unit's reserved '.kpm' metadata member is read back out of its archive. */
+static int
+walk_archive(const char *path, int mode, int nmemb, const char **membs)
 {
     struct mapfile mf;
     const uint8_t *buf;
@@ -420,12 +436,19 @@ walk_archive(const char *path, int extract)
         if (!special) {
             char name[256];
             resolve_name(h, ext, ext_size, name, sizeof(name));
-            if (extract) {
+            if ((mode == 'x' || mode == 'p')
+                && !member_wanted(name, nmemb, membs)) {
+                pos += 60 + (size_t)size + (size & 1);
+                continue;
+            }
+            if (mode == 'x') {
                 FILE *o = fopen(name, "wb");
                 if (!o)
                     die("cannot create %s", name);
                 fwrite(buf + pos + 60, 1, (size_t)size, o);
                 fclose(o);
+            } else if (mode == 'p') {
+                fwrite(buf + pos + 60, 1, (size_t)size, stdout);
             } else {
                 printf("%s\n", name);
             }
@@ -445,11 +468,12 @@ static void
 usage(FILE *out)
 {
     fprintf(out,
-            "usage: skj-ar {rcs|t|x} archive.a [member.o ...]\n"
+            "usage: skj-ar {rcs|t|x|p} archive.a [member ...]\n"
             "\n"
             "Minimal ar(1): create a GNU archive with a symbol index (r/c/s),\n"
-            "list members (t), or extract them (x).  Generic over the object\n"
-            "machine and byte order.\n");
+            "list members (t), extract them (x), or print a member to stdout (p).\n"
+            "For x and p a member-name list selects which; t lists all.  Generic\n"
+            "over the object machine and byte order.\n");
 }
 
 int
@@ -484,6 +508,9 @@ main(int argc, char **argv)
         case 'x':
             mode = 'x';
             break;
+        case 'p':
+            mode = 'p';
+            break;
         case 'c': case 's': case 'u': case 'v': case 'D': case 'S':
             break;              /* accepted, no effect (always deterministic) */
         default:
@@ -504,7 +531,7 @@ main(int argc, char **argv)
     if (mode == 'r')
         create_archive(&arena, path, argc - 3, (const char **)argv + 3);
     else
-        walk_archive(path, mode == 'x');
+        walk_archive(path, mode, argc - 3, (const char **)argv + 3);
 
     arena_free(&arena);
     return 0;

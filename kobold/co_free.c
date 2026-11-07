@@ -44,7 +44,7 @@ struct co_ctx {
    return onto the switched stack (co_switch_rv.S). */
 extern void co_switch(struct co_ctx *from, struct co_ctx *to);
 
-/* The coroutine body ABI skj-kp-rv emits: entry(vm, argsp, nargs).  The image
+/* The coroutine body ABI skj-kpc-rv emits: entry(vm, argsp, nargs).  The image
    passes no VM, so a0 is ignored; a1 is the guest address of the 8-byte-cell seed
    buffer, a2 the count.  The completion value returns in a0. */
 typedef i32 (*co_entry)(u32 vm, u32 argsp, i32 nargs);
@@ -141,7 +141,7 @@ kp_co_new_g(u32 entry, u32 argsp, i32 nargs)
     top = (uint8_t *)((uintptr_t)top & ~(uintptr_t)15);
 
     /* Copy the seed arguments to the top of the private stack so they outlive the
-       caller's frame (the body runs lazily).  8-byte cells, as skj-kp-rv stores
+       caller's frame (the body runs lazily).  8-byte cells, as skj-kpc-rv stores
        them; a 16-byte multiple keeps sp aligned. */
     if (nargs > 0) {
         u32 resv = ((u32)nargs * 8u + 15u) & ~15u;

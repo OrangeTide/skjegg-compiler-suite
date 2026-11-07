@@ -170,19 +170,22 @@ The ahead-of-time path first turns the source into a KPM1 module (the serialized
 IR, see `kp-module-format.md`), then compiles that module to native code:
 
 ```sh
-# 1. front end: source to a KPM1 module
+# 1. compile the source to a KPM1 module
 skj-kpc --emit-kpm hello.pas -o hello.kpm
 
-# 2. backend: module to a native executable, assembled and linked
+# 2. compile that module to a native executable, assembled and linked
 sh kobold/aot-run.sh hello.kpm
 ```
 
-`skj-kpc` is the front end compiled to a native binary, so it runs on the host
-and emits a module for one target: `skj-kpc` (x86-64), `skj-kpc-arm64`,
-`skj-kpc-rv`, and `skj-kpc-cf`, one per backend. The module's `.target` line
-records that architecture and the backend rejects a module built for another.
-`skj-kp` (and `skj-kp-rv`, `skj-kp-cf`, `skj-kp-arm64`) is the backend that
-compiles a module to assembly for each target.
+`skj-kpc` is the single-step Kobold compiler built to a native binary, so it runs
+on the host and targets one architecture: `skj-kpc` (x86-64), `skj-kpc-arm64`,
+`skj-kpc-rv`, and `skj-kpc-cf`, one per backend. Each reads `.kp` (or `.pas`) source,
+or a prebuilt `.kpm` module, and emits that target's native assembly in one step, so
+there is no separate backend tool; `--emit-kpm` just stops it at the module. The
+module's `.target` line records the architecture and a compiler rejects a module built
+for another. The two commands above emit the module and then have `aot-run.sh` drive
+`skj-kpc` to compile it to native code and link it; `skj-kpc hello.pas -o hello.s`
+would go straight to assembly in one step.
 
 ### Emit a module without running
 

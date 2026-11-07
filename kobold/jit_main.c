@@ -113,10 +113,11 @@ static char g_dir[1024];        /* directory of the program, where units are fou
 #define KP_STDLIB_DIR "/usr/local/lib/kobold"
 #endif
 
-/* Try d/name.kpm, then d/<lowercased name>.kpm (as the compiler's unit search
-   does), writing the first readable path to path.  Returns 1 if one exists.  A
-   dotted unit name maps its dots to path separators, so io.files is sought as
-   d/io/files.kpm (doc/languages/kobold/kp-units.md). */
+/* Try d/name.a, then d/<lowercased name>.a (as the compiler's unit search does),
+   writing the first readable path to path.  Returns 1 if one exists.  A unit is a
+   `.a` archive carrying its interface in a '.kpm' member (see ar_extract_member).
+   A dotted unit name maps its dots to path separators, so io.files is sought as
+   d/io/files.a (doc/languages/kobold/kp-units.md). */
 static int
 try_dep_path(const char *d, const char *name, char *path, size_t plen)
 {
@@ -127,14 +128,57 @@ try_dep_path(const char *d, const char *name, char *path, size_t plen)
         rel[j] = name[j] == '.' ? '/' : name[j];
     rel[j] = '\0';
 
-    snprintf(path, plen, "%s/%s.kpm", d, rel);
+    snprintf(path, plen, "%s/%s.a", d, rel);
     if (access(path, R_OK) == 0)
         return 1;
     for (j = 0; rel[j] && j + 1 < sizeof low; j++)
         low[j] = (char)tolower((unsigned char)rel[j]);
     low[j] = '\0';
-    snprintf(path, plen, "%s/%s.kpm", d, low);
+    snprintf(path, plen, "%s/%s.a", d, low);
     return access(path, R_OK) == 0;
+}
+
+/* Extract the bytes of archive member `want` from a GNU `!<arch>` image into a
+   fresh malloc'd, NUL-terminated buffer (*outlen excludes the NUL), or NULL if the
+   image is not an archive or has no such member.  A Kobold unit is an archive whose
+   interface (the KPM payload) is the reserved '.kpm' member, beside its .o members;
+   the symbol index '/' and long-name table '//' both start with '/', so their name
+   fields come out empty and never match. */
+static char *
+ar_extract_member(const char *buf, size_t len, const char *want, size_t *outlen)
+{
+    size_t off, wl = strlen(want);
+
+    if (len < 8 || memcmp(buf, "!<arch>\n", 8) != 0)
+        return NULL;
+    off = 8;
+    while (off + 60 <= len) {
+        const char *h = buf + off;
+        char nm[17];
+        int k;
+        size_t j, sz = 0;
+        char *out;
+
+        for (k = 0; k < 16 && h[k] != '/' && h[k] != ' '; k++)
+            nm[k] = h[k];
+        nm[k] = '\0';
+        for (j = 48; j < 58 && h[j] >= '0' && h[j] <= '9'; j++)
+            sz = sz * 10 + (size_t)(h[j] - '0');
+        if ((size_t)k == wl && memcmp(nm, want, wl) == 0) {
+            if (off + 60 + sz > len)
+                sz = len - off - 60;
+            out = malloc(sz + 1);
+            if (!out)
+                return NULL;
+            memcpy(out, buf + off + 60, sz);
+            out[sz] = '\0';
+            if (outlen)
+                *outlen = sz;
+            return out;
+        }
+        off += 60 + sz + (sz & 1);
+    }
+    return NULL;
 }
 
 /* Resolve a dependency module file, searching in order: the main module's
@@ -274,6 +318,21 @@ load_tree(const char *path, const char *unitname, char *err, size_t errlen)
     if (!text) {
         snprintf(err, errlen, "cannot read '%s'", path);
         return -1;
+    }
+    /* A unit is a `.a` archive; compile from its '.kpm' interface member. A bare
+       module file (a standalone .kpm root passed on the command line) is not an
+       archive and is used as-is. */
+    if (len >= 8 && memcmp(text, "!<arch>\n", 8) == 0) {
+        size_t mlen = 0;
+        char *meta = ar_extract_member(text, len, ".kpm", &mlen);
+        free(text);
+        if (!meta) {
+            snprintf(err, errlen, "unit archive '%s' has no .kpm interface member",
+                     path);
+            return -1;
+        }
+        text = meta;
+        len = mlen;
     }
     return add_module(unitname, text, len, err, errlen);
 }

@@ -2680,7 +2680,7 @@ end;
 
 function ParseProcOrFunc: LongInt;
 var
-  d, blk: LongInt;
+  d, blk, aliasNode: LongInt;
   isFunc: Boolean;
 begin
   isFunc := (Tok.Kind = tkFunction);
@@ -2718,6 +2718,18 @@ begin
       while (Tok.Kind = tkExternal) or IsDirective('cdecl') do
         if Tok.Kind = tkExternal then NextToken
         else begin NextToken; Nodes[d].CConv := 1; end;
+      { an optional `name '<csym>'` gives the external symbol its own link name, so the
+        routine's Kobold name and the C symbol it binds to may differ (the routine is
+        reached as its Kobold name in source, linked and imported as <csym>). Stored as
+        an nkStrLit in slot C; DeclRoutine copies it onto the symbol's LinkName. }
+      if IsDirective('name') then begin
+        NextToken;
+        if Tok.Kind <> tkStrLit then ParseErr('a string literal after ''name''');
+        aliasNode := NewNode(nkStrLit);
+        Nodes[aliasNode].Text := Tok.StrVal;
+        Nodes[d].C := aliasNode;
+        NextToken;
+      end;
       Expect(tkSemicolon);
     end
     else begin
@@ -6380,6 +6392,12 @@ begin
   end;
   Nodes[node].Sym := s;   { the routine's own symbol, for lowering }
 
+  { an `external ... name '<csym>'` alias (nkStrLit in slot C) links and imports the routine
+    under <csym> rather than its Kobold name; LinkNameOf/EmittedRoutineName then emit <csym>
+    at the import declaration and every call site. }
+  if Nodes[node].C >= 0 then
+    Syms[s].LinkName := Nodes[Nodes[node].C].Text;
+
   { record a method against its receiver type for x.method resolution, unless the body just
     completed a heading that already registered it }
   if (Nodes[node].A >= 0) and (recvTy >= 0) and not completedHeading then
@@ -6805,12 +6823,56 @@ begin
   else ModeVal := 0;
 end;
 
+function ExtractArMember(const ar, want: string): string;
+{ Return the bytes of the archive member named `want` from the `ar` image (a GNU
+  `!<arch>` archive read whole), or '' if absent. A Kobold unit is such an archive:
+  its interface (the KPM payload) lives in a reserved member named '.kpm', beside
+  the compiled .o members. The parse is byte-level over a length-counted Pascal
+  string, so embedded NULs in the object members are harmless; it is only ever
+  asked for the text '.kpm' member. }
+var
+  n, off, i, sz: LongInt;
+  nm: string;
+  c: Char;
+begin
+  ExtractArMember := '';
+  n := Length(ar);
+  if (n < 8) or (Copy(ar, 1, 8) <> '!<arch>'#10) then Exit;
+  off := 8;                              { 0-based offset of the first 60-byte header }
+  while off + 60 <= n do begin
+    { name field ar[off..off+16); a GNU short name ends with '/'. The symbol index
+      '/' and the long-name table '//' both start with '/', so nm comes out '' and
+      never matches a wanted member name. }
+    nm := '';
+    for i := 0 to 15 do begin
+      c := ar[off + i + 1];
+      if (c = '/') or (c = ' ') then Break;
+      nm := nm + c;
+    end;
+    { size field ar[off+48..off+58), decimal ASCII, space padded }
+    sz := 0;
+    for i := 48 to 57 do begin
+      c := ar[off + i + 1];
+      if (c < '0') or (c > '9') then Break;
+      sz := sz * 10 + (Ord(c) - Ord('0'));
+    end;
+    if nm = want then begin
+      ExtractArMember := Copy(ar, off + 60 + 1, sz);
+      Exit;
+    end;
+    off := off + 60 + sz;
+    if (sz mod 2) = 1 then Inc(off);     { member data is padded to an even length }
+  end;
+end;
+
 function OpenUnitKpm(const uname: string; var text: string): Boolean;
-{ Read <dir>/<uname>.kpm, name as written then lowercased, from the source directory
-  first, then each -U path directory. }
+{ Read the interface of unit <uname> from <dir>/<uname>.a, name as written then
+  lowercased, searching the source directory first, then each -U path directory,
+  then the standard library. A unit is a `.a` archive; its interface is the '.kpm'
+  member (see ExtractArMember). }
 var
   d: LongInt;
-  dir: string;
+  dir, ar: string;
 begin
   OpenUnitKpm := False;
   { search the source directory first, then each -U directory, then the built-in standard
@@ -6821,10 +6883,16 @@ begin
     else if d > High(UnitPath) then dir := KP_STDLIB
     else dir := UnitPath[d];
     if dir = '' then Continue;
-    text := kpc_ReadFileStr(dir + DotToSlash(uname) + '.kpm');
-    if text <> '' then Exit(True);
-    text := kpc_ReadFileStr(dir + DotToSlash(LowerStr(uname)) + '.kpm');
-    if text <> '' then Exit(True);
+    ar := kpc_ReadFileStr(dir + DotToSlash(uname) + '.a');
+    if ar <> '' then begin
+      text := ExtractArMember(ar, '.kpm');
+      if text <> '' then Exit(True);
+    end;
+    ar := kpc_ReadFileStr(dir + DotToSlash(LowerStr(uname)) + '.a');
+    if ar <> '' then begin
+      text := ExtractArMember(ar, '.kpm');
+      if text <> '' then Exit(True);
+    end;
   end;
 end;
 
@@ -7134,16 +7202,16 @@ begin
   SelectView := viewScope;
 end;
 
-function HasKpmExt(const s: string): Boolean;
-{ True when s ends with the case-insensitive suffix '.kpm'.  The length guard is a
-  separate statement, not an `and` operand: `and` evaluates both sides, so a folded
-  guard would still run Copy with a negative index on a short directory entry (a bare
-  '.' or '..'), building a malformed string that faults. }
+function HasUnitExt(const s: string): Boolean;
+{ True when s ends with the case-insensitive unit-archive suffix '.a'.  The length
+  guard is a separate statement, not an `and` operand: `and` evaluates both sides, so
+  a folded guard would still run Copy with a negative index on a short directory entry
+  (a bare '.' or '..'), building a malformed string that faults. }
 begin
-  if Length(s) < 4 then
-    HasKpmExt := False
+  if Length(s) < 2 then
+    HasUnitExt := False
   else
-    HasKpmExt := LowerStr(Copy(s, Length(s) - 3, 4)) = '.kpm';
+    HasUnitExt := LowerStr(Copy(s, Length(s) - 1, 2)) = '.a';
 end;
 
 procedure BindUnitNamed(item: LongInt; const uname, qual: string; bare: Boolean);
@@ -7198,8 +7266,8 @@ begin
     repeat
       entry := kpc_kpd_next(h);
       if entry = '' then Break;
-      if HasKpmExt(entry) then begin
-        base := Copy(entry, 1, Length(entry) - 4);   { strip '.kpm' }
+      if HasUnitExt(entry) then begin
+        base := Copy(entry, 1, Length(entry) - 2);   { strip '.a' }
         seen := False;
         for i := 0 to High(names) do
           if LowerStr(names[i]) = LowerStr(base) then begin seen := True; Break; end;
@@ -8691,7 +8759,7 @@ var
 begin
   n := IrImportCount;
   SetLength(IrImports, n + 1);
-  IrImports[n].Name := Syms[sym].Name;
+  IrImports[n].Name := LinkNameOf(sym);   { the external link name (an alias when `name` was given) }
   IrImports[n].IsHelper := False;
   IrImports[n].IsType := False;
   sig := Syms[sym].TypeId;

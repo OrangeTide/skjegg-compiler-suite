@@ -6,6 +6,25 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.47.0
+
+#### Changed
+- A compiled Kobold unit on disk is now a GNU `ar` archive (`.a`) rather than a
+  bare `.kpm` module. The archive carries the unit's interface in a reserved
+  member named `.kpm`, so a unit can hold compiled object members beside its
+  metadata; the front end and the loader read the archive and pull that member to
+  resolve a `uses`. This is a hard cut: a unit is resolved only as `<name>.a`, and
+  every unit build rule and test moves at once. A program module stays a bare
+  `.kpm`. `skj-ar` gained a `p` operation that prints an archive member to stdout.
+  See `doc/languages/kobold/kp-units.md`.
+
+#### Added
+- A Kobold host import may give its external symbol its own link name with
+  `external cdecl name '<csym>'`, so the routine's Kobold name used in source and
+  the C symbol it imports and links against can differ (for example a tidy `Emit`
+  over the runtime's `io_write_str`). See the `HostImport` production in
+  `doc/languages/kobold/kp-grammar.md`.
+
 ### 0.46.2
 
 #### Fixed

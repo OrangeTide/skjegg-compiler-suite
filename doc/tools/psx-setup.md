@@ -38,13 +38,13 @@ The install places, for the PlayStation:
 
 - **Tools in `$(PREFIX)/bin`:** `skjcc` (the cross driver), the MIPS C compiler
   `skj-cc-mips-sf`, the Pascal and Kobold front ends `skj-pc-mips`,
-  `skj-kpc-mips`, `skj-kp-mips-sf`, the assembler and linker `skj-as-mips` and
+  `skj-kpc-mips`, the assembler and linker `skj-as-mips` and
   `skj-ld-mips`, the archiver `skj-ar`, the romfs builder `skj-mkromfs`, and the
   asset converters `skj-timconv` (PPM to TIM), `skj-vagconv` (PCM to SPU-ADPCM),
   and `skj-mkcdda` (a CD-DA test disc).
 - **SDK in `$(PREFIX)/lib/skjegg/ps1`:** `libpsx.a`, the `start_psx.o` crt,
-  `psx.h`, the `psx.pas` and `psx.kp` units, and the prebuilt Kobold unit module
-  `psx.kpm` with its object `psx_unit.o`.
+  `psx.h`, the `psx.pas` and `psx.kp` units, and the prebuilt Kobold unit archive
+  `psx.a` (carrying the unit module as its `.kpm` member) with its object `psx_unit.o`.
 
 The driver finds that SDK directory relative to its own location, so once `bin`
 is on `PATH` nothing else needs setting.
@@ -70,7 +70,8 @@ the installed SDK. Pascal compiles straight to assembly; the `cube.pas` sample
 declares the `libpsx` bindings inline (it copies the block from the installed
 `psx.pas`), so there is no unit to link. Kobold runs its two stages (the front
 end emits a KPM module, the codegen lowers it to assembly), resolves `uses psx`
-from the installed unit directory, and links the prebuilt `psx_unit.o` binding.
+from the installed unit directory (reading `psx.a`), and links the prebuilt
+`psx_unit.o` binding.
 The driver keeps the `.s` and `.kpm` intermediates in a temporary directory and
 removes them; pass `-save-temps` to keep them, or `-S` to stop at assembly.
 
@@ -85,9 +86,10 @@ skj-pc-mips -o cube.s cube.pas
 skj-as-mips -o cube.o cube.s
 skj-ld-mips -f ps-exe -o cube.exe "$LIB/start_psx.o" cube.o "$LIB/libpsx.a"
 
-# Kobold: front end to KPM, codegen to assembly, assemble, link the unit.
+# Kobold: skj-kpc-mips runs both stages (it reads source or a prebuilt .kpm):
+# --emit-kpm emits the module, then it lowers that module to assembly.
 skj-kpc-mips -U "$LIB" --emit-kpm cube.kp > cube.kpm
-skj-kp-mips-sf cube.kpm -o cube.s
+skj-kpc-mips cube.kpm -o cube.s
 skj-as-mips -o cube.o cube.s
 skj-ld-mips -f ps-exe -o cube.exe \
     "$LIB/start_psx.o" cube.o "$LIB/psx_unit.o" "$LIB/libpsx.a"

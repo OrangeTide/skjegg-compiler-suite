@@ -13,7 +13,8 @@
 # has no entry, so its symbols keep their names and resolve across the link.
 #
 # Driven by the environment so one script serves every target:
-#   KPAOT      the AOT driver (build/skj-kp, skj-kp-rv, skj-kp-arm64)   [required]
+#   KPAOT      the single-step compiler used as the AOT driver, lowering a .kpm
+#              (build/skj-kpc, skj-kpc-rv, skj-kpc-arm64)                [required]
 #   KPAOTLIB   the runtime archive to link (build/libkpaot*.a)          [required]
 #   KPAOTCC    the compiler driver that assembles the .s and links      [required]
 #   KPAOTAS    an explicit assembler step (x86 host as, or the in-tree
@@ -21,12 +22,17 @@
 #   KPAOTQEMU  an emulator prefix for a cross target; empty on the host
 #   KPAOTNOPIE the link driver's no-PIE flag; default -no-pie, empty on a
 #              PIE-only host (macOS), where clang rejects it
-#   KOBOLD_UNITS  colon-separated extra directories to find unit .kpm files
+#   KPAR       skj-ar, to read a unit's interface member    [default build/skj-ar]
+#   KOBOLD_UNITS  colon-separated extra directories to find unit .a archives
 set -e
+
+HERE=$(dirname "$0")
+ROOT=$(cd "$HERE/.." && pwd)
 
 : "${KPAOT:?set KPAOT to the AOT driver}"
 : "${KPAOTLIB:?set KPAOTLIB to the runtime archive}"
 : "${KPAOTCC:?set KPAOTCC to the link driver}"
+KPAR=${KPAR:-"$ROOT/build/skj-ar"}
 NOPIE=${KPAOTNOPIE--no-pie}
 
 mod="$1"
@@ -41,25 +47,28 @@ trap 'rm -rf "$tmp"' EXIT
 
 moddir=$(dirname "$mod")
 
-# Find a unit's module file: beside the program first, then each KOBOLD_UNITS dir.
-# A dotted unit name maps its dots to path separators (io.files -> io/files.kpm).
+# Find a unit's archive: beside the program first, then each KOBOLD_UNITS dir.
+# A unit is a `.a` archive; a dotted unit name maps its dots to path separators
+# (io.files -> io/files.a).
 find_unit() {
     name=$1
     rel=$(echo "$name" | tr . /)
-    if [ -f "$moddir/$rel.kpm" ]; then echo "$moddir/$rel.kpm"; return 0; fi
+    if [ -f "$moddir/$rel.a" ]; then echo "$moddir/$rel.a"; return 0; fi
     oldifs=$IFS; IFS=:
     for d in $KOBOLD_UNITS; do
-        if [ -n "$d" ] && [ -f "$d/$rel.kpm" ]; then IFS=$oldifs; echo "$d/$rel.kpm"; return 0; fi
+        if [ -n "$d" ] && [ -f "$d/$rel.a" ]; then IFS=$oldifs; echo "$d/$rel.a"; return 0; fi
     done
     IFS=$oldifs
     echo "aot-run.sh: cannot find unit '$name'" >&2
     return 1
 }
 
-# Compile one module to an object, collecting it in $objs; then recurse into its
-# own `.uses` dependencies.  $seen dedups by unit name.
+# Compile one KPM module (a .kpm text file: the program root, or a unit's interface
+# member extracted from its archive) to an object, collecting it in $objs; then
+# recurse into its own `.uses` dependencies.  $seen dedups by unit name.
 objs=""
 seen=""
+depn=0
 compile_module() {
     file=$1
     o="$tmp/m$objn.o"
@@ -76,7 +85,11 @@ compile_module() {
     for dep in $(grep '^\.uses ' "$file" 2>/dev/null | awk '{print $2}'); do
         case " $seen " in *" $dep "*) continue ;; esac
         seen="$seen $dep"
-        compile_module "$(find_unit "$dep")"
+        a=$(find_unit "$dep") || exit 1
+        depn=$((depn + 1))
+        k="$tmp/dep$depn.kpm"
+        "$KPAR" p "$a" .kpm > "$k"
+        compile_module "$k"
     done
 }
 

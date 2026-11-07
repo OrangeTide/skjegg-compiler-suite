@@ -49,7 +49,7 @@ opacity, import, and method rules, is in `kp-units.md`; see also `kp-module-form
 
 > Implemented. `kpcom` parses `unit` files and the `uses` / `reexport`
 > clauses, resolves names across units, emits and reads the `.interface` section, and links
-> precompiled `.kpm` objects; `kpbundle` packages a program with its units. The surface
+> precompiled units (each a `.a` archive carrying its module as a `.kpm` member); `kpbundle` packages a program with its units. The surface
 > below matches what is built (see `kp-units.md`).
 
 ```ebnf
@@ -349,13 +349,17 @@ FuncDecl         = 'function' Identifier
 
 Tail             = [ 'export' ';' ] Block ';' | 'forward' ';'
                  | HostImport ';' .
-HostImport       = 'external' | 'cdecl' | 'external' 'cdecl'
-                 | 'cdecl' 'external' .
+HostImport       = ( 'external' | 'cdecl' | 'external' 'cdecl'
+                 | 'cdecl' 'external' ) [ 'name' StringLit ] .
                  (* 'for' Receiver marks a Go-style method attached to a type.
                     'forward' declares ahead for mutual recursion.
                     'external' (or 'cdecl', naming the C calling convention)
                     marks a routine provided by the host FFI; it has no Pascal
-                    body. 'export' marks a routine as a module entry an
+                    body. An optional 'name' gives the external symbol its own
+                    link name, so the routine's Kobold name (used in source) and
+                    the C symbol it imports and links against may differ, e.g.
+                    'procedure Emit(fd: integer; s: string); external cdecl
+                    name ''io_write_str'';'. 'export' marks a routine as a module entry an
                     embedding host may call across the FFI. 'fails' marks the
                     routine as failable: it reports an error alongside its
                     result, and every call must handle that error. 'fails' is
@@ -796,6 +800,7 @@ unit's implementation part for scalar, handle, and aggregate value types, with c
 property export still deferred.
 
 `out` (a parameter mode), `cdecl` (a calling convention on a host import),
+`name` (an external symbol alias on a host import),
 `export` (a module entry), `read` and `write` (property accessors), and `fails` (the
 failable signature marker and postfix test) are contextual: they act as keywords
 only where a routine, property, or failable form expects them,

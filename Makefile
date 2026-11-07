@@ -904,20 +904,20 @@ check-kp-corpus-cf: build/skj-kpc-cf build/skj-kpc-cf build/libkpaot-cf.a
 ## AOT (in check-all); rv32 and arm64 run the AOT path under qemu (in
 ## check-emu-all), so one .expected pins every backend and the in-memory and
 ## system links agree.
-check-kp-multi: build/skj-kp-jit build/skj-kpc build/skj-kpc build/libkpaot.a
+check-kp-multi: build/skj-kp-jit build/skj-kpc build/skj-ar build/libkpaot.a
 	@QEMU= KP_SRCDIR=tests/kp-multi MODE=jit JIT=build/skj-kp-jit sh tests/run-kp-multi-tests.sh
 	@KP_SRCDIR=tests/kp-multi MODE=aot FRONTEND=build/skj-kpc \
 	    KPAOT=build/skj-kpc KPAOTLIB=build/libkpaot.a \
 	    KPAOTCC=$(CC) KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
 	    sh tests/run-kp-multi-tests.sh
 
-check-kp-multi-rv: build/skj-kpc-rv build/skj-kpc-rv build/libkpaot-rv.a
+check-kp-multi-rv: build/skj-kpc-rv build/skj-ar build/libkpaot-rv.a
 	@KP_SRCDIR=tests/kp-multi MODE=aot FRONTEND=build/skj-kpc-rv \
 	    KPAOT=build/skj-kpc-rv KPAOTLIB=build/libkpaot-rv.a \
 	    KPAOTCC="$(RVJIT_CC)" KPAOTQEMU="$(QEMU_RV)" \
 	    sh tests/run-kp-multi-tests.sh
 
-check-kp-multi-arm64: build/skj-kpc-arm64 build/skj-kpc-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP)
+check-kp-multi-arm64: build/skj-kpc-arm64 build/skj-ar build/libkpaot-arm64.a $(A64_ASM_DEP)
 	@KP_SRCDIR=tests/kp-multi MODE=aot FRONTEND=build/skj-kpc-arm64 \
 	    KPAOT=build/skj-kpc-arm64 KPAOTLIB=build/libkpaot-arm64.a \
 	    KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" \
@@ -933,20 +933,22 @@ check-kp-multi-arm64: build/skj-kpc-arm64 build/skj-kpc-arm64 build/libkpaot-arm
 ## harness co-locates the same way).  A program that `uses files` then round-trips
 ## a file through it on the x86-64 JIT and AOT paths.  The temp path is handed in
 ## as an argument so the test writes only under build/.
-build/kp-files/io/files.kpm: kobold/lib/io/files.pas build/skj-kpc | build
+build/kp-files/io/files.a: kobold/lib/io/files.pas build/skj-kpc build/skj-ar | build
 	@mkdir -p build/kp-files/io
-	./build/skj-kpc --emit-kpm $< > $@
+	./build/skj-kpc --emit-kpm $< > build/kp-files/io/files.kpm
+	sh tests/kp-archive.sh build/skj-ar $@ build/kp-files/io/files.kpm
 
 ## io.textfile uses io.files, so it compiles with -U pointing at the directory
-## whose io/ holds files.kpm.
-build/kp-files/io/textfile.kpm: kobold/lib/io/textfile.pas build/kp-files/io/files.kpm build/skj-kpc | build
+## whose io/ holds files.a.
+build/kp-files/io/textfile.a: kobold/lib/io/textfile.pas build/kp-files/io/files.a build/skj-kpc build/skj-ar | build
 	@mkdir -p build/kp-files/io
-	./build/skj-kpc -U build/kp-files --emit-kpm $< > $@
+	./build/skj-kpc -U build/kp-files --emit-kpm $< > build/kp-files/io/textfile.kpm
+	sh tests/kp-archive.sh build/skj-ar $@ build/kp-files/io/textfile.kpm
 
-check-kp-files: build/skj-kp-jit build/skj-kpc build/skj-kpc-rv build/skj-kpc build/libkpaot.a \
+check-kp-files: build/skj-kp-jit build/skj-kpc build/skj-kpc-rv build/skj-ar build/libkpaot.a \
                 build/skj-kpc-rv build/skj-as-rv build/skj-ld-rv \
                 build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a \
-                build/kp-files/io/files.kpm
+                build/kp-files/io/files.a
 	@cp tests/kp-files/filesrt.pas build/kp-files/filesrt.pas
 	@rm -f build/kp-files/rt.txt
 	@./build/skj-kp-jit build/kp-files/filesrt.pas $(CURDIR)/build/kp-files/rt.txt \
@@ -985,10 +987,10 @@ check-kp-files: build/skj-kp-jit build/skj-kpc build/skj-kpc-rv build/skj-kpc bu
 ## check-kp-files: io.textfile is a thin unit over io.files, so both unit modules
 ## link into the program.  The freestanding runner does not walk `.uses`, so the
 ## rv32 tier compiles the program and both units width-4 and links them together.
-check-kp-textfile: build/skj-kp-jit build/skj-kpc build/skj-kpc-rv build/skj-kpc build/libkpaot.a \
+check-kp-textfile: build/skj-kp-jit build/skj-kpc build/skj-kpc-rv build/skj-ar build/libkpaot.a \
                    build/skj-kpc-rv build/skj-as-rv build/skj-ld-rv \
                    build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a \
-                   build/kp-files/io/files.kpm build/kp-files/io/textfile.kpm
+                   build/kp-files/io/files.a build/kp-files/io/textfile.a
 	@cp tests/kp-files/textfilert.pas build/kp-files/textfilert.pas
 	@rm -f build/kp-files/tf.txt
 	@./build/skj-kp-jit build/kp-files/textfilert.pas $(CURDIR)/build/kp-files/tf.txt \
@@ -1024,18 +1026,19 @@ check-kp-textfile: build/skj-kp-jit build/skj-kpc build/skj-kpc-rv build/skj-kpc
 	    || { echo "FAIL kp-textfile (free-rv)"; cat build/kp-files/tf-rv.err build/kp-files/tf-free-rv.err build/kp-files/tf-free-rv.out; exit 1; }
 	@echo "kp-textfile: 1 passed (jit, aot, free-rv)"
 
-build/kp-dirs/io/dirs.kpm: kobold/lib/io/dirs.pas build/skj-kpc | build
+build/kp-dirs/io/dirs.a: kobold/lib/io/dirs.pas build/skj-kpc build/skj-ar | build
 	@mkdir -p build/kp-dirs/io
-	./build/skj-kpc --emit-kpm $< > $@
+	./build/skj-kpc --emit-kpm $< > build/kp-dirs/io/dirs.kpm
+	sh tests/kp-archive.sh build/skj-ar $@ build/kp-dirs/io/dirs.kpm
 
 ## Directory reads reached through the `dirs` unit, over the same three tiers as
 ## check-kp-files.  A scratch directory of three known files is rebuilt before
 ## each runner; the program reports an order-independent entry count and total
 ## name length, so the expected output is deterministic.
-check-kp-dirs: build/skj-kp-jit build/skj-kpc build/skj-kpc-rv build/skj-kpc build/libkpaot.a \
+check-kp-dirs: build/skj-kp-jit build/skj-kpc build/skj-kpc-rv build/skj-ar build/libkpaot.a \
                build/skj-kpc-rv build/skj-as-rv build/skj-ld-rv \
                build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a \
-               build/kp-dirs/io/dirs.kpm
+               build/kp-dirs/io/dirs.a
 	@cp tests/kp-dirs/dirsrt.pas build/kp-dirs/dirsrt.pas
 	@mkscan() { rm -rf "$$1"; mkdir -p "$$1"; : > "$$1/alpha"; : > "$$1/beta"; : > "$$1/gamma"; }; \
 	 D=$(CURDIR)/build/kp-dirs/scan; \
@@ -1080,46 +1083,21 @@ check-kp-dirs: build/skj-kp-jit build/skj-kpc build/skj-kpc-rv build/skj-kpc bui
 ## sibling, and the in-process JIT, all -DKP_GLUE_HOSTED over the host libc
 ## clock/sleep/entropy), so std.time / std.random work on the hosted AOT and JIT
 ## tiers too; check-kp-stdlib exercises those.
-build/kp-stdlib/io/console.kpm: kobold/lib/io/console.pas build/skj-kpc-rv | build
-	@mkdir -p build/kp-stdlib/io
-	./build/skj-kpc-rv --emit-kpm $< > $@
-build/kp-stdlib/io/buffered.kpm: kobold/lib/io/buffered.pas build/skj-kpc-rv | build
-	@mkdir -p build/kp-stdlib/io
-	./build/skj-kpc-rv --emit-kpm $< > $@
-build/kp-stdlib/std/time.kpm: kobold/lib/std/time.pas build/skj-kpc-rv | build
-	@mkdir -p build/kp-stdlib/std
-	./build/skj-kpc-rv --emit-kpm $< > $@
-build/kp-stdlib/std/random.kpm: kobold/lib/std/random.pas build/skj-kpc-rv | build
-	@mkdir -p build/kp-stdlib/std
-	./build/skj-kpc-rv --emit-kpm $< > $@
-build/kp-stdlib/core/strings.kpm: kobold/lib/core/strings.pas build/skj-kpc-rv | build
-	@mkdir -p build/kp-stdlib/core
-	./build/skj-kpc-rv --emit-kpm $< > $@
-build/kp-stdlib/core/convert.kpm: kobold/lib/core/convert.pas build/skj-kpc-rv | build
-	@mkdir -p build/kp-stdlib/core
-	./build/skj-kpc-rv --emit-kpm $< > $@
-build/kp-stdlib/std/threads.kpm: kobold/lib/std/threads.pas build/skj-kpc-rv | build
-	@mkdir -p build/kp-stdlib/std
-	./build/skj-kpc-rv --emit-kpm $< > $@
+## Each unit precompiles to a <name>.a archive carrying its interface in the
+## reserved .kpm member (what the front end and loader resolve), beside the .kpm
+## left on disk for the freestanding lanes that lower it standalone to an object.
+build/kp-stdlib/%.a: kobold/lib/%.pas build/skj-kpc-rv build/skj-ar | build
+	@mkdir -p $(dir $@)
+	./build/skj-kpc-rv --emit-kpm $< > $(@:.a=.kpm)
+	sh tests/kp-archive.sh build/skj-ar $@ $(@:.a=.kpm)
 
 ## The ColdFire sibling units: the same sources emitted by the ColdFire front end,
 ## so they carry `.target cf` and the ColdFire backend accepts them.  A unit is
 ## bound to its target, so cf gets its own copies rather than reusing the rv ones.
-build/kp-stdlib-cf/io/console.kpm: kobold/lib/io/console.pas build/skj-kpc-cf | build
-	@mkdir -p build/kp-stdlib-cf/io
-	./build/skj-kpc-cf --emit-kpm $< > $@
-build/kp-stdlib-cf/std/time.kpm: kobold/lib/std/time.pas build/skj-kpc-cf | build
-	@mkdir -p build/kp-stdlib-cf/std
-	./build/skj-kpc-cf --emit-kpm $< > $@
-build/kp-stdlib-cf/std/random.kpm: kobold/lib/std/random.pas build/skj-kpc-cf | build
-	@mkdir -p build/kp-stdlib-cf/std
-	./build/skj-kpc-cf --emit-kpm $< > $@
-build/kp-stdlib-cf/core/convert.kpm: kobold/lib/core/convert.pas build/skj-kpc-cf | build
-	@mkdir -p build/kp-stdlib-cf/core
-	./build/skj-kpc-cf --emit-kpm $< > $@
-build/kp-stdlib-cf/std/threads.kpm: kobold/lib/std/threads.pas build/skj-kpc-cf | build
-	@mkdir -p build/kp-stdlib-cf/std
-	./build/skj-kpc-cf --emit-kpm $< > $@
+build/kp-stdlib-cf/%.a: kobold/lib/%.pas build/skj-kpc-cf build/skj-ar | build
+	@mkdir -p $(dir $@)
+	./build/skj-kpc-cf --emit-kpm $< > $(@:.a=.kpm)
+	sh tests/kp-archive.sh build/skj-ar $@ $(@:.a=.kpm)
 
 ## The hosted tiers for the same stddemo (std.random, std.time, io.console): the
 ## in-process x86-64 JIT and the native x86-64 AOT linked against libkpaot.a.
@@ -1128,13 +1106,14 @@ build/kp-stdlib-cf/std/threads.kpm: kobold/lib/std/threads.pas build/skj-kpc-cf 
 ## freestanding rv/cf archives, so a hosted `uses std.time`/`std.random` failed
 ## to link.  The .kpm modules are x86-64 (host skj-kpc) and are shared by both
 ## lanes (the JIT loads the same modules the AOT path links).
-check-kp-stdlib: build/skj-kpc build/skj-kpc build/skj-kp-jit build/libkpaot.a build/skj-as-x86-64 \
-                 build/skj-kpc-arm64 build/skj-kpc-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP)
+check-kp-stdlib: build/skj-kpc build/skj-ar build/skj-kp-jit build/libkpaot.a build/skj-as-x86-64 \
+                 build/skj-kpc-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP)
 	@mkdir -p build/kp-stdlib-host/std build/kp-stdlib-host/io
 	@cp tests/kp-stdlib/stddemo.pas build/kp-stdlib-host/stddemo.pas
 	@E=build/kp-stdlib-host/build.err; : > $$E; \
 	 for u in std/random std/time io/console; do \
-	   ./build/skj-kpc --emit-kpm kobold/lib/$$u.pas > build/kp-stdlib-host/$$u.kpm 2>>$$E || \
+	   ./build/skj-kpc --emit-kpm kobold/lib/$$u.pas > build/kp-stdlib-host/$$u.kpm 2>>$$E && \
+	   sh tests/kp-archive.sh build/skj-ar build/kp-stdlib-host/$$u.a build/kp-stdlib-host/$$u.kpm || \
 	     { echo "FAIL kp-stdlib (emit $$u)"; cat $$E; exit 1; }; \
 	 done; \
 	 ./build/skj-kp-jit build/kp-stdlib-host/stddemo.pas </dev/null \
@@ -1156,7 +1135,8 @@ check-kp-stdlib: build/skj-kpc build/skj-kpc build/skj-kp-jit build/libkpaot.a b
 	@mkdir -p build/kp-stdlib-host/arm64/std build/kp-stdlib-host/arm64/io
 	@E=build/kp-stdlib-host/build.err; \
 	 for u in std/random std/time io/console; do \
-	   ./build/skj-kpc-arm64 --emit-kpm kobold/lib/$$u.pas > build/kp-stdlib-host/arm64/$$u.kpm 2>>$$E || \
+	   ./build/skj-kpc-arm64 --emit-kpm kobold/lib/$$u.pas > build/kp-stdlib-host/arm64/$$u.kpm 2>>$$E && \
+	   sh tests/kp-archive.sh build/skj-ar build/kp-stdlib-host/arm64/$$u.a build/kp-stdlib-host/arm64/$$u.kpm || \
 	     { echo "FAIL kp-stdlib (emit arm64 $$u)"; cat $$E; exit 1; }; \
 	 done; \
 	 ./build/skj-kpc-arm64 -U build/kp-stdlib-host/arm64 --emit-kpm build/kp-stdlib-host/stddemo.pas \
@@ -1173,10 +1153,10 @@ check-kp-stdlib: build/skj-kpc build/skj-kpc build/skj-kp-jit build/libkpaot.a b
 
 check-kp-stdlib-free: build/skj-kpc-rv build/skj-kpc-rv build/skj-as-rv build/skj-ld-rv \
                       build/kpfree-rv/kp_crt_rv.o build/libkpaot-rv-free.a \
-                      build/kp-stdlib/io/console.kpm build/kp-stdlib/io/buffered.kpm \
-                      build/kp-stdlib/std/time.kpm \
-                      build/kp-stdlib/std/random.kpm build/kp-stdlib/core/strings.kpm \
-                      build/kp-stdlib/core/convert.kpm build/kp-stdlib/std/threads.kpm
+                      build/kp-stdlib/io/console.a build/kp-stdlib/io/buffered.a \
+                      build/kp-stdlib/std/time.a \
+                      build/kp-stdlib/std/random.a build/kp-stdlib/core/strings.a \
+                      build/kp-stdlib/core/convert.a build/kp-stdlib/std/threads.a
 	@cp tests/kp-stdlib/stddemo.pas build/kp-stdlib/stddemo.pas
 	@E=build/kp-stdlib/build.err; : > $$E; \
 	 ./build/skj-kpc-rv --emit-kpm build/kp-stdlib/stddemo.pas > build/kp-stdlib/stddemo.kpm 2>>$$E; \
@@ -1309,11 +1289,11 @@ check-kp-stdlib-free: build/skj-kpc-rv build/skj-kpc-rv build/skj-as-rv build/sk
 ## differ from the rv target.  The unit .kpm modules are cf-specific (build/
 ## kp-stdlib-cf, emitted by the ColdFire front end), since a unit is bound to its
 ## target; outputs go there too so the rv objects are not clobbered.
-check-kp-stdlib-free-cf: build/skj-kpc-cf build/skj-kpc-cf build/skj-as build/skj-ld \
+check-kp-stdlib-free-cf: build/skj-kpc-cf build/skj-ar build/skj-as build/skj-ld \
                          build/skj-run build/kpfree-cf/kp_crt_cf.o build/libkpaot-cf-free.a \
-                         build/kp-stdlib-cf/io/console.kpm build/kp-stdlib-cf/std/time.kpm \
-                         build/kp-stdlib-cf/std/random.kpm build/kp-stdlib-cf/core/convert.kpm \
-                         build/kp-stdlib-cf/std/threads.kpm
+                         build/kp-stdlib-cf/io/console.a build/kp-stdlib-cf/std/time.a \
+                         build/kp-stdlib-cf/std/random.a build/kp-stdlib-cf/core/convert.a \
+                         build/kp-stdlib-cf/std/threads.a
 	@mkdir -p build/kp-stdlib-cf
 	@cp tests/kp-stdlib/stddemo.pas build/kp-stdlib-cf/stddemo.pas
 	@E=build/kp-stdlib-cf/build.err; : > $$E; \
@@ -5008,7 +4988,7 @@ INSTALL_PSX_TOOLS := build/skj-cc-mips-sf build/skj-pc-mips build/skj-kpc-mips \
                      build/skj-kpc-mips build/skj-mkromfs \
                      build/skj-timconv build/skj-vagconv build/skj-mkcdda
 INSTALL_PSX_SDK := build/mips/libpsx.a build/mips/start_psx.o \
-                   build/psx-units/psx.kpm build/psx/psx_unit.o
+                   build/psx-units/psx.a build/psx/psx_unit.o
 
 install: $(TOOLS) \
          $(DRIVER_LIB_CF) $(DRIVER_LIB_RV) $(DRIVER_LIB_MIPS) \
@@ -5035,7 +5015,7 @@ install: $(TOOLS) \
 	@$(INSTALL) -d $(DESTDIR)$(libdir)/ps1
 	@$(INSTALL) -m 644 build/mips/libpsx.a build/mips/start_psx.o $(DESTDIR)$(libdir)/ps1/
 	@$(INSTALL) -m 644 libpsx/psx.h units/psx.pas units/psx.kp $(DESTDIR)$(libdir)/ps1/
-	@$(INSTALL) -m 644 build/psx-units/psx.kpm build/psx/psx_unit.o $(DESTDIR)$(libdir)/ps1/
+	@$(INSTALL) -m 644 build/psx-units/psx.a build/psx/psx_unit.o $(DESTDIR)$(libdir)/ps1/
 	@echo
 	@echo "Installed skjegg $(SKJ_VERSION) under $(DESTDIR)$(PREFIX)."
 	@echo "The tools find their headers and runtime relative to their own"
@@ -7524,7 +7504,7 @@ build/psx/hello_kp.exe: examples/psx/hello.kp build/skj-kpc-mips build/skj-kpc-m
 ## The Kobold inline-assembly sample: extended asm (write-only output, register
 ## inputs, an in-out operand) computes a rectangle's X position, drawn through
 ## the psx unit, so the framebuffer verifies the asm result.
-build/psx/kasm.exe: examples/psx/kasm.kp build/psx-units/psx.kpm build/psx/psx_unit.o \
+build/psx/kasm.exe: examples/psx/kasm.kp build/psx-units/psx.a build/psx/psx_unit.o \
                  build/skj-kpc-mips build/skj-kpc-mips build/mips/libpsx.a \
                  build/mips/start_psx.o build/skj-as-mips build/skj-ld-mips | build/psx
 	@./build/skj-kpc-mips -U build/psx-units --emit-kpm examples/psx/kasm.kp > build/psx/kasm.kpm
@@ -7564,14 +7544,19 @@ build/psx/sprite_pas.exe: examples/psx/sprite.pas build/psx/sprite_asset.o \
 	    build/mips/start_psx.o build/psx/sprite_pas.o \
 	    build/psx/sprite_asset.o build/psx/rtex.o build/psx/stex.o build/mips/libpsx.a
 
-build/psx-units/psx.kpm: units/psx.kp build/skj-kpc-mips | build/psx-units
-	@./build/skj-kpc-mips --emit-kpm units/psx.kp > $@
+## The psx unit: its interface is build/psx-units/psx.a (what `uses psx` resolves,
+## via -U build/psx-units), carrying the KPM payload as the reserved .kpm member;
+## the .kpm is left on disk for the standalone lowering into psx_unit.o, the object
+## linked beside each Kobold program.
+build/psx-units/psx.a: units/psx.kp build/skj-kpc-mips build/skj-ar | build/psx-units
+	@./build/skj-kpc-mips --emit-kpm units/psx.kp > build/psx-units/psx.kpm
+	@sh tests/kp-archive.sh build/skj-ar $@ build/psx-units/psx.kpm
 
-build/psx/psx_unit.o: build/psx-units/psx.kpm build/skj-kpc-mips build/skj-as-mips | build/psx
+build/psx/psx_unit.o: build/psx-units/psx.a build/skj-kpc-mips build/skj-as-mips | build/psx
 	@./build/skj-kpc-mips build/psx-units/psx.kpm -o build/psx/psx_unit.s
 	@./build/skj-as-mips -o $@ build/psx/psx_unit.s
 
-build/psx/game_kp.exe: examples/psx/game.kp build/psx-units/psx.kpm build/psx/psx_unit.o \
+build/psx/game_kp.exe: examples/psx/game.kp build/psx-units/psx.a build/psx/psx_unit.o \
                  build/skj-kpc-mips build/skj-kpc-mips build/mips/libpsx.a \
                  build/mips/start_psx.o build/skj-as-mips build/skj-ld-mips | build/psx
 	@./build/skj-kpc-mips -U build/psx-units --emit-kpm examples/psx/game.kp > build/psx/game_kp.kpm
@@ -7582,7 +7567,7 @@ build/psx/game_kp.exe: examples/psx/game.kp build/psx-units/psx.kpm build/psx/ps
 
 ## The Kobold 3D sample: the same spinning cube through the psx unit's GTE
 ## helpers and ordering table.
-build/psx/cube_kp.exe: examples/psx/cube.kp build/psx-units/psx.kpm build/psx/psx_unit.o \
+build/psx/cube_kp.exe: examples/psx/cube.kp build/psx-units/psx.a build/psx/psx_unit.o \
                  build/skj-kpc-mips build/skj-kpc-mips build/mips/libpsx.a \
                  build/mips/start_psx.o build/skj-as-mips build/skj-ld-mips | build/psx
 	@./build/skj-kpc-mips -U build/psx-units --emit-kpm examples/psx/cube.kp > build/psx/cube_kp.kpm
@@ -7599,7 +7584,7 @@ build/psx/sprite_asset.o: examples/psx/sprite_asset.c libpsx/psx.h \
 	@./build/skj-as-mips -o $@ build/psx/sprite_asset.s
 
 ## The Kobold texture sample: drives the richer sprite draws through the psx unit.
-build/psx/sprite_kp.exe: examples/psx/sprite.kp build/psx-units/psx.kpm build/psx/psx_unit.o \
+build/psx/sprite_kp.exe: examples/psx/sprite.kp build/psx-units/psx.a build/psx/psx_unit.o \
                  build/psx/sprite_asset.o build/psx/rtex.o build/psx/stex.o \
                  build/skj-kpc-mips build/skj-kpc-mips build/mips/libpsx.a \
                  build/mips/start_psx.o build/skj-as-mips build/skj-ld-mips | build/psx
@@ -7851,10 +7836,10 @@ test-psx-cube-lang: build/psx/cube_pas.exe build/psx/cube_kp.exe
 test-psx-cube-driver: build/skjcc build/mips/libpsx.a build/mips/start_psx.o \
                       build/skj-cc-mips-sf build/skj-pc-mips build/skj-kpc-mips \
                       build/skj-kpc-mips build/skj-as-mips build/skj-ld-mips \
-                      build/psx-units/psx.kpm build/psx/psx_unit.o | build/psx
+                      build/psx-units/psx.a build/psx/psx_unit.o | build/psx
 	@mkdir -p build/lib/ps1
 	@cp build/mips/libpsx.a build/mips/start_psx.o libpsx/psx.h build/lib/ps1/
-	@cp build/psx-units/psx.kpm build/psx/psx_unit.o build/lib/ps1/
+	@cp build/psx-units/psx.a build/psx/psx_unit.o build/lib/ps1/
 	@./build/skjcc -target ps1 -o build/psx/cube_drv.exe examples/psx/cube.c
 	@./build/skjcc -target ps1 -o build/psx/cube_pas_drv.exe examples/psx/cube.pas
 	@./build/skjcc -target ps1 -o build/psx/cube_kp_drv.exe examples/psx/cube.kp

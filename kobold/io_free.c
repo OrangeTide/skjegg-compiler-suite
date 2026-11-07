@@ -353,7 +353,7 @@ rt_param_str(int i)
  * The shared _start reads argc and argv from the entry stack and calls
  * main(argc, argv), the one entry contract the C runtime uses too.  For a
  * Kobold guest, main records the args for ParamStr / ParamCount and runs the
- * program through kp_guest_entry, the entry skj-kp emits; a normal return
+ * program through kp_guest_entry, the entry skj-kpc emits; a normal return
  * exits 0 (a nonzero status comes only from Halt, through io_halt).  The shared
  * _start then runs __libc_fini before it exits; console I/O is unbuffered now
  * (kp_io.c writes straight to the fd), so that is a no-op for a Kobold guest.
