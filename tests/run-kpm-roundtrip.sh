@@ -1,15 +1,15 @@
 #!/bin/sh
 # Check the KPM reader/writer pair is faithful: for each source module, the
-# assembly skj-kp emits for the original module must byte-match the assembly it
+# assembly skj-kpc emits for the original module must byte-match the assembly it
 # emits for the module after a kpm_read -> kpm_write round trip.  Also confirms
 # the round trip reaches a fixpoint (a second round trip changes nothing).
 #
-#   KPC=build/skj-kpc KP=build/skj-kp RT=build/skj-kpm-roundtrip \
+#   KPC=build/skj-kpc KP=build/skj-kpc RT=build/skj-kpm-roundtrip \
 #       sh tests/run-kpm-roundtrip.sh file.pas ...
 set -e
 
 KPC=${KPC:-build/skj-kpc}
-KP=${KP:-build/skj-kp}
+KP=${KP:-build/skj-kpc}
 RT=${RT:-build/skj-kpm-roundtrip}
 TARGET=${TARGET:-KP_TARGET_X64}
 WORK=$(mktemp -d)

@@ -13981,6 +13981,7 @@ begin
 end;
 
 function kpb_emit_native(const outpath: string; emitKpm: LongInt): LongInt; cdecl; external;
+function kpb_emit_from_kpm(const inpath, outpath: string): LongInt; cdecl; external;
 
 function CompileToBuilder(const srcName, srcText: string; debug: Boolean): Boolean;
 { The single-step compiler core: parse, analyze, and lower srcText, then drive
@@ -14063,6 +14064,15 @@ begin
   UnitSrcDir := DirOf(path);   { a dependency .kpm is searched here first }
   if OptVerbose then
     WriteLn(ErrOutput, 'kpcom: reading ', path, ' (', Length(text), ' bytes)');
+  { A prebuilt KPM1 module as input: lower it straight to assembly through the
+    same AOT pipeline, the single-step compiler's second input shape.  The input
+    is the front end's own serialized output (.kpm header), so there is no source
+    to parse; this replaces the separate KPM-to-assembly backend tool. }
+  if (Length(text) >= 4) and (text[1] = '.') and (text[2] = 'k')
+     and (text[3] = 'p') and (text[4] = 'm') then begin
+    if kpb_emit_from_kpm(path, OptOut) <> 0 then Inc(ErrCount);
+    Exit;
+  end;
   if OptDump then begin
     { lexer only: dump the token stream }
     InitScanner(path, text);

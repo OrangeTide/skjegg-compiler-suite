@@ -76,9 +76,10 @@ Tools:     as  ld  as-rv  ld-rv  as-mips  ld-mips  ar  cpp  addr2line
 Emulators: emu-cf  emu-rv  emu-mips
              (skj-run; any mix, or none.  emu-cf is the ColdFire core,
               emu-rv the RV32 core, emu-mips the little-endian MIPS I core.)
-Kobold:    kp                (the Kobold-Pascal AOT path: the native front end
-             skj-kpc and the KPM1 compiler skj-kp over the bootstrap seed, plus
-             the runtime libkpaot.a; add riscv for the KPM1->RV32 compiler)
+Kobold:    kp                (the Kobold-Pascal AOT path: the single-step
+             compiler skj-kpc, built from kpcom.pas source, which takes .kp or a
+             .kpm to assembly, plus the runtime libkpaot.a; add riscv for the
+             rv32 compiler skj-kpc-rv)
 
 Usage docs for the selected tools and languages are vendored into DIR/doc
 (README.md always, plus the per-component reference, e.g. the whole Kobold
@@ -1254,10 +1255,10 @@ if [ "$has_driver" -eq 1 ]; then
     } >> "$MK"
 fi
 
-# Kobold-Pascal AOT path: the host front end skj-kpc (the seed AOT-compiled) and
-# the KPM1 backend compiler skj-kp, plus the hosted runtime libkpaot.a.  With riscv
-# also selected, skj-kp-rv compiles KPM1 to RV32 asm (its target runtime, hosted
-# libkpaot-rv and the freestanding tier, arrives with a later step).
+# Kobold-Pascal AOT path: the single-step host compiler skj-kpc (built from
+# kpcom.pas source) plus the hosted runtime libkpaot.a.  skj-kpc takes .kp source
+# or a prebuilt .kpm straight to assembly; a per-target skj-kpc-<arch> (rv32,
+# ColdFire, arm64) is emitted for each selected backend.
 if [ "$has_kp" -eq 1 ]; then
     cat >> "$MK" <<'MK'
 
@@ -1277,10 +1278,12 @@ SKJ_KP_AOT_RT := $(SKJEGG)kobold/aot_rt.c $(SKJEGG)kobold/kp_host.c $(SKJEGG)kob
 SKJ_KP_CFLAGS := $(CFLAGS) -DX86_BITS=64 -DKP_FREESTANDING -DKP_REAL=double \
                  -I$(SKJEGG)ir -I$(SKJEGG)jit -I$(SKJEGG)backend -I$(SKJEGG)kobold
 
-# skj-kp: the x86-64 KPM1 AOT compiler (reads a .kpm, writes GNU intel assembly).
-SKJ_ALL += $(BUILD)/skj-kp
-$(BUILD)/skj-kp: $(SKJEGG)kobold/aot_main.c $(SKJEGG)kobold/kpm.c $(SKJ_IR) $(SKJ_BE_X64) | $(BUILD)
-	$(CC) $(CFLAGS) -DX86_BITS=64 -I$(SKJEGG)ir -I$(SKJEGG)backend -I$(SKJEGG)kobold -o $@ $(SKJEGG)kobold/aot_main.c $(SKJEGG)kobold/kpm.c $(SKJ_IR) $(SKJ_BE_X64)
+# The single-step compiler's C half: the in-memory module builder, its native
+# output stage, and the KPM1 reader/writer.  Linked beside the Pascal front-end
+# object and the target backend so skj-kpc compiles .kp source (or a prebuilt
+# .kpm) straight to assembly in one tool, with no separate KPM backend binary.
+SKJ_KP_FE_C := $(SKJEGG)kobold/kpbuild.c $(SKJEGG)kobold/kpb_fe.c $(SKJEGG)kobold/kpb_native.c \
+               $(SKJEGG)kobold/kp_aot.c $(SKJEGG)kobold/kpm.c $(SKJEGG)kobold/kpm_write.c
 
 # co.c carries Kobold's own warning set (no -Wpedantic), so it is a separate object.
 $(BUILD)/kp_co.o: $(SKJEGG)kobold/co.c | $(BUILD)
@@ -1316,47 +1319,43 @@ $(BUILD)/skj-pc-x86-64: $(SKJ_PASCAL_FE) $(SKJ_IR) $(SKJ_BE_X64) | $(BUILD)
 $(BUILD)/pascal_rt_host.o: $(SKJEGG)runtime/pascal_rt.c | $(BUILD)
 	$(CC) -std=c99 -O2 -DPAS_HOST -c -o $@ $<
 
-# skj-kpc / skj-kpc-x86-64: the Kobold front end that emits x86-64 KPM1 modules,
-# so 'skj-kpc --emit-kpm foo.pas' turns Kobold source into a module with no fpc.
+# skj-kpc / skj-kpc-x86-64: the single-step Kobold compiler.  skj-pc compiles
+# kpcom.pas to a host-native front end (-d KP_ONESTEP), linked with the module
+# builder, the AOT emit pipeline, and the x86-64 backend, so one tool takes .kp
+# source (or a prebuilt .kpm) to GNU intel assembly, with no fpc and no separate
+# KPM backend binary.  --emit-kpm writes the module instead, for a stored unit.
 SKJ_ALL += $(BUILD)/skj-kpc $(BUILD)/skj-kpc-x86-64
 $(BUILD)/skj-kpc: $(BUILD)/skj-pc-x86-64 $(SKJEGG)tests/pascal_kpcom_host.c $(BUILD)/pascal_rt_host.o $(SKJEGG)kobold/kpcom.pas | $(BUILD)
-	$(BUILD)/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_X64 -o $(BUILD)/kpcom-x86-64-fe.s $(SKJEGG)kobold/kpcom.pas
+	$(BUILD)/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_X64 -d KP_ONESTEP -o $(BUILD)/kpcom-x86-64-fe.s $(SKJEGG)kobold/kpcom.pas
 	$(X64_ASM) $(X64_ASMFLAGS) $(BUILD)/kpcom-x86-64-fe.s -o $(BUILD)/kpcom-x86-64-fe.o
-	$(CC) -no-pie $(BUILD)/kpcom-x86-64-fe.o $(SKJEGG)tests/pascal_kpcom_host.c $(BUILD)/pascal_rt_host.o -lm -o $@
+	$(CC) $(CFLAGS) -no-pie -DX86_BITS=64 -I$(SKJEGG)ir -I$(SKJEGG)backend -I$(SKJEGG)kobold \
+	    $(BUILD)/kpcom-x86-64-fe.o $(SKJEGG)tests/pascal_kpcom_host.c $(BUILD)/pascal_rt_host.o \
+	    $(SKJ_KP_FE_C) $(SKJ_IR) $(SKJ_BE_X64) -lm -o $@
 $(BUILD)/skj-kpc-x86-64: $(BUILD)/skj-kpc | $(BUILD)
 	cp -f $(BUILD)/skj-kpc $@
 MK
-    if [ "$has_rv" -eq 1 ]; then
-        cat >> "$MK" <<'MK'
 
-# skj-kp-rv: the KPM1 -> RV32 asm AOT compiler, a host binary.  Link its output with
-# the freestanding runtime tier (a later step) or the hosted libkpaot-rv.
-SKJ_ALL += $(BUILD)/skj-kp-rv
-$(BUILD)/skj-kp-rv: $(SKJEGG)kobold/aot_main.c $(SKJEGG)kobold/kpm.c $(SKJ_IR) $(SKJ_RV) | $(BUILD)
-	$(CC) $(CFLAGS) -DKP_AOT_RV -I$(SKJEGG)ir -I$(SKJEGG)backend -I$(SKJEGG)kobold -o $@ $(SKJEGG)kobold/aot_main.c $(SKJEGG)kobold/kpm.c $(SKJ_IR) $(SKJ_RV)
-MK
-    fi
-
-    # Per-target Kobold front ends built from source: skj-pc compiles kpcom.pas
-    # with the emitted target baked in, so each skj-kpc-<target> runs on the host
-    # and emits that one target's KPM1 (rv32 for the VM hosts, ColdFire, arm64).
-    # Emitted for each selected backend target; the x86-64 host front end
-    # (skj-kpc / skj-kpc-x86-64) is above.
+    # Per-target single-step Kobold compilers built from source: skj-pc compiles
+    # kpcom.pas with the emitted target baked in and -d KP_ONESTEP, linked with the
+    # module builder, the AOT emit pipeline, and that target's backend, so each
+    # skj-kpc-<target> runs on the host and takes .kp (or .kpm) straight to that
+    # target's assembly (rv32 for the VM hosts, ColdFire, arm64).  The x86-64 host
+    # compiler (skj-kpc / skj-kpc-x86-64) is above.
     for _pair in rv:RV cf:CF arm64:ARM64; do
         _t=${_pair%:*}; _d=${_pair#*:}
         case $_t in
-            rv)    [ "$has_rv" -eq 1 ]     || continue ;;
-            cf)    [ "$has_cf" -eq 1 ]     || continue ;;
-            arm64) [ "$has_a64_be" -eq 1 ] || continue ;;
+            rv)    [ "$has_rv" -eq 1 ]     || continue; _be='$(SKJ_RV)';  _cf="-DKP_AOT_RV -DSKJ_KPM_ARCH='\"rv32\"'" ;;
+            cf)    [ "$has_cf" -eq 1 ]     || continue; _be='$(SKJ_CF)';  _cf="-DSKJ_KPM_ARCH='\"cf\"'" ;;
+            arm64) [ "$has_a64_be" -eq 1 ] || continue; _be='$(SKJ_A64)'; _cf="-DCC_ARM64" ;;
         esac
         {
             printf '\n'
-            printf '# skj-kpc-%s: the Kobold front end that emits %s KPM1 modules.\n' "$_t" "$_t"
+            printf '# skj-kpc-%s: the single-step Kobold compiler for %s (.kp or .kpm to asm).\n' "$_t" "$_t"
             printf 'SKJ_ALL += $(BUILD)/skj-kpc-%s\n' "$_t"
             printf '$(BUILD)/skj-kpc-%s: $(BUILD)/skj-pc-x86-64 $(SKJEGG)tests/pascal_kpcom_host.c $(BUILD)/pascal_rt_host.o $(SKJEGG)kobold/kpcom.pas | $(BUILD)\n' "$_t"
-            printf '\t$(BUILD)/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_%s -o $(BUILD)/kpcom-%s-fe.s $(SKJEGG)kobold/kpcom.pas\n' "$_d" "$_t"
+            printf '\t$(BUILD)/skj-pc-x86-64 -d KOBOLD -d KP_TARGET_%s -d KP_ONESTEP -o $(BUILD)/kpcom-%s-fe.s $(SKJEGG)kobold/kpcom.pas\n' "$_d" "$_t"
             printf '\t$(X64_ASM) $(X64_ASMFLAGS) $(BUILD)/kpcom-%s-fe.s -o $(BUILD)/kpcom-%s-fe.o\n' "$_t" "$_t"
-            printf '\t$(CC) -no-pie $(BUILD)/kpcom-%s-fe.o $(SKJEGG)tests/pascal_kpcom_host.c $(BUILD)/pascal_rt_host.o -lm -o $@\n' "$_t"
+            printf '\t$(CC) $(CFLAGS) -no-pie %s -I$(SKJEGG)ir -I$(SKJEGG)backend -I$(SKJEGG)kobold $(BUILD)/kpcom-%s-fe.o $(SKJEGG)tests/pascal_kpcom_host.c $(BUILD)/pascal_rt_host.o $(SKJ_KP_FE_C) $(SKJ_IR) %s -lm -o $@\n' "$_cf" "$_t" "$_be"
         } >> "$MK"
     done
 fi

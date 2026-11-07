@@ -50,7 +50,7 @@ TARGETS="ir/ir.c ir/util.c ir/arena.c \
 # through the freshly built tool. The sources come from the Makefile so this
 # never drifts from how the real tools are built.
 CONFIGS="pc-cf moo-cf scheme-cf cc-cf \
-         cc-x64 cc-rv cc-arm64 cc-mips kp-aot"
+         cc-x64 cc-rv cc-arm64 cc-mips"
 
 srcvar() {
     case $1 in
@@ -62,7 +62,6 @@ srcvar() {
     cc-rv)     echo CC_SRC_RV ;;
     cc-arm64)  echo CC_SRC_A64 ;;
     cc-mips)   echo CC_SRC_MIPS ;;
-    kp-aot)    echo __KP_AOT ;;          # a hand-built source set, below
     esac
 }
 
@@ -75,16 +74,11 @@ cflags() {
     cc-rv)     echo "-Icc -Icpp -Iir" ;;
     cc-arm64)  echo "-DCC_LP64 -DCC_PSABI -DCC_ARM64 -Icc -Icpp -Iir -Ibackend" ;;
     cc-mips)   echo "-DCC_PSABI -Icc -Icpp -Iir" ;;
-    kp-aot)    echo "-DX86_BITS=64 -Iir -Ibackend -Ikobold" ;;
     esac
 }
 
 sources() {
-    if [ "$1" = kp-aot ]; then
-        echo "kobold/aot_main.c kobold/kpm.c $(make -s print-IR_SRC) $(make -s print-BE_X64_SEL)"
-    else
-        make -s print-"$(srcvar "$1")"
-    fi
+    make -s print-"$(srcvar "$1")"
 }
 
 # Drivers: compile a corpus through $BIN (the just-built instrumented tool),
@@ -110,28 +104,7 @@ drive() {
         for f in "$ROOT"/tests/cc_t*.c; do
             "$_bin" -o /dev/null "$f" >/dev/null 2>&1 || true
         done ;;
-    kp-aot)
-        # The AOT compiler reads KPM1 modules; precompile the behavioral
-        # corpus with the stock front end, then feed each module through the
-        # instrumented skj-kp so the Kobold-only selector paths are exercised.
-        for p in "$ROOT"/tests/kp-corpus/*.pas; do
-            m="$WORK/kpm/$(basename "$p" .pas).kpm"
-            "$_bin" "$m" -o /dev/null >/dev/null 2>&1 || true
-        done ;;
     esac
-}
-
-# Build the stock skj-kp-jit front end once and precompile the Kobold corpus to
-# KPM1 modules the kp-aot configuration consumes.
-prepare_kp() {
-    mkdir -p "$WORK/kpm"
-    make -s build/skj-kp-jit >/dev/null 2>&1 || {
-        echo "  (skj-kp-jit did not build; skipping kp-aot)"; return 1; }
-    for p in "$ROOT"/tests/kp-corpus/*.pas; do
-        "$ROOT/build/skj-kp-jit" --emit-kpm "$p" \
-            > "$WORK/kpm/$(basename "$p" .pas).kpm" 2>/dev/null || true
-    done
-    return 0
 }
 
 want="$*"
@@ -145,10 +118,6 @@ for cfg in $want; do
     mkdir -p "$dir"
     srcs=$(sources "$cfg")
     cf=$(cflags "$cfg")
-
-    if [ "$cfg" = kp-aot ]; then
-        prepare_kp || continue
-    fi
 
     # Compile each source to an object named by its path so basenames never
     # collide, then link. The .gcno land beside the objects in $dir.

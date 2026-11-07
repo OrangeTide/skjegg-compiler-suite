@@ -1,24 +1,25 @@
 #!/bin/sh
 # run-kp-tests.sh - exercise the KPM1 module reader (kobold/kpm.c) through the
-# Kobold AOT driver skj-kp.  This is a self-contained in-tree regression for
-# the reader's input validation: it needs no external Kobold repo, no qemu, and
-# no assembler or linker, since skj-kp stops at emitting assembly.
+# single-step Kobold compiler skj-kpc.  This is a self-contained in-tree
+# regression for the reader's input validation: it needs no external Kobold
+# repo, no qemu, and no assembler or linker, since skj-kpc stops at emitting
+# assembly when handed a .kpm.
 #
 # Each case is a tests/kp/<name>.kpm module.  A case paired with a
 # tests/kp/<name>.experror file is a malformed module that must be rejected:
-# skj-kp must fail and its stderr must contain every non-blank, non-'#' line of
+# skj-kpc must fail and its stderr must contain every non-blank, non-'#' line of
 # the fixture as a fixed substring (the .experror convention from the Excelsior
 # suite).  A case with no .experror is a well-formed module that must compile
 # cleanly (exit 0), which guards against the validation falsely rejecting a
 # field left at its default.
 #
-#   KP - the AOT driver (default build/skj-kp)
+#   KP - the single-step compiler (default build/skj-kpc)
 
 set -eu
 
 HERE=$(dirname "$0")
 ROOT=$(cd "$HERE/.." && pwd)
-KP=${KP:-"$ROOT/build/skj-kp"}
+KP=${KP:-"$ROOT/build/skj-kpc"}
 BDIR="$ROOT/build/kp"
 
 if [ ! -x "$KP" ]; then
@@ -36,7 +37,7 @@ for src in "$HERE"/kp/*.kpm; do
     errfile="$HERE/kp/$name.experror"
 
     if [ -f "$errfile" ]; then
-        # malformed: skj-kp must fail, and its stderr must carry every line
+        # malformed: skj-kpc must fail, and its stderr must carry every line
         set +e
         "$KP" "$src" -o /dev/null >/dev/null 2>"$BDIR/$name.err"
         got=$?
@@ -56,7 +57,7 @@ for src in "$HERE"/kp/*.kpm; do
             done < "$errfile"
         fi
     else
-        # well-formed: skj-kp must compile it cleanly
+        # well-formed: skj-kpc must compile it cleanly
         set +e
         "$KP" "$src" -o /dev/null >/dev/null 2>"$BDIR/$name.err"
         got=$?

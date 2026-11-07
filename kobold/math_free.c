@@ -17,8 +17,8 @@
    bits (soft-float), so the guest reaches these through brv_* bridges (below) that
    convert bits to a double and back. On a native-double target (ColdFire) a real
    passes in the FPU and a double returns in fp0, which is the convention the kp
-   backend's call reads, so the h_* entries (below, the names the aot_main remap
-   points the kp_sin family at) are plain C wrappers over the my_* cores. The
+   backend's call reads, so the h_* entries (below, the names the skj-kpc AOT
+   remap points the kp_sin family at) are plain C wrappers over the my_* cores. The
    double-math core (my_* below) is shared and exported for both. */
 
 #include <stdint.h>

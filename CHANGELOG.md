@@ -6,6 +6,22 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.46.1
+
+#### Changed
+- `skj-kpc` now reads a prebuilt `.kpm` module as well as Kobold source, so the
+  one tool covers every shape: source to native, source to `.kpm`, and `.kpm` to
+  native. When handed a `.kpm` it loads the module and lowers it to assembly
+  through the same AOT emit pipeline linked into the compiler. This finishes the
+  single-step model: a `.kpm` is lowered through `skj-kpc`, in-tree and in a
+  vendored tree.
+
+#### Removed
+- The separate `skj-kp-<arch>` AOT backend executables, and the host `skj-kp`.
+  They were the last remnant of the two-stage model, a standalone reader of a
+  KPM module that re-emitted assembly. That reader and the emit pipeline now live
+  inside `skj-kpc`, so the standalone tools and `kobold/aot_main.c` are gone.
+
 ### 0.46.0
 
 #### Changed

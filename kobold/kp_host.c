@@ -57,9 +57,9 @@ int kp_co_cancelling_g(void);
 static double b2d(uint64_t b) { double d; memcpy(&d, &b, sizeof d); return d; }
 static uint64_t d2b(double d) { uint64_t b; memcpy(&b, &d, sizeof b); return b; }
 
-/* These carry the guest's import names at link in the AOT path (aot_main.c
-   remaps the guest call target to them), so they are global, not static; the JIT
-   reaches them by address through its binding table either way. */
+/* These carry the guest's import names at link in the AOT path (skj-kpc's AOT
+   emit remaps the guest call target to them), so they are global, not static; the
+   JIT reaches them by address through its binding table either way. */
 void     brv_write_real(int fd, uint64_t x) { io_write_real(fd, b2d(x)); }
 uint64_t brv_read_real(void)                { return d2b(io_read_real()); }
 uint64_t brv_val_real(kp_gptr s)            { return d2b(kp_str_val_real(s)); }
@@ -139,7 +139,7 @@ kp_io_set_args(int argc, char **argv)
 }
 
 /* The number of command-line arguments after the program name.  Global so the
-   AOT link resolves the guest's ParamCount import against it (aot_main.c remap). */
+   AOT link resolves the guest's ParamCount import against it (skj-kpc AOT remap). */
 int rt_param_count(void)
 {
     return g_nargs > 0 ? g_nargs - 1 : 0;

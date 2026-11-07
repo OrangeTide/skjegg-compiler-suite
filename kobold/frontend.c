@@ -58,6 +58,17 @@ kpb_emit_native(const void *outpath, int emit_kpm)
     return 1;
 }
 
+/* kpcom's standalone compile path also lowers a prebuilt `.kpm` to assembly
+   (kpb_emit_from_kpm), which the JIT likewise never runs.  Stub it for the same
+   reason: the JIT binary carries no AOT emit backend. */
+int
+kpb_emit_from_kpm(const void *inpath, const void *outpath)
+{
+    (void)inpath;
+    (void)outpath;
+    return 1;
+}
+
 int
 kp_compile_pas(const char *pas_path, char **module_text, size_t *out_len,
                char *err, size_t errlen)
@@ -317,6 +328,11 @@ static void j_kpbp_func_end(void) { kpb_func_end(); }
    ProcessFile.  The guest module still declares the import, so bind a stub. */
 static int j_kpb_emit_native(kp_gptr p, int e) { (void)p; (void)e; return 1; }
 
+/* Likewise kpcom's .kpm -> native path (ProcessFile when the input is a prebuilt
+   module) imports kpb_emit_from_kpm; the JIT never takes that path either, so
+   bind a stub to satisfy the guest's declared import. */
+static int j_kpb_emit_from_kpm(kp_gptr in, kp_gptr out) { (void)in; (void)out; return 1; }
+
 /* Bind every kpbp_* the guest imports into the builder shims above. Returns 0, or
    -1 (with err set) if the binding table is full. */
 static int
@@ -351,6 +367,7 @@ fe_bind_builder(struct kp_binding *binds, int *nbinds, int cap)
         { "kpbp_asm",          (void (*)(void))j_kpbp_asm },
         { "kpbp_func_end",     (void (*)(void))j_kpbp_func_end },
         { "kpb_emit_native",   (void (*)(void))j_kpb_emit_native },
+        { "kpb_emit_from_kpm", (void (*)(void))j_kpb_emit_from_kpm },
     };
     int i;
     int n = (int)(sizeof tab / sizeof tab[0]);

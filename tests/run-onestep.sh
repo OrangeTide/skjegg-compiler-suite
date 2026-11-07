@@ -1,17 +1,17 @@
 #!/bin/sh
 # Single-step equivalence gate.  For each source module:
 #   1. the assembly skj-kpc emits in one step (.kp -> .s) must byte-match the
-#      assembly the serialized module reaches (skj-kpc --emit-kpm | skj-kp);
-#   2. the KPM image skj-kpc --emit-kpm writes must compile (skj-kp) to that same
+#      assembly the serialized module reaches (skj-kpc --emit-kpm | skj-kpc);
+#   2. the KPM image skj-kpc --emit-kpm writes must compile (skj-kpc) to that same
 #      assembly, so the serialized --emit-kpm output is faithful.
 # KPC and ONESTEP are the same single-step binary; ONESTEP stays overridable.
 #
-#   KPC=build/skj-kpc KP=build/skj-kp ONESTEP=build/skj-kpc \
+#   KPC=build/skj-kpc KP=build/skj-kpc ONESTEP=build/skj-kpc \
 #       sh tests/run-onestep.sh file.pas ...
 set -e
 
 KPC=${KPC:-build/skj-kpc}
-KP=${KP:-build/skj-kp}
+KP=${KP:-build/skj-kpc}
 ONESTEP=${ONESTEP:-build/skj-kpc}
 TARGET=${TARGET:-KP_TARGET_X64}
 WORK=$(mktemp -d)
