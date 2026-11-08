@@ -35,6 +35,11 @@
 #define RV_NR_GETRANDOM     278
 #define RV_NR_NANOSLEEP     101
 #define RV_NR_SCHED_YIELD   124
+/* rv32 is a modern 32-bit ABI: it carries no legacy 32-bit-timespec clock or
+   nanosleep (113/101 above are the shared private seam, not real rv32 Linux).
+   A guest built for real rv32 Linux uses the time64 calls, so service them. */
+#define RV_NR_CLOCK_GETTIME64     403
+#define RV_NR_CLOCK_NANOSLEEP_T64 407
 
 static int
 sys_of_rv(uint32_t nr)
@@ -56,8 +61,10 @@ sys_of_rv(uint32_t nr)
     case RV_NR_RENAMEAT2:   return GSYS_RENAMEAT2;
     case RV_NR_GETDENTS64:  return GSYS_GETDENTS64;
     case RV_NR_CLOCK_GETTIME: return GSYS_CLOCK_GETTIME;
+    case RV_NR_CLOCK_GETTIME64: return GSYS_CLOCK_GETTIME64;
     case RV_NR_GETRANDOM:   return GSYS_GETRANDOM;
     case RV_NR_NANOSLEEP:   return GSYS_NANOSLEEP;
+    case RV_NR_CLOCK_NANOSLEEP_T64: return GSYS_CLOCK_NANOSLEEP64;
     case RV_NR_SCHED_YIELD: return GSYS_SCHED_YIELD;
     default:                return GSYS_UNKNOWN;
     }

@@ -6,6 +6,40 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.49.0
+
+#### Added
+- BASIC reaches three more backends, built from the same front end over the
+  shared IR. `skj-bc-rv` compiles to RISC-V RV32 with hardware float and runs
+  under qemu-riscv32, both hosted and confined inside the `skj-run` sandbox.
+  `skj-bc-mips` compiles to MIPS with soft float for the R3051 and runs under
+  qemu-mipsel, and links a PlayStation PS-EXE that runs on the console, verified
+  on PCSX-Redux with a real BIOS. The BASIC runtime (`runtime/basic_rt.c`) and a
+  new PlayStation seam (`runtime/basic_psx.c`, which drives root counter 2 for
+  the clock, sleep, and random source) back the ports.
+
+#### Changed
+- `PRINT`, `STR$`, and the FLOAT formatter emit the shortest decimal that reads
+  back to the same double, replacing the fixed six-place decimal. The digits come
+  from the Dragon4 algorithm in exact integer arithmetic, so the output depends
+  only on the IEEE 754 bit pattern and is identical on every backend. `VAL` and
+  `INPUT` parse a FLOAT back with a correctly rounded decimal-to-double, so a
+  value survives a print-and-read round trip. `SQR` and the trigonometric helpers
+  round every step to double, so their full-precision output matches across
+  backends; the trig polynomials stay accurate to about seven to ten digits, and
+  `basic_t018_trig` runs on the strict-double suites (the ColdFire 68881
+  double-rounds the last digit in 80-bit precision, so it is excluded there).
+- The `skj-run` emulator services the rv32 time64 `clock_gettime` and
+  `clock_nanosleep` calls. A modern 32-bit guest has no legacy 32-bit-timespec
+  clock or sleep call, so this is the seam BASIC and the other languages use for
+  `TIME` and `WAIT` under the sandbox.
+
+#### Fixed
+- The PlayStation crt (`runtime/start_psx.S`) now writes console output through
+  the PCSX-Redux putchar register when it is present, falling back to the BIOS
+  TTY call otherwise. The old path spun on the BIOS serial-ready poll and hung
+  under the emulator, so no PS-EXE could print.
+
 ### 0.48.0
 
 #### Added

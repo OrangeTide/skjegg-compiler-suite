@@ -65,6 +65,20 @@
 #define SKJ_LONG_BYTES 4
 #endif
 
+/* Byte order, for a front end that lays out initialized data by hand (e.g. the
+   BASIC string-literal length prefix). ColdFire/m68k is big-endian; every other
+   supported target is little-endian. This derives from the ISA selector like the
+   width facts above, but a tool that names no ISA selector (the BASIC front end
+   sets none, to keep cf_emit.c's CC_M68K float path off) passes SKJ_BIG_ENDIAN
+   explicitly, which this guard respects. */
+#ifndef SKJ_BIG_ENDIAN
+#  if defined(CC_M68K)
+#    define SKJ_BIG_ENDIAN 1
+#  else
+#    define SKJ_BIG_ENDIAN 0
+#  endif
+#endif
+
 /* The KPM pointer-width class a backend emits and accepts (see kobold/kpm.c):
    the 64-bit guests are "lp64", the 32-bit ones "ilp32". */
 #define SKJ_KPM_TARGET (SKJ_LP64 ? "lp64" : "ilp32")

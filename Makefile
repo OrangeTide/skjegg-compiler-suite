@@ -182,8 +182,20 @@ PAS_TESTS_NOFLOAT := $(filter-out %_real.pas %_hostio.pas,$(PAS_TESTS))
 BAS_TESTS := $(wildcard tests/basic_*.bas)
 BAS_BINS := $(BAS_TESTS:tests/%.bas=build/%)
 
+# basic_t018_trig prints full-precision transcendental results (SIN/COS/TAN and
+# the degree forms). The shortest-round-trip FLOAT printer shows every digit, so
+# the output depends on the exact rounding of the software trig polynomials. The
+# strict-double backends (RISC-V, MIPS, and so x86-64/arm64) agree bit for bit,
+# but the ColdFire 68881 evaluates in 80-bit extended precision and double-rounds
+# the last digit differently, which no compiler flag undoes. The golden file
+# holds the strict-double value and the test runs on the RISC-V and MIPS BASIC
+# suites; the ColdFire run excludes it, the way PAS_TESTS_NOFLOAT drops the real
+# Pascal tests. basic_t005_float prints only exact arithmetic and stays on every
+# target.
+BAS_TESTS_CF := $(filter-out tests/basic_t018_trig.bas,$(BAS_TESTS))
+
 TOOLS := build/skj-sc build/skj-sc-rv build/skj-sc-mips build/skj-sc-arm64 \
-         build/skj-mooc build/skj-pc build/skj-bc build/skj-as build/skj-ld \
+         build/skj-mooc build/skj-pc build/skj-bc build/skj-bc-rv build/skj-bc-mips build/skj-as build/skj-ld \
          build/skj-as-rv build/skj-ld-rv build/skj-as-mips build/skj-ld-mips build/skj-ar \
          build/skj-as-x86-64 build/skj-as-aarch64 build/skj-ld-aarch64 \
          build/skj-ld-x86-64 build/skj-ld-arm64 \
@@ -2448,7 +2460,7 @@ release-check:
 
 FORCE:
 
-check: build/skj-mooc build/skj-pc build/skj-bc $(SCM_TESTS:tests/%.scm=build/%) $(MOO_TESTS:tests/%.moo=build/%) $(MOO_TOY_TESTS:tests/%.moo=build/%) $(PAS_TESTS_NOFLOAT:tests/%.pas=build/%) $(BAS_TESTS:tests/%.bas=build/%)
+check: build/skj-mooc build/skj-pc build/skj-bc $(SCM_TESTS:tests/%.scm=build/%) $(MOO_TESTS:tests/%.moo=build/%) $(MOO_TOY_TESTS:tests/%.moo=build/%) $(PAS_TESTS_NOFLOAT:tests/%.pas=build/%) $(BAS_TESTS_CF:tests/%.bas=build/%)
 	@sh tests/run-tests.sh "$(QEMU)"
 
 ## RISC-V per-test rules: tests/<name>.scm -> build/rv/<name>.s -> .o -> binary
@@ -2465,6 +2477,36 @@ build/rv/%: build/rv/%.o build/rv/start.o
 
 check-rv: build/skj-sc-rv $(RV_SCM_TESTS:tests/%.scm=build/rv/%)
 	@sh tests/run-tests.sh "$(QEMU_RV)" build/rv
+
+## BASIC on RISC-V (skj-bc-rv). The front end emits rv32 asm with hardware float
+## for FLOAT programs, so the program objects assemble with the float-capable
+## arch (the generic build/rv/%.o rule is rv32im, integer only). Each binary
+## links the shared rv crt and the BASIC runtime (basic_rt.c, cross-compiled by
+## RV_CC through the generic build/rv/%.o: runtime/%.c rule). The soft-float
+## ilp32 ABI matches the runtime, the same convention the C rv path uses.
+build/rv/basic_%.s: tests/basic_%.bas build/skj-bc-rv | build/rv
+	./build/skj-bc-rv -o $@ $<
+
+build/rv/basic_%.o: build/rv/basic_%.s | build/rv
+	$(RV_AS) $(RV_AS_ARCH) -o $@ $<
+
+BAS_RV_BINS := $(BAS_TESTS:tests/%.bas=build/rv/%)
+
+## start_rv.S supplies the 64-bit mul and shift helpers; the divide family
+## (__divdi3/__moddi3/__udivdi3/__umoddi3) comes from soft64_div.o, which
+## basic_rt.c needs for its 64-bit number formatting.
+$(BAS_RV_BINS): build/rv/%: build/rv/%.o build/rv/start.o build/rv/basic_rt.o build/rv/soft64_div.o
+	$(RV_LD) -m elf32lriscv -o $@ build/rv/start.o build/rv/basic_rt.o build/rv/soft64_div.o $<
+
+check-rv-bc: build/skj-bc-rv $(BAS_RV_BINS)
+	@sh tests/run-tests.sh "$(QEMU_RV)" build/rv
+
+## The same rv32 BASIC ELFs run confined under skj-run, the in-tree sandbox
+## emulator, with no rebuild: skj-run services the time64 clock/sleep calls
+## (clock_gettime64/clock_nanosleep) that TIME and WAIT issue, so the binary
+## built for real rv32 Linux executes identically here and under qemu.
+check-rv-bc-sandbox: build/skj-run build/skj-bc-rv $(BAS_RV_BINS)
+	@sh tests/run-tests.sh "./build/skj-run" build/rv
 
 ## Run an ELF under qemu-riscv32 configured to match the rv32.c emulator's ISA.
 ## Usage: make run-rv ELF=build/rv/foo [ARGS='...']
@@ -2496,6 +2538,81 @@ build/mips/%: build/mips/%.o build/mips/start.o
 
 check-mips: build/skj-sc-mips $(MIPS_SCM_TESTS:tests/%.scm=build/mips/%)
 	@sh tests/run-tests.sh "$(QEMU_MIPS)" build/mips
+
+## BASIC on MIPS / PlayStation (skj-bc-mips, soft-float, the R3051 has no FPU).
+## The program objects and the runtime are both soft-float, so the whole float
+## path matches the backend's __skj_* helper ABI. basic_rt.o is built by
+## skj-cc-mips-sf (not gcc) precisely so its float math lowers to those same
+## __skj_* helpers (gcc soft-float would emit libgcc names nothing here
+## provides) and its ABI matches skj-bc-mips. The link pulls softfloat.o (the
+## __skj_* helpers), half.o (FLH/FSH narrowing), and soft64_div.o (the 64-bit
+## divide family number formatting needs). The generic build/mips/%.o rule
+## assembles both the program .s and basic_rt.s, as the C suite does.
+build/mips/basic_rt.s: runtime/basic_rt.c build/skj-cc-mips-sf | build/mips
+	./build/skj-cc-mips-sf -o $@ $<
+
+build/mips/basic_%.s: tests/basic_%.bas build/skj-bc-mips | build/mips
+	./build/skj-bc-mips -o $@ $<
+
+BAS_MIPS_BINS := $(BAS_TESTS:tests/%.bas=build/mips/%)
+
+$(BAS_MIPS_BINS): build/mips/%: build/mips/%.o build/mips/start.o build/mips/basic_rt.o build/mips/half.o build/mips/softfloat.o build/mips/soft64_div.o
+	$(MIPS_LD) -o $@ build/mips/start.o build/mips/basic_rt.o build/mips/half.o build/mips/softfloat.o build/mips/soft64_div.o $<
+
+check-mips-bc: build/skj-bc-mips $(BAS_MIPS_BINS)
+	@sh tests/run-tests.sh "$(QEMU_MIPS)" build/mips
+
+## BASIC on the PlayStation (PS-EXE). The program object is the very same
+## soft-float object the qemu-mipsel path builds; only the link differs. It uses
+## the BIOS-TTY crt (start_psx.o) and the PS1 seam (basic_psx.o) in place of the
+## Linux crt, so the same compiled BASIC runs on the console. basic_psx.c maps
+## the runtime's read/clock_gettime/nanosleep/getrandom seam onto the console:
+## EOF for input, and the hardware root counter for the clock, sleep and random
+## seed (a facility the PS1 Pascal and Kobold runtimes can share later).
+build/mips/basic_psx.s: runtime/basic_psx.c build/skj-cc-mips-sf | build/mips
+	./build/skj-cc-mips-sf -o $@ $<
+
+## A subset that needs no console input (INPUT reads nothing on the PS1): a
+## PRINT/integer program, a float program (soft-float on the FPU-less R3051),
+## and the trig demo. Reused straight from the test corpus.
+BAS_PSX_PROGS := basic_t001_hello basic_t005_float basic_t018_trig
+BAS_PSX_EXES  := $(BAS_PSX_PROGS:%=build/mips/psxbas_%.exe)
+
+build/mips/psxbas_%.exe: build/mips/%.o build/mips/start_psx.o build/mips/basic_rt.o build/mips/basic_psx.o build/mips/half.o build/mips/softfloat.o build/mips/soft64_div.o build/skj-ld-mips | build/mips
+	./build/skj-ld-mips -f ps-exe -o $@ build/mips/start_psx.o build/mips/basic_rt.o build/mips/basic_psx.o build/mips/half.o build/mips/softfloat.o build/mips/soft64_div.o $<
+
+## Structural validation (always available, needs only binutils objdump): the
+## PS-EXE container is well-formed and relocated to the PlayStation RAM base.
+## Correctness of the same soft-float code is covered by check-mips-bc under
+## qemu-mipsel.
+test-basic-psexe: build/skj-bc-mips build/skj-as-mips build/skj-ld-mips $(BAS_PSX_EXES)
+	@for e in $(BAS_PSX_EXES); do \
+	    OBJDUMP="$(MIPS_OBJDUMP)" sh tests/run-psx-tests.sh $$e || exit 1; \
+	 done
+	@echo "BASIC PS-EXE: $(words $(BAS_PSX_EXES)) programs structurally valid"
+
+## Functional run on PCSX-Redux with a real BIOS (opt-in; skipped without
+## pcsx-redux and PSX_BIOS). BASIC runs on the R3051, printing to the BIOS TTY
+## (captured through the PCSX debug register) and ending with exit code 0. The
+## captured TTY output, taken after the BIOS "new PC" banner, is compared to the
+## same .expected fixture the qemu-mipsel run uses, so this verifies the program
+## really ran correctly on the console, not just that it exited.
+test-basic-psexe-redux: build/skj-bc-mips build/skj-as-mips build/skj-ld-mips $(BAS_PSX_EXES)
+	@if ! command -v $(PCSX_REDUX) >/dev/null 2>&1; then echo "SKIP: PCSX-Redux not found"; exit 0; fi; \
+	 if [ -z "$(PSX_BIOS)" ] || [ ! -f "$(PSX_BIOS)" ]; then echo "SKIP: no PlayStation BIOS (pass PSX_BIOS=...)"; exit 0; fi; \
+	 fail=0; \
+	 for e in $(BAS_PSX_EXES); do \
+	    name=$$(basename $$e .exe); base=$${name#psxbas_}; exp="tests/$$base.expected"; \
+	    out=$$(timeout 60 $(PCSX_REDUX) -testmode -cli -run -no-gui-log -bios "$(PSX_BIOS)" -exe $$e 2>&1); \
+	    rc=$$?; \
+	    prog=$$(printf '%s\n' "$$out" | awk 'f{print} /Successful: new PC/{f=1}'); \
+	    if [ $$rc -eq 0 ] && [ "$$prog" = "$$(cat $$exp)" ]; then \
+	        echo "PASS  $$base (PCSX-Redux R3051, output verified)"; \
+	    else \
+	        echo "FAIL  $$base (rc=$$rc)"; printf '%s\n' "$$prog" | diff "$$exp" - || true; fail=1; \
+	    fi; \
+	 done; \
+	 [ $$fail -eq 0 ]
 
 ## MIPS I integration tests (IR builder -> MIPS asm -> qemu-mipsel).
 ## Same pattern as the RISC-V variants: a host binary linked with BE_MIPS
@@ -4006,10 +4123,31 @@ build/skj-pc: $(PC_SRC) pascal/pascal.h ir/ir.h | build
 
 ## BASIC compiler (skj-bc): the core of the BASIDE dialect
 ## (doc/languages/basic.md), lowered to the shared IR over the ColdFire backend.
-BASIC_SRC := basic/lex.c basic/parse.c basic/lower.c basic/main.c $(IR_SRC) $(BE_CF)
+# The BASIC front end is backend-agnostic (main.c calls the generic regalloc /
+# target_emit), so a per-target tool is the same sources linked with a different
+# backend group. The ColdFire tool names no ISA selector, to keep cf_emit.c's
+# CC_M68K float path off, so it passes SKJ_BIG_ENDIAN explicitly; the RISC-V tool
+# selects its ISA with CC_RISCV, from which target.h derives ILP32 and
+# little-endian.
+BASIC_FE       := basic/lex.c basic/parse.c basic/lower.c basic/main.c $(IR_SRC)
+BASIC_SRC      := $(BASIC_FE) $(BE_CF)
+BASIC_RV_SRC   := $(BASIC_FE) $(BE_RV)
+BASIC_MIPS_SRC := $(BASIC_FE) $(BE_MIPS)
 
-build/skj-bc: $(BASIC_SRC) basic/basic.h ir/ir.h | build
-	$(CC) $(CFLAGS) -Ibasic -Iir -o $@ $(BASIC_SRC)
+build/skj-bc: $(BASIC_SRC) basic/basic.h ir/ir.h ir/target.h | build
+	$(CC) $(CFLAGS) -DSKJ_BIG_ENDIAN=1 -Ibasic -Iir -o $@ $(BASIC_SRC)
+
+build/skj-bc-rv: $(BASIC_RV_SRC) basic/basic.h ir/ir.h ir/target.h | build
+	$(CC) $(CFLAGS) -DCC_RISCV -Ibasic -Iir -Ibackend -o $@ $(BASIC_RV_SRC)
+
+## The MIPS / PlayStation BASIC compiler is soft-float (the R3051 has no cop-1),
+## the counterpart of skj-cc-mips-sf and skj-pc-mips. The soft-float ABI returns
+## a double in the v0/v1 register pair, which is exactly what basic_rt.c's float
+## helpers expect (they hand a double back as its i64 bit pattern), so the same
+## runtime ABI works here as on ColdFire and the RV32 ilp32 soft-float ABI.
+## CC_MIPS makes target.h derive ILP32 and little-endian (mipsel).
+build/skj-bc-mips: $(BASIC_MIPS_SRC) basic/basic.h ir/ir.h ir/target.h | build
+	$(CC) $(CFLAGS) -DCC_MIPS -DMIPS_SOFTFLOAT -Ibasic -Iir -Ibackend -o $@ $(BASIC_MIPS_SRC)
 
 ## ---- Native host Pascal compilers (x86-64, aarch64) ----
 ## The front end is backend-agnostic; each host target is a separate binary
@@ -8454,7 +8592,8 @@ check-mips-all: check-mips check-mips-noreorder check-mips-emu test-mips-fs-cap 
                 check-mipsas check-cc-mips-skj test-mips-archive test-mips-psexe \
                 test-psx-gpu test-psx-tex test-psx-rot test-psx-alpha test-psx-cd test-psx-audio test-psx-timconv test-psx-adpcm test-psx-m2 test-psx-assets \
                 test-psx-fixed test-psx-game test-psx-lang test-psx-units test-psx-sprite-lang test-psx-gte test-psx-timer test-psx-cdda test-psx-mc test-psx-pad test-psx-shade test-psx-env test-psx-dbgtext test-psx-cube-lang test-psx-kasm test-psx-cube-driver test-psx-size \
-                test-cc-mips-asm check-mips-sf test-threaded-mips
+                test-cc-mips-asm check-mips-sf test-threaded-mips \
+                check-mips-bc test-basic-psexe
 	@echo "All MIPS test suites passed."
 
 check-cpp: build/skj-cpp
@@ -8544,7 +8683,7 @@ test-help: $(addprefix build/,$(HELP_TOOLS))
 ## it is the native host-arch (x86-64) JIT, the peer of check-kp-jit.
 check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm \
-           check-rv check-x86-64 check-arm64 \
+           check-rv check-rv-bc check-x86-64 check-arm64 \
            check-x86-oracle check-arm64-oracle check-rv-oracle check-jit \
            test-jit-trap \
            test-jit-arena test-fs \
@@ -8587,4 +8726,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all install uninstall release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill test-rv-spawn-backtrace test-rv-spawn-mounts test-cf-spawn-mounts test-rv-spawn-pipe test-cf-spawn-pipe test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh test-rv-ps test-rv-vdso test-cf-vdso test-mips-vdso test-rv-mem-root test-sched-embed test-hv-x86-64-vdso test-hv-arm64-vdso test-rv-env test-cf-env test-hv-x86-64-env test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as test-ld-x86-64 test-ld-arm64 test-cc-driver-x86-64 test-cc-driver-arm64 check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-textfile check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-gdb-fpwatch test-hv-preempt test-hv-parallel test-hv-x86-64-pump check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all install uninstall release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill test-rv-spawn-backtrace test-rv-spawn-mounts test-cf-spawn-mounts test-rv-spawn-pipe test-cf-spawn-pipe test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh test-rv-ps test-rv-vdso test-cf-vdso test-mips-vdso test-rv-mem-root test-sched-embed test-hv-x86-64-vdso test-hv-arm64-vdso test-rv-env test-cf-env test-hv-x86-64-env test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as test-ld-x86-64 test-ld-arm64 test-cc-driver-x86-64 test-cc-driver-arm64 check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-textfile check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-gdb-fpwatch test-hv-preempt test-hv-parallel test-hv-x86-64-pump check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor check-rv-bc check-mips-bc test-basic-psexe test-basic-psexe-redux check-rv-bc-sandbox coverage-codegen clean FORCE

@@ -168,8 +168,10 @@ enum guest_sys {
     GSYS_FCHMODAT,
     GSYS_GETDENTS64,
     GSYS_CLOCK_GETTIME,
+    GSYS_CLOCK_GETTIME64,       /* time64 clock_gettime: 64-bit timespec */
     GSYS_GETRANDOM,
     GSYS_NANOSLEEP,
+    GSYS_CLOCK_NANOSLEEP64,     /* time64 clock_nanosleep: 64-bit timespec */
     GSYS_SCHED_YIELD,
 };
 

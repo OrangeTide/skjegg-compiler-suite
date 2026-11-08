@@ -257,9 +257,13 @@ InputStmt = 'INPUT' [ STRING_LITERAL ';' ] Designator { ',' Designator } .
 ```
 
 `PRINT` writes values at the console cursor. An `INT` prints in full; a `FLOAT`
-prints the shortest digits that read back to the same value; a `STRING` prints its
-characters. (The current `skj-bc` prints a `FLOAT` with a fixed six-place decimal,
-trailing zeros trimmed. The shortest-round-trip form is pending.) `INPUT` reads one line and parses a value per designator. BASIDE's
+prints the shortest digits that read back to the same value; a `STRING` prints
+its characters. The `FLOAT` form is fixed-point with at least one fractional
+digit, turning to scientific notation for a decimal exponent outside the range
+[-4, 17). The shortest digits come from the Dragon4 algorithm and `VAL`/`INPUT`
+round the digits back correctly, so a value survives a print-and-read round trip;
+both run in exact integer arithmetic and give identical output on every target.
+`INPUT` reads one line and parses a value per designator. BASIDE's
 `INK`/`PAPER` print items set display colours and belong to its console module,
 so they are not part of core BASIC.
 
@@ -334,9 +338,11 @@ built-ins `ABS`, `SGN`, `MIN`, `MAX`, `CLAMP`, `FLOOR`, `CEIL`, `ROUND`,
 `CLAMP`, and `LERP` promote to `FLOAT` when any argument is a `FLOAT`. `INT`,
 `FLOOR`, `CEIL`, and `ROUND` yield an `INT`: `INT` truncates toward zero,
 `ROUND` rounds halves away from zero, and all four are exact over the signed
-32-bit range, matching the `FLOAT` print limit. `SQR` and the trigonometric
-functions return a `FLOAT`; the runtime computes them without libm, accurate
-past the six decimal places `PRINT` shows. The string and formatting helpers
+32-bit range. `SQR` and the trigonometric functions return a `FLOAT`; the runtime
+computes them without libm. `SQR` is correctly rounded, while the trigonometric
+functions use short polynomials accurate to about seven to ten significant
+digits, so the shortest-round-trip printer shows that limit in the trailing
+digits. The results are identical on every target. The string and formatting helpers
 `SPACE$`, `STRING$`, `HEX$`, `BIN$`, `FIX$`, `ZERO$`, `RJUST$`, and `LJUST$`
 are implemented, along with the conversions `VAL` (to `FLOAT`) and `VALINT`
 (to `INT`), which parse a leading number and ignore any trailing text.

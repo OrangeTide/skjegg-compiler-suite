@@ -56,34 +56,53 @@ _start:
 1:	b	1b
 
 /* int write(int fd, const char *buf, int n);
- * fd is ignored; each byte goes to the BIOS TTY via A0(3Ch).  Args arrive in
- * $a0-$a2 (the o32 psABI); $s0-$s2 hold the loop state across the BIOS call,
- * which preserves the callee-saved registers. */
+ * fd is ignored.  Each byte is emitted one of two ways, chosen per byte so no
+ * register state has to survive the call:
+ *
+ *   - Under PCSX-Redux the debug register block reads back the magic "PCSX"
+ *     (0x58534350) at 0x1f802080, and a byte stored there is printed.  The
+ *     retail BIOS TTY (A0 3Ch) cannot be used on the emulator: it polls the
+ *     serial port's transmit-ready bit, which PCSX never sets, so it spins
+ *     forever.  (The exit path already uses the sibling register 0x1f802082.)
+ *
+ *   - On real hardware the magic does not match and the byte goes through the
+ *     BIOS std_out_putchar as before.
+ *
+ * The loop state (buf, n, i) lives on the stack and is reloaded every pass: the
+ * BIOS call preserves neither the caller-saved nor the callee-saved registers,
+ * so only $sp and $ra survive it.  Args arrive in $a0-$a2 (the o32 psABI). */
 write:
-	addiu	$sp, $sp, -20
+	addiu	$sp, $sp, -16
 	sw	$ra, 0($sp)
-	sw	$s0, 4($sp)
-	sw	$s1, 8($sp)
-	sw	$s2, 12($sp)
-	move	$s0, $a1		/* buf */
-	move	$s1, $a2		/* n */
-	move	$s2, $zero		/* i = 0 */
+	sw	$a1, 4($sp)		/* buf */
+	sw	$a2, 8($sp)		/* n */
+	sw	$zero, 12($sp)		/* i = 0 */
 .Lwrite_loop:
-	bgeu	$s2, $s1, .Lwrite_done
-	addu	$t0, $s0, $s2
-	lbu	$a0, 0($t0)		/* buf[i] */
+	lw	$t0, 12($sp)		/* i */
+	lw	$t1, 8($sp)		/* n */
+	bgeu	$t0, $t1, .Lwrite_done
+	lw	$t2, 4($sp)		/* buf */
+	addu	$t2, $t2, $t0
+	lbu	$a0, 0($t2)		/* buf[i] */
+	li	$t3, 0x1f802080		/* PCSX-Redux debug register / putchar */
+	lw	$t4, 0($t3)
+	li	$t5, 0x58534350		/* "PCSX" magic */
+	bne	$t4, $t5, .Lwrite_bios
+	sb	$a0, 0($t3)		/* emulator: store the byte to print it */
+	b	.Lwrite_next
+.Lwrite_bios:
 	li	$t1, 0x3c		/* A0(3Ch) std_out_putchar */
 	li	$t2, 0xa0
 	jalr	$t2
-	addiu	$s2, $s2, 1
+.Lwrite_next:
+	lw	$t0, 12($sp)		/* reload i (the call clobbered the temps) */
+	addiu	$t0, $t0, 1
+	sw	$t0, 12($sp)
 	b	.Lwrite_loop
 .Lwrite_done:
-	move	$v0, $s1		/* return the byte count */
+	lw	$v0, 8($sp)		/* return the byte count */
 	lw	$ra, 0($sp)
-	lw	$s0, 4($sp)
-	lw	$s1, 8($sp)
-	lw	$s2, 12($sp)
-	addiu	$sp, $sp, 20
+	addiu	$sp, $sp, 16
 	jr	$ra
 
 /* void exit(int status); the PlayStation has no process to return to, so this

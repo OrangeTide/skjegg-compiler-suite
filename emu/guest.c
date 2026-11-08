@@ -1873,6 +1873,36 @@ sys_clock_gettime(guest *g, uint32_t clk_id, uint32_t ts_ptr)
     return 0;
 }
 
+/* Load a 64-bit value from two target-endian words, the inverse of store64. */
+static uint64_t
+load64(guest *g, uint32_t addr)
+{
+    int be = g->big_endian;
+    uint32_t lo = gm_load(&g->mem, addr + (be ? 4 : 0), 4, be);
+    uint32_t hi = gm_load(&g->mem, addr + (be ? 0 : 4), 4, be);
+
+    return ((uint64_t)hi << 32) | lo;
+}
+
+/* clock_gettime64(clk_id, struct __kernel_timespec *ts): the time64 variant of
+ * clock_gettime, writing a 64-bit {tv_sec, tv_nsec}.  New 32-bit ABIs (rv32
+ * among them) carry no legacy 32-bit-timespec clock_gettime at all, so a guest
+ * built for real rv32 Linux (and run here or under qemu unchanged) issues this.
+ * The source clock is the same as the 32-bit seam; only the layout widens. */
+static int32_t
+sys_clock_gettime64(guest *g, uint32_t clk_id, uint32_t ts_ptr)
+{
+    uint32_t sec, nsec;
+
+    if (ts_ptr == 0)
+        return -GUEST_EFAULT;
+    if (hp_clock(clk_id == 0, &sec, &nsec) != 0)
+        return -GUEST_EINVAL;
+    store64(g, ts_ptr + 0, sec);
+    store64(g, ts_ptr + 8, nsec);
+    return 0;
+}
+
 /* getrandom(buf, len, flags): fill the guest buffer with len random bytes from
  * the host and return the count.  The guest seeds its own generators from this;
  * flags are ignored (the host source never blocks meaningfully here). */
@@ -1902,21 +1932,12 @@ sys_getrandom(guest *g, uint32_t buf, uint32_t len, uint32_t flags)
     return (int32_t)done;
 }
 
-/* nanosleep(req, rem): park for the {tv_sec, tv_nsec} the guest timespec holds
- * (the 32-bit timespec convention, as clock_gettime above).  skj-run really
- * sleeps on the host clock; the guest's Sleep/park glue uses this.  rem (the
- * unslept remainder on a signal) is not written back; skj-run has no signals
- * delivered to the guest, so a sleep here always completes. */
+/* Park for {sec, nsec}, shared by both nanosleep seams.  The split between a
+ * real host sleep and a cooperative park is identical for the 32-bit and the
+ * 64-bit timespec; only the caller's field width differs. */
 static int32_t
-sys_nanosleep(guest *g, uint32_t req_ptr, uint32_t rem_ptr)
+do_sleep(guest *g, uint32_t sec, uint32_t nsec)
 {
-    uint32_t sec, nsec;
-
-    (void)rem_ptr;
-    if (req_ptr == 0)
-        return -GUEST_EFAULT;
-    sec  = gm_load(&g->mem, req_ptr + 0, 4, g->big_endian);
-    nsec = gm_load(&g->mem, req_ptr + 4, 4, g->big_endian);
     if (nsec >= 1000000000u)
         return -GUEST_EINVAL;
     if (!g->can_park) {
@@ -1940,6 +1961,46 @@ sys_nanosleep(guest *g, uint32_t req_ptr, uint32_t rem_ptr)
     }
     g->sleeping = 0;                            /* deadline reached: the sleep is done */
     return 0;
+}
+
+/* nanosleep(req, rem): park for the {tv_sec, tv_nsec} the guest timespec holds
+ * (the 32-bit timespec convention, as clock_gettime above).  skj-run really
+ * sleeps on the host clock; the guest's Sleep/park glue uses this.  rem (the
+ * unslept remainder on a signal) is not written back; skj-run has no signals
+ * delivered to the guest, so a sleep here always completes. */
+static int32_t
+sys_nanosleep(guest *g, uint32_t req_ptr, uint32_t rem_ptr)
+{
+    uint32_t sec, nsec;
+
+    (void)rem_ptr;
+    if (req_ptr == 0)
+        return -GUEST_EFAULT;
+    sec  = gm_load(&g->mem, req_ptr + 0, 4, g->big_endian);
+    nsec = gm_load(&g->mem, req_ptr + 4, 4, g->big_endian);
+    return do_sleep(g, sec, nsec);
+}
+
+/* clock_nanosleep(clk_id, flags, req, rem) via the time64 number: req is a
+ * 64-bit {tv_sec, tv_nsec}.  New 32-bit ABIs have no legacy nanosleep, so a
+ * guest built for real rv32 Linux sleeps through this.  Only a relative sleep
+ * (flags == 0) is served; the clock id is ignored, as for the 32-bit seam.
+ * TIMER_ABSTIME is not supported here. */
+static int32_t
+sys_clock_nanosleep64(guest *g, uint32_t clk_id, uint32_t flags,
+                      uint32_t req_ptr, uint32_t rem_ptr)
+{
+    uint64_t sec, nsec;
+
+    (void)clk_id;
+    (void)rem_ptr;
+    if (flags != 0)                             /* TIMER_ABSTIME unsupported */
+        return -GUEST_EINVAL;
+    if (req_ptr == 0)
+        return -GUEST_EFAULT;
+    sec  = load64(g, req_ptr + 0);
+    nsec = load64(g, req_ptr + 8);
+    return do_sleep(g, (uint32_t)sec, (uint32_t)nsec);
 }
 
 int32_t
@@ -2028,11 +2089,17 @@ guest_syscall(guest *g, int sys, uint32_t a0, uint32_t a1, uint32_t a2,
     case GSYS_CLOCK_GETTIME:
         return sys_clock_gettime(g, a0, a1);
 
+    case GSYS_CLOCK_GETTIME64:
+        return sys_clock_gettime64(g, a0, a1);
+
     case GSYS_GETRANDOM:
         return sys_getrandom(g, a0, a1, a2);
 
     case GSYS_NANOSLEEP:
         return sys_nanosleep(g, a0, a1);
+
+    case GSYS_CLOCK_NANOSLEEP64:
+        return sys_clock_nanosleep64(g, a0, a1, a2, a3);
 
     case GSYS_SCHED_YIELD:
         if (g->can_park) {

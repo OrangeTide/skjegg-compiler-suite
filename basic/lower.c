@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "basic.h"
+#include "target.h"
 #include "util.h"
 
 /* Value types a lowered expression can have. A STRING is a handle: a pointer to
@@ -1768,9 +1769,10 @@ lower_record_assign(struct var *dst, struct node *srcnode, int line)
 }
 
 /* A string literal becomes a private, read-only string object: a global laid
-   out as [int length][bytes], the length a 4-byte big-endian prefix (ColdFire
-   is big-endian, matching the runtime's int read). The STRING handle is the
-   address of that object. */
+   out as [int length][bytes]. The runtime reads the length as a native int, so
+   the 4-byte prefix is written in the target's byte order (big-endian on
+   ColdFire, little-endian on RISC-V and the other little-endian targets). The
+   STRING handle is the address of that object. */
 static struct val
 lower_str_value(struct node *s)
 {
@@ -1788,10 +1790,17 @@ lower_str_value(struct node *s)
     g->is_local = 1;
     g->is_rodata = 1;
     buf = arena_alloc(lower_arena, 4 + len);
+#if SKJ_BIG_ENDIAN
     buf[0] = (unsigned char)((len >> 24) & 0xff);
     buf[1] = (unsigned char)((len >> 16) & 0xff);
     buf[2] = (unsigned char)((len >> 8) & 0xff);
     buf[3] = (unsigned char)(len & 0xff);
+#else
+    buf[0] = (unsigned char)(len & 0xff);
+    buf[1] = (unsigned char)((len >> 8) & 0xff);
+    buf[2] = (unsigned char)((len >> 16) & 0xff);
+    buf[3] = (unsigned char)((len >> 24) & 0xff);
+#endif
     memcpy(buf + 4, s->sval, len);
     g->init_string = (char *)buf;
     g->init_strlen = 4 + len;

@@ -252,11 +252,21 @@ fwd_f(FILE *out, struct ir_func *fn, int t, const char *reg, int f32)
  * Temp -> register materialisation
  ****************************************************************/
 
+static int *temp_is_i64;         /* per-temp map, built per function */
+static const char *i64_rs_lo(FILE *out, struct ir_func *fn, int t, int scratch);
+
 static const char *
 rs(FILE *out, struct ir_func *fn, int t, int scratch)
 {
-    int r = fn->temp_reg[t];
+    int r;
 
+    /* An i64 temp used in a 32-bit context (e.g. a shift count, or a narrowing
+       to int) reads its low word, the register pair's lo half, not temp_reg[t]
+       read as a single register (that holds the pair index). Mirror rv_select's
+       i64-aware rs. */
+    if (temp_is_i64 && t >= 0 && temp_is_i64[t])
+        return i64_rs_lo(out, fn, t, scratch);
+    r = fn->temp_reg[t];
     if (r >= 0)
         return regs[r];
     fprintf(out, "\tlw %s, %d($fp)\n",
@@ -572,7 +582,6 @@ static int arg_fw[MIPS_MAX_ARGS];   /* per-arg float width: 1 = F32, 0 = F64 */
 static int arg_align8[MIPS_MAX_ARGS]; /* 1: start this arg on an even word (the
                                          first word of an 8-aligned struct) */
 static int narg;
-static int *temp_is_i64;         /* per-temp map, built per function */
 static int label_prefix;
 static int ovf_label_ctr;        /* unique locals for label-less overflow traps */
 #ifndef MIPS_SOFTFLOAT
@@ -1925,6 +1934,34 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
             i64_rs_hi(out, fn, i->b, 1));
         fprintf(out, "\tjal __muldi3\n");
         fprintf(out, "\taddiu $sp, $sp, 16\n");
+        const char *dlo = i64_rd_lo(fn, i->dst, 0);
+        const char *dhi = i64_rd_hi(fn, i->dst, 1);
+        if (strcmp(dlo, "$v0") != 0)
+            fprintf(out, "\tmove %s, $v0\n", dlo);
+        if (strcmp(dhi, "$v1") != 0)
+            fprintf(out, "\tmove %s, $v1\n", dhi);
+        i64_wd_lo(out, fn, i->dst, dlo);
+        i64_wd_hi(out, fn, i->dst, dhi);
+        break;
+    }
+
+    case IR_DIVS64: case IR_DIVU64: case IR_MODS64: case IR_MODU64: {
+        /* The 64-bit divide family is not inlined like the other pair ops: it
+           calls soft64.c's __divdi3/__udivdi3/__moddi3/__umoddi3, linked from
+           soft64_div.o, through the o32 register ABI (first long long in
+           $a0:$a1, second in $a2:$a3, result in $v0:$v1). i64 pairs live in
+           $s0-$s7, so $a0-$a3 are free here. Each half is loaded and moved into
+           its argument register in turn, so a reused spill scratch is consumed
+           before the next load overwrites it. */
+        const char *sym = i->op == IR_DIVS64 ? "__divdi3" :
+                          i->op == IR_DIVU64 ? "__udivdi3" :
+                          i->op == IR_MODS64 ? "__moddi3" : "__umoddi3";
+        const char *r;
+        r = i64_rs_lo(out, fn, i->a, 0); fprintf(out, "\tmove $a0, %s\n", r);
+        r = i64_rs_hi(out, fn, i->a, 0); fprintf(out, "\tmove $a1, %s\n", r);
+        r = i64_rs_lo(out, fn, i->b, 1); fprintf(out, "\tmove $a2, %s\n", r);
+        r = i64_rs_hi(out, fn, i->b, 1); fprintf(out, "\tmove $a3, %s\n", r);
+        fprintf(out, "\tjal %s\n", sym);
         const char *dlo = i64_rd_lo(fn, i->dst, 0);
         const char *dhi = i64_rd_hi(fn, i->dst, 1);
         if (strcmp(dlo, "$v0") != 0)

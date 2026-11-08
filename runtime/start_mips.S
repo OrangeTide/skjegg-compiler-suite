@@ -148,6 +148,24 @@ nanosleep:
 	syscall
 	SYSRET
 
+/* int clock_gettime(int clk_id, struct timespec *ts);  MIPS is a legacy 32-bit
+   arch, so it keeps the ordinary 32-bit-timespec clock_gettime (unlike rv32).
+   Args pass through $a0, $a1; the emulator maps #4263 to GSYS_CLOCK_GETTIME. */
+	.globl clock_gettime
+clock_gettime:
+	li	$v0, 4263		/* __NR_clock_gettime (__NR_Linux + 263) */
+	syscall
+	SYSRET
+
+/* int getrandom(void *buf, size_t len, unsigned flags);  fills buf with random
+   bytes, used to seed the BASIC RND generator.  Args pass through $a0, $a1,
+   $a2; the emulator maps #4353 to GSYS_GETRANDOM. */
+	.globl getrandom
+getrandom:
+	li	$v0, 4353		/* __NR_getrandom (__NR_Linux + 353) */
+	syscall
+	SYSRET
+
 /* int sched_yield(void);  gives up the rest of the task's turn without
    sleeping, so a spawned pipeline makes progress under the cooperative
    scheduler.  No args; the emulator maps #4162 to GSYS_SCHED_YIELD. */
