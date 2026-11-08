@@ -1,0 +1,14 @@
+len=12
+asc=72
+chr=A
+left=Hello
+right=World
+mid=Wor
+mid2=World
+uc=HELLO, WORLD
+lc=hello, world
+instr=8
+instr0=0
+stri=42
+strf=3.5
+cat=Hello!

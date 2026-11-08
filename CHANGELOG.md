@@ -6,6 +6,48 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.48.0
+
+#### Added
+- A BASIC front end, `skj-bc`, imports the core of the BASIDE structured-BASIC
+  language as a new statically compiled front end over the shared IR. BASIC
+  joins TinScheme, MooScript, Pascal, Kobold, and C on the same backends,
+  assemblers, and linkers, following the standard front-end shape (`lex.c`,
+  `parse.c`, `lower.c`, `main.c`). It takes the language, not the BASIDE
+  bytecode VM or SDL runtime: the scope is the core language, with no VM ISA and
+  no display or game statement library. The front end targets ColdFire/m68k and
+  its programs run under qemu-m68k. The language reference is
+  `doc/languages/basic.md`.
+  - Types: a 64-bit `INT`, a `FLOAT` (IEEE 754 double) with numeric promotion, a
+    `BYTE`, a dynamic `STRING`, records (`TYPE`...`ENDTYPE`, with fields, whole
+    record assignment, and `REF` record parameters), and fixed arrays of scalar
+    types. The full integer and float expression grammar, `CONST` and `ENUM`
+    integer constants, and a predeclared `PI`.
+  - Control flow: `IF`/`ELSEIF`/`ELSE` (single-line and block), `WHILE`,
+    `REPEAT`/`UNTIL`, `FOR`/`NEXT`, `FOR EACH` over arrays, `CASE`/`WHEN` with
+    value, range, and relational items, and `EXIT`.
+  - `PROC` and `FN` routines with value and `REF` parameters, forward
+    declaration, and mutual recursion.
+  - Console and timing statements: `PRINT` with `;` and `,` separators, `INPUT`,
+    and `WAIT`.
+  - The core built-in library: the string functions `LEN`, `ASC`, `INSTR`,
+    `CHR$`, `STR$`, `LEFT$`, `RIGHT$`, `MID$`, `UCASE$`, `LCASE$`, `SPACE$`,
+    `STRING$`, `HEX$`, `BIN$`, `FIX$`, `ZERO$`, `RJUST$`, `LJUST$`; the numeric
+    functions `ABS`, `SGN`, `MIN`, `MAX`, `CLAMP`, `FLOOR`, `CEIL`, `ROUND`,
+    `LERP`, `SQR`, and the trigonometric family `SIN`, `COS`, `TAN`, `ATN`,
+    `ATN2`, `SIND`, `COSD`, `TAND`; the conversions `INT`, `FLOAT`, `VAL`,
+    `VALINT`; and `RND`, `SEED`, `TIME`.
+  - A small freestanding BASIC runtime (`runtime/basic_rt.c`) over the shared
+    syscall seam, with no libc or libm. It carries its own string operations,
+    integer and float formatting, software square root and trigonometry, a
+    linear congruential generator for `RND`, and a monotonic clock for `TIME`.
+  - The `VECTOR` growable-list type and the `AT` and `TAB` console cursor
+    statements are specified but not yet implemented.
+  - A user manual, `doc/tools/skj-bc.md`, covers invoking the compiler, the
+    compile/assemble/link/run pipeline, a tour of the language, a reference for
+    every core built-in function, and a consolidated grammar. The normative
+    language definition stays in `doc/languages/basic.md`.
+
 ### 0.47.1
 
 #### Changed

@@ -1,0 +1,8 @@
+b=200
+sum=300
+wrap=300
+trunc=44
+zero=0
+neg=255
+mod256=44
+cmp=1

@@ -176,8 +176,14 @@ PAS_TESTS := $(wildcard tests/pascal_*.pas)
 # are host-only too.
 PAS_TESTS_NOFLOAT := $(filter-out %_real.pas %_hostio.pas,$(PAS_TESTS))
 
+# BASIC codegen test lists. Defined here, ahead of the `check` target, because a
+# rule's prerequisites are expanded when the rule is read: a definition placed
+# after `check` would expand to nothing in its prerequisite list.
+BAS_TESTS := $(wildcard tests/basic_*.bas)
+BAS_BINS := $(BAS_TESTS:tests/%.bas=build/%)
+
 TOOLS := build/skj-sc build/skj-sc-rv build/skj-sc-mips build/skj-sc-arm64 \
-         build/skj-mooc build/skj-pc build/skj-as build/skj-ld \
+         build/skj-mooc build/skj-pc build/skj-bc build/skj-as build/skj-ld \
          build/skj-as-rv build/skj-ld-rv build/skj-as-mips build/skj-ld-mips build/skj-ar \
          build/skj-as-x86-64 build/skj-as-aarch64 build/skj-ld-aarch64 \
          build/skj-ld-x86-64 build/skj-ld-arm64 \
@@ -2442,7 +2448,7 @@ release-check:
 
 FORCE:
 
-check: build/skj-mooc build/skj-pc $(SCM_TESTS:tests/%.scm=build/%) $(MOO_TESTS:tests/%.moo=build/%) $(MOO_TOY_TESTS:tests/%.moo=build/%) $(PAS_TESTS_NOFLOAT:tests/%.pas=build/%)
+check: build/skj-mooc build/skj-pc build/skj-bc $(SCM_TESTS:tests/%.scm=build/%) $(MOO_TESTS:tests/%.moo=build/%) $(MOO_TOY_TESTS:tests/%.moo=build/%) $(PAS_TESTS_NOFLOAT:tests/%.pas=build/%) $(BAS_TESTS:tests/%.bas=build/%)
 	@sh tests/run-tests.sh "$(QEMU)"
 
 ## RISC-V per-test rules: tests/<name>.scm -> build/rv/<name>.s -> .o -> binary
@@ -3998,6 +4004,13 @@ PC_SRC := pascal/lex.c pascal/parse.c pascal/lower.c pascal/main.c $(IR_SRC) $(B
 build/skj-pc: $(PC_SRC) pascal/pascal.h ir/ir.h | build
 	$(CC) $(CFLAGS) -Ipascal -Iir -o $@ $(PC_SRC)
 
+## BASIC compiler (skj-bc): the core of the BASIDE dialect
+## (doc/languages/basic.md), lowered to the shared IR over the ColdFire backend.
+BASIC_SRC := basic/lex.c basic/parse.c basic/lower.c basic/main.c $(IR_SRC) $(BE_CF)
+
+build/skj-bc: $(BASIC_SRC) basic/basic.h ir/ir.h | build
+	$(CC) $(CFLAGS) -Ibasic -Iir -o $@ $(BASIC_SRC)
+
 ## ---- Native host Pascal compilers (x86-64, aarch64) ----
 ## The front end is backend-agnostic; each host target is a separate binary
 ## linked with that target's shared selector, mirroring skj-cc.  -DSKJ_LP64
@@ -4079,6 +4092,20 @@ build/pascal_%.s: tests/pascal_%.pas build/skj-pc | build
 PAS_BINS := $(PAS_TESTS_NOFLOAT:tests/%.pas=build/%)
 $(PAS_BINS): build/%: build/%.o build/start.o build/pascal_rt.o build/skj-ld
 	./build/skj-ld -o $@ build/start.o build/pascal_rt.o $<
+
+## BASIC runtime (cross-compiled C), freestanding like the Pascal one.
+build/basic_rt.o: runtime/basic_rt.c | build
+	$(M68K_CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<
+
+## BASIC codegen tests (.bas -> .s via skj-bc)
+build/basic_%.s: tests/basic_%.bas build/skj-bc | build
+	./build/skj-bc -o $@ $<
+
+## BASIC test binaries link start.o and the runtime. BAS_TESTS/BAS_BINS are
+## defined earlier (ahead of the check target) so the check prerequisites see
+## them.
+$(BAS_BINS): build/%: build/%.o build/start.o build/basic_rt.o build/skj-ld
+	./build/skj-ld -o $@ build/start.o build/basic_rt.o $<
 
 ## FPU integration test (IR builder → ColdFire asm → qemu-m68k)
 FPU_TEST_SRC := tests/test_fpu.c $(IR_SRC) $(BE_CF)
