@@ -204,6 +204,15 @@ FN is_odd(n AS INT) AS INT
 ENDFN
 ```
 
+A `DECLARE` can instead bind a foreign C routine, with no BASIC body, by adding
+`EXTERNAL "<symbol>"`. The call lowers to that object symbol, and `INT` crosses
+at the C `int` width. This is how a BASIC program reaches a C library such as the
+PlayStation SDK; see `doc/languages/basic-modules.md`.
+
+```basic
+DECLARE PROC psx_set_bg(r AS INT, g AS INT, b AS INT) EXTERNAL "psx_set_bg"
+```
+
 An `FN` may return several values, used where each value has a place:
 
 ```basic
@@ -418,7 +427,8 @@ ProcDecl    = 'PROC' IDENTIFIER '(' [ ParamList ] ')' StatementList 'ENDPROC' .
 FnDecl      = 'FN' IDENTIFIER '(' [ ParamList ] ')' 'AS' RetList
               StatementList 'ENDFN' .
 ForwardDecl = 'DECLARE' ( 'PROC' IDENTIFIER '(' [ ParamList ] ')'
-                        | 'FN' IDENTIFIER '(' [ ParamList ] ')' 'AS' RetList ) .
+                        | 'FN' IDENTIFIER '(' [ ParamList ] ')' 'AS' RetList )
+              [ 'EXTERNAL' STRING_LITERAL ] .
 RetList     = Type { ',' Type } .
 ParamList   = Param { ',' Param } .
 Param       = [ 'REF' ] IDENTIFIER [ '(' ConstExprList ')' ] 'AS' Type .

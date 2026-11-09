@@ -9,11 +9,11 @@ The authoritative declaration is `libpsx/psx.h`. The signatures below match it;
 the prose is the contract. A function with no documented return value returns
 nothing.
 
-## Calling from C, Pascal, and Kobold
+## Calling from C, Pascal, Kobold, and BASIC
 
-One library backs all three languages. The entry points are plain C with the
-toolkit stack calling convention, and the Pascal and Kobold bindings are thin
-units that re-export the same code, adding no logic.
+One library backs all four languages. The entry points are plain C, and the
+Pascal, Kobold, and BASIC bindings are thin units that re-export the same code,
+adding no logic.
 
 - **C** includes `libpsx/psx.h` and calls the `psx_*` names directly. This is
   the full surface; everything on this page is reachable from C.
@@ -27,8 +27,14 @@ units that re-export the same code, adding no logic.
   `psx.cd`, `psx.gte`, `psx.ot`) that it re-exports, so one `uses psx` reaches
   every name while the linker pulls only the subsystems a game calls. A game that
   wants to be explicit can `uses psx.gte as _` for just the 3D leaf instead.
+- **BASIC** does `IMPORT psx` (`units/psx.bas`) and calls the same PascalCase
+  names dotted (`psx.GpuInit`, `psx.DrawRect`), or `FROM psx IMPORT ...` to call
+  them bare. The module is a flat set of `EXTERNAL` declarations over the same
+  pointer-free subset. BASIC's `INT` is 64-bit, so the binding crosses each
+  `INT` at the C `int` width (see `doc/languages/basic-modules.md`, EXTERNAL);
+  the caller narrows arguments and widens results automatically.
 
-Pascal has no pointers and the Kobold unit stays pointer-free, so the handful of
+Pascal has no pointers and the Kobold and BASIC bindings stay pointer-free, so the handful of
 entry points that take a C pointer (a `psx_texinfo`, a matrix, a raw buffer) are
 C-only. Textures reach the other two languages through the integer-handle API
 (`psx_tex_upload` and the `psx_tex_*` draws), and 3D reaches them through the
@@ -391,4 +397,4 @@ maps the full image of a handle's texture to the four screen corners. Call
   cube in each language, run it, and an example project Makefile.
 - [The MIPS backend](mips.md): the R3000/R3051 code generator and the PS-EXE
   output path.
-- `examples/psx/`: worked examples in C, Pascal, and Kobold.
+- `examples/psx/`: worked examples in C, Pascal, Kobold, and BASIC.

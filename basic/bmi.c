@@ -40,10 +40,14 @@ class_from_str(const char *s, size_t n)
 
 /* A BASIC declared type (TY_DECL_*) as a .bmi primitive class. INT is i64, BYTE
    is i8, FLOAT is f64, STRING is a BASIC string handle, and a record (always a
-   REF parameter at an exported boundary) is an opaque handle. */
+   REF parameter at an exported boundary) is an opaque handle. On an EXTERNAL
+   routine, whose signature crosses to a foreign C routine, INT is instead i32
+   (the C `int` width), so the caller passes and reads it as a 32-bit value. */
 static int
-decl_to_class(int ty)
+decl_to_class_ext(int ty, int is_ext)
 {
+    if (is_ext && ty == TY_DECL_INT)
+        return BMI_I32;
     switch (ty) {
     case TY_DECL_INT:    return BMI_I64;
     case TY_DECL_FLOAT:  return BMI_F64;
@@ -60,24 +64,24 @@ decl_to_class(int ty)
    handle itself. A REF primitive is a pointer to that primitive, written
    "ref <class>". A by-value primitive is just its class. */
 static void
-write_param(FILE *out, struct node *pm)
+write_param(FILE *out, struct node *pm, int is_ext)
 {
     if (pm->op == TY_DECL_RECORD)
         fprintf(out, "handle %s ", pm->sval);   /* a named opaque handle */
     else if (pm->ival)
-        fprintf(out, "ref %s ", class_to_str(decl_to_class(pm->op)));
+        fprintf(out, "ref %s ", class_to_str(decl_to_class_ext(pm->op, is_ext)));
     else
-        fprintf(out, "%s ", class_to_str(decl_to_class(pm->op)));
+        fprintf(out, "%s ", class_to_str(decl_to_class_ext(pm->op, is_ext)));
 }
 
 static void
-write_sig(FILE *out, struct node *params)
+write_sig(FILE *out, struct node *params, int is_ext)
 {
     struct node *pm;
 
     fputs("( ", out);
     for (pm = params; pm; pm = pm->next)
-        write_param(out, pm);
+        write_param(out, pm, is_ext);
     fputs(")", out);
 }
 
@@ -106,20 +110,24 @@ bmi_write(FILE *out, struct node *prog)
             fprintf(out, ".type %s handle\n", s->name);
             break;
         case N_FN:
-            if (s->ival)                /* a forward DECLARE; the definition emits */
+            /* Skip a plain forward DECLARE (its definition emits the entry); an
+               EXTERNAL decl has no definition, so emit it here, bound to its C
+               symbol with INT crossing at the C `int` width. */
+            if (s->ival && !s->link)
                 break;
-            fprintf(out, ".func %s link %s ", s->name, s->name);
-            write_sig(out, s->a);
+            fprintf(out, ".func %s link %s ", s->name, s->link ? s->link : s->name);
+            write_sig(out, s->a, s->link != NULL);
             if (s->op == TY_DECL_RECORD)        /* a named opaque handle return */
                 fprintf(out, " -> handle %s\n", s->sval);
             else
-                fprintf(out, " -> %s\n", class_to_str(decl_to_class(s->op)));
+                fprintf(out, " -> %s\n",
+                        class_to_str(decl_to_class_ext(s->op, s->link != NULL)));
             break;
         case N_PROC:
-            if (s->ival)
+            if (s->ival && !s->link)
                 break;
-            fprintf(out, ".proc %s link %s ", s->name, s->name);
-            write_sig(out, s->a);
+            fprintf(out, ".proc %s link %s ", s->name, s->link ? s->link : s->name);
+            write_sig(out, s->a, s->link != NULL);
             fputc('\n', out);
             break;
         default:

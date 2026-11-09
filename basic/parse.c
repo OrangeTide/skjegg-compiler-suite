@@ -1221,7 +1221,12 @@ parse_fn(struct parser *p)
     return n;
 }
 
-/* ForwardDecl = 'DECLARE' ( 'PROC' ... | 'FN' ... 'AS' Type ) .  No body. */
+/* ForwardDecl = 'DECLARE' ( 'PROC' ... | 'FN' ... 'AS' Type )
+                 [ 'EXTERNAL' STRING_LITERAL ] .
+   No body. A plain forward declaration names a routine defined later in the same
+   file. An EXTERNAL declaration instead binds the name to a foreign routine at
+   the given object symbol (a C function in a linked library); it has no BASIC
+   body, and its primitive INT parameters and result cross at the C `int` width. */
 static struct node *
 parse_declare(struct parser *p)
 {
@@ -1257,6 +1262,12 @@ parse_declare(struct parser *p)
         return NULL;                            /* not reached */
     }
     n->ival = 1;                                /* forward declaration, no body */
+    if (is_kw(p, KW_EXTERNAL)) {
+        advance(p);                             /* EXTERNAL */
+        if (p->cur.kind != TK_STRING_LIT)
+            perr(p, "EXTERNAL must be followed by the object symbol as a string");
+        n->link = parse_string(p)->sval;        /* the C symbol to bind to */
+    }
     return n;
 }
 

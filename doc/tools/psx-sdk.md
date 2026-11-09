@@ -1,10 +1,10 @@
 # The PlayStation SDK
 
-`libpsx` is a runtime SDK that lets C, Pascal, and Kobold programs drive
+`libpsx` is a runtime SDK that lets C, Pascal, Kobold, and BASIC programs drive
 the original PlayStation (SCPH-100x, the R3051 at 33.8 MHz) well enough to make
 games: its GPU, SPU, controllers, timers, memory card, and CD-ROM, plus 3D
-through the GTE. It is one C and assembly library. Pascal and Kobold reach it
-through thin units that bind the C names and add no logic of their own.
+through the GTE. It is one C and assembly library. Pascal, Kobold, and BASIC
+reach it through thin units that bind the C names and add no logic of their own.
 
 The complete function reference is in [the API reference](psx-api.md), and
 [Setting up the PlayStation toolchain](psx-setup.md) is the step-by-step install
@@ -24,8 +24,8 @@ table top to bottom: each layer says how it reaches the one beneath it.
 
 | Layer | What is here | Reaches the layer below by |
 |-------|--------------|----------------------------|
-| **Game** | your program, in C, Pascal, or Kobold | in C, `#include "psx.h"` and call `libpsx` directly; in Pascal and Kobold, go through the unit below |
-| **Binding** (Pascal and Kobold only) | the `psx.pas` unit, and the `psx.kp` umbrella over its per-subsystem leaves (`psx.gpu`, `psx.pad`, ...): `external` declarations with no logic | the one calling convention all three front ends emit (below), so the unit is a name-binding layer, not a shim |
+| **Game** | your program, in C, Pascal, Kobold, or BASIC | in C, `#include "psx.h"` and call `libpsx` directly; in Pascal, Kobold, and BASIC, go through the binding below |
+| **Binding** (Pascal, Kobold, BASIC) | the `psx.pas` unit, the `psx.kp` umbrella over its per-subsystem leaves (`psx.gpu`, `psx.pad`, ...), and the `psx.bas` module (`EXTERNAL` declarations): name-binding with no logic | Pascal and Kobold share the toolkit stack calling convention `libpsx` uses; BASIC follows the platform psABI and crosses `INT` at the C `int` width (`EXTERNAL`), so the binding is a name-and-width layer, not a shim |
 | **`libpsx`** | one C-and-assembly library: the `gpu`, `dma`, `irq`, `spu`, `pad`, `timer`, `cd`, `fixed`, `gte`, `ot`, `tex`, and `debug` modules, plus the BIOS shims | `volatile` MMIO loads and stores, and BIOS A0/B0/C0 calls |
 | **Hardware** | the GPU, SPU, controllers, CD-ROM, timers, and the BIOS | — |
 

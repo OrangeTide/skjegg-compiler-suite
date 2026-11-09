@@ -6,6 +6,31 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.51.0
+
+#### Added
+- BASIC binds a foreign C routine with an `EXTERNAL` clause. A
+  `DECLARE PROC Name(params) EXTERNAL "csym"` or
+  `DECLARE FN Name(params) AS T EXTERNAL "csym"` names the object symbol a BASIC
+  routine resolves to, with no body, the way Pascal's `external` and Kobold's
+  `external cdecl` do. An `EXTERNAL` routine may be `EXPORT`ed from a module,
+  where its `.bmi` records the link symbol. A BASIC `INT` is 64-bit but a C
+  `int` is 32-bit, so an `EXTERNAL` routine crosses `INT` as a 32-bit value. The
+  caller narrows each argument and sign-extends a 32-bit result, which keeps the
+  argument registers aligned on the o32 (MIPS) ABI and widens the return value
+  correctly on the LP64 backends.
+- `units/psx.bas`, a BASIC binding to the `libpsx` PlayStation SDK, built on the
+  `EXTERNAL` clause. BASIC joins C, Pascal, and Kobold as the fourth language
+  that drives the original PlayStation hardware. The binding covers the
+  pointer-free scalar and integer-handle subset of libpsx: GPU and display,
+  texture draws by handle, the pointer-free GTE helpers and ordering table,
+  fixed-point, pad, SPU, CD, and timers. The pointer and struct entry points
+  stay on the C side behind small accessors.
+- BASIC ports of the `hello`, `cube`, and `sprite` PlayStation demos in
+  `examples/psx/`, with a README and captured screenshots, so BASIC sits beside
+  the other three languages. The demos build as MIPS PS-EXE binaries and were
+  verified on the PCSX-Redux emulator.
+
 ### 0.50.0
 
 #### Added

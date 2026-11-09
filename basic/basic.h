@@ -57,7 +57,7 @@ typedef enum {
 
     /* module system (doc/languages/basic-modules.md); appended so the existing
        keyword ids keep their values. */
-    KW_MODULE, KW_EXPORT, KW_IMPORT, KW_FROM,
+    KW_MODULE, KW_EXPORT, KW_IMPORT, KW_FROM, KW_EXTERNAL,
 
     KW_COUNT_
 } Keyword;
@@ -210,6 +210,9 @@ struct node {
     char         *sval;    /* N_STR bytes (unescaped) */
     int           slen;    /* N_STR length */
     struct bmi_sym *imp;   /* N_IMPORT: the imported routine's interface */
+    char         *link;    /* N_PROC/N_FN: the C symbol of an EXTERNAL
+                              declaration (bodyless, binds to a foreign routine),
+                              or NULL for an ordinary routine */
     struct node  *a;
     struct node  *b;
     struct node  *c;       /* IF else body; FOR step; CASE else body */

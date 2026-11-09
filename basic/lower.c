@@ -117,6 +117,11 @@ struct func_ent {
     int         param_rec[MAX_PARAMS];  /* record/opaque type index (record or
                                            handle param), else -1 */
     int         param_ref[MAX_PARAMS];  /* REF flag (record param) */
+    int         param_i32[MAX_PARAMS];  /* a foreign (EXTERNAL/imported) routine's
+                                           INT parameter that crosses at the C
+                                           `int` width: narrow the arg to 32 bits */
+    int         ret_i32;                /* likewise for the FN result: widen the
+                                           32-bit return to INT */
 };
 static struct func_ent *func_tbl;
 static int              nfunc, func_cap;
@@ -169,16 +174,20 @@ func_register(struct node *n)
     }
     f = &func_tbl[nfunc++];
     f->name = n->name;
-    f->link = n->name;
+    f->link = n->link ? n->link : n->name;   /* an EXTERNAL decl binds a C symbol */
     f->is_fn = (n->kind == N_FN);
     f->ret_ty = f->is_fn ? fn_ret_ty(n) : -1;
     /* fn_ret_ty has already resolved and validated the return type name, so the
        lookup here cannot fail when the return is a handle. */
     f->ret_rec = (f->ret_ty == TY_HANDLE) ? rec_lookup(n->sval) : -1;
+    /* an EXTERNAL routine crosses INT at the C `int` width (i32); a BASIC-to-BASIC
+       routine keeps the native 64-bit INT */
+    f->ret_i32 = (n->link && n->kind == N_FN && n->op == TY_DECL_INT);
     for (struct node *pm = n->a; pm; pm = pm->next) {
         if (np >= MAX_PARAMS)
             die("line %d: routine '%s' has too many parameters",
                 n->line, n->name);
+        f->param_i32[np] = 0;           /* overridden for an EXTERNAL INT below */
         if (pm->op == TY_DECL_RECORD) {
             int ri = rec_lookup(pm->sval);
             if (ri < 0)
@@ -208,6 +217,7 @@ func_register(struct node *n)
             f->param_ty[np] = decl_to_ty(pm->op);
             f->param_rec[np] = -1;
             f->param_ref[np] = 0;
+            f->param_i32[np] = (n->link && pm->op == TY_DECL_INT);
         }
         np++;
     }
@@ -281,6 +291,9 @@ func_register_import(const char *key, struct bmi_sym *s, const char *qual)
     f->ret_rec = (f->ret_ty == TY_HANDLE)
                  ? rec_register_opaque(qual ? qualify_type_name(qual, s->ret_type)
                                             : s->ret_type) : -1;
+    /* an i16/i32 result crosses at the C `int` width, so a 32-bit return widens
+       to INT; i64 is native (a BASIC-to-BASIC routine) */
+    f->ret_i32 = (s->ret == BMI_I32 || s->ret == BMI_I16);
     for (i = 0; i < s->nparam; i++) {
         f->param_ty[i] = bmi_class_to_ty(s->param[i]);
         f->param_rec[i] = (f->param_ty[i] == TY_HANDLE)
@@ -288,6 +301,7 @@ func_register_import(const char *key, struct bmi_sym *s, const char *qual)
                                 ? qualify_type_name(qual, s->param_type[i])
                                 : s->param_type[i]) : -1;
         f->param_ref[i] = 0;
+        f->param_i32[i] = (s->param[i] == BMI_I32 || s->param[i] == BMI_I16);
     }
     f->nparams = s->nparam;
 }
@@ -771,6 +785,8 @@ static struct val lower_str_value(struct node *s);
 static struct val lower_index_read(struct node *n);
 static struct val lower_field_read(struct node *n);
 static int        record_arg_addr(struct node *arg, int want_rec, int line);
+static int        as_i32(struct val v);
+static struct val int_from_i32(int c32);
 
 /* Emit each argument with the opcode its width needs: a FLOAT as IR_FARG, a
    64-bit INT as IR_ARG64, anything else as IR_ARG. */
@@ -1396,7 +1412,8 @@ lower_call(struct node *n)
             if (v.ty != TY_INT && v.ty != TY_BYTE)
                 die("line %d: argument %d of '%s' does not match the integer "
                     "parameter", n->line, nargs + 1, n->name);
-            args[nargs] = v.temp;               /* i64 (INT or BYTE) */
+            /* a foreign i32 parameter takes a 32-bit arg; a native INT stays i64 */
+            args[nargs] = f->param_i32[nargs] ? as_i32(v) : v.temp;
         }
         nargs++;
     }
@@ -1414,7 +1431,10 @@ lower_call(struct node *n)
     if (f->ret_ty == TY_HANDLE)
         return (struct val){ emit_call_retptr(f->link, args, nargs), TY_HANDLE,
                              f->ret_rec };
-    /* INT or BYTE result: BYTE promotes to INT at the call site */
+    /* INT or BYTE result: BYTE promotes to INT at the call site. A foreign i32
+       result is read as a 32-bit value and sign-extended to INT. */
+    if (f->ret_i32)
+        return int_from_i32(emit_call_ret32(f->link, args, nargs));
     return (struct val){ emit_call_ret64(f->link, args, nargs), TY_INT, -1 };
 }
 

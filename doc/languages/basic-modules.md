@@ -253,6 +253,32 @@ functions with convenience macros:
 
 Nothing reconciles struct layout anywhere, because no layout crosses a boundary.
 
+## Binding a C library directly: `EXTERNAL`
+
+A routine can bind an existing C symbol with no BASIC body by declaring it
+`EXTERNAL`:
+
+```basic
+EXPORT DECLARE PROC SetBg(r AS INT, g AS INT, b AS INT) EXTERNAL "psx_set_bg"
+EXPORT DECLARE FN   Fmul(a AS INT, b AS INT) AS INT EXTERNAL "psx_fmul"
+```
+
+The string is the object symbol the call binds to (the `link` field of the entry),
+so a tidy BASIC name can wrap a differently spelled C symbol. This is the BASIC
+form of Pascal's `external` and Kobold's `external cdecl name`, and it is how the
+libpsx binding (`units/psx.bas`) reaches the PlayStation SDK. An `EXTERNAL`
+declaration may stand in a module, whose interface is then exported in the `.bmi`,
+or in a plain program that links the symbol directly.
+
+An `EXTERNAL` routine crosses `INT` at the C `int` width. A BASIC `INT` is 64-bit
+but a C `int` is 32-bit, so an `EXTERNAL` routine's `INT` parameter and result are
+the `i32` class in the `.bmi`: the compiler narrows each argument to 32 bits at the
+call and sign-extends a 32-bit result back to `INT`. A BASIC-to-BASIC routine keeps
+the native 64-bit `INT` (`i64`), so ordinary module calls are unaffected. The
+boundary handles only the primitives the C ABI passes by value; a pointer or struct
+argument stays on the C side behind an accessor that takes and returns handles and
+scalars, as `units/psx.bas` and `examples/psx/sprite_asset.c` show.
+
 ## Linking and dead code
 
 Because each language's code lives in its own object members and the linker pulls
@@ -277,7 +303,8 @@ These join the core grammar in `basic.md` when implemented:
 ModuleStmt = 'MODULE' IDENT .
 ImportStmt = 'FROM' IDENT 'IMPORT' IDENT { ',' IDENT }
            | 'IMPORT' IDENT .
-ExportDecl = 'EXPORT' ( ConstDecl | TypeDecl | ProcDecl | FnDecl ) .
+ExportDecl = 'EXPORT' ( ConstDecl | TypeDecl | ProcDecl | FnDecl | ExternDecl ) .
+ExternDecl = 'DECLARE' ( ProcHeader | FnHeader ) 'EXTERNAL' STRING_LITERAL .
 Qualified  = IDENT '.' IDENT .                 ' a qualified-import reference
 ```
 
