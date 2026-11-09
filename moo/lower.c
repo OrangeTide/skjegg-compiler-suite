@@ -257,6 +257,11 @@ static int in_defer;
 static int use_return_push;
 static int ret_base_slot;
 static int ret_count_slot;
+static int ret_write_slot;      /* address of the next list element to write; it
+                                   advances by 4 per push, so the list stays
+                                   contiguous no matter how the arena rounds a
+                                   reservation (the push no longer assumes the
+                                   per-element alloc lands right after the last). */
 
 static int
 has_return_push(struct node *n)
@@ -1856,13 +1861,31 @@ lower_stmt(struct node *n)
         return;
 
     case N_RETURN_PUSH: {
-        int val, argv[1], addr, cnt, one, cnt1;
+        int val, argv[1], wp, four, wp1, cnt, one, cnt1;
         val = deref_prop(lower_expr(n->a)).temp;
+        /* Reserve four bytes in the arena for this element.  The arena may round
+           the reservation up (e.g. to 8 for alignment), so its return address is
+           not used; the element is written at the tracked write pointer, which
+           advances by exactly 4, keeping the list contiguous within the reserved
+           span (the cumulative reservation is always >= the cumulative writes). */
         argv[0] = lower_const(4);
-        addr = emit_rtcall("__moo_arena_alloc", 1, argv);
+        emit_rtcall("__moo_arena_alloc", 1, argv);
+        ins = emit(IR_LDL);
+        ins->dst = new_temp();
+        ins->slot = ret_write_slot;
+        wp = ins->dst;
         ins = emit(IR_SW);
-        ins->a = addr;
+        ins->a = wp;
         ins->b = val;
+        four = lower_const(4);
+        ins = emit(IR_ADD);
+        ins->dst = new_temp();
+        ins->a = wp;
+        ins->b = four;
+        wp1 = ins->dst;
+        ins = emit(IR_STL);
+        ins->a = wp1;
+        ins->slot = ret_write_slot;
         ins = emit(IR_LDL);
         ins->dst = new_temp();
         ins->slot = ret_count_slot;
@@ -2097,9 +2120,10 @@ lower_function(struct node *fn_ast)
     ins->nargs = nparams;
 
     if (use_return_push) {
-        int argv[1], base, zero;
+        int argv[1], base, zero, four, wp;
         ret_base_slot = alloc_slot(4);
         ret_count_slot = alloc_slot(4);
+        ret_write_slot = alloc_slot(4);
         argv[0] = lower_const(4);
         base = emit_rtcall("__moo_arena_alloc", 1, argv);
         ins = emit(IR_STL);
@@ -2112,6 +2136,16 @@ lower_function(struct node *fn_ast)
         ins = emit(IR_STL);
         ins->a = zero;
         ins->slot = ret_count_slot;
+        /* first element goes right after the count header, at base + 4 */
+        four = lower_const(4);
+        ins = emit(IR_ADD);
+        ins->dst = new_temp();
+        ins->a = base;
+        ins->b = four;
+        wp = ins->dst;
+        ins = emit(IR_STL);
+        ins->a = wp;
+        ins->slot = ret_write_slot;
     }
 
     if (use_defer) {

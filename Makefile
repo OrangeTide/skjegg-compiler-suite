@@ -179,7 +179,11 @@ PAS_TESTS_NOFLOAT := $(filter-out %_real.pas %_hostio.pas,$(PAS_TESTS))
 # BASIC codegen test lists. Defined here, ahead of the `check` target, because a
 # rule's prerequisites are expanded when the rule is read: a definition placed
 # after `check` would expand to nothing in its prerequisite list.
-BAS_TESTS := $(wildcard tests/basic_*.bas)
+# basic_mod_*.bas are MODULE sources (libraries, no entry point), exercised by
+# test-basic-module rather than run as program tests, so they are kept out of the
+# runnable-program lists. basic_err_*.bas are deliberately ill-typed modules that
+# must fail to compile, exercised by test-basic-handle-types.
+BAS_TESTS := $(filter-out tests/basic_mod_%.bas tests/basic_err_%.bas,$(wildcard tests/basic_*.bas))
 BAS_BINS := $(BAS_TESTS:tests/%.bas=build/%)
 
 # basic_t018_trig prints full-precision transcendental results (SIN/COS/TAN and
@@ -2460,7 +2464,7 @@ release-check:
 
 FORCE:
 
-check: build/skj-mooc build/skj-pc build/skj-bc $(SCM_TESTS:tests/%.scm=build/%) $(MOO_TESTS:tests/%.moo=build/%) $(MOO_TOY_TESTS:tests/%.moo=build/%) $(PAS_TESTS_NOFLOAT:tests/%.pas=build/%) $(BAS_TESTS_CF:tests/%.bas=build/%)
+check: build/skj-mooc build/skj-pc build/skj-bc $(SCM_TESTS:tests/%.scm=build/%) $(MOO_TESTS:tests/%.moo=build/%) $(MOO_TOY_TESTS:tests/%.moo=build/%) $(PAS_TESTS_NOFLOAT:tests/%.pas=build/%) $(BAS_TESTS_CF:tests/%.bas=build/%) test-basic-bmi test-basic-module test-basic-import test-basic-import-qual test-basic-opaque test-basic-opaque-qual test-basic-handle-types
 	@sh tests/run-tests.sh "$(QEMU)"
 
 ## RISC-V per-test rules: tests/<name>.scm -> build/rv/<name>.s -> .o -> binary
@@ -2498,8 +2502,50 @@ BAS_RV_BINS := $(BAS_TESTS:tests/%.bas=build/rv/%)
 $(BAS_RV_BINS): build/rv/%: build/rv/%.o build/rv/start.o build/rv/basic_rt.o build/rv/soft64_div.o
 	$(RV_LD) -m elf32lriscv -o $@ build/rv/start.o build/rv/basic_rt.o build/rv/soft64_div.o $<
 
-check-rv-bc: build/skj-bc-rv $(BAS_RV_BINS)
+check-rv-bc: build/skj-bc-rv $(BAS_RV_BINS) test-basic-opaque-rv test-basic-opaque-qual-rv
 	@sh tests/run-tests.sh "$(QEMU_RV)" build/rv
+
+## The module system is in the shared front end, so the opaque-TYPE path (an
+## arena-allocated record reached by handle across an archive) is checked on
+## rv32 too, not only ColdFire. Reuses the Geom module and its consumer; the
+## printed values are exact doubles, so the golden is the same across targets.
+build/rv/basic_mod_geom.s: tests/basic_mod_geom.bas build/skj-bc-rv | build/rv
+	./build/skj-bc-rv --emit-module --meta build/rv/geom.bmi -o $@ $<
+
+build/rv/basic_mod_geom.o: build/rv/basic_mod_geom.s | build/rv
+	$(RV_AS) $(RV_AS_ARCH) -o $@ $<
+
+build/rv/Geom.a: build/rv/basic_mod_geom.o build/skj-ar | build/rv
+	sh tests/basic-archive.sh build/skj-ar $@ build/rv/geom.bmi build/rv/basic_mod_geom.o
+
+build/rv/basic_mod_opaque.s: tests/basic_mod_opaque.bas build/rv/Geom.a build/skj-bc-rv | build/rv
+	./build/skj-bc-rv -I build/rv -o $@ $<
+
+build/rv/basic_mod_opaque.o: build/rv/basic_mod_opaque.s | build/rv
+	$(RV_AS) $(RV_AS_ARCH) -o $@ $<
+
+build/rv/basic_mod_opaque: build/rv/basic_mod_opaque.o build/rv/start.o build/rv/basic_rt.o build/rv/soft64_div.o build/rv/Geom.a
+	$(RV_LD) -m elf32lriscv -o $@ build/rv/start.o build/rv/basic_rt.o build/rv/soft64_div.o build/rv/basic_mod_opaque.o build/rv/Geom.a
+
+test-basic-opaque-rv: build/rv/basic_mod_opaque
+	@$(QEMU_RV) build/rv/basic_mod_opaque > build/rv/basic_mod_opaque.out; \
+	 diff tests/basic_mod_opaque.expected build/rv/basic_mod_opaque.out \
+	    && echo "PASS: basic module opaque TYPE on rv32 (handle + accessors)"
+
+## Qualified-import counterpart on rv32 (DIM .. AS Geom.Circle), same Geom archive.
+build/rv/basic_mod_opaque_qual.s: tests/basic_mod_opaque_qual.bas build/rv/Geom.a build/skj-bc-rv | build/rv
+	./build/skj-bc-rv -I build/rv -o $@ $<
+
+build/rv/basic_mod_opaque_qual.o: build/rv/basic_mod_opaque_qual.s | build/rv
+	$(RV_AS) $(RV_AS_ARCH) -o $@ $<
+
+build/rv/basic_mod_opaque_qual: build/rv/basic_mod_opaque_qual.o build/rv/start.o build/rv/basic_rt.o build/rv/soft64_div.o build/rv/Geom.a
+	$(RV_LD) -m elf32lriscv -o $@ build/rv/start.o build/rv/basic_rt.o build/rv/soft64_div.o build/rv/basic_mod_opaque_qual.o build/rv/Geom.a
+
+test-basic-opaque-qual-rv: build/rv/basic_mod_opaque_qual
+	@$(QEMU_RV) build/rv/basic_mod_opaque_qual > build/rv/basic_mod_opaque_qual.out; \
+	 diff tests/basic_mod_opaque_qual.expected build/rv/basic_mod_opaque_qual.out \
+	    && echo "PASS: basic qualified IMPORT opaque TYPE on rv32 (dotted handle type)"
 
 ## The same rv32 BASIC ELFs run confined under skj-run, the in-tree sandbox
 ## emulator, with no rebuild: skj-run services the time64 clock/sleep calls
@@ -2507,6 +2553,108 @@ check-rv-bc: build/skj-bc-rv $(BAS_RV_BINS)
 ## built for real rv32 Linux executes identically here and under qemu.
 check-rv-bc-sandbox: build/skj-run build/skj-bc-rv $(BAS_RV_BINS)
 	@sh tests/run-tests.sh "./build/skj-run" build/rv
+
+## ---- BASIC on x86-64 and arm64 (LP64 psABI) ----
+## arm64, x86-64, ColdFire, MIPS, and rv32 are all first-class BASIC backends.
+## The LP64 targets run the same front end built with the shared psABI selector
+## (BE_X64_SEL / BE_A64_SEL), so pointers, string handles, and opaque handles
+## are a full 64-bit word. Each binary links the shared psABI start file
+## (read/write/exit, as cc uses) plus basic_sys (the moo bump arena and the
+## time/random syscalls), the 64-bit counterpart of the rv crt + seam. i64 and
+## double are native, so no soft64 or softfloat objects are needed.
+build/x86_64/basic_rt.o: runtime/basic_rt.c | build/x86_64
+	$(CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<
+
+build/x86_64/basic_sys.o: runtime/basic_sys_x86_64.S $(X64_ASM_DEP) | build/x86_64
+	$(X64_ASM) $(X64_ASMFLAGS) -o $@ $<
+
+build/x86_64/basic_%.s: tests/basic_%.bas build/skj-bc-x86-64 | build/x86_64
+	./build/skj-bc-x86-64 -o $@ $<
+
+BAS_X64_BINS := $(BAS_TESTS:tests/%.bas=build/x86_64/%)
+
+$(BAS_X64_BINS): build/x86_64/%: build/x86_64/%.o build/x86_64/start_sysv.o build/x86_64/basic_rt.o build/x86_64/basic_sys.o
+	$(X64_LD) -m elf_x86_64 -o $@ build/x86_64/start_sysv.o build/x86_64/basic_rt.o build/x86_64/basic_sys.o $<
+
+check-x86-64-bc: build/skj-bc-x86-64 $(BAS_X64_BINS) test-basic-opaque-x86-64 test-basic-opaque-qual-x86-64
+	@sh tests/run-tests.sh "$(QEMU_X64)" build/x86_64
+
+## Opaque-TYPE module path on x86-64 (the .bmi is .target lp64, handles 8 bytes).
+build/x86_64/basic_mod_geom.s: tests/basic_mod_geom.bas build/skj-bc-x86-64 | build/x86_64
+	./build/skj-bc-x86-64 --emit-module --meta build/x86_64/geom.bmi -o $@ $<
+
+build/x86_64/Geom.a: build/x86_64/basic_mod_geom.o build/skj-ar | build/x86_64
+	sh tests/basic-archive.sh build/skj-ar $@ build/x86_64/geom.bmi build/x86_64/basic_mod_geom.o
+
+build/x86_64/basic_mod_opaque.s: tests/basic_mod_opaque.bas build/x86_64/Geom.a build/skj-bc-x86-64 | build/x86_64
+	./build/skj-bc-x86-64 -I build/x86_64 -o $@ $<
+
+build/x86_64/basic_mod_opaque: build/x86_64/basic_mod_opaque.o build/x86_64/start_sysv.o build/x86_64/basic_rt.o build/x86_64/basic_sys.o build/x86_64/Geom.a
+	$(X64_LD) -m elf_x86_64 -o $@ build/x86_64/start_sysv.o build/x86_64/basic_rt.o build/x86_64/basic_sys.o build/x86_64/basic_mod_opaque.o build/x86_64/Geom.a
+
+test-basic-opaque-x86-64: build/x86_64/basic_mod_opaque
+	@$(QEMU_X64) build/x86_64/basic_mod_opaque > build/x86_64/basic_mod_opaque.out; \
+	 diff tests/basic_mod_opaque.expected build/x86_64/basic_mod_opaque.out \
+	    && echo "PASS: basic module opaque TYPE on x86-64 (handle + accessors)"
+
+## Qualified-import counterpart on x86-64 (DIM .. AS Geom.Circle), same Geom archive.
+build/x86_64/basic_mod_opaque_qual.s: tests/basic_mod_opaque_qual.bas build/x86_64/Geom.a build/skj-bc-x86-64 | build/x86_64
+	./build/skj-bc-x86-64 -I build/x86_64 -o $@ $<
+
+build/x86_64/basic_mod_opaque_qual: build/x86_64/basic_mod_opaque_qual.o build/x86_64/start_sysv.o build/x86_64/basic_rt.o build/x86_64/basic_sys.o build/x86_64/Geom.a
+	$(X64_LD) -m elf_x86_64 -o $@ build/x86_64/start_sysv.o build/x86_64/basic_rt.o build/x86_64/basic_sys.o build/x86_64/basic_mod_opaque_qual.o build/x86_64/Geom.a
+
+test-basic-opaque-qual-x86-64: build/x86_64/basic_mod_opaque_qual
+	@$(QEMU_X64) build/x86_64/basic_mod_opaque_qual > build/x86_64/basic_mod_opaque_qual.out; \
+	 diff tests/basic_mod_opaque_qual.expected build/x86_64/basic_mod_opaque_qual.out \
+	    && echo "PASS: basic qualified IMPORT opaque TYPE on x86-64 (dotted handle type)"
+
+build/arm64/basic_rt.o: runtime/basic_rt.c | build/arm64
+	$(A64_CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<
+
+build/arm64/basic_sys.o: runtime/basic_sys_arm64.S $(A64_ASM_DEP) | build/arm64
+	$(A64_AS) -o $@ $<
+
+build/arm64/basic_%.s: tests/basic_%.bas build/skj-bc-arm64 | build/arm64
+	./build/skj-bc-arm64 -o $@ $<
+
+BAS_A64_BINS := $(BAS_TESTS:tests/%.bas=build/arm64/%)
+
+$(BAS_A64_BINS): build/arm64/%: build/arm64/%.o build/arm64/start_aapcs.o build/arm64/basic_rt.o build/arm64/basic_sys.o
+	$(A64_LD) -o $@ build/arm64/start_aapcs.o build/arm64/basic_rt.o build/arm64/basic_sys.o $<
+
+check-arm64-bc: build/skj-bc-arm64 $(BAS_A64_BINS) test-basic-opaque-arm64 test-basic-opaque-qual-arm64
+	@sh tests/run-tests.sh "$(QEMU_A64)" build/arm64
+
+## Opaque-TYPE module path on arm64 (the .bmi is .target lp64, handles 8 bytes).
+build/arm64/basic_mod_geom.s: tests/basic_mod_geom.bas build/skj-bc-arm64 | build/arm64
+	./build/skj-bc-arm64 --emit-module --meta build/arm64/geom.bmi -o $@ $<
+
+build/arm64/Geom.a: build/arm64/basic_mod_geom.o build/skj-ar | build/arm64
+	sh tests/basic-archive.sh build/skj-ar $@ build/arm64/geom.bmi build/arm64/basic_mod_geom.o
+
+build/arm64/basic_mod_opaque.s: tests/basic_mod_opaque.bas build/arm64/Geom.a build/skj-bc-arm64 | build/arm64
+	./build/skj-bc-arm64 -I build/arm64 -o $@ $<
+
+build/arm64/basic_mod_opaque: build/arm64/basic_mod_opaque.o build/arm64/start_aapcs.o build/arm64/basic_rt.o build/arm64/basic_sys.o build/arm64/Geom.a
+	$(A64_LD) -o $@ build/arm64/start_aapcs.o build/arm64/basic_rt.o build/arm64/basic_sys.o build/arm64/basic_mod_opaque.o build/arm64/Geom.a
+
+test-basic-opaque-arm64: build/arm64/basic_mod_opaque
+	@$(QEMU_A64) build/arm64/basic_mod_opaque > build/arm64/basic_mod_opaque.out; \
+	 diff tests/basic_mod_opaque.expected build/arm64/basic_mod_opaque.out \
+	    && echo "PASS: basic module opaque TYPE on arm64 (handle + accessors)"
+
+## Qualified-import counterpart on arm64 (DIM .. AS Geom.Circle), same Geom archive.
+build/arm64/basic_mod_opaque_qual.s: tests/basic_mod_opaque_qual.bas build/arm64/Geom.a build/skj-bc-arm64 | build/arm64
+	./build/skj-bc-arm64 -I build/arm64 -o $@ $<
+
+build/arm64/basic_mod_opaque_qual: build/arm64/basic_mod_opaque_qual.o build/arm64/start_aapcs.o build/arm64/basic_rt.o build/arm64/basic_sys.o build/arm64/Geom.a
+	$(A64_LD) -o $@ build/arm64/start_aapcs.o build/arm64/basic_rt.o build/arm64/basic_sys.o build/arm64/basic_mod_opaque_qual.o build/arm64/Geom.a
+
+test-basic-opaque-qual-arm64: build/arm64/basic_mod_opaque_qual
+	@$(QEMU_A64) build/arm64/basic_mod_opaque_qual > build/arm64/basic_mod_opaque_qual.out; \
+	 diff tests/basic_mod_opaque_qual.expected build/arm64/basic_mod_opaque_qual.out \
+	    && echo "PASS: basic qualified IMPORT opaque TYPE on arm64 (dotted handle type)"
 
 ## Run an ELF under qemu-riscv32 configured to match the rv32.c emulator's ISA.
 ## Usage: make run-rv ELF=build/rv/foo [ARGS='...']
@@ -2559,8 +2707,49 @@ BAS_MIPS_BINS := $(BAS_TESTS:tests/%.bas=build/mips/%)
 $(BAS_MIPS_BINS): build/mips/%: build/mips/%.o build/mips/start.o build/mips/basic_rt.o build/mips/half.o build/mips/softfloat.o build/mips/soft64_div.o
 	$(MIPS_LD) -o $@ build/mips/start.o build/mips/basic_rt.o build/mips/half.o build/mips/softfloat.o build/mips/soft64_div.o $<
 
-check-mips-bc: build/skj-bc-mips $(BAS_MIPS_BINS)
+check-mips-bc: build/skj-bc-mips $(BAS_MIPS_BINS) test-basic-opaque-mips test-basic-opaque-qual-mips
 	@sh tests/run-tests.sh "$(QEMU_MIPS)" build/mips
+
+## The opaque-TYPE module path on MIPS too (soft-float: a double is two words,
+## so the arena's four-byte alignment is exact here). Reuses the Geom module and
+## its consumer, the same golden as ColdFire and rv32.
+build/mips/basic_mod_geom.s: tests/basic_mod_geom.bas build/skj-bc-mips | build/mips
+	./build/skj-bc-mips --emit-module --meta build/mips/geom.bmi -o $@ $<
+
+build/mips/basic_mod_geom.o: build/mips/basic_mod_geom.s | build/mips
+	$(MIPS_AS) -march=mips1 -EL -o $@ $<
+
+build/mips/Geom.a: build/mips/basic_mod_geom.o build/skj-ar | build/mips
+	sh tests/basic-archive.sh build/skj-ar $@ build/mips/geom.bmi build/mips/basic_mod_geom.o
+
+build/mips/basic_mod_opaque.s: tests/basic_mod_opaque.bas build/mips/Geom.a build/skj-bc-mips | build/mips
+	./build/skj-bc-mips -I build/mips -o $@ $<
+
+build/mips/basic_mod_opaque.o: build/mips/basic_mod_opaque.s | build/mips
+	$(MIPS_AS) -march=mips1 -EL -o $@ $<
+
+build/mips/basic_mod_opaque: build/mips/basic_mod_opaque.o build/mips/start.o build/mips/basic_rt.o build/mips/half.o build/mips/softfloat.o build/mips/soft64_div.o build/mips/Geom.a
+	$(MIPS_LD) -o $@ build/mips/start.o build/mips/basic_rt.o build/mips/half.o build/mips/softfloat.o build/mips/soft64_div.o build/mips/basic_mod_opaque.o build/mips/Geom.a
+
+test-basic-opaque-mips: build/mips/basic_mod_opaque
+	@$(QEMU_MIPS) build/mips/basic_mod_opaque > build/mips/basic_mod_opaque.out; \
+	 diff tests/basic_mod_opaque.expected build/mips/basic_mod_opaque.out \
+	    && echo "PASS: basic module opaque TYPE on mips (handle + accessors)"
+
+## Qualified-import counterpart on MIPS (DIM .. AS Geom.Circle), same Geom archive.
+build/mips/basic_mod_opaque_qual.s: tests/basic_mod_opaque_qual.bas build/mips/Geom.a build/skj-bc-mips | build/mips
+	./build/skj-bc-mips -I build/mips -o $@ $<
+
+build/mips/basic_mod_opaque_qual.o: build/mips/basic_mod_opaque_qual.s | build/mips
+	$(MIPS_AS) -march=mips1 -EL -o $@ $<
+
+build/mips/basic_mod_opaque_qual: build/mips/basic_mod_opaque_qual.o build/mips/start.o build/mips/basic_rt.o build/mips/half.o build/mips/softfloat.o build/mips/soft64_div.o build/mips/Geom.a
+	$(MIPS_LD) -o $@ build/mips/start.o build/mips/basic_rt.o build/mips/half.o build/mips/softfloat.o build/mips/soft64_div.o build/mips/basic_mod_opaque_qual.o build/mips/Geom.a
+
+test-basic-opaque-qual-mips: build/mips/basic_mod_opaque_qual
+	@$(QEMU_MIPS) build/mips/basic_mod_opaque_qual > build/mips/basic_mod_opaque_qual.out; \
+	 diff tests/basic_mod_opaque_qual.expected build/mips/basic_mod_opaque_qual.out \
+	    && echo "PASS: basic qualified IMPORT opaque TYPE on mips (dotted handle type)"
 
 ## BASIC on the PlayStation (PS-EXE). The program object is the very same
 ## soft-float object the qemu-mipsel path builds; only the link differs. It uses
@@ -4129,10 +4318,16 @@ build/skj-pc: $(PC_SRC) pascal/pascal.h ir/ir.h | build
 # CC_M68K float path off, so it passes SKJ_BIG_ENDIAN explicitly; the RISC-V tool
 # selects its ISA with CC_RISCV, from which target.h derives ILP32 and
 # little-endian.
-BASIC_FE       := basic/lex.c basic/parse.c basic/lower.c basic/main.c $(IR_SRC)
+BASIC_FE       := basic/lex.c basic/parse.c basic/lower.c basic/bmi.c basic/main.c $(IR_SRC)
 BASIC_SRC      := $(BASIC_FE) $(BE_CF)
 BASIC_RV_SRC   := $(BASIC_FE) $(BE_RV)
 BASIC_MIPS_SRC := $(BASIC_FE) $(BE_MIPS)
+## The LP64 backends reuse the shared psABI selectors (the ones cc and pascal
+## use), not the stack-ABI emitters: BASIC links a C runtime (basic_rt.c), so it
+## follows the platform psABI on every non-ColdFire target, as the rv32/mips
+## builds already do. target.h derives SKJ_LP64 from X86_BITS==64 / CC_ARM64.
+BASIC_X64_SRC  := $(BASIC_FE) $(BE_X64_SEL)
+BASIC_A64_SRC  := $(BASIC_FE) $(BE_A64_SEL)
 
 build/skj-bc: $(BASIC_SRC) basic/basic.h ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -DSKJ_BIG_ENDIAN=1 -Ibasic -Iir -o $@ $(BASIC_SRC)
@@ -4148,6 +4343,16 @@ build/skj-bc-rv: $(BASIC_RV_SRC) basic/basic.h ir/ir.h ir/target.h | build
 ## CC_MIPS makes target.h derive ILP32 and little-endian (mipsel).
 build/skj-bc-mips: $(BASIC_MIPS_SRC) basic/basic.h ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -DCC_MIPS -DMIPS_SOFTFLOAT -Ibasic -Iir -Ibackend -o $@ $(BASIC_MIPS_SRC)
+
+## The LP64 BASIC compilers. x86-64 is selected by X86_BITS==64 and arm64 by
+## CC_ARM64 (both imply SKJ_LP64=1 in target.h, passed explicitly here so a
+## contradictory width fails the build). Pointers, string handles, and opaque
+## handles are a full 64-bit word; i64 and double are native.
+build/skj-bc-x86-64: $(BASIC_X64_SRC) basic/basic.h ir/ir.h ir/target.h | build
+	$(CC) $(CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -Ibasic -Iir -Ibackend -o $@ $(BASIC_X64_SRC)
+
+build/skj-bc-arm64: $(BASIC_A64_SRC) basic/basic.h ir/ir.h ir/target.h | build
+	$(CC) $(CFLAGS) -DCC_ARM64 -DSKJ_LP64=1 -Ibasic -Iir -Ibackend -o $@ $(BASIC_A64_SRC)
 
 ## ---- Native host Pascal compilers (x86-64, aarch64) ----
 ## The front end is backend-agnostic; each host target is a separate binary
@@ -4244,6 +4449,141 @@ build/basic_%.s: tests/basic_%.bas build/skj-bc | build
 ## them.
 $(BAS_BINS): build/%: build/%.o build/start.o build/basic_rt.o build/skj-ld
 	./build/skj-ld -o $@ build/start.o build/basic_rt.o $<
+
+## BASIC modules (doc/languages/basic-modules.md). test-basic-module checks the
+## producer: a MODULE compiles to a .bmi interface (diffed against the golden)
+## and to an object whose exported routines are global and private ones local,
+## with no program entry point. test-basic-bmi is the host unit test for the
+## .bmi reader.
+build/basic_mod_mathutil.bmi: tests/basic_mod_mathutil.bas build/skj-bc | build
+	./build/skj-bc --emit-module --meta $@ -o build/basic_mod_mathutil.s $<
+
+test-basic-module: build/basic_mod_mathutil.bmi
+	@diff tests/basic_mod_mathutil.bmi.expected build/basic_mod_mathutil.bmi \
+	    && echo "PASS: basic module .bmi matches the golden"
+	@grep -qE '\.globl[[:space:]]+Hypot\b' build/basic_mod_mathutil.s \
+	    && grep -qE '\.globl[[:space:]]+Bump\b' build/basic_mod_mathutil.s \
+	    && ! grep -qE '\.globl[[:space:]]+Secret\b' build/basic_mod_mathutil.s \
+	    && ! grep -qE '^main:' build/basic_mod_mathutil.s \
+	    && echo "PASS: exported routines global, private local, no entry point"
+
+## test-basic-import checks the consumer: the MathUtil module is assembled and
+## wrapped as an archive carrying its `.bmi`, a program imports a FN and a CONST
+## from it with FROM .. IMPORT, and the imported FN is called across the archive
+## boundary (the linker pulls the module object by symbol reference). The .s for
+## the module comes from the --emit-module .bmi rule above, so it is assembled
+## explicitly here rather than through the program .s pattern rule.
+build/basic_mod_mathutil.o: build/basic_mod_mathutil.bmi build/skj-as | build
+	./build/skj-as -o $@ build/basic_mod_mathutil.s
+
+build/MathUtil.a: build/basic_mod_mathutil.o build/basic_mod_mathutil.bmi build/skj-ar | build
+	sh tests/basic-archive.sh build/skj-ar $@ build/basic_mod_mathutil.bmi build/basic_mod_mathutil.o
+
+build/basic_mod_use.s: tests/basic_mod_use.bas build/MathUtil.a build/skj-bc | build
+	./build/skj-bc -I build -o $@ $<
+
+build/basic_mod_use.o: build/basic_mod_use.s build/skj-as | build
+	./build/skj-as -o $@ $<
+
+build/basic_mod_use: build/basic_mod_use.o build/start.o build/basic_rt.o build/MathUtil.a build/skj-ld
+	./build/skj-ld -o $@ build/start.o build/basic_rt.o build/basic_mod_use.o build/MathUtil.a
+
+test-basic-import: build/basic_mod_use
+	@qemu-m68k build/basic_mod_use > build/basic_mod_use.out; \
+	 diff tests/basic_mod_use.expected build/basic_mod_use.out \
+	    && echo "PASS: basic module import (FROM .. IMPORT across an archive)"
+
+## test-basic-import-qual checks the qualified form: `IMPORT MathUtil` reaches
+## the same exports under dotted names (MathUtil.Hypot, MathUtil.MaxSides).
+build/basic_mod_qual.s: tests/basic_mod_qual.bas build/MathUtil.a build/skj-bc | build
+	./build/skj-bc -I build -o $@ $<
+
+build/basic_mod_qual.o: build/basic_mod_qual.s build/skj-as | build
+	./build/skj-as -o $@ $<
+
+build/basic_mod_qual: build/basic_mod_qual.o build/start.o build/basic_rt.o build/MathUtil.a build/skj-ld
+	./build/skj-ld -o $@ build/start.o build/basic_rt.o build/basic_mod_qual.o build/MathUtil.a
+
+test-basic-import-qual: build/basic_mod_qual
+	@qemu-m68k build/basic_mod_qual > build/basic_mod_qual.out; \
+	 diff tests/basic_mod_qual.expected build/basic_mod_qual.out \
+	    && echo "PASS: basic module import (qualified IMPORT, dotted M.name)"
+
+## test-basic-opaque checks the opaque-TYPE surface: the Geom module exports an
+## opaque Circle (a handle) with a heap-allocating constructor, a getter, a
+## setter, and a derived FN; a program imports the type and its accessors, holds
+## handles, and reaches the value only through the exported routines.
+build/basic_mod_geom.bmi: tests/basic_mod_geom.bas build/skj-bc | build
+	./build/skj-bc --emit-module --meta $@ -o build/basic_mod_geom.s $<
+
+build/basic_mod_geom.o: build/basic_mod_geom.bmi build/skj-as | build
+	./build/skj-as -o $@ build/basic_mod_geom.s
+
+build/Geom.a: build/basic_mod_geom.o build/basic_mod_geom.bmi build/skj-ar | build
+	sh tests/basic-archive.sh build/skj-ar $@ build/basic_mod_geom.bmi build/basic_mod_geom.o
+
+build/basic_mod_opaque.s: tests/basic_mod_opaque.bas build/Geom.a build/skj-bc | build
+	./build/skj-bc -I build -o $@ $<
+
+build/basic_mod_opaque.o: build/basic_mod_opaque.s build/skj-as | build
+	./build/skj-as -o $@ $<
+
+build/basic_mod_opaque: build/basic_mod_opaque.o build/start.o build/basic_rt.o build/Geom.a build/skj-ld
+	./build/skj-ld -o $@ build/start.o build/basic_rt.o build/basic_mod_opaque.o build/Geom.a
+
+test-basic-opaque: build/basic_mod_opaque
+	@qemu-m68k build/basic_mod_opaque > build/basic_mod_opaque.out; \
+	 diff tests/basic_mod_opaque.expected build/basic_mod_opaque.out \
+	    && echo "PASS: basic module opaque TYPE (handle + accessors across an archive)"
+
+## test-basic-opaque-qual is the qualified-import counterpart: IMPORT Geom reaches
+## the opaque Circle and its accessors under dotted names, and a handle variable
+## is declared `DIM .. AS Geom.Circle`. The dotted key carries the opaque identity,
+## so a Geom.NewCircle result and a Geom.Circle variable are the same type (a
+## mismatch would fail to compile). Reuses the same Geom archive.
+build/basic_mod_opaque_qual.s: tests/basic_mod_opaque_qual.bas build/Geom.a build/skj-bc | build
+	./build/skj-bc -I build -o $@ $<
+
+build/basic_mod_opaque_qual.o: build/basic_mod_opaque_qual.s build/skj-as | build
+	./build/skj-as -o $@ $<
+
+build/basic_mod_opaque_qual: build/basic_mod_opaque_qual.o build/start.o build/basic_rt.o build/Geom.a build/skj-ld
+	./build/skj-ld -o $@ build/start.o build/basic_rt.o build/basic_mod_opaque_qual.o build/Geom.a
+
+test-basic-opaque-qual: build/basic_mod_opaque_qual
+	@qemu-m68k build/basic_mod_opaque_qual > build/basic_mod_opaque_qual.out; \
+	 diff tests/basic_mod_opaque_qual.expected build/basic_mod_opaque_qual.out \
+	    && echo "PASS: basic qualified IMPORT of an opaque TYPE (dotted handle type)"
+
+## Typed opaque handles are nominal: a handle of one opaque TYPE used where
+## another is expected is a compile error. Each basic_err_handle_*.bas is a
+## module that must fail to compile with the matching diagnostic, covering the
+## three check sites (call argument, assignment, FN return). Host-only (the
+## compiler rejects before any code is emitted), so no target backend is needed.
+test-basic-handle-types: build/skj-bc
+	@fail=0; \
+	 for t in arg assign ret; do \
+	   if ./build/skj-bc --emit-module --meta build/herr_$$t.bmi -o /dev/null \
+	        tests/basic_err_handle_$$t.bas 2>build/herr_$$t.err; then \
+	     echo "FAIL: basic_err_handle_$$t compiled but should have been rejected"; \
+	     fail=1; \
+	   fi; \
+	 done; \
+	 grep -q "is a Square handle but the parameter is a Circle handle" \
+	   build/herr_arg.err || { echo "FAIL: argument mismatch message"; fail=1; }; \
+	 grep -q "is a Circle handle but the value is a Square handle" \
+	   build/herr_assign.err || { echo "FAIL: assignment mismatch message"; fail=1; }; \
+	 grep -q "returns a Circle handle but a Square handle is returned" \
+	   build/herr_ret.err || { echo "FAIL: return mismatch message"; fail=1; }; \
+	 test $$fail -eq 0 \
+	   && echo "PASS: typed handle mismatches rejected (argument, assignment, return)"; \
+	 exit $$fail
+
+build/bmi_selftest: basic/bmi_selftest.c basic/bmi.c ir/util.c ir/arena.c basic/basic.h ir/target.h | build
+	$(CC) $(CFLAGS) -Ibasic -Iir -o $@ basic/bmi_selftest.c basic/bmi.c ir/util.c ir/arena.c
+
+test-basic-bmi: build/bmi_selftest
+	@./build/bmi_selftest
 
 ## FPU integration test (IR builder → ColdFire asm → qemu-m68k)
 FPU_TEST_SRC := tests/test_fpu.c $(IR_SRC) $(BE_CF)
@@ -8683,7 +9023,7 @@ test-help: $(addprefix build/,$(HELP_TOOLS))
 ## it is the native host-arch (x86-64) JIT, the peer of check-kp-jit.
 check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm \
-           check-rv check-rv-bc check-x86-64 check-arm64 \
+           check-rv check-rv-bc check-x86-64 check-x86-64-bc check-arm64 check-arm64-bc \
            check-x86-oracle check-arm64-oracle check-rv-oracle check-jit \
            test-jit-trap \
            test-jit-arena test-fs \
@@ -8726,4 +9066,4 @@ coverage-codegen:
 print-%:
 	@echo '$($*)'
 
-.PHONY: help check-pc-host check-pc-arm64 all install uninstall release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill test-rv-spawn-backtrace test-rv-spawn-mounts test-cf-spawn-mounts test-rv-spawn-pipe test-cf-spawn-pipe test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh test-rv-ps test-rv-vdso test-cf-vdso test-mips-vdso test-rv-mem-root test-sched-embed test-hv-x86-64-vdso test-hv-arm64-vdso test-rv-env test-cf-env test-hv-x86-64-env test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as test-ld-x86-64 test-ld-arm64 test-cc-driver-x86-64 test-cc-driver-arm64 check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-textfile check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-gdb-fpwatch test-hv-preempt test-hv-parallel test-hv-x86-64-pump check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor check-rv-bc check-mips-bc test-basic-psexe test-basic-psexe-redux check-rv-bc-sandbox coverage-codegen clean FORCE
+.PHONY: help check-pc-host check-pc-arm64 all install uninstall release-check check check-rv run-rv test-rv-irq test-rv-run test-guest-mmap test-rv-sandbox test-rv-xlang-sandbox test-mips-sandbox test-cf-sandbox test-rv-spawn-argv test-rv-spawn-wait test-rv-spawn-kill test-rv-spawn-backtrace test-rv-spawn-mounts test-cf-spawn-mounts test-rv-spawn-pipe test-cf-spawn-pipe test-rv-jsh test-cf-jsh test-mips-jsh test-x86-64-jsh test-arm64-jsh test-rv-ps test-rv-vdso test-cf-vdso test-mips-vdso test-rv-mem-root test-sched-embed test-hv-x86-64-vdso test-hv-arm64-vdso test-rv-env test-cf-env test-hv-x86-64-env test-rv-decode-cache test-rv-expand test-rv-bus test-rv-csr test-rv-decode test-rv-fp check-archtest check-rv32 test-rv32-apps test-rv32-unit test-rv32-program test-rv32-lockstep test-rv32-fuzz audit-rv32-coverage audit-rv32-icov audit-rv32-mutants check-emu check-rv-emu check-mips-emu check-emu-all check-emu-san bench bench-cf bench-rv bench-accept test-fpu-emu test-i64-emu test-ops-emu check-x86-64 check-arm64 check-x86-oracle check-arm64-oracle check-rv-oracle check-jit check-jit-arm64 check-jit-rv check-jit-arm64-disasm check-jit-rv-disasm test-jit-trap test-jit-trap-arm64 test-jit-arm64-high check-all check-slow check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp check-as check-rvas check-x86-64as check-aarch64as test-ld-x86-64 test-ld-arm64 test-cc-driver-x86-64 test-cc-driver-arm64 check-cc-rv-skj check-cc-rv-psabi test-cc-rv-psabi-interop test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive test-cc-rv-psabi-struct test-cc-driver check-libc check-libc-cf check-libc-mips check-libc-rv check-libc-x86-64 check-libc-arm64 check-mipsas check-cc-mips-skj test-cc-mips-asm test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm check-mips-all check-smoke test-gc test-coro test-threads test-jit-arena test-fs check-fs-free test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 test-f32-rv f32-oracle f32-golden-check test-f32-diff test-f32-diff-rv test-f32-diff-x86-64 test-f32-diff-arm64 test-f32-diff-mips test-f32-diff-cf test-torture-diff test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 test-ops test-ops-rv test-ops-x86-64 test-ops-arm64 test-threaded test-threaded-rv test-threaded-x86-64 test-threaded-arm64 test-threaded-mips test-parse bootstrap-fpc check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 check-kp-free check-kp-free-cf check-kp-corpus check-kp-corpus-san check-kp-corpus-rv check-kp-corpus-arm64 check-kp-corpus-cf check-kp-multi check-kp-multi-rv check-kp-multi-arm64 check-kp-files check-kp-textfile check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-io-rv check-kp-io-arm64 check-kp-io-free check-kp-inc check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free test-help test-rv-sandbox-io test-rv-libc-io test-rv-stat test-rv-fileops test-rv-dirs test-cf-stat test-cf-fileops test-cf-dirs test-rv-fs-cap test-cf-fs-cap test-mips-fs-cap test-rv-fs-dev test-cf-fs-dev test-rv-fs-rom test-cf-fs-rom test-rv-fs-9p test-cf-fs-9p check-emu-posix test-rv-arc4random test-cf-arc4random test-rv-selfhost test-rv-selfhost-full test-cf-selfhost test-cf-selfhost-full test-mips-selfhost test-rv-selfhost-toolchain test-cf-selfhost-toolchain test-rv-selfhost-kpc test-cf-selfhost-kpc test-rv-selfhost-kpc-full test-cf-selfhost-kpc-full check-selfhost-all test-rv-abort-backtrace test-bt-loop test-bt-trim test-rv-wild-backtrace test-kp-rv-dwarf test-kp-rv-trap-backtrace test-cf-addr2line test-mips-addr2line test-mips-backtrace test-cf-wild-backtrace test-cf-abort-backtrace test-kp-cf-dwarf test-kp-cf-trap-backtrace test-mips-gdb test-rng test-rng-glue test-sched-glue test-vmm test-hv-x86-64 test-hv-arm64 test-hv-gdb test-hv-gdb-fpwatch test-hv-preempt test-hv-parallel test-hv-x86-64-pump check-libc-hv-x86-64 check-libc-hv-arm64 test-macho-arm64 test-macho-arm64-dwarf check-cc-macho-arm64 check-libc-macho-arm64 check-vendor check-rv-bc test-basic-opaque-rv check-x86-64-bc test-basic-opaque-x86-64 check-arm64-bc test-basic-opaque-arm64 check-mips-bc test-basic-opaque-mips test-basic-psexe test-basic-psexe-redux check-rv-bc-sandbox test-basic-bmi test-basic-module test-basic-import test-basic-import-qual test-basic-opaque test-basic-handle-types coverage-codegen clean FORCE

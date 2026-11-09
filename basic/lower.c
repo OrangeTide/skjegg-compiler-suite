@@ -15,13 +15,30 @@
 #include "util.h"
 
 /* Value types a lowered expression can have. A STRING is a handle: a pointer to
-   a runtime object laid out as [int length][bytes]. On the ILP32 ColdFire target
-   the handle is a 32-bit value, so a STRING temp is neither i64 nor float and a
-   STRING slot is pointer-width. */
-enum { TY_INT, TY_FLOAT, TY_BYTE, TY_STRING, TY_RECORD };
+   a runtime object laid out as [int length][bytes]. The handle is pointer-width,
+   4 bytes on an ILP32 target and 8 on an LP64 target, so a STRING temp is neither
+   i64 nor float; it is a pointer, carried with the width-polymorphic pointer
+   opcodes and marked with mark_ptr. */
+/* TY_HANDLE is the value of an opaque exported TYPE: a pointer-width token to a
+   heap record. A variable of an opaque type is a record variable whose slot holds
+   this handle; reading it whole yields TY_HANDLE, while a field access (valid
+   only inside the defining module, where the record's fields are known) reaches
+   through it. Like a STRING, a handle is a pointer and follows the target width. */
+enum { TY_INT, TY_FLOAT, TY_BYTE, TY_STRING, TY_RECORD, TY_HANDLE };
 
-/* A lowered expression: its IR temp and the BASIC type it holds. */
-struct val { int temp; int ty; };
+/* Pointer width follows the target (ir/target.h): LP64 on x86-64/arm64, ILP32 on
+   ColdFire/rv32/MIPS. A pointer value (STRING or HANDLE handle, a record/array
+   address) uses the IR's *64 address opcodes under LP64 and the plain ones under
+   ILP32, exactly as pascal/lower.c does for the same stack-ABI backends. INT
+   (i64) and FLOAT (f64) are already full width on every target and are untouched. */
+#define BAS_LP64      SKJ_LP64
+#define BAS_PTR_BYTES SKJ_PTR_BYTES
+
+/* A lowered expression: its IR temp and the BASIC type it holds. For a handle
+   (ty == TY_HANDLE), rec is the opaque TYPE's rec_tbl index, so a handle's
+   opaque type is checked nominally; rec is unused (and left 0) for every other
+   type, since nothing reads it unless ty == TY_HANDLE. */
+struct val { int temp; int ty; int rec; };
 
 static struct arena      *lower_arena;
 static struct ir_program *cur_prog;
@@ -48,6 +65,19 @@ struct rec_type {
     int           nfields;
     struct rfield fields[32];
     int           size;
+    int           align;        /* worst-case member alignment: a record with a
+                                   FLOAT/INT (or an LP64 STRING/HANDLE) field is
+                                   8-aligned, an all-BYTE record is 1-aligned. The
+                                   size is padded to this, so the record is a whole
+                                   number of its widest member and a small all-byte
+                                   record is not over-padded. The LP64 arena hands
+                                   back 8-aligned storage; the ILP32 moo arena is
+                                   4-granular (its return.. push-back packs 4-byte
+                                   slots), so an ILP32 heap record stays 4-aligned. */
+    int           opaque;       /* an exported (or imported) opaque TYPE: its
+                                   values are handles. A local one has fields and
+                                   a known size (so a constructor can heap-allocate
+                                   it); an imported one has neither. */
 };
 static struct rec_type *rec_tbl;
 static int              nrec, rec_cap;
@@ -76,21 +106,30 @@ static int         nvars, var_cap;
 #define MAX_PARAMS 16
 struct func_ent {
     const char *name;
+    const char *link;               /* object symbol to call; = name for a local
+                                       routine, the .bmi link symbol for an import */
     int         is_fn;              /* 1 = FN (returns a value), 0 = PROC */
     int         ret_ty;             /* TY_* of the return, for an FN */
+    int         ret_rec;            /* opaque type index when ret_ty == TY_HANDLE,
+                                       else -1 */
     int         nparams;
     int         param_ty[MAX_PARAMS];   /* TY_*, TY_RECORD for a record param */
-    int         param_rec[MAX_PARAMS];  /* record type index (record param) */
+    int         param_rec[MAX_PARAMS];  /* record/opaque type index (record or
+                                           handle param), else -1 */
     int         param_ref[MAX_PARAMS];  /* REF flag (record param) */
 };
 static struct func_ent *func_tbl;
 static int              nfunc, func_cap;
 
 static int rec_lookup(const char *name);
+static int rec_register_opaque(const char *name);
+static int fn_ret_ty(struct node *def);
 
 /* The return type of the function being lowered: TY_* for an FN, -1 for a PROC
-   or the module's main. */
+   or the module's main. cur_ret_rec is its opaque type index when cur_ret_ty is
+   TY_HANDLE, else -1. */
 static int   cur_ret_ty;
+static int   cur_ret_rec;
 
 static int   strctr;
 
@@ -130,8 +169,12 @@ func_register(struct node *n)
     }
     f = &func_tbl[nfunc++];
     f->name = n->name;
+    f->link = n->name;
     f->is_fn = (n->kind == N_FN);
-    f->ret_ty = f->is_fn ? decl_to_ty(n->op) : -1;
+    f->ret_ty = f->is_fn ? fn_ret_ty(n) : -1;
+    /* fn_ret_ty has already resolved and validated the return type name, so the
+       lookup here cannot fail when the return is a handle. */
+    f->ret_rec = (f->ret_ty == TY_HANDLE) ? rec_lookup(n->sval) : -1;
     for (struct node *pm = n->a; pm; pm = pm->next) {
         if (np >= MAX_PARAMS)
             die("line %d: routine '%s' has too many parameters",
@@ -140,12 +183,27 @@ func_register(struct node *n)
             int ri = rec_lookup(pm->sval);
             if (ri < 0)
                 die("line %d: unknown record type '%s'", n->line, pm->sval);
-            if (!pm->ival)
-                die("line %d: a record parameter must be REF in this phase",
-                    n->line);
-            f->param_ty[np] = TY_RECORD;
-            f->param_rec[np] = ri;
-            f->param_ref[np] = 1;
+            if (rec_tbl[ri].opaque) {
+                /* an opaque TYPE crosses as a handle; it is passed by reference
+                   implicitly, so REF is neither needed nor written */
+                f->param_ty[np] = TY_HANDLE;
+                f->param_rec[np] = ri;
+                f->param_ref[np] = 0;
+            } else {
+                if (!pm->ival)
+                    die("line %d: a record parameter must be REF in this phase",
+                        n->line);
+                /* An exported routine must not name a private record type: the
+                   .bmi would advertise it as a bare handle an importer can never
+                   construct. Only an exported (opaque) TYPE crosses a boundary. */
+                if (n->is_export)
+                    die("line %d: exported routine '%s' takes the private record "
+                        "type '%s'; EXPORT the TYPE to pass it as an opaque "
+                        "handle", n->line, n->name, pm->sval);
+                f->param_ty[np] = TY_RECORD;
+                f->param_rec[np] = ri;
+                f->param_ref[np] = 1;
+            }
         } else {
             f->param_ty[np] = decl_to_ty(pm->op);
             f->param_rec[np] = -1;
@@ -154,6 +212,84 @@ func_register(struct node *n)
         np++;
     }
     f->nparams = np;
+}
+
+/* Map a .bmi primitive value class to a BASIC TY_*. A handle (opaque exported
+   type) and a by-reference parameter have no step-2 lowering, so the caller
+   rejects them before this runs. */
+static int
+bmi_class_to_ty(int cls)
+{
+    switch (cls) {
+    case BMI_I8:                      return TY_BYTE;
+    case BMI_I16: case BMI_I32: case BMI_I64: return TY_INT;
+    case BMI_F32: case BMI_F64:       return TY_FLOAT;
+    case BMI_STR:                     return TY_STRING;
+    case BMI_HANDLE:                  return TY_HANDLE;
+    default:                          return -1;   /* void */
+    }
+}
+
+/* Build the dotted key `qual.name`, matching how a qualified import registers an
+   opaque type, so a routine's handle parameter resolves to that same rec index. */
+static const char *
+qualify_type_name(const char *qual, const char *name)
+{
+    size_t ql = strlen(qual), nl = strlen(name);
+    char *q = malloc(ql + nl + 2);
+
+    if (!q)
+        die("oom");
+    memcpy(q, qual, ql);
+    q[ql] = '.';
+    memcpy(q + ql + 1, name, nl);
+    q[ql + nl + 1] = '\0';
+    return q;
+}
+
+/* Register an imported routine under `key` (the dotted name for a qualified
+   import, the bare name for a FROM import). `qual` is the module name for a
+   qualified import, so a handle type named in the .bmi signature can be resolved
+   to its dotted rec key, or NULL for a FROM import whose type names stay bare.
+   The parser has already filtered out the unsupported signatures (by-reference
+   parameters), so the predicate at the import site is a safety assertion. */
+static void
+func_register_import(const char *key, struct bmi_sym *s, const char *qual)
+{
+    struct func_ent *f;
+    int i;
+
+    if (func_lookup(key))
+        die("imported routine '%s' clashes with an existing name", key);
+    if (s->nparam > MAX_PARAMS)
+        die("imported routine '%s' has too many parameters", s->name);
+    if (nfunc == func_cap) {
+        func_cap = func_cap ? func_cap * 2 : 16;
+        func_tbl = realloc(func_tbl, func_cap * sizeof(*func_tbl));
+        if (!func_tbl)
+            die("oom");
+    }
+    f = &func_tbl[nfunc++];
+    f->name = key;
+    f->link = s->link;
+    f->is_fn = (s->kind == BMI_FUNC);
+    f->ret_ty = f->is_fn ? bmi_class_to_ty(s->ret) : -1;
+    /* A handle param/return names its opaque type in the .bmi; resolve it to the
+       shared rec_tbl index (registering it if a routine was imported without its
+       type), so the importer checks handle types against the same identity a
+       handle variable of that type carries. */
+    f->ret_rec = (f->ret_ty == TY_HANDLE)
+                 ? rec_register_opaque(qual ? qualify_type_name(qual, s->ret_type)
+                                            : s->ret_type) : -1;
+    for (i = 0; i < s->nparam; i++) {
+        f->param_ty[i] = bmi_class_to_ty(s->param[i]);
+        f->param_rec[i] = (f->param_ty[i] == TY_HANDLE)
+                          ? rec_register_opaque(qual
+                                ? qualify_type_name(qual, s->param_type[i])
+                                : s->param_type[i]) : -1;
+        f->param_ref[i] = 0;
+    }
+    f->nparams = s->nparam;
 }
 
 static struct ir_insn *
@@ -218,6 +354,35 @@ is_float(int t)
     return t >= 0 && t < temp_float_cap && temp_float[t];
 }
 
+/* Per-temp flag: the temp holds a pointer (a STRING/HANDLE handle, or a
+   record/array address). Under LP64 a pointer temp is passed as IR_ARG64 and
+   returned via IR_RETV64/IR_CALL64; under ILP32 it is a plain 32-bit value. The
+   pointer-emit helpers below set this; the arg/return boundaries read it. */
+static unsigned char *temp_ptr;
+static int            temp_ptr_cap;
+
+static void
+mark_ptr(int t)
+{
+    if (t >= temp_ptr_cap) {
+        int ncap = temp_ptr_cap ? temp_ptr_cap * 2 : 64;
+        while (t >= ncap)
+            ncap *= 2;
+        temp_ptr = realloc(temp_ptr, ncap);
+        if (!temp_ptr)
+            die("oom");
+        memset(temp_ptr + temp_ptr_cap, 0, ncap - temp_ptr_cap);
+        temp_ptr_cap = ncap;
+    }
+    temp_ptr[t] = 1;
+}
+
+static int
+is_ptr(int t)
+{
+    return t >= 0 && t < temp_ptr_cap && temp_ptr[t];
+}
+
 static int
 alloc_slot(int bytes)
 {
@@ -234,10 +399,10 @@ alloc_slot(int bytes)
 static int
 ty_slot_size(int ty)
 {
-    /* A STRING slot holds a pointer (4 bytes, ILP32). INT and FLOAT are 8 bytes;
-       a scalar BYTE also uses an 8-byte slot and the 64-bit load/store opcodes,
-       holding a value masked to 0..255. */
-    return ty == TY_STRING ? 4 : 8;
+    /* A STRING slot holds a pointer (BAS_PTR_BYTES: 4 on ILP32, 8 on LP64). INT
+       and FLOAT are 8 bytes; a scalar BYTE also uses an 8-byte slot and the
+       64-bit load/store opcodes, holding a value masked to 0..255. */
+    return ty == TY_STRING ? BAS_PTR_BYTES : 8;
 }
 
 static int
@@ -249,12 +414,13 @@ var_find(const char *name)
     return -1;
 }
 
-/* Bytes for one element of the given scalar type (STRING is a 4-byte handle,
-   BYTE a single byte, INT and FLOAT eight bytes). */
+/* Bytes for one element of the given scalar type, which doubles as the field's
+   natural alignment in a record (STRING is a pointer-width handle, BYTE a single
+   byte, INT and FLOAT eight bytes). */
 static int
 elem_bytes(int ty)
 {
-    return ty == TY_STRING ? 4 : ty == TY_BYTE ? 1 : 8;
+    return ty == TY_STRING ? BAS_PTR_BYTES : ty == TY_BYTE ? 1 : 8;
 }
 
 static struct var *
@@ -350,6 +516,8 @@ rec_register(struct node *n)
     r = &rec_tbl[nrec++];
     r->name = n->name;
     r->nfields = 0;
+    r->align = 1;
+    r->opaque = n->is_export;       /* an exported TYPE is opaque at the boundary */
     for (struct node *f = n->a; f; f = f->next) {
         int ty, sz;
         if (f->op == TY_DECL_RECORD)
@@ -364,8 +532,61 @@ rec_register(struct node *n)
         r->fields[r->nfields].offset = off;
         r->nfields++;
         off += sz;
+        if (sz > r->align)
+            r->align = sz;          /* worst-case member alignment */
     }
-    r->size = align_up(off, 8);
+    r->size = align_up(off, r->align);
+}
+
+/* Register an imported opaque TYPE: a handle type with no visible fields and no
+   known size (the importer never allocates or lays it out). Idempotent. */
+static int
+rec_register_opaque(const char *name)
+{
+    struct rec_type *r;
+    int idx = rec_lookup(name);
+
+    if (idx >= 0)
+        return idx;
+    if (nrec == rec_cap) {
+        rec_cap = rec_cap ? rec_cap * 2 : 8;
+        rec_tbl = realloc(rec_tbl, rec_cap * sizeof(*rec_tbl));
+        if (!rec_tbl)
+            die("oom");
+    }
+    r = &rec_tbl[nrec];
+    r->name = name;
+    r->nfields = 0;
+    r->size = 0;
+    r->align = 1;           /* a handle; never laid out by value here */
+    r->opaque = 1;
+    return nrec++;
+}
+
+/* The opaque type name for a handle's rec index, for a diagnostic. A negative
+   index means the handle's type could not be resolved (a malformed .bmi). */
+static const char *
+handle_type_name(int rec)
+{
+    return rec >= 0 ? rec_tbl[rec].name : "<unknown>";
+}
+
+/* The return type of an FN: a scalar TY_*, or TY_HANDLE when it returns an
+   exported opaque TYPE (a non-opaque record cannot be returned by value). */
+static int
+fn_ret_ty(struct node *def)
+{
+    int ri;
+
+    if (def->op != TY_DECL_RECORD)
+        return decl_to_ty(def->op);
+    ri = rec_lookup(def->sval);
+    if (ri < 0)
+        die("line %d: unknown record type '%s'", def->line, def->sval);
+    if (!rec_tbl[ri].opaque)
+        die("line %d: an FN may return a record only when it is an opaque "
+            "exported TYPE", def->line);
+    return TY_HANDLE;
 }
 
 /* Declare a record variable: its slot holds the record bytes, or a pointer when
@@ -379,7 +600,9 @@ var_declare_record(const char *name, int rec, int is_ref, int line)
     v->is_record = 1;
     v->rec = rec;
     v->is_ref = is_ref;
-    v->slot = alloc_slot(is_ref ? 4 : rec_tbl[rec].size);
+    /* a REF/handle slot holds a pointer (BAS_PTR_BYTES); a by-value record slot
+       holds the record bytes */
+    v->slot = alloc_slot(is_ref ? BAS_PTR_BYTES : rec_tbl[rec].size);
 }
 
 /* A 32-bit integer constant (for exit's status, the return value, and the
@@ -393,6 +616,71 @@ lower_const32(long v)
     return ins->dst;
 }
 
+/* ---- pointer / address helpers (width-polymorphic, mirroring pascal/lower.c) ----
+   Each picks the LP64 *64 opcode or the ILP32 plain one off BAS_LP64, and marks
+   the result a pointer so the arg/return boundary sends it at the right width. */
+
+static int
+emit_lea_sym(const char *name)          /* address of a global symbol */
+{
+    struct ir_insn *ins = emit(BAS_LP64 ? IR_LEA64 : IR_LEA);
+    ins->dst = new_temp();
+    ins->sym = arena_strdup(lower_arena, name);
+    mark_ptr(ins->dst);
+    return ins->dst;
+}
+
+static int
+emit_adl(int slot)                      /* address of a local slot */
+{
+    struct ir_insn *ins = emit(BAS_LP64 ? IR_ADL64 : IR_ADL);
+    ins->dst = new_temp();
+    ins->slot = slot;
+    mark_ptr(ins->dst);
+    return ins->dst;
+}
+
+static int
+emit_load_ptr(int slot)                 /* load a pointer value out of a slot */
+{
+    struct ir_insn *ins = emit(BAS_LP64 ? IR_LDL64 : IR_LDL);
+    ins->dst = new_temp();
+    ins->slot = slot;
+    mark_ptr(ins->dst);
+    return ins->dst;
+}
+
+static void
+emit_store_ptr(int slot, int val)       /* store a pointer value into a slot */
+{
+    struct ir_insn *ins = emit(BAS_LP64 ? IR_STL64 : IR_STL);
+    ins->slot = slot;
+    ins->a = val;
+}
+
+static int
+emit_addp(int base, int off)            /* pointer + signed 32-bit offset -> pointer */
+{
+    struct ir_insn *ins;
+
+    /* Under LP64 the offset is a signed 32-bit value (a field offset, or an array
+       index times the element size). A 32-bit op zero-extends, so sign-extend the
+       offset to 64 bits before adding it to the 64-bit base, or a small negative
+       offset would become a huge address. */
+    if (BAS_LP64) {
+        ins = emit(IR_SEXT64);
+        ins->dst = new_temp();
+        ins->a = off;
+        off = ins->dst;
+    }
+    ins = emit(BAS_LP64 ? IR_ADD64 : IR_ADD);
+    ins->dst = new_temp();
+    ins->a = base;
+    ins->b = off;
+    mark_ptr(ins->dst);
+    return ins->dst;
+}
+
 /* A 64-bit INT constant. */
 static struct val
 lower_const64(long long v)
@@ -401,7 +689,7 @@ lower_const64(long long v)
     ins->dst = new_temp();
     ins->imm = v;
     mark_i64(ins->dst);
-    return (struct val){ ins->dst, TY_INT };
+    return (struct val){ ins->dst, TY_INT, -1 };
 }
 
 /* A FLOAT (double) constant: a read-only global holding the bit pattern, loaded
@@ -411,7 +699,8 @@ lower_const_float(double v)
 {
     char label[32];
     struct ir_global *g;
-    struct ir_insn *lea, *ins;
+    struct ir_insn *ins;
+    int addr;
     union { double d; int64_t i; } u;
 
     snprintf(label, sizeof(label), "__bflt_%d", strctr++);
@@ -427,16 +716,13 @@ lower_const_float(double v)
     g->next = cur_prog->globals;
     cur_prog->globals = g;
 
-    lea = emit(IR_LEA);
-    lea->dst = new_temp();
-    lea->sym = arena_strdup(lower_arena, label);
-
+    addr = emit_lea_sym(label);      /* emit the address first (not inline) */
     ins = emit(IR_FLD);
     ins->dst = new_temp();
-    ins->a = lea->dst;
+    ins->a = addr;
     ins->imm = 0;                    /* double */
     mark_float(ins->dst);
-    return (struct val){ ins->dst, TY_FLOAT };
+    return (struct val){ ins->dst, TY_FLOAT, -1 };
 }
 
 /* ---- control-flow and call helpers ---- */
@@ -498,7 +784,8 @@ emit_args(int *args, int nargs)
             ins = emit(IR_FARG);
             ins->a = args[i];
             ins->imm = 0;            /* double */
-        } else if (is_i64(args[i])) {
+        } else if (is_i64(args[i]) || (BAS_LP64 && is_ptr(args[i]))) {
+            /* an i64 is 64-bit everywhere; a pointer is 64-bit under LP64 */
             ins = emit(IR_ARG64);
             ins->a = args[i];
         } else {
@@ -523,9 +810,10 @@ emit_call_ret64(const char *name, int *args, int nargs)
     return ins->dst;
 }
 
-/* A call whose result is a 32-bit value (a STRING handle, or a small int from a
-   runtime helper); read from IR_CALL's result register. Not marked i64/float, so
-   it is later passed as a plain IR_ARG. */
+/* A call whose result is a 32-bit int (a small code or length from a runtime
+   helper, e.g. LEN/ASC/INSTR, later sign-extended to INT). Read from IR_CALL's
+   result register; not marked, so it passes as a plain IR_ARG. For a pointer
+   result (a STRING/HANDLE handle) use emit_call_retptr instead. */
 static int
 emit_call_ret32(const char *name, int *args, int nargs)
 {
@@ -536,6 +824,23 @@ emit_call_ret32(const char *name, int *args, int nargs)
     ins->dst = new_temp();
     ins->sym = arena_strdup(lower_arena, name);
     ins->nargs = nargs;
+    return ins->dst;
+}
+
+/* A call whose result is a pointer (a STRING/HANDLE handle, or a heap pointer
+   from __moo_arena_alloc): IR_CALL64 under LP64 so the full 64-bit return
+   register is read, IR_CALL under ILP32. The result is marked a pointer. */
+static int
+emit_call_retptr(const char *name, int *args, int nargs)
+{
+    struct ir_insn *ins;
+
+    emit_args(args, nargs);
+    ins = emit(BAS_LP64 ? IR_CALL64 : IR_CALL);
+    ins->dst = new_temp();
+    ins->sym = arena_strdup(lower_arena, name);
+    ins->nargs = nargs;
+    mark_ptr(ins->dst);
     return ins->dst;
 }
 
@@ -577,7 +882,7 @@ bits_to_float(int bits)
     ins->slot = slot;
     ins->imm = 0;                    /* double */
     mark_float(ins->dst);
-    return (struct val){ ins->dst, TY_FLOAT };
+    return (struct val){ ins->dst, TY_FLOAT, -1 };
 }
 
 /* Promote a value to FLOAT. A FLOAT is returned unchanged; an INT goes through
@@ -615,7 +920,7 @@ bool_to_int(int b32)
     i->dst = new_temp();
     i->a = b32;
     mark_i64(i->dst);
-    return (struct val){ i->dst, TY_INT };
+    return (struct val){ i->dst, TY_INT, -1 };
 }
 
 /* ---- loop context (for EXIT) ---- */
@@ -765,28 +1070,30 @@ lower_expr(struct node *n)
             die("line %d: undeclared variable '%s'", n->line, n->name);
         if (vars[vi].is_array)
             die("line %d: the array '%s' needs an index", n->line, n->name);
-        if (vars[vi].is_record)
-            die("line %d: the record '%s' needs a field", n->line, n->name);
+        if (vars[vi].is_record) {
+            /* an opaque-type variable used whole yields its handle (the pointer
+               in its slot); a transparent record must be used through a field. */
+            if (!rec_tbl[vars[vi].rec].opaque)
+                die("line %d: the record '%s' needs a field", n->line, n->name);
+            return (struct val){ emit_load_ptr(vars[vi].slot), TY_HANDLE,
+                                 vars[vi].rec };
+        }
         if (vars[vi].ty == TY_FLOAT) {
             ins = emit(IR_FLDL);
             ins->dst = new_temp();
             ins->slot = vars[vi].slot;
             ins->imm = 0;            /* double */
             mark_float(ins->dst);
-            return (struct val){ ins->dst, TY_FLOAT };
+            return (struct val){ ins->dst, TY_FLOAT, -1 };
         }
-        if (vars[vi].ty == TY_STRING) {
-            ins = emit(IR_LDL);      /* 32-bit handle */
-            ins->dst = new_temp();
-            ins->slot = vars[vi].slot;
-            return (struct val){ ins->dst, TY_STRING };
-        }
+        if (vars[vi].ty == TY_STRING)
+            return (struct val){ emit_load_ptr(vars[vi].slot), TY_STRING, -1 };
         /* INT reads as INT; BYTE promotes to INT (its slot holds 0..255). */
         ins = emit(IR_LDL64);
         ins->dst = new_temp();
         ins->slot = vars[vi].slot;
         mark_i64(ins->dst);
-        return (struct val){ ins->dst, TY_INT };
+        return (struct val){ ins->dst, TY_INT, -1 };
     }
 
     case N_NEG: {
@@ -797,13 +1104,13 @@ lower_expr(struct node *n)
             ins->a = a.temp;
             ins->imm = 0;
             mark_float(ins->dst);
-            return (struct val){ ins->dst, TY_FLOAT };
+            return (struct val){ ins->dst, TY_FLOAT, -1 };
         }
         ins = emit(IR_NEG64);
         ins->dst = new_temp();
         ins->a = a.temp;
         mark_i64(ins->dst);
-        return (struct val){ ins->dst, TY_INT };
+        return (struct val){ ins->dst, TY_INT, -1 };
     }
 
     case N_NOT: {
@@ -831,7 +1138,7 @@ lower_expr(struct node *n)
         ins->a = a.temp;
         ins->b = c.temp;
         mark_i64(ins->dst);
-        return (struct val){ ins->dst, TY_INT };
+        return (struct val){ ins->dst, TY_INT, -1 };
     }
 
     case N_BINOP: {
@@ -857,8 +1164,8 @@ lower_expr(struct node *n)
             args[0] = a.temp;
             args[1] = b.temp;
             if (n->op == BOP_ADD)
-                return (struct val){ emit_call_ret32("__basic_str_cat", args, 2),
-                                     TY_STRING };
+                return (struct val){ emit_call_retptr("__basic_str_cat", args, 2),
+                                     TY_STRING, -1 };
             if (is_cmp(n->op)) {
                 int c32 = emit_call_ret32("__basic_str_cmp", args, 2);
                 int c64, zero;
@@ -917,7 +1224,7 @@ lower_expr(struct node *n)
             ins->b = fb;
             ins->imm = 0;
             mark_float(ins->dst);
-            return (struct val){ ins->dst, TY_FLOAT };
+            return (struct val){ ins->dst, TY_FLOAT, -1 };
         }
 
         /* '^' power. INT operands use the integer helper; a FLOAT base is not
@@ -928,7 +1235,7 @@ lower_expr(struct node *n)
                 die("line %d: FLOAT '^' is not yet supported", n->line);
             args[0] = a.temp;
             args[1] = b.temp;
-            return (struct val){ emit_call_ret64("__basic_ipow", args, 2), TY_INT };
+            return (struct val){ emit_call_ret64("__basic_ipow", args, 2), TY_INT, -1 };
         }
 
         /* + - * promote to FLOAT when either operand is FLOAT. As with '/', the
@@ -951,7 +1258,7 @@ lower_expr(struct node *n)
             ins->b = fb;
             ins->imm = 0;
             mark_float(ins->dst);
-            return (struct val){ ins->dst, TY_FLOAT };
+            return (struct val){ ins->dst, TY_FLOAT, -1 };
         }
 
         switch (n->op) {
@@ -972,12 +1279,12 @@ lower_expr(struct node *n)
         ins->a = a.temp;
         ins->b = b.temp;
         mark_i64(ins->dst);
-        return (struct val){ ins->dst, TY_INT };
+        return (struct val){ ins->dst, TY_INT, -1 };
     }
 
     default:
         die("lower: unexpected expression node %d", n->kind);
-        return (struct val){ 0, TY_INT };   /* not reached */
+        return (struct val){ 0, TY_INT, -1 };   /* not reached */
     }
 }
 
@@ -1022,7 +1329,7 @@ lower_short_circuit(struct node *n, int is_and)
     ins->dst = new_temp();
     ins->slot = slot;
     mark_i64(ins->dst);
-    return (struct val){ ins->dst, TY_INT };
+    return (struct val){ ins->dst, TY_INT, -1 };
 }
 
 /* ---- calls ---- */
@@ -1070,6 +1377,16 @@ lower_call(struct node *n)
                 die("line %d: argument %d of '%s' must be a STRING",
                     n->line, nargs + 1, n->name);
             args[nargs] = v.temp;               /* 32-bit handle */
+        } else if (f->param_ty[nargs] == TY_HANDLE) {
+            if (v.ty != TY_HANDLE)
+                die("line %d: argument %d of '%s' must be a handle (an opaque "
+                    "TYPE value)", n->line, nargs + 1, n->name);
+            if (v.rec != f->param_rec[nargs])
+                die("line %d: argument %d of '%s' is a %s handle but the "
+                    "parameter is a %s handle", n->line, nargs + 1, n->name,
+                    handle_type_name(v.rec),
+                    handle_type_name(f->param_rec[nargs]));
+            args[nargs] = v.temp;               /* opaque handle, pointer-width */
         } else if (f->param_ty[nargs] == TY_FLOAT) {
             if (v.ty == TY_STRING)
                 die("line %d: argument %d of '%s' is a STRING but the parameter "
@@ -1087,15 +1404,18 @@ lower_call(struct node *n)
         die("line %d: too few arguments to '%s'", n->line, n->name);
 
     if (!f->is_fn) {
-        emit_call(n->name, args, nargs);
-        return (struct val){ 0, -1 };           /* PROC: no value */
+        emit_call(f->link, args, nargs);
+        return (struct val){ 0, -1, -1 };           /* PROC: no value */
     }
     if (f->ret_ty == TY_FLOAT)
-        return (struct val){ emit_call_retf(n->name, args, nargs), TY_FLOAT };
+        return (struct val){ emit_call_retf(f->link, args, nargs), TY_FLOAT, -1 };
     if (f->ret_ty == TY_STRING)
-        return (struct val){ emit_call_ret32(n->name, args, nargs), TY_STRING };
+        return (struct val){ emit_call_retptr(f->link, args, nargs), TY_STRING, -1 };
+    if (f->ret_ty == TY_HANDLE)
+        return (struct val){ emit_call_retptr(f->link, args, nargs), TY_HANDLE,
+                             f->ret_rec };
     /* INT or BYTE result: BYTE promotes to INT at the call site */
-    return (struct val){ emit_call_ret64(n->name, args, nargs), TY_INT };
+    return (struct val){ emit_call_ret64(f->link, args, nargs), TY_INT, -1 };
 }
 
 /* Count the arguments on a builtin's argument chain. */
@@ -1127,7 +1447,7 @@ int_from_i32(int c32)
     ins->dst = new_temp();
     ins->a = c32;
     mark_i64(ins->dst);
-    return (struct val){ ins->dst, TY_INT };
+    return (struct val){ ins->dst, TY_INT, -1 };
 }
 
 /* A string argument of a builtin; errors if the argument is not a STRING. */
@@ -1189,7 +1509,7 @@ lower_builtin(struct node *n)
     case BF_CHR:
         if (nargs != 1) die("line %d: CHR$ takes one argument", n->line);
         args[0] = int_arg(n->a);
-        return (struct val){ emit_call_ret32("__basic_chr", args, 1), TY_STRING };
+        return (struct val){ emit_call_retptr("__basic_chr", args, 1), TY_STRING, -1 };
 
     case BF_STR: {
         struct val x;
@@ -1199,27 +1519,27 @@ lower_builtin(struct node *n)
             die("line %d: STR$ needs a number", n->line);
         if (x.ty == TY_FLOAT) {
             args[0] = x.temp;
-            return (struct val){ emit_call_ret32("__basic_str_from_float",
-                                                 args, 1), TY_STRING };
+            return (struct val){ emit_call_retptr("__basic_str_from_float",
+                                                 args, 1), TY_STRING, -1 };
         }
         args[0] = x.temp;               /* i64, passed as ARG64 */
-        return (struct val){ emit_call_ret32("__basic_str_from_int",
-                                             args, 1), TY_STRING };
+        return (struct val){ emit_call_retptr("__basic_str_from_int",
+                                             args, 1), TY_STRING, -1 };
     }
 
     case BF_LEFT:
         if (nargs != 2) die("line %d: LEFT$ takes two arguments", n->line);
         args[0] = str_arg(n->a, n->op);
         args[1] = int_arg(n->a->next);
-        return (struct val){ emit_call_ret32("__basic_left", args, 2),
-                             TY_STRING };
+        return (struct val){ emit_call_retptr("__basic_left", args, 2),
+                             TY_STRING, -1 };
 
     case BF_RIGHT:
         if (nargs != 2) die("line %d: RIGHT$ takes two arguments", n->line);
         args[0] = str_arg(n->a, n->op);
         args[1] = int_arg(n->a->next);
-        return (struct val){ emit_call_ret32("__basic_right", args, 2),
-                             TY_STRING };
+        return (struct val){ emit_call_retptr("__basic_right", args, 2),
+                             TY_STRING, -1 };
 
     case BF_MID:
         if (nargs != 2 && nargs != 3)
@@ -1230,20 +1550,20 @@ lower_builtin(struct node *n)
             args[2] = int_arg(n->a->next->next);
         else
             args[2] = as_i32(lower_const64(-1));   /* -1 = to end of string */
-        return (struct val){ emit_call_ret32("__basic_mid", args, 3),
-                             TY_STRING };
+        return (struct val){ emit_call_retptr("__basic_mid", args, 3),
+                             TY_STRING, -1 };
 
     case BF_UCASE:
         if (nargs != 1) die("line %d: UCASE$ takes one argument", n->line);
         args[0] = str_arg(n->a, n->op);
-        return (struct val){ emit_call_ret32("__basic_ucase", args, 1),
-                             TY_STRING };
+        return (struct val){ emit_call_retptr("__basic_ucase", args, 1),
+                             TY_STRING, -1 };
 
     case BF_LCASE:
         if (nargs != 1) die("line %d: LCASE$ takes one argument", n->line);
         args[0] = str_arg(n->a, n->op);
-        return (struct val){ emit_call_ret32("__basic_lcase", args, 1),
-                             TY_STRING };
+        return (struct val){ emit_call_retptr("__basic_lcase", args, 1),
+                             TY_STRING, -1 };
 
     case BF_ABS: {
         struct val x;
@@ -1255,7 +1575,7 @@ lower_builtin(struct node *n)
             return bits_to_float(emit_call_ret64("__basic_fabs_bits", args, 1));
         }
         args[0] = x.temp;
-        return (struct val){ emit_call_ret64("__basic_iabs", args, 1), TY_INT };
+        return (struct val){ emit_call_ret64("__basic_iabs", args, 1), TY_INT, -1 };
     }
 
     case BF_SGN: {
@@ -1266,8 +1586,8 @@ lower_builtin(struct node *n)
         args[0] = x.temp;
         if (x.ty == TY_FLOAT)
             return (struct val){ emit_call_ret64("__basic_fsgn", args, 1),
-                                 TY_INT };
-        return (struct val){ emit_call_ret64("__basic_isgn", args, 1), TY_INT };
+                                 TY_INT, -1 };
+        return (struct val){ emit_call_ret64("__basic_isgn", args, 1), TY_INT, -1 };
     }
 
     case BF_MIN:
@@ -1290,7 +1610,7 @@ lower_builtin(struct node *n)
         args[0] = a.temp;
         args[1] = b.temp;
         return (struct val){ emit_call_ret64(
-            is_max ? "__basic_imax" : "__basic_imin", args, 2), TY_INT };
+            is_max ? "__basic_imax" : "__basic_imin", args, 2), TY_INT, -1 };
     }
 
     case BF_CLAMP: {
@@ -1312,7 +1632,7 @@ lower_builtin(struct node *n)
         args[1] = lo.temp;
         args[2] = hi.temp;
         return (struct val){ emit_call_ret64("__basic_iclamp", args, 3),
-                             TY_INT };
+                             TY_INT, -1 };
     }
 
     case BF_INT: {
@@ -1321,9 +1641,9 @@ lower_builtin(struct node *n)
         x = lower_expr(n->a);
         if (x.ty == TY_STRING) die("line %d: INT needs a number", n->line);
         if (x.ty != TY_FLOAT)
-            return (struct val){ x.temp, TY_INT };   /* already integral */
+            return (struct val){ x.temp, TY_INT, -1 };   /* already integral */
         args[0] = x.temp;
-        return (struct val){ emit_call_ret64("__basic_ftoi", args, 1), TY_INT };
+        return (struct val){ emit_call_ret64("__basic_ftoi", args, 1), TY_INT, -1 };
     }
 
     case BF_FLOAT: {
@@ -1331,7 +1651,7 @@ lower_builtin(struct node *n)
         if (nargs != 1) die("line %d: FLOAT takes one argument", n->line);
         x = lower_expr(n->a);
         if (x.ty == TY_STRING) die("line %d: FLOAT needs a number", n->line);
-        return (struct val){ to_float(x), TY_FLOAT };
+        return (struct val){ to_float(x), TY_FLOAT, -1 };
     }
 
     case BF_FLOOR:
@@ -1347,9 +1667,9 @@ lower_builtin(struct node *n)
         x = lower_expr(n->a);
         if (x.ty == TY_STRING) die("line %d: %s needs a number", n->line, who);
         if (x.ty != TY_FLOAT)
-            return (struct val){ x.temp, TY_INT };   /* already integral */
+            return (struct val){ x.temp, TY_INT, -1 };   /* already integral */
         args[0] = x.temp;
-        return (struct val){ emit_call_ret64(name, args, 1), TY_INT };
+        return (struct val){ emit_call_ret64(name, args, 1), TY_INT, -1 };
     }
 
     case BF_LERP: {
@@ -1409,32 +1729,32 @@ lower_builtin(struct node *n)
         if (nargs != 1) die("line %d: VALINT takes one argument", n->line);
         args[0] = str_arg(n->a, n->op);
         return (struct val){ emit_call_ret64("__basic_valint", args, 1),
-                             TY_INT };
+                             TY_INT, -1 };
 
     case BF_SPACE:
         if (nargs != 1) die("line %d: SPACE$ takes one argument", n->line);
         args[0] = int_arg(n->a);
-        return (struct val){ emit_call_ret32("__basic_space", args, 1),
-                             TY_STRING };
+        return (struct val){ emit_call_retptr("__basic_space", args, 1),
+                             TY_STRING, -1 };
 
     case BF_STRING:
         if (nargs != 2) die("line %d: STRING$ takes two arguments", n->line);
         args[0] = int_arg(n->a);
         args[1] = str_arg(n->a->next, n->op);
-        return (struct val){ emit_call_ret32("__basic_string", args, 2),
-                             TY_STRING };
+        return (struct val){ emit_call_retptr("__basic_string", args, 2),
+                             TY_STRING, -1 };
 
     case BF_HEX:
         if (nargs != 1) die("line %d: HEX$ takes one argument", n->line);
         args[0] = int_arg64(n->a);
-        return (struct val){ emit_call_ret32("__basic_hex", args, 1),
-                             TY_STRING };
+        return (struct val){ emit_call_retptr("__basic_hex", args, 1),
+                             TY_STRING, -1 };
 
     case BF_BIN:
         if (nargs != 1) die("line %d: BIN$ takes one argument", n->line);
         args[0] = int_arg64(n->a);
-        return (struct val){ emit_call_ret32("__basic_bin", args, 1),
-                             TY_STRING };
+        return (struct val){ emit_call_retptr("__basic_bin", args, 1),
+                             TY_STRING, -1 };
 
     case BF_FIX: {
         struct val x;
@@ -1443,30 +1763,30 @@ lower_builtin(struct node *n)
         if (x.ty == TY_STRING) die("line %d: FIX$ needs a number", n->line);
         args[0] = to_float(x);
         args[1] = int_arg(n->a->next);
-        return (struct val){ emit_call_ret32("__basic_fix", args, 2),
-                             TY_STRING };
+        return (struct val){ emit_call_retptr("__basic_fix", args, 2),
+                             TY_STRING, -1 };
     }
 
     case BF_ZERO:
         if (nargs != 2) die("line %d: ZERO$ takes two arguments", n->line);
         args[0] = int_arg64(n->a);
         args[1] = int_arg(n->a->next);
-        return (struct val){ emit_call_ret32("__basic_zero", args, 2),
-                             TY_STRING };
+        return (struct val){ emit_call_retptr("__basic_zero", args, 2),
+                             TY_STRING, -1 };
 
     case BF_RJUST:
         if (nargs != 2) die("line %d: RJUST$ takes two arguments", n->line);
         args[0] = str_arg(n->a, n->op);
         args[1] = int_arg(n->a->next);
-        return (struct val){ emit_call_ret32("__basic_rjust", args, 2),
-                             TY_STRING };
+        return (struct val){ emit_call_retptr("__basic_rjust", args, 2),
+                             TY_STRING, -1 };
 
     case BF_LJUST:
         if (nargs != 2) die("line %d: LJUST$ takes two arguments", n->line);
         args[0] = str_arg(n->a, n->op);
         args[1] = int_arg(n->a->next);
-        return (struct val){ emit_call_ret32("__basic_ljust", args, 2),
-                             TY_STRING };
+        return (struct val){ emit_call_retptr("__basic_ljust", args, 2),
+                             TY_STRING, -1 };
 
     case BF_RND:
         if (nargs != 0) die("line %d: RND takes no arguments", n->line);
@@ -1479,11 +1799,11 @@ lower_builtin(struct node *n)
     case BF_SEED:
         if (nargs != 1) die("line %d: SEED takes one argument", n->line);
         args[0] = int_arg64(n->a);
-        return (struct val){ emit_call_ret64("__basic_seed", args, 1), TY_INT };
+        return (struct val){ emit_call_ret64("__basic_seed", args, 1), TY_INT, -1 };
 
     default:
         die("lower: unknown builtin %d", n->op);
-        return (struct val){ 0, TY_INT };
+        return (struct val){ 0, TY_INT, -1 };
     }
 }
 
@@ -1501,7 +1821,7 @@ load_scalar(int addr, int ety)
         ins->dst = new_temp();
         ins->a = addr;
         mark_i64(ins->dst);
-        return (struct val){ ins->dst, TY_INT };
+        return (struct val){ ins->dst, TY_INT, -1 };
     case TY_BYTE: {
         int b;
         ins = emit(IR_LB);                  /* zero-extended byte -> i32 */
@@ -1512,7 +1832,7 @@ load_scalar(int addr, int ety)
         ins->dst = new_temp();
         ins->a = b;
         mark_i64(ins->dst);
-        return (struct val){ ins->dst, TY_INT };
+        return (struct val){ ins->dst, TY_INT, -1 };
     }
     case TY_FLOAT:
         ins = emit(IR_FLD);
@@ -1520,12 +1840,13 @@ load_scalar(int addr, int ety)
         ins->a = addr;
         ins->imm = 0;
         mark_float(ins->dst);
-        return (struct val){ ins->dst, TY_FLOAT };
-    default:                                /* TY_STRING */
-        ins = emit(IR_LW);
+        return (struct val){ ins->dst, TY_FLOAT, -1 };
+    default:                                /* TY_STRING: a pointer-width handle */
+        ins = emit(BAS_LP64 ? IR_LD64 : IR_LW);
         ins->dst = new_temp();
         ins->a = addr;
-        return (struct val){ ins->dst, TY_STRING };
+        mark_ptr(ins->dst);
+        return (struct val){ ins->dst, TY_STRING, -1 };
     }
 }
 
@@ -1565,10 +1886,10 @@ store_scalar(int addr, int ety, struct val v, int line, const char *what)
         ins->imm = 0;
         break;
     }
-    default:                                /* TY_STRING */
+    default:                                /* TY_STRING: a pointer-width handle */
         if (v.ty != TY_STRING)
             die("line %d: %s needs a STRING value", line, what);
-        ins = emit(IR_SW);
+        ins = emit(BAS_LP64 ? IR_ST64 : IR_SW);
         ins->a = addr;
         ins->b = v.temp;
         break;
@@ -1620,16 +1941,10 @@ lower_elem_addr(struct var *v, struct node *args, int line)
     ins->b = esz;
     off = ins->dst;
 
-    ins = emit(IR_ADL);
-    ins->dst = new_temp();
-    ins->slot = v->slot;
-    base = ins->dst;
-
-    ins = emit(IR_ADD);
-    ins->dst = new_temp();
-    ins->a = base;
-    ins->b = off;
-    return ins->dst;
+    /* the base is the array slot's address (pointer-width); the index offset is a
+       signed 32-bit byte count, added with emit_addp (sign-extended under LP64) */
+    base = emit_adl(v->slot);
+    return emit_addp(base, off);
 }
 
 /* Read array element n->name(n->a...). */
@@ -1666,15 +1981,12 @@ lower_index_store(struct node *desig, struct val val, int line)
 
 /* ---- records ---- */
 
-/* The base address (32-bit) of a record variable: the slot's address for a
-   by-value record, or the pointer the slot holds for a REF parameter. */
+/* The base address (pointer-width) of a record variable: the slot's address for
+   a by-value record, or the pointer the slot holds for a REF/handle parameter. */
 static int
 record_base(struct var *v)
 {
-    struct ir_insn *ins = emit(v->is_ref ? IR_LDL : IR_ADL);
-    ins->dst = new_temp();
-    ins->slot = v->slot;
-    return ins->dst;
+    return v->is_ref ? emit_load_ptr(v->slot) : emit_adl(v->slot);
 }
 
 /* Resolve a field designator (N_FIELD: a = record variable, name = field),
@@ -1696,21 +2008,17 @@ lower_field_addr(struct node *n, int *ty_out, int line)
     v = &vars[vi];
     if (!v->is_record)
         die("line %d: '%s' is not a record", line, base->name);
+    if (rec_tbl[v->rec].opaque && rec_tbl[v->rec].nfields == 0)
+        die("line %d: '%s' is an opaque TYPE; its fields are private to its "
+            "module", line, rec_tbl[v->rec].name);
     fld = rec_field(&rec_tbl[v->rec], n->name);
     if (!fld)
         die("line %d: record '%s' has no field '%s'", line, base->name, n->name);
     *ty_out = fld->ty;
 
     addr = record_base(v);
-    if (fld->offset != 0) {
-        struct ir_insn *ins;
-        int c = lower_const32(fld->offset);
-        ins = emit(IR_ADD);
-        ins->dst = new_temp();
-        ins->a = addr;
-        ins->b = c;
-        addr = ins->dst;
-    }
+    if (fld->offset != 0)
+        addr = emit_addp(addr, lower_const32(fld->offset));
     return addr;
 }
 
@@ -1778,7 +2086,6 @@ lower_str_value(struct node *s)
 {
     char label[32];
     struct ir_global *g;
-    struct ir_insn *lea;
     int len = s->slen;
     unsigned char *buf;
 
@@ -1807,10 +2114,9 @@ lower_str_value(struct node *s)
     g->next = cur_prog->globals;
     cur_prog->globals = g;
 
-    lea = emit(IR_LEA);
-    lea->dst = new_temp();
-    lea->sym = arena_strdup(lower_arena, label);
-    return (struct val){ lea->dst, TY_STRING };
+    /* The handle is the address of that global object: a 4-byte length prefix
+       (written above, matching struct bstr) then the bytes. Pointer-width. */
+    return (struct val){ emit_lea_sym(label), TY_STRING, -1 };
 }
 
 /* ---- statements ---- */
@@ -1858,9 +2164,7 @@ store_var(int vi, struct val v, int line)
         if (vars[vi].ty != TY_STRING || v.ty != TY_STRING)
             die("line %d: cannot mix STRING and a number in an assignment "
                 "to '%s'", line, vars[vi].name);
-        ins = emit(IR_STL);             /* 32-bit handle */
-        ins->slot = vars[vi].slot;
-        ins->a = v.temp;
+        emit_store_ptr(vars[vi].slot, v.temp);   /* pointer-width handle */
         return;
     }
     if (vars[vi].ty == TY_FLOAT) {
@@ -1928,13 +2232,13 @@ reload_sel(int slot, int ty)
         ins->slot = slot;
         ins->imm = 0;
         mark_float(ins->dst);
-        return (struct val){ ins->dst, TY_FLOAT };
+        return (struct val){ ins->dst, TY_FLOAT, -1 };
     }
     ins = emit(IR_LDL64);
     ins->dst = new_temp();
     ins->slot = slot;
     mark_i64(ins->dst);
-    return (struct val){ ins->dst, TY_INT };
+    return (struct val){ ins->dst, TY_INT, -1 };
 }
 
 /* Lower one WHEN item against the selector in `slot`, yielding an i32 0/1. */
@@ -2023,19 +2327,15 @@ read_scalar_var(int vi)
         ins->slot = vars[vi].slot;
         ins->imm = 0;
         mark_float(ins->dst);
-        return (struct val){ ins->dst, TY_FLOAT };
+        return (struct val){ ins->dst, TY_FLOAT, -1 };
     }
-    if (vars[vi].ty == TY_STRING) {
-        ins = emit(IR_LDL);
-        ins->dst = new_temp();
-        ins->slot = vars[vi].slot;
-        return (struct val){ ins->dst, TY_STRING };
-    }
+    if (vars[vi].ty == TY_STRING)
+        return (struct val){ emit_load_ptr(vars[vi].slot), TY_STRING, -1 };
     ins = emit(IR_LDL64);                    /* INT, or BYTE held 0..255 */
     ins->dst = new_temp();
     ins->slot = vars[vi].slot;
     mark_i64(ins->dst);
-    return (struct val){ ins->dst, vars[vi].ty == TY_BYTE ? TY_BYTE : TY_INT };
+    return (struct val){ ins->dst, vars[vi].ty == TY_BYTE ? TY_BYTE : TY_INT, -1 };
 }
 
 /* Lower a control-flow statement (IF / WHILE / REPEAT / FOR / EXIT / CASE). */
@@ -2179,7 +2479,7 @@ lower_control(struct node *n)
             mark_i64(ins->dst); ss = ins->dst;
             ins = emit(IR_ADD64); ins->dst = new_temp(); ins->a = vv; ins->b = ss;
             mark_i64(ins->dst); sum = ins->dst;
-            store_var(vi, (struct val){ sum, TY_INT }, n->line);
+            store_var(vi, (struct val){ sum, TY_INT, -1 }, n->line);
         }
         emit_jmp(ltop);
         emit_label(lend);
@@ -2244,10 +2544,8 @@ lower_control(struct node *n)
             esz_c = lower_const32(esz);
             ins = emit(IR_MUL); ins->dst = new_temp();
             ins->a = i; ins->b = esz_c; off = ins->dst;
-            ins = emit(IR_ADL); ins->dst = new_temp(); ins->slot = arr->slot;
-            base = ins->dst;
-            ins = emit(IR_ADD); ins->dst = new_temp();
-            ins->a = base; ins->b = off; addr = ins->dst;
+            base = emit_adl(arr->slot);         /* pointer: array base address */
+            addr = emit_addp(base, off);        /* + signed 32-bit byte offset */
 
             /* bind the element into the loop variable (reference semantics:
                written back after the body) */
@@ -2263,10 +2561,8 @@ lower_control(struct node *n)
             esz_c = lower_const32(esz);
             ins = emit(IR_MUL); ins->dst = new_temp();
             ins->a = i; ins->b = esz_c; off = ins->dst;
-            ins = emit(IR_ADL); ins->dst = new_temp(); ins->slot = arr->slot;
-            base = ins->dst;
-            ins = emit(IR_ADD); ins->dst = new_temp();
-            ins->a = base; ins->b = off; addr = ins->dst;
+            base = emit_adl(arr->slot);         /* pointer: array base address */
+            addr = emit_addp(base, off);        /* + signed 32-bit byte offset */
             store_scalar(addr, ety, read_scalar_var(vi), n->line, n->name);
 
             /* index += 1 */
@@ -2310,7 +2606,22 @@ lower_stmt(struct node *n)
                 die("line %d: unknown record type '%s'", n->line, n->sval);
             if (n->a)
                 die("line %d: arrays of records are not yet supported", n->line);
-            var_declare_record(n->name, ri, 0, n->line);
+            if (rec_tbl[ri].opaque) {
+                /* an opaque-type variable is handle-backed (its slot holds a
+                   pointer). A local opaque TYPE (known size) is heap-allocated
+                   here so a constructor can return it; an imported one has no
+                   known size and simply holds a handle assigned from a call. */
+                int vi;
+                var_declare_record(n->name, ri, 1, n->line);
+                vi = var_find(n->name);
+                if (rec_tbl[ri].size > 0) {
+                    int sz = lower_const32(rec_tbl[ri].size);
+                    int h = emit_call_retptr("__moo_arena_alloc", &sz, 1);
+                    emit_store_ptr(vars[vi].slot, h);
+                }
+            } else {
+                var_declare_record(n->name, ri, 0, n->line);
+            }
         } else if (n->a) {                      /* bounds present: an array */
             int dims[MAX_DIMS], nd = 0;
             for (struct node *b = n->a; b; b = b->next) {
@@ -2337,10 +2648,26 @@ lower_stmt(struct node *n)
             int vi = var_find(n->name);
             if (vi < 0)
                 die("line %d: undeclared variable '%s'", n->line, n->name);
-            if (vars[vi].is_record)             /* whole-record copy */
-                lower_record_assign(&vars[vi], n->a, n->line);
-            else
+            if (vars[vi].is_record) {
+                if (rec_tbl[vars[vi].rec].opaque) {
+                    /* an opaque handle variable takes a handle value, stored as
+                       the pointer in its slot (not a record block copy) */
+                    struct val v = lower_expr(n->a);
+                    if (v.ty != TY_HANDLE)
+                        die("line %d: '%s' is an opaque handle and takes only a "
+                            "handle value", n->line, n->name);
+                    if (v.rec != vars[vi].rec)
+                        die("line %d: '%s' is a %s handle but the value is a %s "
+                            "handle", n->line, n->name,
+                            handle_type_name(vars[vi].rec),
+                            handle_type_name(v.rec));
+                    emit_store_ptr(vars[vi].slot, v.temp);
+                } else {                        /* whole-record copy */
+                    lower_record_assign(&vars[vi], n->a, n->line);
+                }
+            } else {
                 store_var(vi, lower_expr(n->a), n->line);
+            }
         }
         break;
 
@@ -2370,7 +2697,17 @@ lower_stmt(struct node *n)
                 if (v.ty != TY_STRING)
                     die("line %d: an FN of STRING must RETURN a STRING",
                         n->line);
-                ins = emit(IR_RETV);            /* 32-bit handle */
+                ins = emit(BAS_LP64 ? IR_RETV64 : IR_RETV);   /* pointer handle */
+                ins->a = v.temp;
+            } else if (cur_ret_ty == TY_HANDLE) {
+                if (v.ty != TY_HANDLE)
+                    die("line %d: an FN of an opaque TYPE must RETURN a handle "
+                        "of that type", n->line);
+                if (v.rec != cur_ret_rec)
+                    die("line %d: this FN returns a %s handle but a %s handle is "
+                        "returned", n->line, handle_type_name(cur_ret_rec),
+                        handle_type_name(v.rec));
+                ins = emit(BAS_LP64 ? IR_RETV64 : IR_RETV);   /* pointer handle */
                 ins->a = v.temp;
             } else if (cur_ret_ty == TY_FLOAT) {
                 int fv = to_float(v);
@@ -2415,14 +2752,14 @@ lower_stmt(struct node *n)
             if (vi < 0)
                 die("line %d: undeclared variable '%s'", t->line, t->name);
             if (vars[vi].ty == TY_STRING) {
-                int h = emit_call_ret32("__basic_input_str", NULL, 0);
-                store_var(vi, (struct val){ h, TY_STRING }, t->line);
+                int h = emit_call_retptr("__basic_input_str", NULL, 0);
+                store_var(vi, (struct val){ h, TY_STRING, -1 }, t->line);
             } else if (vars[vi].ty == TY_FLOAT) {
                 int bits = emit_call_ret64("__basic_input_float_bits", NULL, 0);
                 store_var(vi, bits_to_float(bits), t->line);
             } else {
                 int v = emit_call_ret64("__basic_input_int", NULL, 0);
-                store_var(vi, (struct val){ v, TY_INT }, t->line);
+                store_var(vi, (struct val){ v, TY_INT, -1 }, t->line);
             }
         }
         break;
@@ -2455,11 +2792,14 @@ lower_stmt(struct node *n)
     }
 }
 
-/* Is this top-level node a definition (not a module statement)? */
+/* Is this top-level node a definition (not an executable module statement)? An
+   exported CONST carries an N_CONST node for the interface writer but produces no
+   code, so it counts as a definition. */
 static int
 is_def_node(struct node *n)
 {
-    return n->kind == N_PROC || n->kind == N_FN || n->kind == N_TYPE;
+    return n->kind == N_PROC || n->kind == N_FN || n->kind == N_TYPE ||
+           n->kind == N_CONST || n->kind == N_IMPORT;
 }
 
 /* Start a new function: fresh per-function scratch (slots, variables, temp
@@ -2474,6 +2814,7 @@ begin_func(const char *name)
     vars = NULL; nvars = 0; var_cap = 0;
     temp_i64 = NULL; temp_i64_cap = 0;
     temp_float = NULL; temp_float_cap = 0;
+    temp_ptr = NULL; temp_ptr_cap = 0;
     loop_sp = 0;
     return fn;
 }
@@ -2492,6 +2833,7 @@ end_func(struct ir_func *fn, int nparams)
     free(vars); vars = NULL; nvars = 0; var_cap = 0;
     free(temp_i64); temp_i64 = NULL; temp_i64_cap = 0;
     free(temp_float); temp_float = NULL; temp_float_cap = 0;
+    free(temp_ptr); temp_ptr = NULL; temp_ptr_cap = 0;
 }
 
 /* Lower one PROC/FN definition. Parameters become the first nparams slots, so
@@ -2502,10 +2844,14 @@ lower_user_func(struct node *def)
     struct ir_func *fn = begin_func(def->name);
     struct ir_insn *ins;
     int np = 0;
+    int pfloat[MAX_PARAMS];
+    int any_float = 0;
 
-    cur_ret_ty = (def->kind == N_FN) ? decl_to_ty(def->op) : -1;
+    cur_ret_ty = (def->kind == N_FN) ? fn_ret_ty(def) : -1;
+    cur_ret_rec = (cur_ret_ty == TY_HANDLE) ? rec_lookup(def->sval) : -1;
 
     for (struct node *pm = def->a; pm; pm = pm->next) {
+        int is_float_param = 0;
         if (pm->op == TY_DECL_RECORD) {
             int ri = rec_lookup(pm->sval);
             if (ri < 0)
@@ -2513,9 +2859,38 @@ lower_user_func(struct node *def)
             /* a record parameter is REF: the slot holds a pointer */
             var_declare_record(pm->name, ri, 1, def->line);
         } else {
-            var_declare(pm->name, decl_to_ty(pm->op), def->line);
+            int ty = decl_to_ty(pm->op);
+            var_declare(pm->name, ty, def->line);
+            is_float_param = (ty == TY_FLOAT);
         }
+        if (np < MAX_PARAMS)
+            pfloat[np] = is_float_param;
+        any_float |= is_float_param;
         np++;
+    }
+
+    /* Thread the float parameter classes to the register psABI. A FLOAT
+       parameter rides a hardware float register (xmm on x86-64 System V, d on
+       AArch64 AAPCS), so the selector backends need its class; integer and
+       pointer parameters default to class 0. The ILP32 soft-float targets
+       (ColdFire, rv32, MIPS) pass every argument in integer registers or on the
+       stack, so they ignore these arrays, but a BASIC FLOAT is always a double
+       (param_fw 0), which is their default, so setting them is harmless there. */
+    if (any_float && np <= MAX_PARAMS) {
+        fn->param_class = arena_zalloc(lower_arena, np * sizeof(int));
+        fn->param_neb = arena_zalloc(lower_arena, np * sizeof(signed char));
+        fn->param_cls = arena_zalloc(lower_arena,
+                                     4 * np * sizeof(signed char));
+        fn->param_fw = arena_zalloc(lower_arena, np * sizeof(signed char));
+        for (int i = 0; i < np; i++) {
+            fn->param_neb[i] = 1;
+            fn->param_class[i] = pfloat[i];
+            fn->param_cls[4 * i] = (signed char)pfloat[i];
+            fn->param_cls[4 * i + 1] = -1;
+            fn->param_cls[4 * i + 2] = -1;
+            fn->param_cls[4 * i + 3] = -1;
+            fn->param_fw[i] = 0;        /* BASIC FLOAT is always a double */
+        }
     }
 
     ins = emit(IR_FUNC);
@@ -2530,8 +2905,13 @@ lower_user_func(struct node *def)
     if (cur_ret_ty == TY_FLOAT) {
         struct val z = lower_const_float(0.0);
         ins = emit(IR_FRETV); ins->a = z.temp; ins->imm = 0;
-    } else if (cur_ret_ty == TY_STRING) {
-        ins = emit(IR_RETV); ins->a = lower_const32(0);   /* NULL handle */
+    } else if (cur_ret_ty == TY_STRING || cur_ret_ty == TY_HANDLE) {
+        /* NULL handle, pointer-width */
+        if (BAS_LP64) {
+            ins = emit(IR_RETV64); ins->a = lower_const64(0).temp;
+        } else {
+            ins = emit(IR_RETV); ins->a = lower_const32(0);
+        }
     } else if (cur_ret_ty >= 0) {
         struct val z = lower_const64(0);
         ins = emit(IR_RETV64); ins->a = z.temp;
@@ -2564,40 +2944,61 @@ lower_program(struct arena *a, struct node *ast)
     if (!ast || ast->kind != N_PROGRAM)
         die("lower: expected a program node");
 
-    /* pass 1a: record types first, so routine signatures and DIMs can name
-       them. pass 1b: routine signatures, so a call may precede its definition
-       (and forward DECLAREs are honoured). */
+    /* pass 1a: record types first (local, then imported opaque ones), so routine
+       signatures and DIMs can name them. pass 1b: routine signatures, so a call
+       may precede its definition (and forward DECLAREs are honoured), followed by
+       the imported routines. */
     for (s = ast->a; s; s = s->next)
         if (s->kind == N_TYPE)
             rec_register(s);
     for (s = ast->a; s; s = s->next)
+        if (s->kind == N_IMPORT && s->imp->kind == BMI_TYPE)
+            rec_register_opaque(s->name);   /* key: dotted for a qualified import */
+    for (s = ast->a; s; s = s->next)
         if (s->kind == N_PROC || s->kind == N_FN)
             func_register(s);
-
-    /* the module's statements form main */
-    main_fn = begin_func("main");
-    cur_ret_ty = -1;
-    ins = emit(IR_FUNC);
-    ins->sym = arena_strdup(a, "main");
-    ins->nargs = 0;
     for (s = ast->a; s; s = s->next)
-        if (!is_def_node(s))
-            lower_stmt(s);
-    args[0] = lower_const32(0);                 /* implicit exit(0) */
-    emit_call("exit", args, 1);
-    ins = emit(IR_RETV);
-    ins->a = lower_const32(0);
-    emit(IR_ENDF);
-    end_func(main_fn, 0);
+        if (s->kind == N_IMPORT && s->imp->kind != BMI_TYPE)
+            func_register_import(s->name, s->imp, s->sval);
 
-    prog->funcs = main_fn;
-    fn_tail = &main_fn->next;
+    /* A file headed by MODULE is a library: it has no entry point, and only its
+       exported routines are globally visible. A program instead forms a main
+       function from its module-scope statements. */
+    if (ast->name) {
+        for (s = ast->a; s; s = s->next)
+            if (!is_def_node(s))
+                die("line %d: a MODULE has no top-level statements", s->line);
+        prog->funcs = NULL;
+        fn_tail = &prog->funcs;
+    } else {
+        main_fn = begin_func("main");
+        cur_ret_ty = -1;
+        cur_ret_rec = -1;
+        ins = emit(IR_FUNC);
+        ins->sym = arena_strdup(a, "main");
+        ins->nargs = 0;
+        for (s = ast->a; s; s = s->next)
+            if (!is_def_node(s))
+                lower_stmt(s);
+        args[0] = lower_const32(0);             /* implicit exit(0) */
+        emit_call("exit", args, 1);
+        ins = emit(IR_RETV);
+        ins->a = lower_const32(0);
+        emit(IR_ENDF);
+        end_func(main_fn, 0);
+
+        prog->funcs = main_fn;
+        fn_tail = &main_fn->next;
+    }
 
     /* each PROC/FN with a body becomes its own function (forward DECLAREs,
-       marked ival = 1, have no body and emit nothing). */
+       marked ival = 1, have no body and emit nothing). In a module, only an
+       EXPORTed routine is global; the rest are file-local. */
     for (s = ast->a; s; s = s->next)
         if ((s->kind == N_PROC || s->kind == N_FN) && !s->ival) {
             struct ir_func *fn = lower_user_func(s);
+            if (ast->name)
+                fn->is_local = !s->is_export;
             *fn_tail = fn;
             fn_tail = &fn->next;
         }

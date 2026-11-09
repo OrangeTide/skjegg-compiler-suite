@@ -27,7 +27,7 @@
 #include <sys/stat.h>
 
 /****************************************************************
- * ELF32 symbol reading (either endianness)
+ * ELF symbol reading (ELF32 or ELF64, either endianness)
  ****************************************************************/
 
 #define ELF_ST_BIND(i)  ((i) >> 4)
@@ -37,6 +37,7 @@ struct elf_view {
     const uint8_t *buf;
     size_t len;
     int le;                     /* 1 little-endian, 0 big-endian */
+    int is64;                   /* 1 ELF64, 0 ELF32 */
 };
 
 static uint16_t
@@ -58,7 +59,18 @@ rd32(const struct elf_view *e, size_t off)
           ((uint32_t)p[2] << 8) | (uint32_t)p[3];
 }
 
-/* True and fills *e if buf is an ELF32 relocatable object we can index. */
+static uint64_t
+rd64(const struct elf_view *e, size_t off)
+{
+    uint64_t lo = rd32(e, e->le ? off : off + 4);
+    uint64_t hi = rd32(e, e->le ? off + 4 : off);
+    return e->le ? (lo | (hi << 32)) : ((lo << 32) | hi);
+}
+
+/* True and fills *e if buf is an ELF32 or ELF64 relocatable object we can
+ * index.  BASIC and the other front ends emit ELF32 on the ILP32 targets
+ * (ColdFire, rv32, MIPS) and ELF64 on the LP64 ones (x86-64, AArch64), so the
+ * one archiver indexes every target's objects. */
 static int
 elf_open(struct elf_view *e, const uint8_t *buf, size_t len)
 {
@@ -66,7 +78,11 @@ elf_open(struct elf_view *e, const uint8_t *buf, size_t len)
     e->len = len;
     if (len < 52 || memcmp(buf, "\177ELF", 4) != 0)
         return 0;
-    if (buf[4] != 1)            /* ELFCLASS32 */
+    if (buf[4] == 1)            /* ELFCLASS32 */
+        e->is64 = 0;
+    else if (buf[4] == 2)       /* ELFCLASS64 */
+        e->is64 = 1;
+    else
         return 0;
     if (buf[5] == 1)
         e->le = 1;
@@ -74,46 +90,61 @@ elf_open(struct elf_view *e, const uint8_t *buf, size_t len)
         e->le = 0;
     else
         return 0;
+    if (e->is64 && len < 64)
+        return 0;
     return 1;
 }
 
-/* Call cb(name, ctx) for each defined global/weak symbol of an ELF32 member.
+/* Call cb(name, ctx) for each defined global/weak symbol of an ELF member.
  * A defined symbol is one whose st_shndx is not SHN_UNDEF (0); this includes
- * common and absolute symbols, matching what ar/ranlib index. */
+ * common and absolute symbols, matching what ar/ranlib index.  The section
+ * header and symbol strides and field offsets differ between ELF32 and ELF64,
+ * so they are chosen from e->is64. */
 static void
 elf_each_defined_global(const struct elf_view *e,
                         void (*cb)(const char *, void *), void *ctx)
 {
-    uint32_t shoff = rd32(e, 32);
-    uint16_t shnum = rd16(e, 48);
+    /* e_shoff (section header table offset) and e_shnum (count). */
+    uint64_t shoff = e->is64 ? rd64(e, 40) : rd32(e, 32);
+    uint16_t shnum = rd16(e, e->is64 ? 60 : 48);
+    size_t shent = e->is64 ? 64 : 40;   /* section header entry size */
+    size_t syment = e->is64 ? 24 : 16;  /* symbol table entry size */
 
     for (uint16_t i = 0; i < shnum; i++) {
-        size_t sh = shoff + (size_t)i * 40;
-        if (sh + 40 > e->len)
+        size_t sh = shoff + (size_t)i * shent;
+        if (sh + shent > e->len)
             return;
         if (rd32(e, sh + 4) != 2)       /* SHT_SYMTAB */
             continue;
 
-        uint32_t sym_off = rd32(e, sh + 16);
-        uint32_t sym_size = rd32(e, sh + 20);
-        uint32_t link = rd32(e, sh + 24);
-        if ((size_t)link * 40 + 40 > shnum * 40u)
+        /* sh_offset/sh_size are 8-byte on ELF64 (at +24/+32), 4-byte on ELF32
+         * (at +16/+20); sh_link is 4-byte at +40 (ELF64) or +24 (ELF32). */
+        uint64_t sym_off = e->is64 ? rd64(e, sh + 24) : rd32(e, sh + 16);
+        uint64_t sym_size = e->is64 ? rd64(e, sh + 32) : rd32(e, sh + 20);
+        uint32_t link = rd32(e, sh + (e->is64 ? 40 : 24));
+        if ((size_t)link * shent + shent > (size_t)shnum * shent)
             return;
-        uint32_t str_off = rd32(e, shoff + (size_t)link * 40 + 16);
-        int count = (int)(sym_size / 16);
+        uint64_t str_off = e->is64
+            ? rd64(e, shoff + (size_t)link * shent + 24)
+            : rd32(e, shoff + (size_t)link * shent + 16);
+        int count = (int)(sym_size / syment);
 
         for (int s = 0; s < count; s++) {
-            size_t so = sym_off + (size_t)s * 16;
-            if (so + 16 > e->len)
+            size_t so = sym_off + (size_t)s * syment;
+            if (so + syment > e->len)
                 break;
+            /* st_name is 4-byte at +0 on both.  st_info/st_shndx sit at
+             * +12/+14 in the ELF32 entry but at +4/+6 in the ELF64 entry. */
             uint32_t st_name = rd32(e, so + 0);
-            uint8_t st_info = e->buf[so + 12];
-            uint16_t st_shndx = rd16(e, so + 14);
+            uint8_t st_info = e->buf[so + (e->is64 ? 4 : 12)];
+            uint16_t st_shndx = rd16(e, so + (e->is64 ? 6 : 14));
             int bind = ELF_ST_BIND(st_info);
 
             if (st_shndx == 0)                  /* SHN_UNDEF */
                 continue;
             if (bind != 1 && bind != 2)         /* GLOBAL, WEAK */
+                continue;
+            if (str_off + st_name >= e->len)
                 continue;
             const char *name = (const char *)e->buf + str_off + st_name;
             if (name[0] == '\0')

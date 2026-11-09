@@ -1,0 +1,7 @@
+.bmi 1
+.target ilp32 big
+.module MathUtil
+.const MaxSides i64 = 32
+.const Tau i64 = 6
+.func Hypot link Hypot ( f64 f64 ) -> f64
+.proc Bump link Bump ( ref i64 i64 )

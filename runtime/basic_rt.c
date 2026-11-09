@@ -1566,6 +1566,11 @@ basic_clock_gettime64(int clk_id, struct brt_timespec64 *ts)
                       : "r"(a7), "r"(a1)
                       : "memory");
     return (int)a0;
+#elif defined(__x86_64__) || defined(__aarch64__)
+    /* LP64: the native clock_gettime fills a 16-byte {long sec; long nsec}
+       timespec, which is exactly brt_timespec64 here, so call it through the
+       shared seam directly. */
+    return clock_gettime(clk_id, ts);
 #else
     register long d0 __asm__("d0") = 403;       /* __NR_clock_gettime64 */
     register long d1 __asm__("d1") = clk_id;
@@ -1693,6 +1698,16 @@ __basic_wait(int ms)
                           : "+r"(a0)
                           : "r"(a7), "r"(a1), "r"(a2), "r"(a3)
                           : "memory");
+    }
+#elif defined(__x86_64__) || defined(__aarch64__)
+    {
+        /* LP64: nanosleep takes a 16-byte {long sec; long nsec} timespec, which
+           is brt_timespec64 here. */
+        struct brt_timespec64 req;
+
+        req.sec = ms / 1000;
+        req.nsec = (long long)(ms % 1000) * 1000000;
+        nanosleep(&req, 0);
     }
 #else
     {

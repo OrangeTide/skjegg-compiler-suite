@@ -8,10 +8,12 @@ code through the shared IR, the same path the other front ends take (`lex.c`,
 The language is imported from BASIDE (a structured-BASIC dialect aimed at simple
 games). Skjegg takes the core language only: the four value types, declarations,
 structured control flow, procedures and functions, aggregates, and the core
-built-in functions. BASIDE's bytecode VM, its display and game statement
-library, and its module (`IMPORT`) system are out of scope. Graphics or other
-host services, if wanted later, come through a unit such as `libpsx` or a
-separate runtime, not through built-in statements.
+built-in functions. BASIDE's bytecode VM and its display and game statement
+library are out of scope. Graphics or other host services, if wanted later, come
+through a unit such as `libpsx` or a separate runtime, not through built-in
+statements. Skjegg does add a module system (`MODULE`, `EXPORT`, `FROM`,
+`IMPORT`) for building and consuming shared libraries; it is specified separately
+in `basic-modules.md`, not here.
 
 This document is the grammar specification. As with the other front ends, the
 grammar is the source of truth and is kept ahead of the implementation; a
@@ -419,7 +421,11 @@ REF     REM     REMOVE  REPEAT  RETURN  RIGHT$  RJUST$  RND     ROUND
 SEED    SGN     SHL     SHR     SIN     SIND    SPACE$  SQR     STEP    STR$
 STRING  STRING$ TAB     TAN     TAND    THEN    TIME    TO      TYPE
 UCASE$  UNTIL   VAL     VALINT  VECTOR  WAIT    WHEN    WHILE   ZERO$
+MODULE  EXPORT  IMPORT  FROM
 ```
+
+`MODULE`, `EXPORT`, `IMPORT`, and `FROM` are the module-system keywords; the
+module grammar and the on-disk interface are specified in `basic-modules.md`.
 
 The words of BASIDE's display, console, controls, sound, card, asset, timer, and
 matrix statement libraries, and of its game extension modules, are not reserved

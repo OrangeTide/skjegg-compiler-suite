@@ -12,6 +12,7 @@
 
 #include "basic.h"
 #include "util.h"
+#include "target.h"
 
 /* A named compile-time integer constant (from CONST or ENUM). Constants have no
    runtime storage; a reference folds to its value at parse time, so a constant
@@ -22,13 +23,34 @@ struct const_ent {
     struct const_ent *next;
 };
 
+/* A module brought in by `IMPORT M` (qualified): its members are reached dotted,
+   as `M.name`, so the interface is kept to resolve a qualified reference. */
+struct mod_ent {
+    char            *name;        /* the module's qualifier */
+    struct bmi      *bmi;         /* its interface */
+    struct mod_ent  *next;
+};
+
 struct parser {
     struct arena     *arena;
     Lexer             lx;
     Token             cur;        /* current (unconsumed) token */
     const char       *filename;
     struct const_ent *consts;     /* defined integer constants */
+    struct mod_ent   *modules;    /* qualified-imported modules (IMPORT M) */
 };
+
+/* Import search directories (-I), borrowed from the driver. Consulted in order
+   to resolve a module name M to the archive <dir>/M.a. */
+static const char **g_import_dirs;
+static int          g_nimport_dirs;
+
+void
+basic_set_import_dirs(const char **dirs, int ndirs)
+{
+    g_import_dirs = dirs;
+    g_nimport_dirs = ndirs;
+}
 
 static void
 perr(struct parser *p, const char *msg)
@@ -113,6 +135,11 @@ const_add(struct parser *p, char *name, long val)
     p->consts = c;
 }
 
+/* Qualified-import helpers, defined with the import machinery below but needed
+   here so a type spec can name a module's opaque type as `Module.Type`. */
+static struct mod_ent *mod_lookup(struct parser *p, const char *name);
+static char *qual_name(struct parser *p, const char *mod, const char *name);
+
 /* If the current token is a scalar type keyword, return its TY_DECL_* and
    advance past it; otherwise return -1 and consume nothing. */
 static int
@@ -129,25 +156,41 @@ scalar_decl_type(struct parser *p)
     return t;
 }
 
-/* A full type spec after AS: a scalar type, or an identifier naming a record
-   type (returned as TY_DECL_RECORD with *recname set). -1 if neither. */
+/* A full type spec after AS: a scalar type, a local record/opaque type named by
+   a bare identifier, or a qualified-imported opaque type named `Module.Type`.
+   A record type is returned as TY_DECL_RECORD with *recname set (the dotted key
+   for the qualified form, matching how the opaque type was registered on
+   import). -1 if none of these. */
 static int
 decl_type_spec(struct parser *p, char **recname)
 {
     int t = scalar_decl_type(p);
+    char *name;
+    struct mod_ent *m;
 
     if (t >= 0) {
         if (recname)
             *recname = NULL;
         return t;
     }
-    if (p->cur.kind == TK_IDENT) {
-        if (recname)
-            *recname = ident_text(p);
+    if (p->cur.kind != TK_IDENT)
+        return -1;
+    name = ident_text(p);
+    advance(p);
+    if (p->cur.kind == TK_DOT && (m = mod_lookup(p, name)) != NULL) {
+        char *member;
+        advance(p);   /* consume '.' */
+        if (p->cur.kind != TK_IDENT)
+            perr(p, "expected an opaque type name after 'Module.'");
+        member = ident_text(p);
         advance(p);
+        if (recname)
+            *recname = qual_name(p, m->name, member);
         return TY_DECL_RECORD;
     }
-    return -1;
+    if (recname)
+        *recname = name;
+    return TY_DECL_RECORD;
 }
 
 /* ---- expressions ---- */
@@ -155,6 +198,11 @@ decl_type_spec(struct parser *p, char **recname)
 static struct node *parse_expr(struct parser *p);
 static struct node *parse_args(struct parser *p);
 static struct node *parse_string(struct parser *p);
+
+/* Qualified module references (IMPORT M; then M.name). Defined with the import
+   machinery below, used from parse_primary and parse_statement above it. */
+static struct mod_ent *mod_lookup(struct parser *p, const char *name);
+static struct node *parse_qualified_ref(struct parser *p, struct mod_ent *m);
 
 /* Map a built-in function keyword to its BF_* id, or -1 if not a built-in. */
 static int
@@ -252,7 +300,13 @@ parse_primary(struct parser *p)
         char  *name = ident_text(p);
         size_t nlen = p->cur.length;
         struct const_ent *c;
+        struct mod_ent *m;
         advance(p);
+
+        /* name '.' member, where name is a qualified-imported module, is a
+           reference to that module's export (a folded CONST or an FN call). */
+        if (p->cur.kind == TK_DOT && (m = mod_lookup(p, name)) != NULL)
+            return parse_qualified_ref(p, m);
 
         /* name '(' ... ')' is a function call. */
         if (p->cur.kind == TK_LPAREN) {
@@ -684,19 +738,32 @@ parse_dim(struct parser *p, struct node ***tail)
 }
 
 /* ConstStmt = 'CONST' IDENTIFIER '=' ConstExpr { ',' IDENTIFIER '=' ConstExpr } .
-   Each value folds to an integer constant; emits no runtime node. */
+   Each value folds to an integer constant and emits no runtime node. When the
+   CONST is exported (EXPORT CONST in a module), each constant also gets an
+   N_CONST node appended through *tail so the interface writer can see its value;
+   a non-exported CONST passes exported = 0 and tail = NULL. */
 static void
-parse_const(struct parser *p)
+parse_const(struct parser *p, int exported, struct node ***tail)
 {
     advance(p);   /* 'CONST' */
     for (;;) {
         char *name;
+        long val;
         if (p->cur.kind != TK_IDENT)
             perr(p, "expected a constant name after CONST");
         name = ident_text(p);
         advance(p);
         expect(p, TK_EQ, "expected '=' in a CONST");
-        const_add(p, name, fold_const(p, parse_expr(p)));
+        val = fold_const(p, parse_expr(p));
+        const_add(p, name, val);
+        if (exported) {
+            struct node *c = mknode(p, N_CONST);
+            c->name = name;
+            c->ival = val;
+            c->is_export = 1;
+            **tail = c;
+            *tail = &c->next;
+        }
         if (p->cur.kind == TK_COMMA) {
             advance(p);
             continue;
@@ -1140,9 +1207,9 @@ parse_fn(struct parser *p)
     advance(p);
     n->a = parse_params(p);
     expect_kw(p, KW_AS, "expected AS before the FN return type");
-    t = scalar_decl_type(p);
+    t = decl_type_spec(p, &n->sval);
     if (t < 0)
-        perr(p, "an FN must return INT, FLOAT, BYTE, or STRING in this phase");
+        perr(p, "an FN must return INT, FLOAT, BYTE, STRING, or an opaque TYPE");
     n->op = t;
     if (p->cur.kind == TK_COMMA)
         perr(p, "multiple FN return values are not yet supported");
@@ -1179,9 +1246,9 @@ parse_declare(struct parser *p)
         advance(p);
         n->a = parse_params(p);
         expect_kw(p, KW_AS, "expected AS before the FN return type");
-        t = scalar_decl_type(p);
+        t = decl_type_spec(p, &n->sval);
         if (t < 0)
-            perr(p, "an FN must return INT, FLOAT, BYTE, or STRING in this phase");
+            perr(p, "an FN must return INT, FLOAT, BYTE, STRING, or an opaque TYPE");
         n->op = t;
         if (p->cur.kind == TK_COMMA)
             perr(p, "multiple FN return values are not yet supported");
@@ -1314,7 +1381,7 @@ parse_statement(struct parser *p, struct node ***tail)
                 *tail = &(**tail)->next;
             return;
         case KW_CONST:
-            parse_const(p);         /* compile-time only, no runtime node */
+            parse_const(p, 0, NULL);    /* compile-time only, no runtime node */
             return;
         case KW_ENUM:
             parse_enum(p);          /* compile-time only, no runtime node */
@@ -1342,7 +1409,16 @@ parse_statement(struct parser *p, struct node ***tail)
         /* AssignOrCall. A trailing '(' is either an indexed assignment target
            (an array element) or a PROC call, told apart by a following '='. */
         char *name = ident_text(p);
+        struct mod_ent *m;
         advance(p);
+        /* A qualified call statement: M.Proc(args), where M was IMPORTed. */
+        if (p->cur.kind == TK_DOT && (m = mod_lookup(p, name)) != NULL) {
+            n = parse_qualified_ref(p, m);
+            if (n->kind != N_CALL)
+                perr(p, "a module constant is not a statement");
+            **tail = n; *tail = &n->next;
+            return;
+        }
         if (p->cur.kind == TK_LPAREN) {
             struct node *desig = mknode(p, N_CALL);
             desig->name = name;
@@ -1390,6 +1466,241 @@ parse_statement(struct parser *p, struct node ***tail)
     perr(p, "expected a statement");
 }
 
+/* Resolve a module name to its archive path by searching the import directories
+   for `<dir>/<name>.a` (and the current directory as a final fallback). Returns
+   an arena path, or dies naming the module that could not be found. */
+static char *
+resolve_module(struct parser *p, const char *mod)
+{
+    char buf[1024];
+    int i;
+
+    for (i = 0; i <= g_nimport_dirs; i++) {
+        const char *dir = i < g_nimport_dirs ? g_import_dirs[i] : ".";
+        FILE *f;
+
+        if (snprintf(buf, sizeof buf, "%s/%s.a", dir, mod) >= (int)sizeof buf)
+            continue;
+        f = fopen(buf, "rb");
+        if (f) {
+            fclose(f);
+            return arena_strdup(p->arena, buf);
+        }
+    }
+    die("%s:%d: cannot find module '%s' (looked for '%s.a' on the import path)",
+        p->filename, p->cur.line, mod, mod);
+    return NULL;   /* unreachable */
+}
+
+/* Find an exported symbol by its BASIC name in a module interface. */
+static struct bmi_sym *
+bmi_find(struct bmi *m, const char *name)
+{
+    struct bmi_sym *s;
+
+    for (s = m->syms; s; s = s->next)
+        if (strcmp(s->name, name) == 0)
+            return s;
+    return NULL;
+}
+
+/* Load a module's interface from its archive on the import path, verifying its
+   declared name and that it is built for this target. */
+static struct bmi *
+load_module(struct parser *p, const char *mod)
+{
+    char *path, *text;
+    struct bmi *m;
+    size_t tlen;
+
+    path = resolve_module(p, mod);
+    text = bmi_from_archive(p->arena, path, &tlen);
+    m = bmi_read(p->arena, text, tlen, path);
+    if (m->module && strcmp(m->module, mod) != 0)
+        die("%s:%d: module '%s' declares its name as '%s'",
+            p->filename, p->cur.line, mod, m->module);
+    /* A .bmi is per target: its pointer width and endianness are authoritative,
+       so a module built for another target would miscompile every call here. */
+    if (m->lp64 != SKJ_LP64 || m->big_endian != SKJ_BIG_ENDIAN)
+        die("%s:%d: module '%s' is built for %s %s-endian, but this target is "
+            "%s %s-endian", p->filename, p->cur.line, mod,
+            m->lp64 ? "lp64" : "ilp32", m->big_endian ? "big" : "little",
+            SKJ_LP64 ? "lp64" : "ilp32", SKJ_BIG_ENDIAN ? "big" : "little");
+    return m;
+}
+
+/* Build the dotted key `mod.name`, used as the func-table key and const name of
+   a qualified import so it never collides with an unqualified name. */
+static char *
+qual_name(struct parser *p, const char *mod, const char *name)
+{
+    size_t ml = strlen(mod), nl = strlen(name);
+    char *q = arena_alloc(p->arena, ml + nl + 2);
+
+    memcpy(q, mod, ml);
+    q[ml] = '.';
+    memcpy(q + ml + 1, name, nl);
+    q[ml + nl + 1] = '\0';
+    return q;
+}
+
+static struct mod_ent *
+mod_lookup(struct parser *p, const char *name)
+{
+    struct mod_ent *e;
+
+    for (e = p->modules; e; e = e->next)
+        if (strcmp(e->name, name) == 0)
+            return e;
+    return NULL;
+}
+
+/* Append an N_IMPORT node registering `s` as an external routine under `key`
+   (the unqualified name for a FROM import, the dotted key for a qualified one).
+   `qual` is the module name for a qualified import (so the lowerer can qualify
+   the plain opaque-type names in the routine signature to their dotted keys), or
+   NULL for a FROM import whose names stay unqualified. */
+static void
+emit_import(struct parser *p, struct node ***tail, const char *key,
+            struct bmi_sym *s, const char *qual)
+{
+    struct node *n = mknode(p, N_IMPORT);
+
+    n->name = (char *)key;
+    n->sval = (char *)qual;
+    n->imp = s;
+    **tail = n;
+    *tail = &n->next;
+}
+
+/* `FROM M IMPORT a, b, c` : load module M's interface and bring the listed
+   names into scope unqualified. A CONST import folds to its value at parse time
+   (like a local CONST); a TYPE, FN, or PROC import becomes an N_IMPORT node the
+   lowerer registers (an opaque TYPE as a handle type, a routine as an external).
+   Both this form and the qualified `IMPORT M` form support opaque handles. */
+static void
+parse_import(struct parser *p, struct node ***tail)
+{
+    char *mod;
+    struct bmi *m;
+
+    advance(p);   /* consume FROM */
+    if (p->cur.kind != TK_IDENT)
+        perr(p, "expected a module name after FROM");
+    mod = ident_text(p);
+    advance(p);
+    expect_kw(p, KW_IMPORT, "expected IMPORT after the module name");
+
+    m = load_module(p, mod);
+
+    for (;;) {
+        char *name;
+        struct bmi_sym *s;
+
+        if (p->cur.kind != TK_IDENT)
+            perr(p, "expected an imported name");
+        name = ident_text(p);
+        s = bmi_find(m, name);
+        if (!s)
+            die("%s:%d: module '%s' does not export '%s'",
+                p->filename, p->cur.line, mod, name);
+        /* CONST folds now; a TYPE, FN, or PROC becomes an N_IMPORT the lowerer
+           registers (an opaque TYPE as a handle type, a routine as an external).
+           Handle signatures are supported here and in the qualified form. */
+        if (s->kind == BMI_CONST)
+            const_add(p, name, s->cval);
+        else
+            emit_import(p, tail, name, s, NULL);
+        advance(p);
+        if (p->cur.kind != TK_COMMA)
+            break;
+        advance(p);
+    }
+    if (!at_terminator(p))
+        perr(p, "expected end of line after the import list");
+}
+
+/* `IMPORT M` (qualified) : load module M and bring all its exports into scope
+   under dotted names (`M.name`). Every CONST, opaque TYPE, and supported FN/PROC
+   is registered eagerly (opaque handles included); an unsupported one (a REF
+   parameter) is left out and reported only if it is actually referenced (see
+   parse_qualified_ref), so a module with an unsupported routine can still be
+   imported for its other exports. An opaque type is used as `DIM x AS M.Type`. */
+static void
+parse_qualified_import(struct parser *p, struct node ***tail)
+{
+    char *mod;
+    struct bmi *m;
+    struct mod_ent *e;
+    struct bmi_sym *s;
+
+    advance(p);   /* consume IMPORT */
+    if (p->cur.kind != TK_IDENT)
+        perr(p, "expected a module name after IMPORT");
+    mod = ident_text(p);
+    advance(p);
+
+    if (!mod_lookup(p, mod)) {
+        m = load_module(p, mod);
+        e = arena_zalloc(p->arena, sizeof(*e));
+        e->name = mod;
+        e->bmi = m;
+        e->next = p->modules;
+        p->modules = e;
+        for (s = m->syms; s; s = s->next) {
+            if (bmi_unsupported_reason(s))
+                continue;   /* deferred; reported at a reference, not here */
+            if (s->kind == BMI_CONST)
+                const_add(p, qual_name(p, mod, s->name), s->cval);
+            else
+                emit_import(p, tail, qual_name(p, mod, s->name), s, mod);
+        }
+    }
+    if (!at_terminator(p))
+        perr(p, "expected end of line after IMPORT");
+}
+
+/* Resolve `M.member` after the module name has been consumed and the current
+   token is '.'. Returns a folded N_INT for a CONST, or an N_CALL (keyed on the
+   dotted name) for an FN/PROC. An unsupported or unknown member dies here. */
+static struct node *
+parse_qualified_ref(struct parser *p, struct mod_ent *m)
+{
+    char *member;
+    struct bmi_sym *s;
+    const char *why;
+    struct node *n;
+
+    advance(p);   /* consume '.' */
+    if (p->cur.kind != TK_IDENT)
+        perr(p, "expected a member name after 'Module.'");
+    member = ident_text(p);
+    advance(p);
+
+    s = bmi_find(m->bmi, member);
+    if (!s)
+        die("%s:%d: module '%s' does not export '%s'",
+            p->filename, p->cur.line, m->name, member);
+    if (s->kind == BMI_TYPE)
+        die("%s:%d: '%s.%s' is an opaque type, not a value",
+            p->filename, p->cur.line, m->name, member);
+    why = bmi_unsupported_reason(s);
+    if (why)
+        die("%s:%d: '%s.%s' %s",
+            p->filename, p->cur.line, m->name, member, why);
+    if (s->kind == BMI_CONST) {
+        n = mknode(p, N_INT);
+        n->ival = s->cval;
+        return n;
+    }
+    if (p->cur.kind != TK_LPAREN)
+        perr(p, "a call to a module routine needs '('");
+    n = mknode(p, N_CALL);
+    n->name = qual_name(p, m->name, member);
+    n->a = parse_args(p);
+    return n;
+}
+
 struct node *
 parse_program(struct arena *a, const char *src, size_t len, const char *filename)
 {
@@ -1400,6 +1711,7 @@ parse_program(struct arena *a, const char *src, size_t len, const char *filename
     p.arena = a;
     p.filename = filename;
     p.consts = NULL;
+    p.modules = NULL;
     lexer_init(&p.lx, src, len);
     advance(&p);
 
@@ -1407,10 +1719,40 @@ parse_program(struct arena *a, const char *src, size_t len, const char *filename
     prog->kind = N_PROGRAM;
     tail = &prog->a;
 
+    /* An optional leading MODULE statement makes the file a library; its name is
+       carried on the program node (NULL for a program). It must come first. */
+    while (p.cur.kind == TK_NEWLINE || p.cur.kind == TK_COLON)
+        advance(&p);
+    if (is_kw(&p, KW_MODULE)) {
+        advance(&p);
+        if (p.cur.kind != TK_IDENT)
+            perr(&p, "expected a module name after MODULE");
+        prog->name = ident_text(&p);
+        advance(&p);
+        if (!at_terminator(&p))
+            perr(&p, "expected end of line after the module name");
+    }
+
     while (p.cur.kind != TK_EOF) {
+        int exported = 0;
+
         if (p.cur.kind == TK_NEWLINE || p.cur.kind == TK_COLON) {
             advance(&p);
             continue;
+        }
+        if (is_kw(&p, KW_MODULE))
+            perr(&p, "MODULE must be the first statement");
+        if (is_kw(&p, KW_FROM)) {
+            parse_import(&p, &tail);
+            continue;
+        }
+        if (is_kw(&p, KW_IMPORT)) {
+            parse_qualified_import(&p, &tail);
+            continue;
+        }
+        if (is_kw(&p, KW_EXPORT)) {
+            advance(&p);
+            exported = 1;
         }
         /* PROC / FN / DECLARE / TYPE are top-level definitions. */
         if (p.cur.kind == TK_KEYWORD &&
@@ -1420,11 +1762,21 @@ parse_program(struct arena *a, const char *src, size_t len, const char *filename
                            : p.cur.keyword == KW_FN       ? parse_fn(&p)
                            : p.cur.keyword == KW_TYPE      ? parse_type(&p)
                            :                                 parse_declare(&p);
+            d->is_export = exported;
             *tail = d;
             tail = &d->next;
             if (!at_terminator(&p))
                 perr(&p, "expected end of definition");
             continue;
+        }
+        if (exported) {
+            if (is_kw(&p, KW_CONST)) {
+                parse_const(&p, 1, &tail);
+                if (!at_terminator(&p))
+                    perr(&p, "expected end of definition");
+                continue;
+            }
+            perr(&p, "EXPORT must precede CONST, TYPE, PROC, FN, or DECLARE");
         }
         parse_statement(&p, &tail);
         if (!at_terminator(&p))

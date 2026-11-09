@@ -417,16 +417,19 @@ __moddi3:
 
 | __moo_arena_alloc(size)
 |   Bump allocator for strings, lists, and other runtime values.
-|   Aligns size up to 4 bytes.  Returns pointer in d0.
+|   Returns an 8-byte-aligned pointer in d0, so a heap object with a double or
+|   i64 field is aligned for the loads the backends emit.  Clobbers only d0, d1,
+|   a0 (the m68k scratch set the original used), so a1 stays live for callers.
     .globl __moo_arena_alloc
 __moo_arena_alloc:
-    move.l  4(%sp), %d0         | d0 = requested size
-    addq.l  #3, %d0
-    and.l   #-4, %d0            | align to 4 bytes
+    move.l  4(%sp), %d1         | d1 = requested size
+    addq.l  #7, %d1
+    and.l   #-8, %d1            | round size up to 8
     lea     __moo_arena_ptr, %a0
-    move.l  (%a0), %d1          | d1 = current pointer
-    add.l   %d0, %d1            | d1 = new pointer
-    move.l  (%a0), %d0          | d0 = old pointer (return value)
+    move.l  (%a0), %d0          | d0 = current pointer
+    addq.l  #7, %d0
+    and.l   #-8, %d0            | 8-align the base (return value)
+    add.l   %d0, %d1            | d1 = new pointer = base + size
     move.l  %d1, (%a0)          | store new pointer
     movea.l %d0, %a0            | a0 = return value (m68k ABI)
     rts

@@ -51,9 +51,12 @@ static void
 usage(const char *prog, FILE *out, int code)
 {
     fprintf(out, "usage: %s [options] <file.bas>\n", prog);
-    fprintf(out, "  -o <file>   output assembly file\n");
-    fprintf(out, "  -V          show version\n");
-    fprintf(out, "  --tokens    dump token stream and exit\n");
+    fprintf(out, "  -o <file>       output assembly file\n");
+    fprintf(out, "  --meta <file>   write the module interface (.bmi) here\n");
+    fprintf(out, "  --emit-module   require the source to be a MODULE\n");
+    fprintf(out, "  -I <dir>        add a module import search directory\n");
+    fprintf(out, "  -V              show version\n");
+    fprintf(out, "  --tokens        dump token stream and exit\n");
     exit(code);
 }
 
@@ -62,7 +65,11 @@ main(int argc, char **argv)
 {
     const char *filename;
     const char *outfile;
+    const char *metafile;
     int tokens_only;
+    int emit_module;
+    const char **import_dirs;
+    int nimport_dirs;
     char *src;
 
     util_set_progname("skj-bc");
@@ -73,12 +80,29 @@ main(int argc, char **argv)
 
     filename = NULL;
     outfile = NULL;
+    metafile = NULL;
     tokens_only = 0;
+    emit_module = 0;
+    import_dirs = malloc((argc > 0 ? argc : 1) * sizeof(*import_dirs));
+    if (!import_dirs)
+        die("out of memory");
+    util_cleanup_push(cleanup_free, import_dirs);
+    nimport_dirs = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0) {
             if (++i >= argc)
                 usage(argv[0], stderr, 1);
             outfile = argv[i];
+        } else if (strcmp(argv[i], "--meta") == 0) {
+            if (++i >= argc)
+                usage(argv[0], stderr, 1);
+            metafile = argv[i];
+        } else if (strcmp(argv[i], "--emit-module") == 0) {
+            emit_module = 1;
+        } else if (strcmp(argv[i], "-I") == 0) {
+            if (++i >= argc)
+                usage(argv[0], stderr, 1);
+            import_dirs[nimport_dirs++] = argv[i];
         } else if (strcmp(argv[i], "-V") == 0) {
             printf("skj-bc %s\n", SKJ_VERSION);
             return 0;
@@ -118,8 +142,27 @@ main(int argc, char **argv)
         arena_init(&a);
         util_cleanup_push(cleanup_arena, &a);
 
+        basic_set_import_dirs(import_dirs, nimport_dirs);
         ast = parse_program(&a, src, strlen(src), filename);
+
+        /* Module expectations: --emit-module requires a MODULE source, --meta is
+           for a module only, and a module needs --meta to carry its interface. */
+        if (emit_module && !ast->name)
+            die("--emit-module given but the source has no MODULE statement");
+        if (metafile && !ast->name)
+            die("--meta given but the source is not a MODULE");
+        if (ast->name && !metafile)
+            die("a MODULE needs --meta <file> to write its interface");
+
         prog = lower_program(&a, ast);
+
+        if (metafile) {
+            FILE *mf = fopen(metafile, "w");
+            if (!mf)
+                die("cannot open '%s' for writing", metafile);
+            bmi_write(mf, ast);
+            fclose(mf);
+        }
 
         for (fn = prog->funcs; fn; fn = fn->next)
             regalloc(fn);

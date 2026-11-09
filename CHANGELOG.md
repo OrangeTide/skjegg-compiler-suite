@@ -6,6 +6,42 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.50.0
+
+#### Added
+- A module system for BASIC, with a Modula-2 surface over `ar` archives. A
+  source file headed by `MODULE M` is a library with no entry point; a
+  per-declaration `EXPORT` publishes a `CONST`, `FN`, `PROC`, or `TYPE`.
+  `skj-bc --emit-module --meta <file>` writes a text `.bmi` interface beside the
+  object, and `skj-ar` stores it as a reserved archive member. A program brings a
+  module in with either `FROM M IMPORT a, b`, which binds the names unqualified,
+  or `IMPORT M`, which binds them dotted as `M.name`. The compiler resolves the
+  module on the `-I` import path and checks its target tag. An `EXPORT TYPE` is
+  opaque to importers: it crosses as a handle, constructed and reached only
+  through the module's exported routines, with its fields private. A handle is
+  nominally typed, so a call, assignment, or return that mixes two opaque types
+  is a compile error. Both import forms carry opaque types, a handle variable
+  declared `DIM c AS Circle` for an unqualified import or `DIM c AS M.Circle` for
+  a qualified one. The reference is `doc/languages/basic-modules.md`.
+- BASIC reaches the two LP64 backends, arm64 and x86-64, built from the same
+  front end over the shared IR through the platform psABI selectors, the same
+  path the C and Pascal front ends take. BASIC now runs on all five first-class
+  backends. Pointers, string handles, and opaque handles are a full 64-bit word
+  there, and a FLOAT argument passes in a floating-point register per the
+  hard-float ABI.
+- `skj-ar` indexes ELF64 archive members, so an x86-64 or arm64 module archive
+  carries the symbol table the linker needs to resolve a module reference.
+
+#### Changed
+- A record is padded to its worst-case member alignment, and the shared moo bump
+  arena is 8-aligned on the 32-bit targets, so a record field that is a FLOAT or
+  a 64-bit integer is correctly aligned on every backend.
+
+#### Fixed
+- MooScript's `return..` list builder no longer assumes the bump arena packs its
+  reservations contiguously. It tracks an explicit write pointer, so the list is
+  built correctly whatever the arena's alignment granularity.
+
 ### 0.49.0
 
 #### Added

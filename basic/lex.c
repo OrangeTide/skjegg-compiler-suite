@@ -29,6 +29,7 @@ static const char *const kw_names[KW_COUNT_] = {
     "SEED", "SGN", "SHL", "SHR", "SIN", "SIND", "SPACE$", "SQR", "STEP", "STR$",
     "STRING", "STRING$", "TAB", "TAN", "TAND", "THEN", "TIME", "TO", "TYPE",
     "UCASE$", "UNTIL", "VAL", "VALINT", "VECTOR", "WAIT", "WHEN", "WHILE", "ZERO$",
+    "MODULE", "EXPORT", "IMPORT", "FROM",
 };
 
 const char *

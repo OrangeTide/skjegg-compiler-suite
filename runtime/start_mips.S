@@ -377,11 +377,13 @@ __lshrdi3:
  *   Bump allocator.  Aligns size up to 4 bytes.  Returns pointer in $v0. */
 	.globl __moo_arena_alloc
 __moo_arena_alloc:
-	addiu	$a0, $a0, 3
-	li	$t1, -4
-	and	$a0, $a0, $t1		/* round up to 4 (andi zero-extends) */
+	addiu	$a0, $a0, 7
+	li	$t1, -8
+	and	$a0, $a0, $t1		/* round size up to 8 */
 	la	$t0, __moo_arena_ptr
-	lw	$t2, 0($t0)		/* $t2 = old pointer (return value) */
+	lw	$t2, 0($t0)		/* $t2 = current pointer */
+	addiu	$t2, $t2, 7
+	and	$t2, $t2, $t1		/* 8-align the base (return value) */
 	addu	$t3, $t2, $a0		/* $t3 = new pointer */
 	sw	$t3, 0($t0)
 	move	$v0, $t2

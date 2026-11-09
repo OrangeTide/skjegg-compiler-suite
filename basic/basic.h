@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "ir.h"   /* struct ir_program, struct arena, slurp, die, util_* */
 
@@ -54,6 +55,10 @@ typedef enum {
     KW_STRING, KW_STRING_FN, KW_TAB, KW_TAN, KW_TAND, KW_THEN, KW_TIME, KW_TO, KW_TYPE,
     KW_UCASE, KW_UNTIL, KW_VAL, KW_VALINT, KW_VECTOR, KW_WAIT, KW_WHEN, KW_WHILE, KW_ZERO,
 
+    /* module system (doc/languages/basic-modules.md); appended so the existing
+       keyword ids keep their values. */
+    KW_MODULE, KW_EXPORT, KW_IMPORT, KW_FROM,
+
     KW_COUNT_
 } Keyword;
 
@@ -90,7 +95,10 @@ const char *keyword_name(int kw);
    doc/languages/basic.md is wider; later phases add node kinds for the rest
    (control flow, PROC/FN, aggregates, FLOAT/STRING variables). */
 enum node_kind {
-    N_PROGRAM,    /* a = statement list (via ->next) */
+    N_PROGRAM,    /* a = statement list (via ->next); name = module name when the
+                     file is a MODULE, NULL for a program */
+    N_CONST,      /* an EXPORTed CONST: name; ival = folded value. A non-exported
+                     CONST leaves no node (it folds at use). */
     N_DIM,        /* name = variable; op = TY_DECL_*, a scalar declaration */
     N_ASSIGN,     /* name = target variable; a = value expression */
     N_PRINT,      /* a = item list; ival = 1 to suppress the trailing newline */
@@ -129,6 +137,9 @@ enum node_kind {
     N_PARAM,      /* name; op = TY_DECL_* */
     N_RETURN,     /* a = return expression, or NULL in a PROC */
     N_CALL,       /* name; a = argument expression list (chained by ->next) */
+    N_IMPORT,     /* an imported FN/PROC from another module; imp = its bmi_sym.
+                     Registered as an external routine; CONST imports fold at
+                     parse time and leave no node. */
 
     /* ---- strings and I/O ---- */
     N_BUILTIN,    /* op = BF_* ; a = argument expression list (chained) */
@@ -191,12 +202,14 @@ enum bop {
 struct node {
     int           kind;
     int           line;
+    int           is_export; /* N_PROC/N_FN/N_TYPE/N_CONST: part of a module's interface */
     int           op;      /* operator / separator, by kind */
     long          ival;    /* N_INT value; N_PRINT newline-suppress flag */
     double        fval;    /* N_FLT value */
     char         *name;    /* N_DIM/N_ASSIGN/N_VAR identifier */
     char         *sval;    /* N_STR bytes (unescaped) */
     int           slen;    /* N_STR length */
+    struct bmi_sym *imp;   /* N_IMPORT: the imported routine's interface */
     struct node  *a;
     struct node  *b;
     struct node  *c;       /* IF else body; FOR step; CASE else body */
@@ -204,7 +217,69 @@ struct node {
     struct node  *next;    /* sibling in a list */
 };
 
+/* ---- module interface (.bmi), doc/languages/basic-modules.md ----
+
+   The reader turns a .bmi member back into this structure; the writer emits one
+   from a module's AST. Both are in bmi.c. The value classes are primitives only:
+   a BASIC INT is i64, BYTE is i8, FLOAT is f64, STRING is a BASIC string handle
+   (str), and an opaque exported TYPE is a handle. */
+enum bmi_class {
+    BMI_VOID, BMI_I8, BMI_I16, BMI_I32, BMI_I64,
+    BMI_F32, BMI_F64, BMI_STR, BMI_HANDLE
+};
+enum bmi_kind { BMI_CONST, BMI_TYPE, BMI_FUNC, BMI_PROC };
+
+#define BMI_MAXPARAM 16
+
+struct bmi_sym {
+    int             kind;                 /* a bmi_kind */
+    char           *name;                 /* the BASIC name */
+    char           *link;                 /* object symbol (func/proc) */
+    long            cval;                  /* BMI_CONST value */
+    int             ret;                  /* BMI_FUNC return class */
+    char           *ret_type;             /* opaque type name when ret==BMI_HANDLE */
+    int             nparam;               /* BMI_FUNC/BMI_PROC */
+    int             param[BMI_MAXPARAM];  /* parameter classes */
+    char           *param_type[BMI_MAXPARAM]; /* opaque type name when the param
+                                                 class is BMI_HANDLE, else NULL */
+    int             param_ref[BMI_MAXPARAM]; /* 1 = passed by reference (a pointer) */
+    struct bmi_sym *next;
+};
+
+struct bmi {
+    char           *module;               /* the module's name */
+    int             lp64;                 /* target pointer width */
+    int             big_endian;
+    struct bmi_sym *syms;                 /* in declaration order */
+};
+
+/* Write a module's interface, derived from its AST, as a .bmi member. */
+void        bmi_write(FILE *out, struct node *prog);
+
+/* Parse .bmi text into a struct bmi (arena-allocated), or die on a malformed
+   member. name is for diagnostics. */
+struct bmi *bmi_read(struct arena *a, const char *text, size_t len,
+                     const char *name);
+
+/* Read the reserved `.bmi` member from a GNU `ar` archive at `path` into an
+   arena-copied, NUL-terminated buffer (*outlen excludes the NUL), or die if the
+   file is not an archive or has no `.bmi` member. */
+char *bmi_from_archive(struct arena *a, const char *path, size_t *outlen);
+
+/* NULL if an imported symbol has a signature the current phase can lower (a
+   CONST, or an FN/PROC over by-value primitives); otherwise a human-readable
+   reason ("has a REF parameter, not yet supported", ...). An opaque handle
+   (type, handle parameter, or handle return) and a by-reference parameter are
+   the deferred cases. The returned string begins with a verb, to read after the
+   routine's name. */
+const char *bmi_unsupported_reason(struct bmi_sym *s);
+
 /* ---- pipeline ---- */
+
+/* Set the module import search directories (-I), consulted by parse_program to
+   resolve a `FROM M IMPORT` against `<dir>/M.a`. The array is borrowed, not
+   copied, so it must outlive the parse. */
+void                basic_set_import_dirs(const char **dirs, int ndirs);
 
 struct node        *parse_program(struct arena *a, const char *src, size_t len,
                                   const char *filename);

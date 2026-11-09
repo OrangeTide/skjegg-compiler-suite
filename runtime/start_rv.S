@@ -68,14 +68,18 @@ __lshrdi3:
 	.size	__lshrdi3,.-__lshrdi3
 
 /* void *__moo_arena_alloc(int size);
- *   Bump allocator.  Aligns size up to 4 bytes.  Returns pointer in a0. */
+ *   Bump allocator.  Returns an 8-byte-aligned pointer in a0 (base and size both
+ *   round up to 8), so a heap object with a double/i64 field is aligned for the
+ *   hardware fld/fsd the rv32 backend emits. */
 	.globl __moo_arena_alloc
 	.type	__moo_arena_alloc,@function
 __moo_arena_alloc:
-	addi	a0, a0, 3
-	andi	a0, a0, -4
+	addi	a0, a0, 7
+	andi	a0, a0, -8		/* round size up to 8 */
 	la	t0, __moo_arena_ptr
-	lw	t1, 0(t0)		/* t1 = old pointer (return value) */
+	lw	t1, 0(t0)		/* t1 = current pointer */
+	addi	t1, t1, 7
+	andi	t1, t1, -8		/* 8-align the base (return value) */
 	add	t2, t1, a0		/* t2 = new pointer */
 	sw	t2, 0(t0)
 	mv	a0, t1
