@@ -57,6 +57,7 @@ remap_sym(const char *s)
         { "io_write_real",    "brv_write_real" },
         { "io_read_real",     "brv_read_real" },
         { "kp_str_val_real",  "brv_val_real" },
+        { "kp_str_from_real", "brv_str_from_real" },
         { "kp_sin",           "brv_sin" },
         { "kp_cos",           "brv_cos" },
         { "kp_exp",           "brv_exp" },

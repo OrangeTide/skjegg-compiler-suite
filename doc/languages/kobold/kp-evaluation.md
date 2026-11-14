@@ -1,6 +1,6 @@
-# Kobold-Pascal Dynamic Semantics
+# Kobold Pascal Dynamic Semantics
 
-This document specifies the observable run-time behavior of Kobold-Pascal in the
+This document specifies the observable run-time behavior of Kobold Pascal in the
 places the language reference and the grammar leave open: evaluation order, the sign
 and overflow behavior of integer arithmetic, how divide-by-zero and other faults
 behave, how strings and sets compare, what an uninitialized or default value holds,

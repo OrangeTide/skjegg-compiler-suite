@@ -6,6 +6,29 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.52.0
+
+#### Added
+- Kobold string interpolation now accepts a `real`. A `${expr}` hole whose value
+  is a real renders the way `write` prints it (its shortest `%g` form); it was
+  previously a compile error, so a real had to be converted with `str` first.
+- An opt-in CP0 system tier in the `skj-run` MIPS core: coprocessor-0 exceptions,
+  interrupts, and the return-from-exception path, with a host-side test suite
+  exercising them.
+- A runnable BASIC example under `examples/basic/` that defines a module and
+  consumes it from a program.
+
+#### Changed
+- The language is written "Kobold Pascal" (no hyphen) throughout the
+  documentation and the sources.
+- The Kobold guide and tutorial were refreshed: the backend list now names all
+  five targets (adding ColdFire and MIPS), a stale WebAssembly reference is gone,
+  and the `.kp` source-file convention is documented.
+
+#### Fixed
+- `make install` no longer aborts with "will not overwrite just-created" when the
+  tool or SDK install list named the same binary twice.
+
 ### 0.51.0
 
 #### Added

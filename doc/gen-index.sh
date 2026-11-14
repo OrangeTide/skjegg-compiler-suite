@@ -119,7 +119,7 @@ HEAD
 printf '\n  <h2>Languages</h2>\n  <ul>\n'
 emit_entries languages
 printf '  </ul>\n'
-printf '\n  <h3>Kobold-Pascal</h3>\n  <ul>\n'
+printf '\n  <h3>Kobold Pascal</h3>\n  <ul>\n'
 emit_ordered languages/kobold \
     kp-guide.md kp-tutorial.md kp-examples.md kp-grammar.md kp-language.md \
     kp-units.md kp-errors.md kp-diagnostics.md kp-conformance.md \

@@ -368,3 +368,7 @@ string handle directly, since both sides share the runtime's representation (a
 crossing to a C foundation is still the wrapper's job, as above). Whether an
 exported module variable is ever allowed stays closed: no, a module reaches
 shared state through accessor routines, not an exported global.
+
+A runnable version of the `Geometry` example above lives in `examples/basic/`
+(`geometry.bas` plus the consumer `shapes.bas`), with a README that walks through
+the archive build. `make test-basic-example` builds, links, and runs it.

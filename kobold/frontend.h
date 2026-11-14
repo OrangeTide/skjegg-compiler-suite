@@ -1,5 +1,5 @@
 /* frontend.h : run the Kobold front end (kpcom) in-process to compile
-   Kobold-Pascal source to a KPM1 module.  This is what lets skj-kp-jit accept a
+   Kobold Pascal source to a KPM1 module.  This is what lets skj-kp-jit accept a
    `.pas` source file, not only a prebuilt `.kpm`: kpcom is linked in natively
    beside the C module builder and compiles straight into it in one step. */
 
@@ -8,7 +8,7 @@
 
 #include <stddef.h>
 
-/* Compile the Kobold-Pascal source file at `pas_path` to a KPM1 module.  The
+/* Compile the Kobold Pascal source file at `pas_path` to a KPM1 module.  The
    linked-in front end's CompileModule export is called in-process; it compiles
    straight into the C module builder, and the finished module is serialized once
    with kpm_write.  On success returns 0 and sets *module_text to a malloc'd buffer

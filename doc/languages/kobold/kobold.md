@@ -1,6 +1,6 @@
-# Kobold-Pascal front end (`kobold/`)
+# Kobold Pascal front end (`kobold/`)
 
-Kobold-Pascal reaches the shared IR through a different seam from the other
+Kobold Pascal reaches the shared IR through a different seam from the other
 front ends. Its compiler, `kpcom`, is a self-hosting Pascal program whose source
 is in this tree (`kobold/kpcom.pas`); skjegg is its home, not a consumer of some
 other Kobold tree. Because `kpcom` is written in Pascal and compiles itself, the
@@ -554,5 +554,5 @@ are specified by the companion documents in this directory:
 
 - `doc/tools/jit.md`: the shared in-process JIT the Kobold tools build on.
 - `doc/internals/ir.md`: the IR a KPM1 module is read into.
-- `PLAN.md`, "Kobold-Pascal in-process linking and lazy compilation": the
+- `PLAN.md`, "Kobold Pascal in-process linking and lazy compilation": the
   deferred lazy-compilation work (Steps C and D) and why it waits.

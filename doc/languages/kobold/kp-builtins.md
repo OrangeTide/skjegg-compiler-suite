@@ -1,7 +1,7 @@
-# Kobold-Pascal Built-in Routines
+# Kobold Pascal Built-in Routines
 
 This document is the signature reference for the predefined routines of
-Kobold-Pascal: what each one takes, what it returns, what it does, and when it can
+Kobold Pascal: what each one takes, what it returns, what it does, and when it can
 trap. It is the rule-level companion to the built-in table in `kp-language.md`,
 which lists the same routines by purpose. For the type rules the signatures rely on
 (what "ordinal", "numeric", "handle", and the compatibility relations mean) see

@@ -76,7 +76,7 @@ Tools:     as  ld  as-rv  ld-rv  as-mips  ld-mips  ar  cpp  addr2line
 Emulators: emu-cf  emu-rv  emu-mips
              (skj-run; any mix, or none.  emu-cf is the ColdFire core,
               emu-rv the RV32 core, emu-mips the little-endian MIPS I core.)
-Kobold:    kp                (the Kobold-Pascal AOT path: the single-step
+Kobold:    kp                (the Kobold Pascal AOT path: the single-step
              compiler skj-kpc, built from kpcom.pas source, which takes .kp or a
              .kpm to assembly, plus the runtime libkpaot.a; add riscv for the
              rv32 compiler skj-kpc-rv)
@@ -616,7 +616,7 @@ if [ "$has_addr2line" -eq 1 ]; then
        "$DEST/dwarf/"
 fi
 
-# Kobold-Pascal AOT path (kobold).  The front end kpcom is in-tree Pascal source
+# Kobold Pascal AOT path (kobold).  The front end kpcom is in-tree Pascal source
 # (kobold/kpcom.pas); this carries the KPM1 reader and runtime (kobold/), the
 # x86-64 selector the host tools build on, and the jit/ call trampoline libkpaot
 # links.  Rather than a prebuilt seed of one fixed width, it ships the Compact
@@ -699,7 +699,7 @@ fi
 if [ "$has_libc" -eq 1 ]; then
     cp "$S/doc/tools/libc.md" "$DEST/doc/"
 fi
-# Kobold-Pascal: the whole language doc set (guide, tutorial, grammar,
+# Kobold Pascal: the whole language doc set (guide, tutorial, grammar,
 # semantics, builtins, embedding, sandbox, ...), which is how to use the
 # language and its toolchain.
 if [ "$has_kp" -eq 1 ]; then
@@ -1255,7 +1255,7 @@ if [ "$has_driver" -eq 1 ]; then
     } >> "$MK"
 fi
 
-# Kobold-Pascal AOT path: the single-step host compiler skj-kpc (built from
+# Kobold Pascal AOT path: the single-step host compiler skj-kpc (built from
 # kpcom.pas source) plus the hosted runtime libkpaot.a.  skj-kpc takes .kp source
 # or a prebuilt .kpm straight to assembly; a per-target skj-kpc-<arch> (rv32,
 # ColdFire, arm64) is emitted for each selected backend.
@@ -1295,7 +1295,7 @@ $(BUILD)/libkpaot.a: $(SKJ_KP_AOT_RT) $(BUILD)/kp_co.o | $(BUILD)
 	@for f in $(SKJ_KP_AOT_RT); do o=$(BUILD)/aot/`basename $$f | sed 's/\.[cS]$$/.o/'`; $(CC) $(SKJ_KP_CFLAGS) -c $$f -o $$o || exit 1; done
 	$(AR) rcs $@ $(BUILD)/aot/*.o $(BUILD)/kp_co.o
 
-# The Kobold-Pascal front end, built from source rather than a prebuilt seed:
+# The Kobold Pascal front end, built from source rather than a prebuilt seed:
 # skj-pc (the Pascal compiler) built for the host compiles kpcom.pas
 # (valid Pascal) to native host code, and compiling it with -d KP_TARGET_<T>
 # bakes the emitted target in.  So skj-kpc-<target> runs on this host and emits

@@ -1,6 +1,6 @@
-# Kobold-Pascal Grammar
+# Kobold Pascal Grammar
 
-This document is the grammar of Kobold-Pascal, a subset of Pascal with no
+This document is the grammar of Kobold Pascal, a subset of Pascal with no
 pointers, opaque host handles, Go-style methods, and stackful coroutines. For the
 rationale behind these choices see `kobold.md`. The static-semantics rules the
 grammar does not capture (type identity, compatibility, conversions, expression

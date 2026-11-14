@@ -1,9 +1,9 @@
 program interptest;
 { Double-quoted strings interpolate dollar-brace holes; single-quoted strings
   stay plain. A hole renders like write: string and char as-is, integers and
-  int64 as their digits, bool and enum as their ordinal number. A doubled dollar
-  escapes the hole marker, and a doubled quote is a literal quote. Prints the
-  lines in interp.expected. }
+  int64 as their digits, a real as its %g form, bool and enum as their ordinal
+  number. A doubled dollar escapes the hole marker, and a doubled quote is a
+  literal quote. Prints the lines in interp.expected. }
 type
   Color = (Red, Green, Blue);
 var
@@ -13,6 +13,7 @@ var
   s: string;
   b: boolean;
   col: Color;
+  r: real;
 begin
   n := 42;
   big := 10000000000;
@@ -20,11 +21,13 @@ begin
   s := 'world';
   b := true;
   col := Green;
+  r := 3.14159;
   WriteLn("hello ${s}!");
   WriteLn("n=${n} big=${big}");
   WriteLn("char=${c}");
   WriteLn("bool=${b} enum=${col}");
   WriteLn("sum=${n + 8}");
+  WriteLn("real=${r} half=${r / 2}");
   WriteLn("literal $${not a hole} and $x");
   WriteLn("quote=""q""");
   WriteLn('plain ${notahole} stays');

@@ -2,7 +2,7 @@
 # run-xlang-sandbox.sh : the cross-language RV32 process-sandbox demo.
 #
 # One root process, built from C by skj-cc-rv, spawns two children: one built
-# from C (cchild.c) and one from Kobold-Pascal (kchild.pas, through
+# from C (cchild.c) and one from Kobold Pascal (kchild.pas, through
 # skj-kpc-rv -> skj-as-rv -> skj-ld-rv over the freestanding crt).
 # skj-run round-robin schedules all three under one shared memory budget. The
 # children are RV32 ELFs the toolkit produced from the shared IR, so the

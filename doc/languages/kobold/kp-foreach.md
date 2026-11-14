@@ -1,4 +1,4 @@
-# Kobold-Pascal: iterating with `for`-`in`
+# Kobold Pascal: iterating with `for`-`in`
 
 The counted loop `for i := lo to hi do` walks a range of integers. The
 `for`-`in` loop walks the elements of a sequence directly, without naming an

@@ -1,4 +1,4 @@
-# Kobold-Pascal Properties (uniform access)
+# Kobold Pascal Properties (uniform access)
 
 This note describes `property`: an accessor-backed value that looks like a variable at
 every use site but is implemented by routines. It follows the uniform access principle,

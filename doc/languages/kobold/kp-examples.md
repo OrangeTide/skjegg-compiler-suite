@@ -1,4 +1,4 @@
-# Kobold-Pascal Examples
+# Kobold Pascal Examples
 
 A set of complete programs you can compile and run, each with its output. They
 are small on purpose, one idea apiece. For a guided path through the language,

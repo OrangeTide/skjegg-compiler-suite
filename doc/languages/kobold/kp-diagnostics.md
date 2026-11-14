@@ -1,4 +1,4 @@
-# Kobold-Pascal Diagnostics
+# Kobold Pascal Diagnostics
 
 This document covers diagnostics at two stages: the errors the compiler reports
 while translating a program, and the runtime facilities a program uses to check
@@ -158,7 +158,7 @@ language-surface-adjacent work left before 1.0.
 
 ## Runtime diagnostics
 
-Kobold-Pascal keeps the runtime small, so most run-time diagnostics live in the
+Kobold Pascal keeps the runtime small, so most run-time diagnostics live in the
 guest language rather than the C VM. The compiler self-hosts and the guest has full
 I/O, so assertions, tracing, and line coverage are ordinary Pascal that a program
 writes for itself. The VM adds only one primitive that the guest cannot express

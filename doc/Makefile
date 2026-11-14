@@ -59,7 +59,7 @@ $(OUT)/%.html: %.md $(TEMPLATE) $(FILTER)
 	   languages) label=Languages;; \
 	   *) label=Documentation;; \
 	 esac; \
-	 case '$*' in languages/kobold/*) label="Kobold-Pascal";; esac; \
+	 case '$*' in languages/kobold/*) label="Kobold Pascal";; esac; \
 	 base=$$(basename '$*'); \
 	 sed '1{/^# /d;}' $< | \
 	   SITE_PREFIX="$$prefix" $(PANDOC) $(PANDOC_HTML) \

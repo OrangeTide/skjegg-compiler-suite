@@ -1,4 +1,4 @@
-# Kobold-Pascal Units and Separate Compilation
+# Kobold Pascal Units and Separate Compilation
 
 This note describes the design of the unit system: how a script is split across
 several source files that compile separately and link together, so game scripts can

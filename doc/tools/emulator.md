@@ -85,11 +85,22 @@ matters because target hosts differ: a ColdFire-based host carries only
 the ColdFire core, while a host that moved to RV32 would carry only the
 RISC-V core.
 
-The MIPS core is the user-visible architecture only: the general
-registers, HI/LO, the branch and load delay slots, and the `SYSCALL` and
-`BREAK` traps. It has no CP0, cache or MMIO, and no COP1; floating point
-is the backend's softfloat path, so a hardware-COP1 binary faults with an
-illegal instruction here.
+The MIPS core models the user-visible architecture: the general
+registers, HI/LO, the branch and load delay slots, the `SYSCALL` and
+`BREAK` traps, and the COP1 floating-point unit the hardware-float
+backend targets (the softfloat backend needs no COP1 and runs here too).
+
+It also has an opt-in system (privileged) tier, off by default, that the
+`system_mode` flag turns on. With it set, the core models the CP0
+Status/Cause/EPC registers, the general exception vector, external
+interrupt lines (asserted through `mips_set_irq`, taken at instruction
+boundaries under the `SR.IEc` and `SR.IM` gates), `MFC0`/`MTC0` and the
+`RFE` return. `SYSCALL`, `BREAK`, reserved instructions, arithmetic
+overflow and address errors then vector into guest code through CP0
+instead of stopping the CPU, so the core can run a kernel that handles
+its own exceptions. This mirrors the RV32 core's user/machine split.
+Address translation stays with the bus; there is no TLB, cache or MMIO
+model. The host-side suite `make test-mips-sys` exercises the tier.
 
 ## The machine
 

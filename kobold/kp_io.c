@@ -119,6 +119,19 @@ io_write_real(int fd, double x)
     out_bytes(fd, buf, n);
 }
 
+/* A real rendered to a fresh guest string the same way io_write_real renders it
+   (shared fmt_g), so string interpolation of a ${real} hole and write(real) agree
+   byte for byte.  The sibling of kp_str_from_int/int64/char; it lives here rather
+   than in str_fmt.c / io_free.c so both tiers share the one %g renderer. */
+kp_gptr
+kp_str_from_real(double x)
+{
+    char buf[40];
+    int n = fmt_g(x, buf);
+
+    return kp_str_new(buf, n);
+}
+
 void io_flush(int fd) { (void)fd; }     /* unbuffered: nothing to flush */
 void io_halt(int code) { KP_IO_EXIT(code); }
 

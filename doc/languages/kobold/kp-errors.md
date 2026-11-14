@@ -1,4 +1,4 @@
-# Kobold-Pascal Error Handling
+# Kobold Pascal Error Handling
 
 This note describes the design of recoverable error handling: how a routine reports an
 expected failure to its caller, and how the caller deals with it. It is the expected-failure

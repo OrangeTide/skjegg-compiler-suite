@@ -1,7 +1,7 @@
 /* The root process of the cross-language sandbox demo.
  *
  * Compiled by skj-cc-rv. It spawns two children from images embedded in its own
- * data: one built from C (cchild.c) and one from Kobold-Pascal (kchild.pas).
+ * data: one built from C (cchild.c) and one from Kobold Pascal (kchild.pas).
  * The host reads each image out with gm_read_out and loads it with the
  * in-memory ELF loader; each child then runs as its own process with its own
  * memory, round-robin scheduled by skj-run under the shared budget. To the

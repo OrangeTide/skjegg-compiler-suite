@@ -1,6 +1,6 @@
-# Kobold-Pascal Static Semantics
+# Kobold Pascal Static Semantics
 
-This document specifies the static semantics of Kobold-Pascal: the type system,
+This document specifies the static semantics of Kobold Pascal: the type system,
 the compatibility and conversion rules, how expressions are typed, how overloaded
 calls are resolved, how aggregate values are laid out, what a constant expression
 may contain, and how names are resolved. It is the rule-level companion to

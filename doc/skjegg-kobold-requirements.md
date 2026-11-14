@@ -1,7 +1,7 @@
 # The skjegg/boris hosting contract
 
 This is the handoff contract between skjegg and the boris MUD server. boris
-vendors skjegg's RV32 toolchain and freestanding runtime to host Kobold-Pascal
+vendors skjegg's RV32 toolchain and freestanding runtime to host Kobold Pascal
 and C programs as sandboxed guests. The document records what boris asked skjegg
 to provide, and what skjegg guarantees in return, so a re-vendor reads one
 accurate contract rather than reconstructing it from two trees.

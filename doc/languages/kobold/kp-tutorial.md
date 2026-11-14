@@ -1,6 +1,6 @@
-# Kobold-Pascal Tutorial
+# Kobold Pascal Tutorial
 
-This tutorial teaches Kobold-Pascal from a first program upward, one feature at a
+This tutorial teaches Kobold Pascal from a first program upward, one feature at a
 time. Each step is a complete program you can compile and run. For the quickest
 loop, run each with the in-process JIT:
 
@@ -11,6 +11,10 @@ skj-kp-jit step.pas
 Two steps need more than the bare JIT, and each says so where it comes up: a
 program that `uses` a unit needs that unit's compiled module on the path (step
 19), and inline assembly is ahead-of-time only (step 20).
+
+Kobold source is conventionally `.kp`. The examples here use `.pas` because the
+tools accept either and pick the language from how they are invoked, not from
+the suffix; a new program of your own should use `.kp`.
 
 For the precise rules behind anything here, see the reference (`kp-language.md`)
 and the grammar (`kp-grammar.md`). The static-semantics rules are in
@@ -489,9 +493,9 @@ end.
 ```
 
 Write a literal dollar-brace as `$$` before the brace and a literal double quote
-as `""`. A hole may hold a string, a `char`, an integer width, an `int64`, or a
-`bool`/enum (as its ordinal number); a `real` hole is not supported yet, so
-convert it with `Str` first, and a hole may not contain a double-quoted string.
+as `""`. A hole may hold a string, a `char`, an integer width, an `int64`, a
+`real` (rendered the way `Write` renders it), or a `bool`/enum (as its ordinal
+number); a hole may not contain a double-quoted string.
 
 Higher-level helpers (`UpperCase`, `LowerCase`, `Trim`, `StringReplace`, and
 string `Delete`/`Insert`) live in the `core.strings` unit (step 19), not the

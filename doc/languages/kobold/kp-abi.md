@@ -1,4 +1,4 @@
-# Kobold-Pascal Host ABI
+# Kobold Pascal Host ABI
 
 This document specifies the binary contract between JIT-compiled Kobold code and the
 C host: how values are represented, how the guest calls the host, how handles live

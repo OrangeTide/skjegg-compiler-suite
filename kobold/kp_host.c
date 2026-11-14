@@ -63,6 +63,9 @@ static uint64_t d2b(double d) { uint64_t b; memcpy(&b, &d, sizeof b); return b; 
 void     brv_write_real(int fd, uint64_t x) { io_write_real(fd, b2d(x)); }
 uint64_t brv_read_real(void)                { return d2b(io_read_real()); }
 uint64_t brv_val_real(kp_gptr s)            { return d2b(kp_str_val_real(s)); }
+/* The argument is a real's bits; the result is a handle (int-class), so only the
+   argument crosses the bridge. */
+kp_gptr  brv_str_from_real(uint64_t x)      { return kp_str_from_real(b2d(x)); }
 
 uint64_t brv_sin(uint64_t x)    { return d2b(sin(b2d(x))); }
 uint64_t brv_cos(uint64_t x)    { return d2b(cos(b2d(x))); }
@@ -221,6 +224,11 @@ kp_install_runtime(struct kp_binding *binds, int *n, int cap)
     BIND("kp_str_from_int", kp_str_from_int);
     BIND("kp_str_from_int64", kp_str_from_int64);
     BIND("kp_str_from_char", kp_str_from_char);
+#ifdef KP_RV_FLOAT_BRIDGE
+    BIND("kp_str_from_real", brv_str_from_real);
+#else
+    BIND("kp_str_from_real", kp_str_from_real);
+#endif
     BIND("kp_str_val_int", kp_str_val_int);
     BIND("kp_str_val_int64", kp_str_val_int64);
     BIND("kp_str_valcode", kp_str_valcode);

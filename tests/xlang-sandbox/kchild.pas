@@ -1,4 +1,4 @@
-{ The Kobold-Pascal child of the cross-language sandbox demo.
+{ The Kobold Pascal child of the cross-language sandbox demo.
 
   Compiled by skj-kpc (front end) -> skj-kp-rv (RV32 codegen) -> skj-as-rv ->
   skj-ld-rv over the freestanding crt (kp_crt_rv.S) and libkpaot-rv-free.a,

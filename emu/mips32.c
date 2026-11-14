@@ -25,7 +25,7 @@ enum {
     OP_BEQ = 0x04, OP_BNE = 0x05, OP_BLEZ = 0x06, OP_BGTZ = 0x07,
     OP_ADDI = 0x08, OP_ADDIU = 0x09, OP_SLTI = 0x0A, OP_SLTIU = 0x0B,
     OP_ANDI = 0x0C, OP_ORI = 0x0D, OP_XORI = 0x0E, OP_LUI = 0x0F,
-    OP_COP1 = 0x11,
+    OP_COP0 = 0x10, OP_COP1 = 0x11,
     OP_LB = 0x20, OP_LH = 0x21, OP_LWL = 0x22, OP_LW = 0x23,
     OP_LBU = 0x24, OP_LHU = 0x25, OP_LWR = 0x26,
     OP_SB = 0x28, OP_SH = 0x29, OP_SWL = 0x2A, OP_SW = 0x2B, OP_SWR = 0x2E,
@@ -79,6 +79,11 @@ mips_reset(mips_cpu *cpu, uint32_t entry)
     for (i = 0; i < 32; i++)
         cpu->fpr[i] = 0;
     cpu->fcsr = 0;
+    for (i = 0; i < 32; i++)
+        cpu->cp0[i] = 0;
+    /* system_mode and halt_on_break are configuration the consumer sets around
+     * mips_init; a reset leaves them in place, the way the RV32 core keeps its
+     * extension switches across rv_reset. */
 }
 
 void
@@ -106,6 +111,92 @@ mips_trap(mips_cpu *cpu, int type, int signal, uint32_t addr,
     mips_trace_push(&cpu->trace, (uint8_t)type, cpu->cur_pc, insn, addr, note);
 }
 
+/****************************************************************
+ * CP0 : the system (privileged) tier
+ ****************************************************************/
+
+/* Enter the general exception handler with ExcCode `exc_code`.  Records EPC
+ * (the branch, not the delay slot, when the fault is in a slot so the branch
+ * re-runs on return), sets Cause (ExcCode and the BD bit, keeping the pending
+ * interrupt lines), pushes the SR interrupt/mode stack, and vectors the PC.
+ * cpu->cur_pc and cpu->in_delay must already describe the faulting instruction.
+ * Only called in system mode. */
+static void
+raise_exception(mips_cpu *cpu, uint32_t exc_code)
+{
+    uint32_t sr = cpu->cp0[MIPS_CP0_SR];
+    uint32_t cause;
+    uint32_t stack;
+    uint32_t vector;
+
+    cpu->cp0[MIPS_CP0_EPC] = cpu->in_delay ? cpu->cur_pc - 4 : cpu->cur_pc;
+
+    cause = (exc_code << MIPS_CAUSE_EXC_SHIFT) & MIPS_CAUSE_EXC_MASK;
+    if (cpu->in_delay)
+        cause |= MIPS_CAUSE_BD;
+    /* keep the pending interrupt lines the bus has asserted */
+    cause |= cpu->cp0[MIPS_CP0_CAUSE] & MIPS_CAUSE_IP_MASK;
+    cpu->cp0[MIPS_CP0_CAUSE] = cause;
+
+    /* Push the interrupt-enable / mode stack: the low six bits shift left by
+     * two, entering kernel mode with interrupts disabled. */
+    stack = sr & 0x3Fu;
+    cpu->cp0[MIPS_CP0_SR] = (sr & ~0x3Fu) | ((stack << 2) & 0x3Fu);
+
+    vector = (sr & MIPS_SR_BEV) ? 0xBFC00180u : 0x80000080u;
+    cpu->pc = vector;
+    cpu->next_pc = vector + 4;
+    cpu->branch_taken = 0;
+    cpu->in_delay = 0;
+}
+
+/* Whether an interrupt is both pending and enabled: any asserted Cause.IP line
+ * that its SR.IM mask bit allows, with the global SR.IEc gate open. */
+static int
+interrupt_pending(const mips_cpu *cpu)
+{
+    uint32_t sr = cpu->cp0[MIPS_CP0_SR];
+
+    if ((sr & MIPS_SR_IEc) == 0)
+        return 0;
+    return (cpu->cp0[MIPS_CP0_CAUSE] & sr & MIPS_CAUSE_IP_MASK) != 0;
+}
+
+void
+mips_set_irq(mips_cpu *cpu, int line, int level)
+{
+    uint32_t bit;
+
+    if (line < 0 || line >= MIPS_NUM_IRQ_LINES)
+        return;
+    bit = 1u << (8 + line);
+    if (level)
+        cpu->cp0[MIPS_CP0_CAUSE] |= bit;
+    else
+        cpu->cp0[MIPS_CP0_CAUSE] &= ~bit;
+}
+
+/* Take a synchronous fault.  In system mode it records a trace event and
+ * vectors through CP0, returning 1 so the step aborts the instruction but keeps
+ * running (completing any load the previous instruction left pending).  In user
+ * mode it stops the CPU for the host harness, returning 0; the caller then
+ * returns -1.  `set_badv` writes BADVADDR for an address error. */
+static int
+take_fault(mips_cpu *cpu, int trap_type, int signal, uint32_t exc_code,
+           uint32_t badv, int set_badv, uint32_t inst, const char *note)
+{
+    if (cpu->system_mode) {
+        if (set_badv)
+            cpu->cp0[MIPS_CP0_BADVADDR] = badv;
+        mips_trace_push(&cpu->trace, (uint8_t)trap_type, cpu->cur_pc, inst,
+                        badv, note);
+        raise_exception(cpu, exc_code);
+        return 1;
+    }
+    mips_trap(cpu, trap_type, signal, badv, inst, note);
+    return 0;
+}
+
 /* The GPR an instruction writes, or 0 if it writes none.  Used to suppress a
  * pending load whose destination the delay-slot instruction overwrites (the
  * comparison is by register number, not value). */
@@ -113,6 +204,7 @@ static uint32_t
 delay_slot_dest(uint32_t inst)
 {
     uint32_t op = inst >> 26;
+    uint32_t rs = (inst >> 21) & 0x1F;
     uint32_t rt = (inst >> 16) & 0x1F;
     uint32_t rd = (inst >> 11) & 0x1F;
     uint32_t funct = inst & 0x3F;
@@ -139,6 +231,8 @@ delay_slot_dest(uint32_t inst)
         return ((rt & 0x1E) == 0x10) ? 31u : 0u;   /* BLTZAL/BGEZAL link ra */
     case OP_JAL:
         return 31u;
+    case OP_COP0:
+        return (rs == 0) ? rt : 0u;     /* MFC0 writes rt in the execute stage */
     default:
         return 0;
     }
@@ -216,7 +310,9 @@ fp_to_w(double v, uint32_t rm)
     return (uint32_t)(int32_t)r;
 }
 
-/* Execute a COP1 (opcode 0x11) instruction.  Returns 0, or -1 on a trap. */
+/* Execute a COP1 (opcode 0x11) instruction.  Returns 0 on success, 1 when a
+ * reserved encoding vectored in system mode (the caller resumes), or -1 when it
+ * stopped the CPU in user mode. */
 static int
 mips_cop1(mips_cpu *cpu, uint32_t inst)
 {
@@ -335,8 +431,8 @@ mips_cop1(mips_cpu *cpu, uint32_t inst)
         break;
     }
 
-    mips_trap(cpu, MIPS_TR_ILLEGAL, SIG_ILL, 0, inst, "reserved COP1");
-    return -1;
+    return take_fault(cpu, MIPS_TR_ILLEGAL, SIG_ILL, MIPS_EXC_RI, 0, 0, inst,
+                      "reserved COP1") ? 1 : -1;
 }
 
 int
@@ -353,9 +449,31 @@ mips_step(mips_cpu *cpu)
     cpu->cur_pc = cpu->pc;
     cpu->in_delay = cpu->branch_taken;
 
+    /* Interrupts are recognised at instruction boundaries, before the fetch,
+     * so EPC names the instruction that has not run yet.  A load the previous
+     * instruction started still writes back: the delay-slot instruction that
+     * would have completed it does not run, so commit it here or the target
+     * keeps its stale value. */
+    if (cpu->system_mode && interrupt_pending(cpu)) {
+        if (cpu->load_reg != 0) {
+            cpu->r[cpu->load_reg] = cpu->load_val;
+            cpu->load_reg = 0;
+            cpu->load_val = 0;
+            cpu->r[0] = 0;
+        }
+        mips_trace_push(&cpu->trace, MIPS_TR_TRAP, cpu->cur_pc, 0, 0,
+                        "interrupt");
+        raise_exception(cpu, MIPS_EXC_INT);
+        cpu->cycles++;
+        return 0;
+    }
+
     if (cpu->pc & 3) {
-        mips_trap(cpu, MIPS_TR_FETCH_FAULT, SIG_BUS, cpu->pc, 0,
-                  "misaligned instruction fetch");
+        if (take_fault(cpu, MIPS_TR_FETCH_FAULT, SIG_BUS, MIPS_EXC_ADEL,
+                       cpu->pc, 1, 0, "misaligned instruction fetch")) {
+            cpu->cycles++;
+            return 0;
+        }
         return -1;
     }
     inst = cpu->read32(cpu->bus_ctx, cpu->pc);
@@ -403,6 +521,12 @@ mips_step(mips_cpu *cpu)
             do_branch(cpu, a);
             break;
         case FN_SYSCALL:
+            if (cpu->system_mode) {
+                mips_trace_push(&cpu->trace, MIPS_TR_SYSCALL, cpu->cur_pc,
+                                inst, 0, "syscall");
+                raise_exception(cpu, MIPS_EXC_SYSCALL);
+                goto load_writeback;
+            }
             if (cpu->syscall)
                 cpu->syscall(cpu, cpu->syscall_ctx);
             else
@@ -412,6 +536,19 @@ mips_step(mips_cpu *cpu)
         case FN_BREAK: {
             uint32_t code = (inst >> 6) & 0xFFFFF;
             int sig = (code == 6 || code == 7) ? SIG_FPE : SIG_TRAP;
+            if (cpu->system_mode) {
+                /* The harness can elect to halt on BREAK (a monitor trap);
+                 * otherwise it vectors like any other exception. */
+                if (cpu->halt_on_break) {
+                    cpu->halted = 1;
+                } else {
+                    mips_trace_push(&cpu->trace, MIPS_TR_BREAK, cpu->cur_pc,
+                                    inst, code, "break");
+                    raise_exception(cpu, MIPS_EXC_BREAK);
+                    goto load_writeback;
+                }
+                break;
+            }
             mips_trap(cpu, MIPS_TR_BREAK, sig, code, inst, "break");
             break;
         }
@@ -460,8 +597,9 @@ mips_step(mips_cpu *cpu)
             a = cpu->r[rs]; b = cpu->r[rt];
             uint32_t r = a + b;
             if ((int32_t)((a ^ r) & (b ^ r)) < 0) {
-                mips_trap(cpu, MIPS_TR_OVERFLOW, SIG_FPE, 0, inst,
-                          "add overflow");
+                if (take_fault(cpu, MIPS_TR_OVERFLOW, SIG_FPE,
+                               MIPS_EXC_OVERFLOW, 0, 0, inst, "add overflow"))
+                    goto load_writeback;
                 return -1;
             }
             cpu->r[rd] = r;
@@ -472,8 +610,9 @@ mips_step(mips_cpu *cpu)
             a = cpu->r[rs]; b = cpu->r[rt];
             uint32_t r = a - b;
             if ((int32_t)((a ^ b) & (a ^ r)) < 0) {
-                mips_trap(cpu, MIPS_TR_OVERFLOW, SIG_FPE, 0, inst,
-                          "sub overflow");
+                if (take_fault(cpu, MIPS_TR_OVERFLOW, SIG_FPE,
+                               MIPS_EXC_OVERFLOW, 0, 0, inst, "sub overflow"))
+                    goto load_writeback;
                 return -1;
             }
             cpu->r[rd] = r;
@@ -491,8 +630,9 @@ mips_step(mips_cpu *cpu)
             cpu->r[rd] = (cpu->r[rs] < cpu->r[rt]) ? 1 : 0;
             break;
         default:
-            mips_trap(cpu, MIPS_TR_ILLEGAL, SIG_ILL, 0, inst,
-                      "reserved SPECIAL funct");
+            if (take_fault(cpu, MIPS_TR_ILLEGAL, SIG_ILL, MIPS_EXC_RI, 0, 0,
+                           inst, "reserved SPECIAL funct"))
+                goto load_writeback;
             return -1;
         }
         break;
@@ -538,7 +678,9 @@ mips_step(mips_cpu *cpu)
         a = cpu->r[rs]; b = (uint32_t)imm_se;
         uint32_t r = a + b;
         if ((int32_t)((a ^ r) & (b ^ r)) < 0) {
-            mips_trap(cpu, MIPS_TR_OVERFLOW, SIG_FPE, 0, inst, "addi overflow");
+            if (take_fault(cpu, MIPS_TR_OVERFLOW, SIG_FPE, MIPS_EXC_OVERFLOW,
+                           0, 0, inst, "addi overflow"))
+                goto load_writeback;
             return -1;
         }
         cpu->r[rt] = r;
@@ -556,16 +698,47 @@ mips_step(mips_cpu *cpu)
     case OP_XORI: cpu->r[rt] = cpu->r[rs] ^ imm_ze; break;
     case OP_LUI:  cpu->r[rt] = imm_ze << 16; break;
 
-    case OP_COP1:
-        if (mips_cop1(cpu, inst) < 0)
+    case OP_COP0:
+        if (!cpu->system_mode) {
+            if (take_fault(cpu, MIPS_TR_ILLEGAL, SIG_ILL, MIPS_EXC_RI, 0, 0,
+                           inst, "cop0 in user mode"))
+                goto load_writeback;
+            return -1;
+        }
+        switch (rs) {
+        case 0x00:                      /* MFC0: GPR[rt] = CP0[rd] */
+            if (rt) cpu->r[rt] = cpu->cp0[rd];
+            break;
+        case 0x04:                      /* MTC0: CP0[rd] = GPR[rt] */
+            cpu->cp0[rd] = cpu->r[rt];
+            break;
+        case 0x10:                      /* RFE: pop the SR interrupt/mode stack */
+            if ((inst & 0x3F) == 0x10) {
+                uint32_t mode = cpu->cp0[MIPS_CP0_SR] & 0x3Fu;
+                cpu->cp0[MIPS_CP0_SR] = (cpu->cp0[MIPS_CP0_SR] & ~0x3Fu)
+                                      | ((mode >> 2) | (mode & 0x30u));
+            }
+            break;
+        default:
+            break;
+        }
+        break;
+
+    case OP_COP1: {
+        int cr = mips_cop1(cpu, inst);
+        if (cr > 0)                     /* reserved encoding vectored */
+            goto load_writeback;
+        if (cr < 0)                     /* stopped in user mode */
             return -1;
         break;
+    }
 
     case OP_LWC1:                       /* FP load: FPR[ft] = mem[rs+imm] */
         addr = cpu->r[rs] + (uint32_t)imm_se;
         if (addr & 3) {
-            mips_trap(cpu, MIPS_TR_LOAD_MISALIGN, SIG_BUS, addr, inst,
-                      "misaligned lwc1");
+            if (take_fault(cpu, MIPS_TR_LOAD_MISALIGN, SIG_BUS, MIPS_EXC_ADEL,
+                           addr, 1, inst, "misaligned lwc1"))
+                goto load_writeback;
             return -1;
         }
         cpu->fpr[rt] = cpu->read32(cpu->bus_ctx, addr);
@@ -573,8 +746,9 @@ mips_step(mips_cpu *cpu)
     case OP_SWC1:                       /* FP store: mem[rs+imm] = FPR[ft] */
         addr = cpu->r[rs] + (uint32_t)imm_se;
         if (addr & 3) {
-            mips_trap(cpu, MIPS_TR_STORE_MISALIGN, SIG_BUS, addr, inst,
-                      "misaligned swc1");
+            if (take_fault(cpu, MIPS_TR_STORE_MISALIGN, SIG_BUS, MIPS_EXC_ADES,
+                           addr, 1, inst, "misaligned swc1"))
+                goto load_writeback;
             return -1;
         }
         cpu->write32(cpu->bus_ctx, addr, cpu->fpr[rt]);
@@ -593,8 +767,9 @@ mips_step(mips_cpu *cpu)
     case OP_LH:
         addr = cpu->r[rs] + (uint32_t)imm_se;
         if (addr & 1) {
-            mips_trap(cpu, MIPS_TR_LOAD_MISALIGN, SIG_BUS, addr, inst,
-                      "misaligned lh");
+            if (take_fault(cpu, MIPS_TR_LOAD_MISALIGN, SIG_BUS, MIPS_EXC_ADEL,
+                           addr, 1, inst, "misaligned lh"))
+                goto load_writeback;
             return -1;
         }
         if (rt) { cpu->load_reg = rt;
@@ -603,8 +778,9 @@ mips_step(mips_cpu *cpu)
     case OP_LHU:
         addr = cpu->r[rs] + (uint32_t)imm_se;
         if (addr & 1) {
-            mips_trap(cpu, MIPS_TR_LOAD_MISALIGN, SIG_BUS, addr, inst,
-                      "misaligned lhu");
+            if (take_fault(cpu, MIPS_TR_LOAD_MISALIGN, SIG_BUS, MIPS_EXC_ADEL,
+                           addr, 1, inst, "misaligned lhu"))
+                goto load_writeback;
             return -1;
         }
         if (rt) { cpu->load_reg = rt;
@@ -613,8 +789,9 @@ mips_step(mips_cpu *cpu)
     case OP_LW:
         addr = cpu->r[rs] + (uint32_t)imm_se;
         if (addr & 3) {
-            mips_trap(cpu, MIPS_TR_LOAD_MISALIGN, SIG_BUS, addr, inst,
-                      "misaligned lw");
+            if (take_fault(cpu, MIPS_TR_LOAD_MISALIGN, SIG_BUS, MIPS_EXC_ADEL,
+                           addr, 1, inst, "misaligned lw"))
+                goto load_writeback;
             return -1;
         }
         if (rt) { cpu->load_reg = rt;
@@ -654,8 +831,9 @@ mips_step(mips_cpu *cpu)
     case OP_SH:
         addr = cpu->r[rs] + (uint32_t)imm_se;
         if (addr & 1) {
-            mips_trap(cpu, MIPS_TR_STORE_MISALIGN, SIG_BUS, addr, inst,
-                      "misaligned sh");
+            if (take_fault(cpu, MIPS_TR_STORE_MISALIGN, SIG_BUS, MIPS_EXC_ADES,
+                           addr, 1, inst, "misaligned sh"))
+                goto load_writeback;
             return -1;
         }
         cpu->write16(cpu->bus_ctx, addr, cpu->r[rt] & 0xFFFF);
@@ -663,8 +841,9 @@ mips_step(mips_cpu *cpu)
     case OP_SW:
         addr = cpu->r[rs] + (uint32_t)imm_se;
         if (addr & 3) {
-            mips_trap(cpu, MIPS_TR_STORE_MISALIGN, SIG_BUS, addr, inst,
-                      "misaligned sw");
+            if (take_fault(cpu, MIPS_TR_STORE_MISALIGN, SIG_BUS, MIPS_EXC_ADES,
+                           addr, 1, inst, "misaligned sw"))
+                goto load_writeback;
             return -1;
         }
         cpu->write32(cpu->bus_ctx, addr, cpu->r[rt]);
@@ -697,14 +876,19 @@ mips_step(mips_cpu *cpu)
     }
 
     default:
-        mips_trap(cpu, MIPS_TR_ILLEGAL, SIG_ILL, 0, inst, "reserved opcode");
+        if (take_fault(cpu, MIPS_TR_ILLEGAL, SIG_ILL, MIPS_EXC_RI, 0, 0, inst,
+                       "reserved opcode"))
+            goto load_writeback;
         return -1;
     }
 
+load_writeback:
     cpu->r[0] = 0;
 
     /* Complete the previous instruction's deferred load, unless the just
-     * executed instruction wrote the same register (by number). */
+     * executed instruction wrote the same register (by number).  A system-mode
+     * exception reaches here too, so a load the faulting instruction's
+     * predecessor started still writes back before the handler runs. */
     if (dreg != 0 && delay_slot_dest(inst) != dreg)
         cpu->r[dreg] = dval;
     cpu->r[0] = 0;

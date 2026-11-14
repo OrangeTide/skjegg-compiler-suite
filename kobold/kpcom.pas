@@ -1,4 +1,4 @@
-{ Kobold-Pascal language front end (Pascal), single file. It is a complete
+{ Kobold Pascal language front end (Pascal), single file. It is a complete
   compiler: a lexer, a recursive-descent parser that builds an AST, the
   semantic analyzer and type system, IR generation, and the KPM1 module
   writer. See doc/languages/kobold/kp-grammar.md. }
@@ -5287,16 +5287,15 @@ end;
 
 function CheckInterpHole(node: LongInt): LongInt;
 { The interpolation hole (nkToStr): the value is rendered to a string the way
-  write renders it. Allowed: string, char, any integer width (incl int64), and the
-  ordinals (bool, enum) that render as their number. A real needs a string-producing
-  formatter the runtime does not expose yet, so it is rejected for now. }
+  write renders it. Allowed: string, char, any integer width (incl int64), a real
+  (rendered like write, through kp_str_from_real), and the ordinals (bool, enum)
+  that render as their number. }
 var
   t: LongInt;
 begin
   t := AnalyzeExpr(Nodes[node].A);
-  if IsRealType(t) then
-    SemErr(node, 'interpolating a real is not supported yet; format it with str or write')
-  else if (t <> tyStr) and (t <> tyChar) and (not IsInt64(t)) and (not IsOrdinalType(t)) then
+  if (t <> tyStr) and (t <> tyChar) and (not IsInt64(t)) and
+     (not IsRealType(t)) and (not IsOrdinalType(t)) then
     SemErr(node, 'cannot interpolate a value of this type into a string');
   CheckInterpHole := tyStr;
 end;
@@ -8849,6 +8848,25 @@ begin
   Inc(IrImportCount);
 end;
 
+procedure EnsureHelperFtoStr(const name: string);
+{ Declare a runtime helper import taking one float argument and returning a string
+  handle (int-class result), for kp_str_from_real: interpolating a real into a string. }
+var
+  n, i: LongInt;
+begin
+  for i := 0 to IrImportCount - 1 do
+    if IrImports[i].Name = name then Exit;
+  n := IrImportCount;
+  SetLength(IrImports, n + 1);
+  IrImports[n].Name := name;
+  IrImports[n].IsHelper := True;
+  IrImports[n].IsType := False;
+  SetLength(IrImports[n].ParamCls, 1);
+  IrImports[n].ParamCls[0] := 'float';
+  IrImports[n].RetCls := 'int';
+  Inc(IrImportCount);
+end;
+
 procedure EnsureFuncIF(const name: string);
 { Declare a host-function import with an (int, float) parameter list and no result,
   for io_write_real: a stream id and a real value. }
@@ -11007,17 +11025,25 @@ end;
 
 function LowerToStr(node: LongInt): LongInt;
 { Lower an interpolation hole (nkToStr) to a string value, the same rendering
-  write uses: a string is the identity, a char through kp_str_from_char, int64
-  through kp_str_from_int64, and everything else (int widths, bool, enum) through
-  kp_str_from_int. (A real is rejected in the checker.) }
+  write uses: a string is the identity, a char through kp_str_from_char, a real
+  through kp_str_from_real, int64 through kp_str_from_int64, and everything else
+  (int widths, bool, enum) through kp_str_from_int. }
 var
-  t, d: LongInt;
+  t, d, av: LongInt;
 begin
   t := Nodes[Nodes[node].A].Ty;
   if t = tyStr then
     LowerToStr := LowerExpr(Nodes[node].A)
   else if t = tyChar then
     LowerToStr := EmitStrCall1('kp_str_from_char', LowerExpr(Nodes[node].A))
+  else if IsRealType(t) then begin
+    av := AsFloat(Nodes[node].A);   { lower (and widen) the real before staging the arg }
+    EnsureHelperFtoStr('kp_str_from_real');
+    EmitFArg(av);
+    d := NewTemp;
+    PushI('CALL', d, -1, -1, 0, -1, -1, 1, 'kp_str_from_real');
+    LowerToStr := d;
+  end
   else if IsInt64(t) then begin
     EnsureHelperI64('kp_str_from_int64', 'int');
     EmitArg64(AsInt64(Nodes[node].A));

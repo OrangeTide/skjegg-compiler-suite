@@ -1,0 +1,7 @@
+MaxSides=32
+radius=5.0
+diameter=10.0
+area=78.53981625
+after SetRadius:
+radius=10.0
+diameter=20.0

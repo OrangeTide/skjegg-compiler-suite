@@ -1,4 +1,4 @@
-# Kobold-Pascal Module Format (KPM1)
+# Kobold Pascal Module Format (KPM1)
 
 A KPM1 module is the serialized IR that passes from the Kobold front end (Pascal)
 to the VM backend (C). It is the interface between the two halves, and the module a

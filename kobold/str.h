@@ -44,6 +44,7 @@ kp_gptr    kp_str_base(KP_VM_P kp_gptr s);    /* guest address of the bytes, 0 i
 kp_gptr    kp_str_from_int(KP_VM_P int32_t x);
 kp_gptr    kp_str_from_int64(KP_VM_P int64_t x);     /* Str of an Int64 value */
 kp_gptr    kp_str_from_char(KP_VM_P int32_t code);   /* a 1-char string from a byte code */
+kp_gptr    kp_str_from_real(KP_VM_P double x);       /* a real rendered as write would (interpolation) */
 int32_t     kp_str_cmp(KP_VM_P kp_gptr a, kp_gptr b);  /* <0, 0, >0 by byte order then length */
 int32_t     kp_str_pos(KP_VM_P kp_gptr sub, kp_gptr s);
 kp_gptr    kp_str_copy(KP_VM_P kp_gptr s, int32_t index, int32_t count);

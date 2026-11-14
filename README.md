@@ -165,7 +165,7 @@ The reference manual is published at
 <https://orangetide.github.io/skjegg-compiler-suite/>, organized by language,
 tool, and internals. Its source of truth is the Markdown under `doc/`:
 
-- `doc/languages/` the language front ends, including the full Kobold-Pascal
+- `doc/languages/` the language front ends, including the full Kobold Pascal
   specification under `doc/languages/kobold/` (grammar, language reference,
   units, module format, host ABI, and more).
 - `doc/tools/` the emulator, the JIT, the libc, the MIPS backend, and the
@@ -303,7 +303,7 @@ The axes expand to these tokens, which may also be passed directly.
 | `moo`      | MooScript front end + `runtime/str.c`, `list.c`          |
 | `pascal`   | Pascal front end + `runtime/pascal_rt.c`         |
 | `cc`       | C compiler front end (auto-includes the cpp library)     |
-| `kp`       | Kobold-Pascal AOT path (`skj-kpc`, `skj-kp`, `libkpaot.a`) |
+| `kp`       | Kobold Pascal AOT path (`skj-kpc`, `skj-kp`, `libkpaot.a`) |
 | `as`, `ld` | ColdFire assembler and linker (library + standalone)     |
 | `as-rv`, `ld-rv`     | RISC-V RV32 assembler and linker               |
 | `as-mips`, `ld-mips` | MIPS assembler and linker (ld-mips writes PS-EXE) |

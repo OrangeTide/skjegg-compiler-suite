@@ -1,6 +1,6 @@
-# Kobold-Pascal design decisions
+# Kobold Pascal design decisions
 
-This is the decision log for Kobold-Pascal: the settled choices behind the
+This is the decision log for Kobold Pascal: the settled choices behind the
 language, the runtime, and the module format, with the reasoning that led to
 each. It is an internal design record kept next to the sources, not part of the
 published manual under `doc/languages/kobold/`. The reference manuals describe

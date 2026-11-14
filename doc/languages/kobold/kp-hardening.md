@@ -1,6 +1,6 @@
-# Kobold-Pascal Untrusted-Script Hardening
+# Kobold Pascal Untrusted-Script Hardening
 
-This document sketches how Kobold-Pascal would run untrusted scripts, code from
+This document sketches how Kobold Pascal would run untrusted scripts, code from
 someone other than the game author, such as a downloaded mod. It is a deferred
 design: the default posture is trusted-now (see the Safety section of
 `kobold.md`), and none of the mechanisms below are built yet.

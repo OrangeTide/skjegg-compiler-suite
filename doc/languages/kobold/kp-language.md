@@ -1,6 +1,6 @@
-# Kobold-Pascal Language Reference
+# Kobold Pascal Language Reference
 
-This is the reference for writing Kobold-Pascal programs: the types, expressions,
+This is the reference for writing Kobold Pascal programs: the types, expressions,
 statements, routines, built-ins, and directives the front end accepts. It describes the
 language as the compiler implements it, not a superset.
 
@@ -80,12 +80,12 @@ identifier may still carry one of these names.
 - **Interpolated string.** Double-quoted text builds a string with interpolation holes:
   `"hello ${name}, you have ${count} messages"`. Each `${expr}` is replaced by `expr`
   rendered to text the way `write` renders it (a string or `char` as itself, an integer
-  or `int64` as its digits, a `bool` or enum as its ordinal number). Write a literal
+  or `int64` as its digits, a `real` in its `%g` form, a `bool` or enum as its ordinal
+  number). Write a literal
   dollar-brace with `$$` before the brace, a literal double quote with `""`, and any
   other `$` stands for itself. Single-quoted literals never interpolate, so existing code
-  is unchanged. See [Strings](#strings). (A `real` hole is not supported yet; convert it
-  with `str` first. A hole may not itself contain a double-quoted string; use single
-  quotes inside a hole.)
+  is unchanged. See [Strings](#strings). (A hole may not itself contain a double-quoted
+  string; use single quotes inside a hole.)
 - **Boolean.** The predefined constants `true` and `false`.
 - **Nil.** `nil`, the empty handle, usable where any handle, string, or dynamic array is
   expected.
@@ -614,8 +614,8 @@ text (as `write` would render it) and concatenated into the result, so
 `"x = ${x}, ok = ${found}"` folds to `'x = ' + str(x) + ', ok = ' + str(found)`. Write a
 literal dollar-brace as `$$` before the brace and a literal quote as `""`. A single-quoted
 literal is never interpolated. Hole types: string, `char`, the integer widths and
-`int64`, and `bool`/enum (rendered as their ordinal number); a `real` is not supported yet
-(convert it with `str`), and a hole may not contain a double-quoted string.
+`int64`, `real` (rendered in its `%g` form, as `write` renders it), and `bool`/enum
+(rendered as their ordinal number); a hole may not contain a double-quoted string.
 
 Higher-level string helpers (`UpperCase`, `LowerCase`, `Trim`, `StringReplace`, and string
 `Delete`/`Insert`) live in the standard-library `core.strings` unit, reached with

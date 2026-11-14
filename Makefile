@@ -212,11 +212,14 @@ TOOLS := build/skj-sc build/skj-sc-rv build/skj-sc-mips build/skj-sc-arm64 \
          build/skj-cc-rv build/skjcc build/skj-run \
          build/skj-addr2line build/skj-dbg \
          $(NATIVE_JIT) $(NATIVE_KP_JIT) $(if $(HOST_IS_ARM64),,build/skj-kp-patrol) \
-         $(NATIVE_KP) $(NATIVE_LIBKPAOT) build/skj-kpc \
+         build/skj-kpc \
          build/skj-kpc-rv build/skj-kpc-cf build/skj-kpc-arm64
 
 PHONY += all
-all: $(TOOLS)
+# The native Kobold AOT archive is a runtime library, not a tool: build it with
+# a bare `make`, but keep it out of $(TOOLS) so `install` does not place it in
+# bindir.  It installs into $(libdir)/kobold via $(INSTALL_KPAOT).
+all: $(TOOLS) $(NATIVE_LIBKPAOT)
 
 ## help : print the common targets and the full check-*/test-* catalog.
 ## The catalog is generated from this Makefile, so it never falls out of date.
@@ -2526,7 +2529,7 @@ PHONY += FORCE
 FORCE:
 
 PHONY += check
-check: build/skj-mooc build/skj-pc build/skj-bc $(SCM_TESTS:tests/%.scm=build/%) $(MOO_TESTS:tests/%.moo=build/%) $(MOO_TOY_TESTS:tests/%.moo=build/%) $(PAS_TESTS_NOFLOAT:tests/%.pas=build/%) $(BAS_TESTS_CF:tests/%.bas=build/%) test-basic-bmi test-basic-module test-basic-import test-basic-import-qual test-basic-opaque test-basic-opaque-qual test-basic-external test-basic-handle-types
+check: build/skj-mooc build/skj-pc build/skj-bc $(SCM_TESTS:tests/%.scm=build/%) $(MOO_TESTS:tests/%.moo=build/%) $(MOO_TOY_TESTS:tests/%.moo=build/%) $(PAS_TESTS_NOFLOAT:tests/%.pas=build/%) $(BAS_TESTS_CF:tests/%.bas=build/%) test-basic-bmi test-basic-module test-basic-import test-basic-import-qual test-basic-opaque test-basic-opaque-qual test-basic-external test-basic-handle-types test-basic-example
 	@sh tests/run-tests.sh "$(QEMU)"
 
 ## RISC-V per-test rules: tests/<name>.scm -> build/rv/<name>.s -> .o -> binary
@@ -3463,6 +3466,9 @@ build/san/test_rv_decode_cache: tests/test_rv_decode_cache.c emu/rv32.c emu/rv32
 build/san/test_rv_irq: tests/test_rv_irq.c emu/rv32.c emu/rv32.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Iemu -o $@ tests/test_rv_irq.c emu/rv32.c -lm
 
+build/san/test_mips_sys: tests/test_mips_sys.c emu/mips32.c emu/mips32.h | build build/san
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Iemu -o $@ tests/test_mips_sys.c emu/mips32.c -lm
+
 build/san/test_rv_expand: tests/test_rv_expand.c emu/rv32.c emu/rv32.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Iemu -o $@ tests/test_rv_expand.c emu/rv32.c -lm
 
@@ -3486,6 +3492,7 @@ check-emu-san: build/san/test_rv_run build/san/test_guest_mmap \
                build/san/test_rv_decode_cache build/san/test_rv_irq \
                build/san/test_rv_expand build/san/test_rv_bus \
                build/san/test_rv_csr build/san/test_rv_decode build/san/test_rv_fp \
+               build/san/test_mips_sys \
                build/san/skj-run build/sandbox/parent.elf
 	@./build/san/test_rv_run
 	@./build/san/test_guest_mmap
@@ -3496,6 +3503,7 @@ check-emu-san: build/san/test_rv_run build/san/test_guest_mmap \
 	@./build/san/test_rv_csr
 	@./build/san/test_rv_decode
 	@./build/san/test_rv_fp
+	@./build/san/test_mips_sys
 	@sh tests/run-sandbox-test.sh "$(CURDIR)/build/san/skj-run" "$(CURDIR)/build/sandbox/parent.elf"
 	@echo "All host-only emulator tests passed under ASan+UBSan."
 
@@ -4032,6 +4040,16 @@ build/sched_glue_test: tests/sched_glue_test.c runtime/sched_glue.c | build
 PHONY += test-gc
 test-gc: build/test_gc
 	./build/test_gc
+
+## The MIPS system (privileged) tier: CP0 exceptions, interrupts and RFE,
+## driven host-side against emu/mips32.c with no cross toolchain or qemu (the
+## test-gc / test_rv_irq pattern).
+build/test_mips_sys: tests/test_mips_sys.c emu/mips32.c emu/mips32.h | build
+	$(CC) $(CFLAGS) -Iemu -o $@ tests/test_mips_sys.c emu/mips32.c -lm
+
+PHONY += test-mips-sys
+test-mips-sys: build/test_mips_sys
+	./build/test_mips_sys
 
 ## The libc coroutine primitive (host-only quick gate).  Compiles libc/coro.c
 ## with the x86-64 co_switch natively and runs the generator/echo self-check, so
@@ -4757,6 +4775,34 @@ test-basic-opaque-qual: build/basic_mod_opaque_qual
 	@qemu-m68k build/basic_mod_opaque_qual > build/basic_mod_opaque_qual.out; \
 	 diff tests/basic_mod_opaque_qual.expected build/basic_mod_opaque_qual.out \
 	    && echo "PASS: basic qualified IMPORT of an opaque TYPE (dotted handle type)"
+
+## A self-contained runnable BASIC module demo (examples/basic): the Geometry
+## module compiled to an archive, then consumed by shapes.bas. It mirrors the
+## worked example in doc/languages/basic-modules.md and is the pointable
+## "define a module, consume it" pair the tests do not provide.
+build/geometry.bmi: examples/basic/geometry.bas build/skj-bc | build
+	./build/skj-bc --emit-module --meta $@ -o build/geometry.s $<
+
+build/geometry.o: build/geometry.bmi build/skj-as | build
+	./build/skj-as -o $@ build/geometry.s
+
+build/Geometry.a: build/geometry.o build/geometry.bmi build/skj-ar | build
+	sh tests/basic-archive.sh build/skj-ar $@ build/geometry.bmi build/geometry.o
+
+build/shapes.s: examples/basic/shapes.bas build/Geometry.a build/skj-bc | build
+	./build/skj-bc -I build -o $@ $<
+
+build/shapes.o: build/shapes.s build/skj-as | build
+	./build/skj-as -o $@ $<
+
+build/basic_example_shapes: build/shapes.o build/start.o build/basic_rt.o build/Geometry.a build/skj-ld
+	./build/skj-ld -o $@ build/start.o build/basic_rt.o build/shapes.o build/Geometry.a
+
+PHONY += test-basic-example
+test-basic-example: build/basic_example_shapes
+	@qemu-m68k build/basic_example_shapes > build/basic_example_shapes.out; \
+	 diff examples/basic/shapes.expected build/basic_example_shapes.out \
+	    && echo "PASS: basic module example (examples/basic: Geometry + shapes)"
 
 ## Typed opaque handles are nominal: a handle of one opaque TYPE used where
 ## another is expected is a compile error. Each basic_err_handle_*.bas is a
@@ -5720,7 +5766,7 @@ PSX_SUBS   := gpu pad spu fixed tex cd gte ot
 PSX_LEAF_A := $(PSX_SUBS:%=build/psx-units/psx/%.a)
 PSX_LEAF_O := $(PSX_SUBS:%=build/psx/psx_%.o)
 INSTALL_PSX_TOOLS := build/skj-cc-mips-sf build/skj-pc-mips build/skj-kpc-mips \
-                     build/skj-kpc-mips build/skj-mkromfs \
+                     build/skj-mkromfs \
                      build/skj-timconv build/skj-vagconv build/skj-mkcdda
 INSTALL_PSX_SDK := build/mips/libpsx.a build/mips/start_psx.o \
                    build/psx-units/psx.a $(PSX_LEAF_A)
@@ -7440,7 +7486,7 @@ test-hv-x86-64-env: $(VMM_PROBE_DEPS) build/skj-cc-x86-64 build/skj-as-x86-64 bu
 	 else echo "FAIL: test-hv-x86-64-env got '$$out'"; exit 1; fi
 
 ## The cross-language sandbox demo: a C root (skj-cc-rv) spawns two children,
-## one built from C and one from Kobold-Pascal (skj-kpc -> skj-kpc-rv ->
+## one built from C and one from Kobold Pascal (skj-kpc -> skj-kpc-rv ->
 ## skj-as-rv -> skj-ld-rv over the freestanding crt + libkpaot-rv-free.a).  All
 ## three are RV32 ELFs the toolkit produced from the one shared IR, so skj-run
 ## schedules a C process and a Pascal process side by side with nothing
@@ -9497,7 +9543,7 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            check-x86-oracle check-arm64-oracle check-rv-oracle check-jit \
            test-jit-trap \
            test-jit-arena test-fs \
-           test-gc test-coro test-threads \
+           test-gc test-coro test-threads test-mips-sys \
            test-fpu test-fpu-rv test-fpu-x86-64 test-fpu-arm64 \
            test-f32-diff \
            test-i64 test-i64-rv test-i64-x86-64 test-i64-arm64 \

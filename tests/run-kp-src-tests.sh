@@ -1,5 +1,5 @@
 #!/bin/sh
-# run-kp-src-tests.sh - compile and run Kobold-Pascal source fixtures end to end.
+# run-kp-src-tests.sh - compile and run Kobold Pascal source fixtures end to end.
 #
 # The fixtures live in tests/kp-src/<name>.pas, each paired with a
 # tests/kp-src/<name>.expected file holding the program's expected stdout.  This

@@ -1,6 +1,6 @@
-# Running a Kobold-Pascal program in the RV32 sandbox
+# Running a Kobold Pascal program in the RV32 sandbox
 
-This is the end-to-end path from a Kobold-Pascal source file to a program running
+This is the end-to-end path from a Kobold Pascal source file to a program running
 inside the in-tree RV32 emulator (`skj-run`, the `emu/rv32.c` core). It is the
 freestanding tier: the program links against the no-libc guest runtime, so it is
 the same build a real RV32 VM host would load, not a hosted libc executable.
@@ -108,16 +108,16 @@ libc for a Linux or qemu run.
 The steps above run the program as the root ELF the emulator loads. The RV32
 sandbox can also spawn a compiled guest as a child process (its own CPU, memory,
 heap, and stack) over `RV_SYS_SPAWN`. `tests/xlang-sandbox/` is the worked
-example: a C root process (built with `skj-cc-rv`) spawns a Kobold-Pascal child
+example: a C root process (built with `skj-cc-rv`) spawns a Kobold Pascal child
 built through this same `skj-kpc-rv` to `skj-as-rv` to `skj-ld-rv` chain, proving
-a C guest and a Kobold-Pascal guest are the same kind of thing to the sandbox,
+a C guest and a Kobold Pascal guest are the same kind of thing to the sandbox,
 both being RV32 ELFs from the one shared IR. See `make test-rv-xlang-sandbox` and
 `doc/tools/emulator.md`.
 
 ## The compiler itself in the sandbox
 
 Stage 1 above runs the front end natively on the host, but that is a choice, not
-a requirement. `kpcom` is an ordinary Kobold-Pascal program, so it compiles
+a requirement. `kpcom` is an ordinary Kobold Pascal program, so it compiles
 through this same RV32 and ColdFire pipeline into a guest ELF and runs inside
 `skj-run`. The in-guest compiler is a verified fixed point: the KPM1 it emits is
 byte-identical to the KPM1 the host compiler emits for the same source.

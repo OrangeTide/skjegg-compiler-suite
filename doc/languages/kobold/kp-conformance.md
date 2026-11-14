@@ -1,6 +1,6 @@
-# Kobold-Pascal Standards Conformance and Roadmap
+# Kobold Pascal Standards Conformance and Roadmap
 
-This document maps Kobold-Pascal against the Pascal standards and dialects it draws
+This document maps Kobold Pascal against the Pascal standards and dialects it draws
 from, so the distance to a complete, production-ready language is visible in one
 place. It records three things:
 
@@ -14,7 +14,7 @@ It reflects the language as the compiler implements it today, cross-checked agai
 `kp-language.md`, `kp-grammar.md`, and the front end. This document is about
 language surface, not build tasks.
 
-Kobold-Pascal is a Pascal-family scripting language, not a conforming ISO Pascal.
+Kobold Pascal is a Pascal-family scripting language, not a conforming ISO Pascal.
 It removes constructs that do not fit an embedded, no-pointer, host-sandboxed model,
 leaves out Standard Pascal features that are clumsy or rarely useful in a script,
 and adds constructs that a game host needs. The tables below are a gap analysis, not

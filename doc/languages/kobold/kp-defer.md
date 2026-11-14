@@ -1,4 +1,4 @@
-# Kobold-Pascal defer (scoped teardown)
+# Kobold Pascal defer (scoped teardown)
 
 This note describes `defer`: a statement that registers teardown to run when its
 enclosing block exits. It gives a routine a single, local place to pair a release

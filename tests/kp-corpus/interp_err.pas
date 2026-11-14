@@ -1,8 +1,13 @@
 program interp_err;
-{ A real cannot be interpolated yet; this fixture must be rejected (interp_err.experror). }
+{ A record has no write rendering, so it cannot be interpolated into a string;
+  this fixture must be rejected (interp_err.experror). A real now interpolates
+  (see interp.pas). }
+type
+  Point = record x, y: integer; end;
 var
-  r: real;
+  p: Point;
 begin
-  r := 3.5;
-  WriteLn("value is ${r}");
+  p.x := 1;
+  p.y := 2;
+  WriteLn("point is ${p}");
 end.

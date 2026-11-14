@@ -1,5 +1,5 @@
 #!/bin/sh
-# run-kp-multi-tests.sh - compile and run multi-unit Kobold-Pascal fixtures.
+# run-kp-multi-tests.sh - compile and run multi-unit Kobold Pascal fixtures.
 #
 # The single-module runner (run-kp-src-tests.sh) compiles one .pas per fixture.
 # A multi-unit program instead `uses` one or more units, each a separate .pas

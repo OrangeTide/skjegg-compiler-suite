@@ -1,11 +1,11 @@
-# Embedding Kobold-Pascal
+# Embedding Kobold Pascal
 
-This is the practical guide to running Kobold-Pascal scripts inside a C program.
+This is the practical guide to running Kobold Pascal scripts inside a C program.
 It works out the whole process, from getting a compiled module to calling into it
 and back. For the exact value and call ABI it builds on, see `kp-abi.md`; for the
 module format, `kp-module-format.md`.
 
-Kobold-Pascal is split in two. The front end (`kpcom`) turns Pascal source into a
+Kobold Pascal is split in two. The front end (`kpcom`) turns Pascal source into a
 KPM1 module, a portable image of the intermediate representation. The backend is a
 small C library, `libkobold.a`, that loads a module, JITs it to native code
 (x86-64 or AArch64), and runs it in the host process. A host embeds the backend; the front end is a

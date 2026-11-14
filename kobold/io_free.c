@@ -300,6 +300,7 @@ kp_str_val_real(kp_gptr s)
 void     brv_write_real(int fd, uint64_t x) { io_write_real(fd, b2d(x)); }
 uint64_t brv_read_real(void)                { return d2b(io_read_real()); }
 uint64_t brv_val_real(kp_gptr s)            { return d2b(kp_str_val_real(s)); }
+kp_gptr  brv_str_from_real(uint64_t x)      { return kp_str_from_real(b2d(x)); }
 #endif
 
 /****************************************************************

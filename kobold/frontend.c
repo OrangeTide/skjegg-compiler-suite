@@ -1,5 +1,5 @@
 /* frontend.c : run the Kobold front end (kpcom) in-process to compile
-   Kobold-Pascal source to a KPM1 module (see frontend.h).
+   Kobold Pascal source to a KPM1 module (see frontend.h).
 
    Two builds, chosen by KP_FE_LINKED:
 

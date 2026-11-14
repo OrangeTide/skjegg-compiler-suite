@@ -1,18 +1,20 @@
-# Kobold-Pascal Guide
+# Kobold Pascal Guide
 
-This is the starting point for writing Kobold-Pascal. It explains what the
+This is the starting point for writing Kobold Pascal. It explains what the
 language is for, shows the language at a glance, and walks through compiling and
 running a program with the skjegg tools. When you want to learn the language
 step by step, read `kp-tutorial.md`; when you want the precise rules, read
 `kp-language.md` (the reference) and `kp-grammar.md` (the grammar).
 
-## What Kobold-Pascal is
+## What Kobold Pascal is
 
-Kobold-Pascal is a small, statically typed language in the Pascal family,
+Kobold Pascal is a small, statically typed language in the Pascal family,
 designed to be embedded in a C program as a scripting layer and compiled to
 native machine code. In skjegg it is a front end that reaches the shared IR
 through its own compiler, `kpcom`, and then uses the same backends as the C
-compiler, so a Kobold program runs on x86-64, AArch64, and RISC-V RV32.
+compiler, so a Kobold program runs on x86-64, AArch64, RISC-V RV32, ColdFire
+(m68k), and MIPS. The in-process JIT covers x86-64, AArch64, and RV32; the
+other targets are reached through the ahead-of-time path.
 
 It aims at the niche that games and tools reach for when they need a scripting
 layer that is easy to embed, cheap to run, and safe to hand to someone who is
@@ -32,9 +34,9 @@ not a systems programmer.
   function interface. A host object is named by an integer handle id, never by
   an address, so a script never holds a host pointer.
 
-Kobold-Pascal shares much of its syntax with Pascal (`../pascal.md`),
-but compiles to native machine code rather than WebAssembly and uses opaque
-handles rather than pointers.
+Kobold Pascal shares much of its syntax with the Pascal front end
+(`../pascal.md`); the main difference is that Kobold exposes no pointers,
+reaching host resources through opaque, typed handles instead.
 
 ## The language at a glance
 
@@ -92,7 +94,7 @@ nested. The language is case-insensitive.
 
 ## Extensions for game scripting
 
-Kobold-Pascal adds a few features beyond the Pascal subset, each chosen to help
+Kobold Pascal adds a few features beyond the Pascal subset, each chosen to help
 with embedding and with the kind of scripting that games need.
 
 ### Opaque handles
@@ -150,7 +152,10 @@ its own overloads.
 
 ## Compiling and running
 
-A Kobold program is a `.pas` source file. skjegg compiles it in two ways.
+A Kobold program is a source file, conventionally `.kp`. The tools also accept
+`.pas` and pick the language from how they are invoked, not from the suffix, so
+the in-tree examples that use `.pas` compile as Kobold too. skjegg compiles it
+in two ways.
 
 ### Run it directly (the JIT)
 
@@ -179,7 +184,7 @@ sh kobold/aot-run.sh hello.kpm
 
 `skj-kpc` is the single-step Kobold compiler built to a native binary, so it runs
 on the host and targets one architecture: `skj-kpc` (x86-64), `skj-kpc-arm64`,
-`skj-kpc-rv`, and `skj-kpc-cf`, one per backend. Each reads `.kp` (or `.pas`) source,
+`skj-kpc-rv`, `skj-kpc-cf`, and `skj-kpc-mips`, one per backend. Each reads `.kp` (or `.pas`) source,
 or a prebuilt `.kpm` module, and emits that target's native assembly in one step, so
 there is no separate backend tool; `--emit-kpm` just stops it at the module. The
 module's `.target` line records the architecture and a compiler rejects a module built

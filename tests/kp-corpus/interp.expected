@@ -3,6 +3,7 @@ n=42 big=10000000000
 char=Q
 bool=1 enum=1
 sum=50
+real=3.14159 half=1.57079
 literal ${not a hole} and $x
 quote="q"
 plain ${notahole} stays
