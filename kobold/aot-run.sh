@@ -66,9 +66,38 @@ find_unit() {
 # Compile one KPM module (a .kpm text file: the program root, or a unit's interface
 # member extracted from its archive) to an object, collecting it in $objs; then
 # recurse into its own `.uses` dependencies.  $seen dedups by unit name.
+# A native-backed unit (an optional C-library binding) ships its glue object(s)
+# inside its own `.a`, alongside the reserved `.kpm` interface member, and a
+# sidecar `<unit>.link` file beside the `.a` holding the external link flags
+# (`-lSDL3 ...`).  Pull both in: extract every non-.kpm object member into a
+# per-dep directory (names can repeat across units) and add it to the link, and
+# append the sidecar's flags to $xlibs (emitted after the objects at link time).
 objs=""
+xlibs=""
 seen=""
 depn=0
+
+native_from_unit() {
+    _a=$1
+    _n=$2
+    case $_a in /*) ;; *) _a="$PWD/$_a" ;; esac       # skj-ar x extracts into cwd
+    _ud="$tmp/u$_n"
+    mkdir -p "$_ud"
+    for _m in $("$KPAR" t "$_a" 2>/dev/null); do
+        case $_m in
+            .kpm) continue ;;                          # the interface, compiled separately
+            *.o)
+                ( cd "$_ud" && "$KPAR" x "$_a" "$_m" )
+                objs="$objs $_ud/$_m"
+                ;;
+        esac
+    done
+    _lk="${_a%.a}.link"
+    if [ -f "$_lk" ]; then           # an `&&` here would trip `set -e` when absent
+        xlibs="$xlibs $(cat "$_lk")"
+    fi
+}
+
 compile_module() {
     file=$1
     o="$tmp/m$objn.o"
@@ -87,6 +116,7 @@ compile_module() {
         seen="$seen $dep"
         a=$(find_unit "$dep") || exit 1
         depn=$((depn + 1))
+        native_from_unit "$a" "$depn"
         k="$tmp/dep$depn.kpm"
         "$KPAR" p "$a" .kpm > "$k"
         compile_module "$k"
@@ -96,6 +126,8 @@ compile_module() {
 objn=0
 compile_module "$mod"
 
-$KPAOTCC $NOPIE $objs "$KPAOTLIB" -o "$tmp/p" -lm
+# $xlibs carries any native-backed unit's external link flags (-lSDL3 ...); it
+# follows the runtime archive so those libraries resolve the glue objects' symbols.
+$KPAOTCC $NOPIE $objs "$KPAOTLIB" -o "$tmp/p" -lm $xlibs
 
 exec $KPAOTQEMU "$tmp/p" "$@"

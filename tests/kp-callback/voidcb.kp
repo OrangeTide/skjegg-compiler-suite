@@ -1,0 +1,19 @@
+{ Parameterless callbacks across the FFI. `@` takes the address of a parameterless
+  routine (its bare name would call it), yielding a C function pointer C calls back. }
+program voidcb;
+type
+  VoidFn = procedure cdecl;
+  NulFn  = function: integer cdecl;
+procedure call_v(f: VoidFn); cdecl; external;
+function call_i(f: NulFn): integer; cdecl; external;
+
+procedure hello;
+begin writeln('hello'); end;
+
+function answer: integer;
+begin answer := 42; end;
+
+begin
+  call_v(@hello);           { C calls a parameterless Kobold procedure }
+  writeln(call_i(@answer)); { C calls a parameterless Kobold function: 42 }
+end.

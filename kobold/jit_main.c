@@ -181,6 +181,39 @@ ar_extract_member(const char *buf, size_t len, const char *want, size_t *outlen)
     return NULL;
 }
 
+/* True if the archive image carries any `.o` object member, i.e. it is a
+   native-backed unit whose C glue (an external-library binding) is archived beside
+   its `.kpm` interface.  Such a unit is ahead-of-time only: the JIT binds host
+   symbols from a fixed table and has no path to an external library's symbols, so
+   it is rejected with a clear message rather than loaded.  The member walk mirrors
+   ar_extract_member; the name fields of the index '/' and long-name table '//'
+   start with '/', so they come out empty and never end in ".o". */
+static int
+ar_has_object(const char *buf, size_t len)
+{
+    size_t off;
+
+    if (len < 8 || memcmp(buf, "!<arch>\n", 8) != 0)
+        return 0;
+    off = 8;
+    while (off + 60 <= len) {
+        const char *h = buf + off;
+        char nm[17];
+        int k;
+        size_t j, sz = 0;
+
+        for (k = 0; k < 16 && h[k] != '/' && h[k] != ' '; k++)
+            nm[k] = h[k];
+        nm[k] = '\0';
+        for (j = 48; j < 58 && h[j] >= '0' && h[j] <= '9'; j++)
+            sz = sz * 10 + (size_t)(h[j] - '0');
+        if (k >= 2 && nm[k - 2] == '.' && nm[k - 1] == 'o')
+            return 1;
+        off += 60 + sz + (sz & 1);
+    }
+    return 0;
+}
+
 /* Resolve a dependency module file, searching in order: the main module's
    directory, each colon-separated entry of KOBOLD_UNITS, then the built-in
    standard library directory.  Returns 1 and fills path on the first hit. */
@@ -324,7 +357,17 @@ load_tree(const char *path, const char *unitname, char *err, size_t errlen)
        archive and is used as-is. */
     if (len >= 8 && memcmp(text, "!<arch>\n", 8) == 0) {
         size_t mlen = 0;
-        char *meta = ar_extract_member(text, len, ".kpm", &mlen);
+        char *meta;
+        if (ar_has_object(text, len)) {
+            snprintf(err, errlen,
+                     "unit '%s' wraps an external C library and can only be used "
+                     "in an ahead-of-time build (compile with skj-kpc); the JIT "
+                     "cannot bind external symbols",
+                     unitname ? unitname : path);
+            free(text);
+            return -1;
+        }
+        meta = ar_extract_member(text, len, ".kpm", &mlen);
         free(text);
         if (!meta) {
             snprintf(err, errlen, "unit archive '%s' has no .kpm interface member",

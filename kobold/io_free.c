@@ -691,4 +691,7 @@ int     kpc_WriteFileStr(kp_gptr pathstr, kp_gptr d) { return WriteFileStr(paths
 int     kpc_kpd_open(kp_gptr pathstr)                { return kpd_open(pathstr); }
 kp_gptr kpc_kpd_next(int h)                          { return kpd_next(h); }
 void    kpc_kpd_close(int h)                         { kpd_close(h); }
+/* The freestanding self-host has no install tree to resolve against, so it reports
+ * no standard-library directory; kpcom falls back to its baked KP_STDLIB. */
+kp_gptr kpc_StdlibDir(void)                          { return kp_str_new("", 0); }
 #endif /* KP_HAVE_FILE_IO */

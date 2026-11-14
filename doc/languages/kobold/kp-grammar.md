@@ -246,8 +246,15 @@ InterfaceField   = Identifier ':' ProceduralType ';' .
                     procedural fields are the operations the host provides.
                     See Handle types below. *)
 
-ProceduralType   = 'procedure' [ FormalParams ]
-                 | 'function' [ FormalParams ] ':' Type .
+ProceduralType   = ( 'procedure' [ FormalParams ]
+                   | 'function' [ FormalParams ] ':' Type ) [ 'cdecl' ] .
+                   (* the inline 'cdecl' marks a C-convention callback type for the FFI
+                      boundary. The native and C conventions are ABI-identical on every
+                      target, so it never changes codegen and stays signature-compatible
+                      with a plain proc type; it is an intent marker, matching the 'cdecl'
+                      on an external routine declaration. It is inline, with no separating
+                      ';', because a proc type inside a formal-parameter list is already
+                      followed by ';' separating the next parameter. *)
 
 ImplementDecl    = 'implement' Identifier 'for' Identifier ';' .
                  (* A nominal, static assertion that record R conforms to interface I:
@@ -427,8 +434,10 @@ convenience (see `kobold.md`).
 field, interface field, or array element) is a bare code pointer with no captured
 environment. It may hold a top-level routine or a nested routine that captures
 nothing from its enclosing scope. Taking the value of a nested routine that reads or
-writes an enclosing local is a compile-time error: there are no closures. A procedure
-value is called through the ordinary call syntax in `Designator`, whatever the
+writes an enclosing local is a compile-time error: there are no closures. A routine
+named without a call yields its value, except a parameterless function, whose bare name
+calls it; `@name` takes any routine's value, including a parameterless function's. A
+procedure value is called through the ordinary call syntax in `Designator`, whatever the
 callee designator is: a name, an interface method field (host handle methods, the
 common case), or a computed element such as `table[op](args)`. The last is the
 direct-threaded dispatch shape, an array of routine values walked and called in a
@@ -664,10 +673,14 @@ Factor           = INTEGER_LITERAL
                  | StartExpr
                  | BindExpr
                  | YieldExpr .
-                 (* '@' name takes the address of a label in the current routine,
-                    yielding a 'label' value for a computed 'goto'. It is the only
-                    use of '@', and the only operand it accepts is a label name;
-                    there is no general address-of operator. *)
+                 (* '@' name takes an address. When name is a routine it is that
+                    routine's procedural value, a bare code pointer: the one way to take
+                    a parameterless function's address, since its bare name calls it (a
+                    procedure or a function with parameters is also a value bare). When
+                    name is not a routine it is a label in the current routine, yielding
+                    a 'label' value for a computed 'goto'. A routine name resolves in the
+                    symbol table, a label is interned separately, so the two do not
+                    collide. There is no general address-of operator for data. *)
 
 Aggregate        = '(' Expression ',' Expression { ',' Expression } ')' .
                  (* an array constant's elements, one nested Aggregate per dimension

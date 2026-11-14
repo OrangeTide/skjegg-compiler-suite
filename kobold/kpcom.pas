@@ -15,7 +15,8 @@ uses SysUtils;   { FindFirst/FindNext for the `uses ns.*` wildcard under the fpc
 
 const
   KP_VERSION = {$I version.inc};   { 'vX.Y.Z', written by the Makefile }
-  KP_STDLIB  = {$I stdlib.inc};    { default unit search dir, written by the Makefile }
+  KP_STDLIB  = {$I stdlib.inc};    { fallback unit search dir, used when the host cannot
+                                     resolve the install dir relative to the binary (StdLibDir) }
 
 { ---- Types ---- }
 
@@ -173,6 +174,10 @@ type
     RetType: LongInt;           { -1 for a procedure }
     Failable: Boolean;          { a routine marked `fails`: returns an error in a second register }
     Variadic: Boolean;          { a built-in that accepts any arguments }
+    Cdecl: Boolean;             { a proc type marked `cdecl`: a C-convention callback type. The
+                                  native and C conventions are ABI-identical on every target, so
+                                  this never changes codegen; it names a type for the FFI boundary
+                                  and stays signature-compatible with a plain proc type. }
     FloatBits: LongInt;         { a real's storage width: 32 for single, else 64 (double) }
     IntBits: LongInt;           { an integer's storage width: 64 for int64, else 32 }
     Size: LongInt;              { explicit byte size, or -1 to compute from the layout }
@@ -918,6 +923,40 @@ begin
   kpc_WriteFileStr := 1;
 end;
 {$ENDIF}
+
+{ The installed standard-library unit directory for the given target arch, resolved
+  by the host relative to the running compiler: <bindir>/../lib/skjegg/kobold/<arch>/.
+  An installed `uses` then finds a shipped unit with no KOBOLD_UNITS set. The host
+  returns the empty string when it is not a relocatable install, in which case kpcom
+  falls back to the baked KP_STDLIB (see StdLibDir). The FPC bootstrap is never an
+  installed compiler, so its body returns empty. The arch argument also keeps the
+  call on the call path, where the host symbol's exact case is preserved. }
+{$IFDEF KOBOLD}
+function kpc_StdlibDir(const arch: string): string; cdecl; external;
+{$ELSE}
+function kpc_StdlibDir(const arch: string): string;
+begin
+  kpc_StdlibDir := '';
+end;
+{$ENDIF}
+
+function StdLibDir: string;
+{ The effective standard-library directory for a `uses` the -U path did not
+  resolve: the per-target install directory found relative to the compiler, or the
+  baked KP_STDLIB fallback with the target arch as a subdirectory. Units are
+  Target-bound, so each target's units live under their own <arch>/ directory,
+  matching `make install`. }
+var
+  base: string;
+begin
+  base := kpc_StdlibDir(CurTarget.Arch);
+  if base <> '' then
+    StdLibDir := base
+  else if CurTarget.Arch <> '' then
+    StdLibDir := KP_STDLIB + CurTarget.Arch + '/'
+  else
+    StdLibDir := KP_STDLIB;
+end;
 
 { Directory enumeration for the `uses ns.*` namespace wildcard. Under Kobold these are the
   same host imports the io.dirs unit uses: kpc_kpd_open returns a small handle (or -1),
@@ -2135,6 +2174,10 @@ begin
   if Nodes[pt].Flag = 1 then begin
     Expect(tkColon); Nodes[pt].B := ParseType;
   end;
+  { an optional inline `cdecl` marks a C-convention callback type. It is inline (no
+    semicolon) because a proc type inside a formal-param list is already followed by `;`
+    separating the next parameter. }
+  if IsDirective('cdecl') then begin NextToken; Nodes[pt].CConv := 1; end;
   ParseProcType := pt;
 end;
 
@@ -4355,6 +4398,7 @@ begin
       end;
       if Nodes[node].Flag = 1 then SemTypes[ty].RetType := ResolveType(Nodes[node].B)
       else SemTypes[ty].RetType := -1;
+      SemTypes[ty].Cdecl := Nodes[node].CConv = 1;
       ResolveType := ty;
     end;
   else
@@ -5317,11 +5361,25 @@ begin
     nkToStr:   AnalyzeExpr := CheckInterpHole(node);
     nkNil:     AnalyzeExpr := tyNil;
     nkLabelAddr: begin
-      { `@name` is a label value; register the mention against the current
-        routine (an undefined label is caught at routine exit). The type is
-        `label`; the IR label id is assigned in lowering. }
-      LabelIntern(Nodes[node].Text, node);
-      AnalyzeExpr := tyLabel;
+      s := Lookup(Nodes[node].Text);
+      if (s >= 0) and (Syms[s].Kind in [syProc, syFunc]) then begin
+        { `@routine` takes the routine's procedural value, a bare code pointer. This is
+          the one way to take the value of a parameterless function, whose bare name calls
+          it (a procedure or a function with parameters is a value bare as well). A routine
+          name resolves in the symbol table, so it is distinguished from a code label, which
+          is interned separately below. }
+        Nodes[node].Sym := s;
+        CheckRoutineValue(node, s);
+        AnalyzeExpr := Syms[s].TypeId;
+      end
+      else begin
+        { `@name` is a label value; register the mention against the current routine (an
+          undefined label is caught at routine exit). The type is `label`; the IR label id
+          is assigned in lowering. }
+        Nodes[node].Sym := -1;
+        LabelIntern(Nodes[node].Text, node);
+        AnalyzeExpr := tyLabel;
+      end;
     end;
     nkIdent: begin
       s := Lookup(Nodes[node].Text);
@@ -6878,12 +6936,13 @@ var
   dir, ar: string;
 begin
   OpenUnitKpm := False;
-  { search the source directory first, then each -U directory, then the built-in standard
-    library directory (KP_STDLIB, the install location baked in at build time) so a bare
-    `uses strings;` resolves without a -U flag on an installed compiler }
+  { search the source directory first, then each -U directory, then the standard
+    library directory (StdLibDir: the per-target install location, found relative to
+    the compiler) so a bare `uses strings;` resolves without a -U flag on an installed
+    compiler }
   for d := -1 to High(UnitPath) + 1 do begin
     if d < 0 then dir := UnitSrcDir
-    else if d > High(UnitPath) then dir := KP_STDLIB
+    else if d > High(UnitPath) then dir := StdLibDir
     else dir := UnitPath[d];
     if dir = '' then Continue;
     ar := kpc_ReadFileStr(dir + DotToSlash(uname) + '.a');
@@ -7051,6 +7110,32 @@ begin
         end;
         s := AddSym(nm, syType);
         Syms[s].TypeId := ety;
+        Syms[s].Imported := True;
+      end
+      else if cls = 'proc' then begin
+        { a procedure (callback) type: reconstruct the signature so a routine value passes to
+          or returns from an exported routine typed with it }
+        sig := NewSemType(skProc);
+        SemTypes[sig].Name := nm;
+        SemTypes[sig].FromUnit := uname;
+        NextField(line, dpos);              { '(' }
+        cls := NextField(line, dpos);       { a mode, or ')' }
+        while (cls <> ')') and (cls <> '') do begin
+          base := NextField(line, dpos);    { the parameter type }
+          AddSigParam(sig, RefToType(base, uscope), ModeVal(cls));
+          cls := NextField(line, dpos);
+        end;
+        NextField(line, dpos);              { '->' }
+        base := NextField(line, dpos);      { the result type }
+        SemTypes[sig].RetType := RefToType(base, uscope);
+        base := NextField(line, dpos);      { optional 'fails' and/or 'cdecl' }
+        while base <> '' do begin
+          if base = 'fails' then SemTypes[sig].Failable := True
+          else if base = 'cdecl' then SemTypes[sig].Cdecl := True;
+          base := NextField(line, dpos);
+        end;
+        s := AddSym(nm, syType);
+        Syms[s].TypeId := sig;
         Syms[s].Imported := True;
       end;
     end
@@ -7261,7 +7346,7 @@ begin
   SetLength(names, 0);
   for d := -1 to High(UnitPath) + 1 do begin
     if d < 0 then dir := UnitSrcDir
-    else if d > High(UnitPath) then dir := KP_STDLIB
+    else if d > High(UnitPath) then dir := StdLibDir
     else dir := UnitPath[d];
     if dir = '' then Continue;
     h := kpc_kpd_open(dir + DotToSlash(ns));
@@ -8738,7 +8823,7 @@ begin
   else if (ty < SemCount) and (SemTypes[ty].Kind = skProcess) then TypeRef := 'process'
   else if (ty < SemCount) and (SemTypes[ty].Name <> '') and
           ((SemTypes[ty].Kind = skEnum) or (SemTypes[ty].Kind = skRecord) or
-           (SemTypes[ty].Kind = skInterface)) then
+           (SemTypes[ty].Kind = skInterface) or (SemTypes[ty].Kind = skProc)) then
     TypeRef := SemTypes[ty].Name
   else TypeRef := ClassOf(ty);
 end;
@@ -11068,8 +11153,12 @@ begin
       else LowerExpr := EmitLIC(Nodes[node].IntVal);
     nkRealLit: LowerExpr := EmitRealConst(Nodes[node].Text);
     nkLabelAddr:
-      { `@name` is the address of a local code label, a label value }
-      LowerExpr := EmitLabAddr(LowerLabelId(Nodes[node].Text));
+      if (Nodes[node].Sym >= 0) and (Syms[Nodes[node].Sym].Kind in [syProc, syFunc]) then
+        { `@routine` is the routine's procedural value, a bare code pointer }
+        LowerExpr := EmitLEA(EmittedRoutineName(Nodes[node].Sym))
+      else
+        { `@name` is the address of a local code label, a label value }
+        LowerExpr := EmitLabAddr(LowerLabelId(Nodes[node].Text));
     nkStrLit:
       { a one-character literal retyped to char by its context lowers as a character code }
       if Nodes[node].Ty = tyChar then
@@ -11079,17 +11168,21 @@ begin
     nkToStr: LowerExpr := LowerToStr(node);
     nkIdent: begin
       s := Nodes[node].Sym;
-      if (s >= 0) and (Syms[s].Kind in [syProc, syFunc]) and
-         (Nodes[node].Ty >= 0) and (SemTypes[Nodes[node].Ty].Kind = skProc) then
-        { a routine named as a value is a bare code pointer }
-        LowerExpr := EmitLEA(EmittedRoutineName(s))
-      else if (s >= 0) and (Syms[s].Kind = syFunc) and (s = CurFuncSym) then
+      if (s >= 0) and (Syms[s].Kind = syFunc) and (s = CurFuncSym) then
         { the current function's result read by its name; the result slot holds a scalar or
           a handle id }
         LowerExpr := LoadSym(s)
-      else if (s >= 0) and (Syms[s].Kind = syFunc) then
-        { a paramless function used as a value is a call }
+      else if (s >= 0) and (Syms[s].Kind = syFunc) and
+              (Length(SemTypes[Syms[s].TypeId].ParamTypes) = 0) then
+        { a bare parameterless function used as a value is a call (mirrors AnalyzeExpr,
+          which types it as the result). This must come before the routine-value branch:
+          a parameterless function whose result is itself a proc type has node type skProc,
+          so keying on the node's type alone would wrongly take the function's address. }
         LowerExpr := LowerCallSym(node, [], True)
+      else if (s >= 0) and (Syms[s].Kind in [syProc, syFunc]) then
+        { a routine named as a value is a bare code pointer: a procedure, or a function with
+          parameters (a parameterless function is called just above). }
+        LowerExpr := EmitLEA(EmittedRoutineName(s))
       else if (s >= 0) and IsPropertySym(s) then
         { a property read is a getter call whatever its type; for an aggregate type the
           call returns the value through its sret buffer, whose address LoadSym yields
@@ -13795,6 +13888,13 @@ begin
         for m := 0 to High(SemTypes[ety].Names) do
           line := line + ' ' + SemTypes[ety].Names[m] + ' ' + ProcSigRef(SemTypes[ety].Subs[m]);
         InterfaceEntryFromSym := line + ' )';
+      end
+      else if (ety >= 0) and (ety < SemCount) and (SemTypes[ety].Kind = skProc) then begin
+        { a procedure (callback) type: the consumer reconstructs the signature, so a routine
+          value (a bare code pointer) can be passed to or returned from an exported routine. }
+        line := '    .type ' + Syms[s].Name + ' proc ' + ProcSigRef(ety);
+        if SemTypes[ety].Cdecl then line := line + ' cdecl';
+        InterfaceEntryFromSym := line;
       end;
     end;
     syConst:

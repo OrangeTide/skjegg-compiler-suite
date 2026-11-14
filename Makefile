@@ -29,6 +29,11 @@ CC      ?= cc
 CFLAGS  ?= -std=c99 -O2 -Wall -Wextra -Wpedantic -Wno-unused-parameter
 CFLAGS  += -Ibuild
 
+# Optional external-library detection, written by ./configure (git-ignored).
+# Absent when configure has not run, so a plain build enables no optional units
+# and needs no external dependency.  Each optional unit's rules key off HAVE_*.
+-include config.mk
+
 # Default search path for skj-provided headers (<stdarg.h>), baked into every
 # cc front end.  SKJ_CC_INCLUDE overrides it at run time for a relocated build.
 SKJ_INC_DEF := -DSKJ_INCLUDE_DIR='"$(CURDIR)/include"'
@@ -974,6 +979,28 @@ check-kp-multi-arm64: build/skj-kpc-arm64 build/skj-ar build/libkpaot-arm64.a $(
 	    KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
 	    sh tests/run-kp-multi-tests.sh
 
+## ---- the FFI callback boundary (tests/kp-callback) ----
+## A Kobold program hands its own routines to a C stub (cbhost.c) as function
+## pointers, which C calls back, and receives a C function pointer it calls.  A
+## Kobold procedure value is a bare code pointer emitted through the platform
+## psABI, the same shape a C function pointer has, so neither direction needs a
+## trampoline.  AOT-only, on the hosted psABI targets.  The rv32, ColdFire and MIPS
+## sandbox hosts link guest code against host-provided services the same way and
+## could use this callback path too; only the hosted x86-64/arm64 targets are
+## wired here for now.
+PHONY += check-kp-callback
+check-kp-callback: build/skj-kpc build/libkpaot.a $(X64_ASM_DEP)
+	@KPAOT=build/skj-kpc KPAOTLIB=build/libkpaot.a \
+	    KPAOTCC="$(CC)" KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
+	    sh tests/run-kp-callback-tests.sh
+
+PHONY += check-kp-callback-arm64
+check-kp-callback-arm64: build/skj-kpc-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP)
+	@KPAOT=build/skj-kpc-arm64 KPAOTLIB=build/libkpaot-arm64.a \
+	    KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" \
+	    KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
+	    sh tests/run-kp-callback-tests.sh
+
 ## ---- file I/O provided as a Kobold unit (tests/kp-files) ----
 ## The `files` library unit (kobold/lib/files.pas) gives a program whole-file
 ## read/write through `uses files`, instead of a per-program external declaration
@@ -1204,6 +1231,99 @@ check-kp-stdlib: build/skj-kpc build/skj-ar build/skj-kp-jit build/libkpaot.a bu
 	 cmp -s build/kp-stdlib-host/arm64.out tests/kp-stdlib/stddemo.expected \
 	   || { echo "FAIL kp-stdlib (aot-arm64)"; cat $$E build/kp-stdlib-host/arm64.out; exit 1; }
 	@echo "kp-stdlib: 3 passed (jit, aot-x86-64, aot-arm64): std.random, std.time, io.console"
+
+## ---- native-backed optional unit mechanism (tests/kp-native) ----
+## The build path an optional external-library unit (SDL3, libcurl, ...) uses,
+## proved end to end with no external dependency so it runs in CI unconditionally.
+## A native-backed unit ships its C glue object inside its own `.a` (beside the
+## reserved `.kpm` interface member) and names its external link flags in a sidecar
+## `<unit>.link`; aot-run.sh extracts the glue object from the archive and appends
+## the sidecar flags to the link.  Here a stand-in "external library"
+## (libnatextra.a) plays the part SDL3 would: the glue reaches it only through the
+## sidecar flags, so a regression in either half of the mechanism is a link error
+## or a wrong result, not a silent skip.  Host x86-64 AOT, self-contained.
+PHONY += check-kp-native
+check-kp-native: build/skj-kpc build/skj-kp-jit build/skj-ar build/libkpaot.a build/skj-as-x86-64 | build
+	@echo "== check-kp-native: optional native-backed unit mechanism =="
+	@mkdir -p build/kp-native
+	@# the stand-in external library, reached only via the sidecar .link flags
+	@$(CC) -std=c99 -O2 -c tests/kp-native/natextra.c -o build/kp-native/natextra.o
+	@./build/skj-ar rcs build/kp-native/libnatextra.a build/kp-native/natextra.o
+	@# the unit's glue object, archived inside the unit .a beside the .kpm
+	@$(CC) -std=c99 -O2 -c tests/kp-native/nadd_glue.c -o build/kp-native/nadd_glue.o
+	@./build/skj-kpc --emit-kpm tests/kp-native/nadd.pas -o build/kp-native/nadd.kpm
+	@sh tests/kp-archive.sh build/skj-ar build/kp-native/nadd.a \
+	    build/kp-native/nadd.kpm build/kp-native/nadd_glue.o
+	@printf -- '-L%s/build/kp-native -lnatextra\n' "$(CURDIR)" > build/kp-native/nadd.link
+	@./build/skj-kpc -U build/kp-native --emit-kpm tests/kp-native/natprog.pas \
+	    -o build/kp-native/natprog.kpm
+	@KOBOLD_UNITS=$(CURDIR)/build/kp-native KPAOT=build/skj-kpc KPAOTLIB=build/libkpaot.a \
+	   KPAOTCC="$(CC)" KPAOTAS="build/skj-as-x86-64" \
+	   sh kobold/aot-run.sh build/kp-native/natprog.kpm </dev/null \
+	   > build/kp-native/out.txt 2>build/kp-native/err.txt; \
+	 cmp -s build/kp-native/out.txt tests/kp-native/natprog.expected \
+	   && echo "kp-native: 1 passed (glue object from .a + sidecar .link flags)" \
+	   || { echo "FAIL check-kp-native"; echo "-- out --"; cat build/kp-native/out.txt; \
+	        echo "-- err --"; cat build/kp-native/err.txt; exit 1; }
+	@# the JIT must refuse a native-backed unit with a clear AOT-only message, not
+	@# load it: the glue object in nadd.a marks the unit native, so load_tree stops.
+	@# (The front end still finds nadd.a beside the program and type-checks `uses`.)
+	@cp tests/kp-native/natprog.pas build/kp-native/natprog.pas
+	@if ./build/skj-kp-jit build/kp-native/natprog.pas \
+	      > build/kp-native/jit.out 2>&1; then \
+	     echo "FAIL check-kp-native (JIT ran a native-backed unit)"; \
+	     cat build/kp-native/jit.out; exit 1; \
+	 fi; \
+	 grep -q 'ahead-of-time build' build/kp-native/jit.out \
+	   && echo "kp-native: JIT refuses a native-backed unit (AOT-only message)" \
+	   || { echo "FAIL check-kp-native (JIT message)"; cat build/kp-native/jit.out; exit 1; }
+
+## ---- std.osthreads: real OS threads as a native-backed unit (tests/kp-osthreads) ----
+## The first native-backed unit built on the mechanism above (not a stand-in): the
+## Kobold interface wraps C glue (osthreads_glue.c) that runs a Kobold routine on a
+## platform thread, handed over as a function pointer.  Shared-nothing (only scalars
+## cross), hosted (pthreads, a platform given on a POSIX host, so it is built
+## unconditionally rather than configure-gated), ahead-of-time only.  The glue is
+## plain libc C, not the freestanding runtime, so it is built with ordinary flags.
+build/kp-osthreads/std/osthreads.a: kobold/lib/std/osthreads.pas kobold/lib/std/osthreads_glue.c build/skj-kpc build/skj-ar | build
+	@mkdir -p build/kp-osthreads/std
+	$(CC) -std=c99 -O2 -c kobold/lib/std/osthreads_glue.c -o build/kp-osthreads/std/osthreads_glue.o
+	./build/skj-kpc --emit-kpm $< > build/kp-osthreads/std/osthreads.kpm
+	sh tests/kp-archive.sh build/skj-ar $@ build/kp-osthreads/std/osthreads.kpm build/kp-osthreads/std/osthreads_glue.o
+	printf -- '-lpthread\n' > build/kp-osthreads/std/osthreads.link
+
+build/kp-osthreads-arm64/std/osthreads.a: kobold/lib/std/osthreads.pas kobold/lib/std/osthreads_glue.c build/skj-kpc-arm64 build/skj-ar | build
+	@mkdir -p build/kp-osthreads-arm64/std
+	$(A64_CC) -std=c99 -O2 -c kobold/lib/std/osthreads_glue.c -o build/kp-osthreads-arm64/std/osthreads_glue.o
+	./build/skj-kpc-arm64 --emit-kpm $< > build/kp-osthreads-arm64/std/osthreads.kpm
+	sh tests/kp-archive.sh build/skj-ar $@ build/kp-osthreads-arm64/std/osthreads.kpm build/kp-osthreads-arm64/std/osthreads_glue.o
+	printf -- '-lpthread\n' > build/kp-osthreads-arm64/std/osthreads.link
+
+PHONY += check-kp-osthreads
+check-kp-osthreads: build/kp-osthreads/std/osthreads.a build/skj-kpc build/libkpaot.a build/skj-as-x86-64 | build
+	@echo "== check-kp-osthreads: real OS threads via a native-backed unit =="
+	@./build/skj-kpc -U build/kp-osthreads --emit-kpm tests/kp-osthreads/parsum.kp -o build/kp-osthreads/parsum.kpm
+	@KOBOLD_UNITS=$(CURDIR)/build/kp-osthreads KPAOT=build/skj-kpc KPAOTLIB=build/libkpaot.a \
+	   KPAOTCC="$(CC)" KPAOTAS="build/skj-as-x86-64" \
+	   sh kobold/aot-run.sh build/kp-osthreads/parsum.kpm </dev/null \
+	   > build/kp-osthreads/out.txt 2>build/kp-osthreads/err.txt; \
+	 cmp -s build/kp-osthreads/out.txt tests/kp-osthreads/parsum.expected \
+	   && echo "kp-osthreads: 1 passed (real OS threads run a Kobold worker)" \
+	   || { echo "FAIL check-kp-osthreads"; echo "-- out --"; cat build/kp-osthreads/out.txt; \
+	        echo "-- err --"; cat build/kp-osthreads/err.txt; exit 1; }
+
+PHONY += check-kp-osthreads-arm64
+check-kp-osthreads-arm64: build/kp-osthreads-arm64/std/osthreads.a build/skj-kpc-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP) | build
+	@echo "== check-kp-osthreads-arm64: real OS threads via a native-backed unit =="
+	@./build/skj-kpc-arm64 -U build/kp-osthreads-arm64 --emit-kpm tests/kp-osthreads/parsum.kp -o build/kp-osthreads-arm64/parsum.kpm
+	@KOBOLD_UNITS=$(CURDIR)/build/kp-osthreads-arm64 KPAOT=build/skj-kpc-arm64 KPAOTLIB=build/libkpaot-arm64.a \
+	   KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
+	   sh kobold/aot-run.sh build/kp-osthreads-arm64/parsum.kpm </dev/null \
+	   > build/kp-osthreads-arm64/out.txt 2>build/kp-osthreads-arm64/err.txt; \
+	 cmp -s build/kp-osthreads-arm64/out.txt tests/kp-osthreads/parsum.expected \
+	   && echo "kp-osthreads-arm64: 1 passed (real OS threads run a Kobold worker)" \
+	   || { echo "FAIL check-kp-osthreads-arm64"; echo "-- out --"; cat build/kp-osthreads-arm64/out.txt; \
+	        echo "-- err --"; cat build/kp-osthreads-arm64/err.txt; exit 1; }
 
 PHONY += check-kp-stdlib-free
 check-kp-stdlib-free: build/skj-kpc-rv build/skj-kpc-rv build/skj-as-rv build/skj-ld-rv \
@@ -3440,6 +3560,7 @@ check-emu-all: check-emu check-rv-emu check-mips-emu test-coop-read \
                check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 \
                check-kp-free check-kp-corpus-rv check-kp-corpus-arm64 \
                check-kp-multi-rv check-kp-multi-arm64 \
+               check-kp-callback-arm64 check-kp-osthreads-arm64 \
                check-kp-io-rv check-kp-io-arm64 check-kp-io-free \
                check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free
 	@echo "All emulator test suites passed."
@@ -5775,6 +5896,7 @@ PHONY += install
 install: $(TOOLS) \
          $(DRIVER_LIB_CF) $(DRIVER_LIB_RV) $(DRIVER_LIB_MIPS) \
          $(DRIVER_LIB_X64) $(DRIVER_LIB_A64) $(INSTALL_KPAOT) \
+         build/kp-osthreads/std/osthreads.a build/kp-osthreads-arm64/std/osthreads.a \
          $(INSTALL_PSX_TOOLS) $(INSTALL_PSX_SDK)
 	@echo "  INSTALL  tools -> $(DESTDIR)$(bindir)"
 	@$(INSTALL) -d $(DESTDIR)$(bindir)
@@ -5791,6 +5913,16 @@ install: $(TOOLS) \
 	@$(INSTALL) -d $(DESTDIR)$(libdir)/arm64    && $(INSTALL) -m 644 $(DRIVER_LIB_A64)  $(DESTDIR)$(libdir)/arm64/
 	@echo "  INSTALL  Kobold runtime -> $(DESTDIR)$(libdir)/kobold"
 	@$(INSTALL) -d $(DESTDIR)$(libdir)/kobold && $(INSTALL) -m 644 $(INSTALL_KPAOT) $(DESTDIR)$(libdir)/kobold/
+	@echo "  INSTALL  Kobold native units -> $(DESTDIR)$(libdir)/kobold/<target>"
+	@# std.osthreads is a native-backed unit: its glue object is target-specific, so each
+	@# hosted target gets its own archive and .link sidecar under kobold/<target>/.  An
+	@# installed skj-kpc finds them there on its own (it resolves the standard-library
+	@# directory as <bindir>/../lib/skjegg/kobold/<target>/, relative to itself), so a
+	@# `uses` needs no KOBOLD_UNITS.
+	@$(INSTALL) -d $(DESTDIR)$(libdir)/kobold/x86-64/std
+	@$(INSTALL) -m 644 build/kp-osthreads/std/osthreads.a build/kp-osthreads/std/osthreads.link $(DESTDIR)$(libdir)/kobold/x86-64/std/
+	@$(INSTALL) -d $(DESTDIR)$(libdir)/kobold/arm64/std
+	@$(INSTALL) -m 644 build/kp-osthreads-arm64/std/osthreads.a build/kp-osthreads-arm64/std/osthreads.link $(DESTDIR)$(libdir)/kobold/arm64/std/
 	@echo "  INSTALL  PlayStation toolchain -> $(DESTDIR)$(bindir)"
 	@$(INSTALL) -m 755 $(INSTALL_PSX_TOOLS) $(DESTDIR)$(bindir)/
 	@echo "  INSTALL  libpsx SDK -> $(DESTDIR)$(libdir)/ps1"
@@ -9563,7 +9695,7 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive \
            test-cc-rv-psabi-struct test-cc-driver check-libc \
            check-kp \
-           check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-corpus check-kp-corpus-cf check-kp-multi check-kp-files check-kp-textfile check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-inc
+           check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-corpus check-kp-corpus-cf check-kp-multi check-kp-callback check-kp-osthreads check-kp-files check-kp-textfile check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-inc check-kp-native
 	@echo "All architecture test suites passed."
 
 PHONY += clean

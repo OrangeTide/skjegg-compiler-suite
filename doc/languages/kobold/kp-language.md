@@ -336,6 +336,76 @@ explicitly. Handle types and their methods are provided by the host and specifie
 
 `process` is the handle type of a coroutine. See [Coroutines](#coroutines).
 
+### Procedure types
+
+A procedure type is the type of a routine value. A variable, parameter, record field, or
+array element of a procedure type holds a routine, called through ordinary call syntax:
+
+```pascal
+type IntFn = function(x: integer): integer;
+function dbl(x: integer): integer;
+begin dbl := x * 2; end;
+var cb: IntFn;
+begin
+  cb := dbl;        { cb now refers to dbl }
+  writeln(cb(21));  { 42 }
+end.
+```
+
+A procedure value is a **bare code pointer with no captured environment**. It may hold a
+top-level routine or a nested routine that captures nothing from its enclosing scope;
+taking the value of a nested routine that reads or writes an enclosing local is a
+compile-time error (there are no closures). `nil` is the empty procedure value.
+
+A routine named without a call takes its value (`cb := dbl`). The one exception is a
+parameterless function: its bare name **calls** it, as everywhere else in the language.
+Write empty parentheses to force the call explicitly, and `@name` to take the function's
+value instead of calling it:
+
+```pascal
+function current: IntFn;      { returns a procedure value }
+begin current := dbl; end;
+cb := current;                { calls current, cb := its result }
+cb := current();              { the same, written explicitly }
+
+var g: NulFn;                 { NulFn = function: integer }
+g := @current;                { @ takes current's address, not a call }
+```
+
+`@routine` takes any routine's procedural value, the same value a bare procedure or a bare
+function-with-parameters already yields; for a parameterless function it is the only way to
+take the address rather than call. (`@` on a name that is not a routine is the label-address
+operator for a computed `goto`; the two do not collide, since a routine resolves as an
+ordinary name and a label is separate.)
+
+#### Callbacks across the FFI
+
+Because a procedure value is a plain code pointer emitted through the platform C ABI, it is
+also a C function pointer: a Kobold routine can be handed to an `external` C routine that
+calls it back, and a C routine can return a function pointer that Kobold calls. Mark a
+callback type `cdecl` to name the C calling convention at the boundary:
+
+```pascal
+type IntFn = function(x: integer): integer cdecl;
+function apply(f: IntFn; n: integer): integer; cdecl; external;  { C calls f(n) }
+function get_fn: IntFn; cdecl; external;                         { C returns a pointer }
+
+function dbl(x: integer): integer;
+begin dbl := x * 2; end;
+var g: IntFn;
+begin
+  writeln(apply(dbl, 21));   { C calls dbl back: 42 }
+  g := get_fn();             { a C function pointer }
+  writeln(g(14));            { Kobold calls it }
+end.
+```
+
+The native and C conventions are ABI-identical on every target, so `cdecl` on a procedure
+type never changes code generation and a `cdecl` type stays signature-compatible with a
+plain one. The marker is inline (no separating `;`), because a procedure type inside a
+parameter list is already followed by `;` separating the next parameter. See
+[External routines](#external-routines) and `kp-abi.md`.
+
 ## Properties
 
 A `property` presents as a value but reads and writes through accessor routines (uniform

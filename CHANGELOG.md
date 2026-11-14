@@ -6,6 +6,38 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.53.0
+
+#### Added
+- Kobold procedure values (function pointers). A routine taken by value is a bare
+  code pointer emitted through the platform C ABI, so the same value serves a
+  Kobold-to-Kobold indirect call and a C callback across the FFI boundary, with no
+  trampoline. A bare routine name takes its value, except a parameterless function,
+  whose bare name calls it; `f()` forces the call and `@f` takes the value.
+- The `@` operator takes any routine's procedural value (`@routine`), the way to
+  pass a parameterless function, since its bare name would call it.
+- `cdecl` may be written on a procedure type, as in
+  `type Op = function(x: integer): integer cdecl;`, marking a callback type that
+  crosses the C ABI. It is signature-compatible with a plain procedure type.
+- A procedure type is carried across a unit interface, so a unit may take a Kobold
+  routine as a callback parameter and a consumer can pass `@routine` to it.
+- Native-backed optional units: a `uses` unit whose implementation calls a thin C
+  glue layer over an external C library, built ahead-of-time and shipped in the
+  unit's own archive. See `doc/languages/kobold/kp-native-units.md`.
+- `std.osthreads`, a standard-library unit that runs a Kobold routine on a real OS
+  thread (`Spawn(@work, arg)` and `Join`), the first native-backed unit. It is
+  shared-nothing: a worker takes one integer and returns one integer, and must not
+  touch a value shared with another thread.
+
+#### Fixed
+- A bare parameterless function whose result type is itself a procedure type had
+  its address taken instead of being called, a silent miscompile. It is now called,
+  matching the rule that a parameterless function's bare name calls it.
+- An installed compiler finds a shipped standard-library unit with no
+  `KOBOLD_UNITS` set. It resolves its unit directory relative to its own binary,
+  as `<bindir>/../lib/skjegg/kobold/<target>/`, matching where `make install`
+  places the units.
+
 ### 0.52.0
 
 #### Added

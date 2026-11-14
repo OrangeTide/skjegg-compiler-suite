@@ -7,10 +7,14 @@
    the end), kpd_close releases it, over the host opendir/readdir, mirroring the
    Kobold runtime's own kpd_* in aot_rt.c. */
 
+#define _DEFAULT_SOURCE         /* expose readlink() under -std=c99 (exepath.h) */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
+
+#include "exepath.h"
 
 #define PSTR_HDR 16
 
@@ -26,6 +30,35 @@ static const char *pstr_bytes(const void *s)
 {
     if (!s) return "";
     return (const char *)s + PSTR_HDR;
+}
+
+/* The installed standard-library unit directory for target arch `archstr`, found
+   relative to this compiler binary: <exe_dir>/../lib/skjegg/kobold/<arch>/.  An
+   installed compiler resolves a `uses` unit under it with no KOBOLD_UNITS.  Empty
+   when the executable directory cannot be determined; kpcom then falls back to the
+   baked KP_STDLIB. */
+void *kpc_StdlibDir(const void *archstr)
+{
+    char dir[2048];
+    char out[2048];
+    char arch[64];
+    int an = pstr_len(archstr);
+    int n;
+
+    if (an >= (int)sizeof arch)
+        an = sizeof arch - 1;
+    memcpy(arch, pstr_bytes(archstr), an);
+    arch[an] = '\0';
+    skj_exe_dir(NULL, dir, sizeof dir);
+    if (!dir[0])
+        return __pascal_str_new("", 0);
+    if (arch[0])
+        n = snprintf(out, sizeof out, "%s/../lib/skjegg/kobold/%s/", dir, arch);
+    else
+        n = snprintf(out, sizeof out, "%s/../lib/skjegg/kobold/", dir);
+    if (n < 0 || n >= (int)sizeof out)
+        return __pascal_str_new("", 0);
+    return __pascal_str_new(out, n);
 }
 
 void *kpc_ReadFileStr(const void *path)

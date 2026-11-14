@@ -1,0 +1,29 @@
+{ The unified callback boundary: a Kobold routine passed to C and called back, a
+  C-stored Kobold callback fired later, and a C function pointer returned to Kobold and
+  called. The callback types are declared `cdecl`, the C-convention marker. Linked
+  against tests/kp-callback/cbhost.c. }
+program roundtrip;
+type
+  IntFn = function(x: integer): integer cdecl;
+  Sink  = procedure(i: integer) cdecl;
+function apply_cb(f: IntFn; n: integer): integer; cdecl; external;
+procedure each(f: Sink; n: integer); cdecl; external;
+procedure set_cb(f: Sink); cdecl; external;
+procedure fire(x: integer); cdecl; external;
+function get_fn: IntFn; cdecl; external;
+
+function dbl(x: integer): integer;
+begin dbl := x * 2; end;
+
+procedure show(i: integer);
+begin writeln('tick ', i); end;
+
+var g: IntFn;
+begin
+  writeln(apply_cb(dbl, 21));   { C calls a Kobold function: 42 }
+  each(show, 3);                { C calls a Kobold procedure three times }
+  set_cb(show);
+  fire(99);                     { C fires the stored Kobold callback }
+  g := get_fn();                { C returns a function pointer }
+  writeln(g(14));               { Kobold calls it: 42 }
+end.

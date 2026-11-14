@@ -88,6 +88,7 @@ a conformance claim.
 | Procedures and functions | Done | |
 | Value and `var` parameters | Done | |
 | Procedural and functional parameters | Done | A procedure or function value is a bare code pointer, no captured environment. |
+| `cdecl` callback types across the FFI | Done | A procedure type may be marked `cdecl`. A Kobold routine value is a C function pointer, so it may be passed to a C routine that calls it back, and a C-returned function pointer may be called from Kobold. ABI-identical to the native convention; no trampoline. |
 | Nested routines with access to enclosing locals | Done | No closures: a nested routine that captures a local may be called but not stored or returned. |
 | `forward` declarations | Done | |
 | Function result via function name | Done | Also `exit(value)`. |

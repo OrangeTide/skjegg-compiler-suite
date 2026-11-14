@@ -127,6 +127,7 @@ kp_compile_pas(const char *pas_path, char **module_text, size_t *out_len,
 #include "str.h"
 #include "kpcom_kpm.h"
 #include "kpbuild.h"
+#include "exepath.h"            /* skj_exe_dir, for the relocatable stdlib dir */
 
 #include <dirent.h>
 
@@ -165,6 +166,35 @@ fe_write_file_str(kp_gptr pathstr, kp_gptr datastr)
     memcpy(path, kp_str_bytes(pathstr), (size_t)plen);
     path[plen] = '\0';
     return kp_write_file(path, kp_str_bytes(datastr), (size_t)kp_str_len(datastr));
+}
+
+/* The installed standard-library unit directory for target arch `archstr`, found
+   relative to this compiler binary (<exe_dir>/../lib/skjegg/kobold/<arch>/), so an
+   installed compiler resolves a `uses` unit with no KOBOLD_UNITS. Falls back to the
+   baked KP_STDLIB in kpcom when this returns the empty string. */
+static kp_gptr
+fe_stdlib_dir(kp_gptr archstr)
+{
+    char dir[2048];
+    char out[2048];
+    char arch[64];
+    int an = kp_str_len(archstr);
+    int n;
+
+    if (an < 0) an = 0;
+    if (an >= (int)sizeof arch) an = sizeof arch - 1;
+    memcpy(arch, kp_str_bytes(archstr), (size_t)an);
+    arch[an] = '\0';
+    skj_exe_dir(NULL, dir, sizeof dir);
+    if (!dir[0])
+        return kp_str_new("", 0);
+    if (arch[0])
+        n = snprintf(out, sizeof out, "%s/../lib/skjegg/kobold/%s/", dir, arch);
+    else
+        n = snprintf(out, sizeof out, "%s/../lib/skjegg/kobold/", dir);
+    if (n < 0 || n >= (int)sizeof out)
+        return kp_str_new("", 0);
+    return kp_str_new(out, n);
 }
 
 /* Directory enumeration for the `uses ns.*` wildcard: kpcom lists a namespace directory at
@@ -435,12 +465,15 @@ kp_compile_pas(const char *pas_path, char **module_text, size_t *out_len,
        binary: source reads, the namespace-wildcard directory listing), and the
        module builder the single-step guest drives. */
     kp_install_runtime(binds, &nbinds, (int)(sizeof binds / sizeof binds[0]));
-    if (nbinds + 5 <= (int)(sizeof binds / sizeof binds[0])) {
+    if (nbinds + 6 <= (int)(sizeof binds / sizeof binds[0])) {
         binds[nbinds].name = "kpc_ReadFileStr";
         binds[nbinds].addr = fe_as_addr((void (*)(void))fe_read_file_str);
         nbinds++;
         binds[nbinds].name = "kpc_WriteFileStr";
         binds[nbinds].addr = fe_as_addr((void (*)(void))fe_write_file_str);
+        nbinds++;
+        binds[nbinds].name = "kpc_StdlibDir";
+        binds[nbinds].addr = fe_as_addr((void (*)(void))fe_stdlib_dir);
         nbinds++;
         /* the unit-namespace wildcard lists a namespace directory at compile time */
         binds[nbinds].name = "kpc_kpd_open";
