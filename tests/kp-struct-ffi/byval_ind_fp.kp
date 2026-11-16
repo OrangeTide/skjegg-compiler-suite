@@ -1,0 +1,32 @@
+{ By-value floating-point small-struct FFI through an INDIRECT call: a cdecl proc value
+  (a C function pointer) that returns a float-bearing record by value.  A float eightbyte
+  rides an SSE register on x86-64 (SysV); a homogeneous float aggregate rides the s
+  registers on arm64 (AAPCS64).  CALLI_AGG scatters those result registers into the record
+  on the indirect path, exactly as the direct CALL_AGG does.  Skipped on rv32 (its soft-
+  float ilp32 ABI disagrees with the zig hard-float glue on how a float-bearing struct
+  crosses). }
+program byval_ind_fp;
+
+type
+  FPoint = record x, y: single; end;              { 8 bytes: one SSE eightbyte / a 2-float HFA }
+  FColor = record r, g, b, a: single; end;        { 16 bytes: two SSE eightbytes / a 4-float HFA }
+  MkFPFn = function(x: integer; y: integer): FPoint cdecl;
+  MkFCFn = function(r: integer; g: integer; b: integer; a: integer): FColor cdecl;
+
+function MkFP(x: integer; y: integer): FPoint; cdecl; external name 'bv_mkfp';
+function MkFC(r: integer; g: integer; b: integer; a: integer): FColor; cdecl; external name 'bv_mkcolor';
+
+var
+  makePoint: MkFPFn;
+  makeColor: MkFCFn;
+  p: FPoint;
+  c: FColor;
+
+begin
+  makePoint := @MkFP;
+  p := makePoint(3, 4);                     { indirect call: a 2-float HFA / SSE eightbyte }
+  writeln('fp=', p.x + p.y);                { 7 }
+  makeColor := @MkFC;
+  c := makeColor(10, 20, 30, 40);           { indirect call: a 4-float HFA / two SSE eightbytes }
+  writeln('fc=', c.r + c.g + c.b + c.a);    { 100 }
+end.

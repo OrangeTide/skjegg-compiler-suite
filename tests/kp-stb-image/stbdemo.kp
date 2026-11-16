@@ -1,0 +1,35 @@
+{ Smoke test for the stb_image unit. It decodes a committed 3x2 24-bit BMP whose
+  pixels are known, so the output pins the whole chain: the file crosses as a
+  Kobold string, stb decodes it, and the integer-id handle, the dimension
+  accessors, and the per-channel Pixel reader return the right bytes (y = 0 is the
+  top row). A second pass forces RGBA to check the opaque alpha fill. The path is
+  relative to the repository root, where the test harness runs the program. }
+program stbdemo;
+uses stb_image as img;
+
+var
+  h, x, y, c: integer;
+
+begin
+  h := img.Load('tests/kp-stb-image/test3x2.bmp');
+  if h = 0 then
+  begin
+    writeln('load=fail');
+    halt(1);
+  end;
+  writeln('size=', img.Width(h), ' ', img.Height(h), ' ', img.Channels(h));
+  for y := 0 to img.Height(h) - 1 do
+    for x := 0 to img.Width(h) - 1 do
+    begin
+      write('p', x, ',', y, '=');
+      for c := 0 to img.Channels(h) - 1 do
+        write(' ', img.Pixel(h, x, y, c));
+      writeln;
+    end;
+  img.Free(h);
+
+  { force four channels: the opaque-alpha fill makes a 3-channel BMP read as RGBA. }
+  h := img.LoadRGBA('tests/kp-stb-image/test3x2.bmp');
+  writeln('rgba=', img.Channels(h), ' alpha=', img.Pixel(h, 0, 0, 3));
+  img.Free(h);
+end.

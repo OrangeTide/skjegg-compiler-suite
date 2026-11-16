@@ -807,6 +807,10 @@ read_func(struct reader *r, struct ir_func *fn)
     if (fn->nparams) {
         fn->param_class = arena_zalloc(a, (size_t)fn->nparams * sizeof(int));
         fn->param_fw = arena_zalloc(a, (size_t)fn->nparams * sizeof(signed char));
+        /* zero = "derive one register from param_class" below; a `.paramagg` line sets a
+           by-value register-struct param's slot count and classes directly */
+        fn->param_neb = arena_zalloc(a, (size_t)fn->nparams * sizeof(signed char));
+        fn->param_cls = arena_zalloc(a, (size_t)fn->nparams * 4 * sizeof(signed char));
     }
 
     for (;;) {
@@ -827,6 +831,28 @@ read_func(struct reader *r, struct ir_func *fn)
             else if (strcmp(tok[0], ".paramfw") == 0) {
                 for (int k = 1; k < n && k - 1 < fn->nparams; k++)
                     fn->param_fw[k - 1] = (signed char)strtol(tok[k], NULL, 10);
+            }
+            /* a cdecl callee's by-value register-struct parameter:
+               `.paramagg <idx> <neb> <c0> <c1> <c2> <c3>` */
+            else if (strcmp(tok[0], ".paramagg") == 0) {
+                if (n >= 7 && fn->param_neb && fn->param_cls) {
+                    int pi = (int)strtol(tok[1], NULL, 10);
+                    if (pi >= 0 && pi < fn->nparams) {
+                        fn->param_neb[pi] = (signed char)strtol(tok[2], NULL, 10);
+                        for (int k = 0; k < 4; k++)
+                            fn->param_cls[4 * pi + k] =
+                                (signed char)strtol(tok[3 + k], NULL, 10);
+                    }
+                }
+            }
+            /* a cdecl callee returning a small plain-data record in registers:
+               `.retagg <neb> <c0> <c1> <c2> <c3>` */
+            else if (strcmp(tok[0], ".retagg") == 0) {
+                if (n >= 6) {
+                    fn->ret_neb = (signed char)strtol(tok[1], NULL, 10);
+                    for (int k = 0; k < 4; k++)
+                        fn->ret_cls[k] = (signed char)strtol(tok[2 + k], NULL, 10);
+                }
             }
             /* psABI hint lines are accepted and ignored for the v1 subset */
             else if (strcmp(tok[0], ".paramneb") != 0 &&
@@ -872,11 +898,11 @@ read_func(struct reader *r, struct ir_func *fn)
        one register slot each, SSE (class 1) for a float and INTEGER otherwise.
        Without this a float parameter is classed INTEGER and read from the wrong
        register, so the callee sees zero. */
-    if (fn->nparams && fn->param_class) {
+    if (fn->nparams && fn->param_class && fn->param_neb && fn->param_cls) {
         int pi;
-        fn->param_neb = arena_zalloc(a, (size_t)fn->nparams * sizeof(signed char));
-        fn->param_cls = arena_zalloc(a, (size_t)fn->nparams * 4 * sizeof(signed char));
         for (pi = 0; pi < fn->nparams; pi++) {
+            if (fn->param_neb[pi] != 0)
+                continue;               /* a `.paramagg` line already set this one */
             fn->param_neb[pi] = 1;
             fn->param_cls[4 * pi] = (signed char)(fn->param_class[pi] == 1 ? 1 : 0);
         }

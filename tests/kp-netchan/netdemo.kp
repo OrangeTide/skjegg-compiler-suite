@@ -1,0 +1,57 @@
+{ Smoke test for the netchan unit. It runs a server and a client in one process
+  over loopback UDP, so it needs no external network and is CI-safe. The client
+  connects, both sides pump with Service until connected, the client opens a
+  reliable send channel and sends one datagram, and the server takes it from an
+  EvData event. The payload and the final connected states are deterministic; the
+  number of pump iterations is not, so the loop runs until the datagram arrives or
+  a generous cap is reached. }
+program netdemo;
+uses netchan as nc;
+
+var
+  sv, cl, ch, i, ev, port, sent: integer;
+  msg: string;
+
+begin
+  sv := nc.OpenServer(0);                 { an ephemeral port }
+  if sv = 0 then
+  begin
+    writeln('server=fail');
+    halt(1);
+  end;
+  port := nc.Port(sv);
+  cl := nc.OpenClient('127.0.0.1', port);
+  if cl = 0 then
+  begin
+    writeln('client=fail');
+    halt(1);
+  end;
+
+  ch := 0;
+  sent := 0;
+  msg := '';
+  i := 0;
+  while (i < 500) and (msg = '') do
+  begin
+    if nc.Service(cl) = nc.StateConnected then
+      if ch = 0 then ch := nc.OpenChannel(cl, nc.Reliable, nc.DirSend, 'text');
+    nc.Service(sv);
+    if (ch <> 0) and (sent = 0) then
+    begin
+      nc.Send(ch, 'hello netchan');
+      sent := 1;
+    end;
+    ev := nc.Poll(sv);
+    while ev <> nc.EvNone do
+    begin
+      if ev = nc.EvData then msg := nc.Recv(sv);
+      ev := nc.Poll(sv);
+    end;
+    i := i + 1;
+  end;
+
+  writeln('states=', nc.State(cl), ' ', nc.State(sv));
+  writeln('got=', msg);
+  nc.Close(cl);
+  nc.Close(sv);
+end.

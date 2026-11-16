@@ -1,0 +1,19 @@
+{ By-value small-struct FFI, the register-overflow case: eight integer arguments fill
+  the integer argument registers, so the by-value record that follows no longer fits in
+  registers and crosses on the stack.  On x86-64 and arm64 the psABI all-or-nothing rule
+  passes the whole record as a stack copy (ARG_MEM); on rv32 its words land on the stack
+  naturally.  The glue (sfhost.c) takes the record by value, so a correct total proves the
+  record's bytes arrived on the stack intact. }
+program byval_mem;
+
+type P2 = record x: integer; y: integer; end;
+
+function Over(a: integer; b: integer; c: integer; d: integer;
+             e: integer; f: integer; g: integer; h: integer;
+             p: P2): integer; cdecl; external name 'bv_over';
+
+var p: P2;
+begin
+  p.x := 10; p.y := 20;
+  writeln('over=', Over(1, 2, 3, 4, 5, 6, 7, 8, p));   { 36 + 30 = 66 }
+end.

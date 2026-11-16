@@ -1,0 +1,29 @@
+{ By-value small-struct FFI through an INDIRECT call: a cdecl proc value (a C function
+  pointer) that returns a small record by value.  A direct cdecl call already brings the
+  record back in registers (CALL_AGG); this proves the same for a call through a code
+  pointer (CALLI_AGG), where the callee is not known by name.  The record is all-integer,
+  so it rides a general register on every target (one INTEGER eightbyte on the 64-bit
+  targets, two 4-byte words on rv32).  The glue (sfhost.c) takes and returns the C struct
+  by value, so a correct round-trip proves the register ABI on the indirect path. }
+program byval_ind;
+
+type
+  P2 = record x: integer; y: integer; end;        { 8 bytes: one INTEGER eightbyte / two words }
+  MkP2Fn = function(a: integer; b: integer): P2 cdecl;
+  Sum2Fn = function(p: P2): integer cdecl;
+
+function Mk2(a: integer; b: integer): P2; cdecl; external name 'bv_mk2';
+function Sum2(p: P2): integer; cdecl; external name 'bv_sum2';
+
+var
+  mk: MkP2Fn;
+  sm: Sum2Fn;
+  q: P2;
+
+begin
+  mk := @Mk2;
+  q := mk(100, 23);                 { indirect cdecl call returning a record by value }
+  writeln('mk=', q.x, ' ', q.y);    { 100 23 }
+  sm := @Sum2;
+  writeln('sum2=', sm(q));          { 123: an indirect call with a by-value record arg }
+end.

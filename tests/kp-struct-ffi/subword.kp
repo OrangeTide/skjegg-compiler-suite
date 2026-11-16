@@ -1,0 +1,21 @@
+{ Sub-word integer fields across the FFI: byte is a 1-byte C uint8, word a 2-byte
+  uint16, smallint a 2-byte int16, each at its own alignment. The glue writes values
+  that exercise unsigned 16-bit (60000) and signed 16-bit (-1000). }
+program subword;
+
+type
+  Color = record r: byte; g: byte; b: byte; a: byte; end;
+  Sw    = record tag: byte; half: word; sx: smallint; n: integer; end;
+
+procedure setcolor(var c: Color); cdecl; external;
+procedure setsw(var s: Sw); cdecl; external;
+
+var
+  c: Color;
+  s: Sw;
+begin
+  setcolor(c);
+  writeln('rgba=', c.r, ' ', c.g, ' ', c.b, ' ', c.a);
+  setsw(s);
+  writeln('sw=', s.tag, ' ', s.half, ' ', s.sx, ' ', s.n);
+end.

@@ -1,0 +1,15 @@
+{ A record too large for the register class may not cross the FFI by value: the
+  register by-value path covers at most two eightbytes (16 bytes) on the LP64 targets
+  and two words (8 bytes) on rv32, so a 20-byte record must be var or const. }
+program err_byval_param;
+type Big = record a: integer; b: integer; c: integer; d: integer; e: integer; end;  { 20 bytes }
+function sumv(p: Big): integer; cdecl; external;
+var pt: Big;
+begin
+  pt.a := 1;
+  pt.b := 2;
+  pt.c := 3;
+  pt.d := 4;
+  pt.e := 5;
+  writeln(sumv(pt));
+end.

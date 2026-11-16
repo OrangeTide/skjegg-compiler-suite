@@ -1,0 +1,4 @@
+ok=yes status=0
+hello from libcurl
+line two
+missing=no

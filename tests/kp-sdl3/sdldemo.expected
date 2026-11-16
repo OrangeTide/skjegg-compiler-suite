@@ -1,0 +1,8 @@
+init=ok
+winsize=320 240
+title=sdl3 demo
+rgba8888=169090815
+rect=2 1 2 3
+frect=2 1 2 3
+draw=ok
+events=drained

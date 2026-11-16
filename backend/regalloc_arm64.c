@@ -306,8 +306,8 @@ regalloc(struct ir_func *fn)
             }
         }
 
-        if (i->op == IR_ARG || i->op == IR_ARG64 || i->op == IR_ARG_X8 ||
-            i->op == IR_ARG_MEM) {
+        if (i->op == IR_ARG || i->op == IR_ARG64 || i->op == IR_FARG ||
+            i->op == IR_ARG_X8 || i->op == IR_ARG_MEM) {
             if (npending < 16)
                 pending[npending++] = i->a;
         } else if (i->op == IR_CALL || i->op == IR_CALLI ||

@@ -331,6 +331,10 @@ j_kpbp_func_begin(kp_gptr name, int is_local, int is_variadic,
 static void j_kpbp_slotsize(int size) { kpb_slotsize(size); }
 static void j_kpbp_paramclass(int cls) { kpb_paramclass(cls); }
 static void j_kpbp_paramfw(int fw) { kpb_paramfw(fw); }
+static void j_kpbp_paramagg(int idx, int neb, int c0, int c1, int c2, int c3)
+{ kpb_paramagg(idx, neb, c0, c1, c2, c3); }
+static void j_kpbp_retagg(int neb, int c0, int c1, int c2, int c3)
+{ kpb_retagg(neb, c0, c1, c2, c3); }
 
 static void
 j_kpbp_insn(kp_gptr mnem, int dst, int a, int b, int64_t imm,
@@ -393,6 +397,8 @@ fe_bind_builder(struct kp_binding *binds, int *nbinds, int cap)
         { "kpbp_slotsize",     (void (*)(void))j_kpbp_slotsize },
         { "kpbp_paramclass",   (void (*)(void))j_kpbp_paramclass },
         { "kpbp_paramfw",      (void (*)(void))j_kpbp_paramfw },
+        { "kpbp_paramagg",     (void (*)(void))j_kpbp_paramagg },
+        { "kpbp_retagg",       (void (*)(void))j_kpbp_retagg },
         { "kpbp_insn",         (void (*)(void))j_kpbp_insn },
         { "kpbp_asm",          (void (*)(void))j_kpbp_asm },
         { "kpbp_func_end",     (void (*)(void))j_kpbp_func_end },

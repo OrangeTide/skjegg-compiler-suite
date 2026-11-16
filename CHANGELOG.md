@@ -6,6 +6,106 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.54.0
+
+#### Added
+- Records cross the C FFI by reference as a documented contract: a `var` record is
+  a C `T*`, a `const` record a `const T*`, with field layout matching the C struct
+  (and a variant record overlaying like a C union). A field that is a managed type
+  (a string, dynamic array, map, interface, or handle) is rejected, since it is a
+  reference-counted descriptor, not inline struct data.
+- Real sub-word integer types. `byte` and `shortint` are one byte, `word` and
+  `smallint` two, each with its own storage width and signedness rather than being
+  aliases of the 32-bit integer. A record of them now matches a C struct of `char`
+  or `short` fields, so `SDL_Color` is `record r, g, b, a: byte; end`. Field and
+  array storage narrows to the true width; register values and arithmetic are
+  unchanged.
+- Packed records and the `{$A n}` field-alignment directive, matching a C struct
+  declared `#pragma pack(n)` or `__attribute__((packed))`. `packed record ... end`
+  removes inter-field padding (field alignment capped at 1); `{$A n}` caps field
+  alignment at n (1, 2, 4, 8, or 16) for the records that follow, and `{$A+}`
+  restores natural alignment. `packed` stays usable as an ordinary identifier.
+- A small plain-data record crosses a `cdecl` boundary **by value** in registers on
+  x86-64, arm64, and rv32, following the C register ABI: up to 16 bytes on the
+  64-bit targets (SysV eightbytes, or an arm64 floating-point HFA) and up to 8 bytes
+  on rv32, with integer slots in general registers and float slots in SSE / HFA
+  registers. A record whose slots do not fit the remaining argument registers passes
+  on the stack. This holds both ways and for both call forms: a Kobold `cdecl`
+  routine passes and returns such a record by value; a C library may call a Kobold
+  `cdecl` callback with a record by value and take its record result in registers;
+  and a call through a `cdecl` procedure value (a C function pointer) returns a
+  record in registers just as a direct call does. A record too large for the
+  register class, a record with a managed field, and the ColdFire / MIPS targets
+  still cross by reference. See `doc/languages/kobold/kp-native-units.md`.
+- `sdl3`, an optional native-backed unit gated on an external dependency: `uses
+  sdl3` gives a Kobold program SDL3 windows, a 2D renderer, and polled input. It
+  builds only when `./configure` found SDL3, so the core build is unaffected
+  without it. Its binding rests on the FFI record support: `Color` has `SDL_Color`'s
+  exact four-byte layout, and windows and renderers are integer ids into a glue
+  table, never pointers.
+- `stb_image`, a native-backed unit binding stb_image.h, the public-domain image
+  loader (PNG, JPEG, BMP, TGA, GIF, and more), vendored at `third_party/stb_image.h`.
+  `Load` and `LoadRGBA` decode a file and return an integer image id; `Width`,
+  `Height`, `Channels`, and `Pixel` read the decoded image. Being header-only it has
+  no external dependency and is always built. It is the worked example of a `string`
+  path and an integer-id handle crossing the FFI together; its glue decodes the
+  Kobold string path with `kp_str_bytes`.
+- `stb_truetype`, a native-backed unit binding stb_truetype.h, the public-domain
+  TrueType font loader and rasterizer, vendored at `third_party/stb_truetype.h`.
+  `LoadFont` returns a font handle; `Ascent`, `Descent`, `LineGap`, and `Advance`
+  report scaled metrics; `Render` rasterizes a code point into a glyph handle whose
+  8-bit coverage bitmap is read with `GlyphWidth`, `GlyphHeight`, `GlyphXOff`,
+  `GlyphYOff`, and `Coverage`. Also header-only, so always built.
+- `netchan`, a native-backed unit binding netchan, a multiplexed
+  reliable/unreliable channel protocol, over UDP. The netchan core and its UDP
+  transport are vendored at `third_party/netchan/` (CC0), so the unit has no
+  external dependency and is always built. A connection and a channel are integer
+  ids; `OpenServer` / `OpenClient` create a connection, `Service` runs the socket
+  pump, `OpenChannel` and `Send` transmit, and `Poll` plus `Recv` receive. It is
+  the first unit over a vendored multi-file library rather than a single header.
+- `curl`, a native-backed unit binding libcurl's easy interface for a simple fetch,
+  built when `./configure` finds libcurl (`HAVE_LIBCURL`). `Get` returns a URL's
+  body as a string, with `LastStatus` and `LastOk` for the outcome; the glue
+  supplies the write callback libcurl delivers the body through. A `file://` URL
+  reads a local file through the same path as an `http://` fetch.
+- Unit routine names are namespaced. A unit compiles its public routines to symbols
+  qualified by the unit name (`<unit>.<name>`), so a unit may reuse the bare names of
+  the C library it binds without colliding with that library's symbols at link time.
+  A program's routines, methods (qualified by receiver), and `external` / `cdecl`
+  routines are unchanged, and a re-exported routine keeps its origin unit's qualifier.
+- `@unit.routine` takes the procedural value of a routine exported by a used unit, so
+  a qualified import can supply a callback. When the routine is overloaded, a value
+  has no call arguments to resolve against, so the target proc type selects the
+  overload: the one matching the variable it is assigned to or the parameter it is
+  passed to. This applies to the bare `@routine` form as well, which previously bound
+  the first candidate and failed to type-check against a mismatching target.
+- `raylib`, a native-backed unit binding raylib for a window, immediate-mode 2D
+  drawing, and color and vector helpers, built when `./configure` finds raylib
+  (`HAVE_RAYLIB`). It is the worked example of the by-value record FFI: `Color`,
+  `Vector2`, and `Rectangle` cross by value in registers as raylib's C ABI does. It
+  keeps raylib's own routine names (`InitWindow`, `DrawRectangle`), which the unit
+  namespacing keeps from colliding with raylib's C symbols. configure probes the
+  header and static link line directly, since raylib often ships with no pkg-config
+  file. Its test runs a real window and frame under `xvfb-run` with software GL.
+
+#### Fixed
+- A native-unit glue object compiled for a 64-bit target now gets the correct
+  pointer width automatically. The glue carries no instruction-set selector, so
+  `ir/target.h` defaulted its width to ILP32 and a guest pointer (a string
+  handle) was truncated unless each unit's build hand-set `-DSKJ_LP64=1`. That
+  flag was also a latent bug, since a future rv32 or ColdFire native unit would
+  be forced to the wrong width. The header now derives the width from the
+  compiling toolchain for a freestanding glue or runtime object: LP64 on an
+  x86-64 or arm64 host, ILP32 from a 32-bit cross compiler. A contradicting
+  `-DSKJ_LP64` is a build error rather than a silent wrong-width pointer.
+- AArch64: a float argument's live range now extends to the call that consumes it,
+  not just to the argument setup. Several float arguments staged for one call could
+  otherwise collide in a register and be miscompiled.
+- A qualified import resolves overloads across a unit. `uses U as u; u.Foo(x)` now
+  chooses the overload of `Foo` that matches the argument types, the same as a bare
+  import or a same-module call. A dotted reference previously bound the first
+  candidate by name, so a call matching a later overload failed to type-check.
+
 ### 0.53.0
 
 #### Added

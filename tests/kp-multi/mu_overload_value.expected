@@ -1,0 +1,9 @@
+int:nonneg
+int:neg
+str:hi
+bool:true
+int:nonneg
+str:arg
+loc:neg
+loc:bare
+loc:nonneg

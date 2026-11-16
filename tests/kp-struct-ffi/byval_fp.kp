@@ -1,0 +1,49 @@
+{ By-value floating-point small-struct FFI (Phase 2): a record of floats crosses a
+  cdecl boundary by value in floating-point registers, both as an argument and as a
+  result.  On x86-64 (SysV) a float eightbyte rides an SSE register; on arm64
+  (AAPCS64) a homogeneous float aggregate rides the s/d registers.  A record of one
+  int and one float is a single INTEGER eightbyte, so it rides a general register.
+  The glue (sfhost.c) takes and returns each struct by value, so a correct sum or
+  round-trip proves the FP register ABI.  Skipped on rv32 (its soft-float ilp32 ABI
+  disagrees with the zig hard-float glue on how a float-bearing struct crosses). }
+program byval_fp;
+
+type
+  FColor = record r, g, b, a: single; end;   { 16 bytes: two SSE eightbytes / 4-float HFA }
+  FPoint = record x, y: single; end;          { 8 bytes: one SSE eightbyte / 2-float HFA }
+  FMix = record n: integer; f: single; end;   { 8 bytes: one INTEGER eightbyte }
+  DPair = record a, b: real; end;             { 16 bytes: two SSE eightbytes / 2-double HFA }
+
+function FColorSum(c: FColor): single; cdecl; external name 'bv_fcolor';
+function FPointSum(p: FPoint): single; cdecl; external name 'bv_fpoint';
+function FMixSum(m: FMix): integer; cdecl; external name 'bv_fmix';
+function DPairSum(d: DPair): real; cdecl; external name 'bv_dpair';
+function MkFP(x: integer; y: integer): FPoint; cdecl; external name 'bv_mkfp';
+function MkColor(r: integer; g: integer; b: integer; a: integer): FColor; cdecl; external name 'bv_mkcolor';
+function MkDPair(a: integer; b: integer): DPair; cdecl; external name 'bv_mkdpair';
+
+var
+  col: FColor;
+  pt: FPoint;
+  mx: FMix;
+  dp: DPair;
+  rc: FColor;
+  rp: FPoint;
+  rd: DPair;
+
+begin
+  col.r := 10.0; col.g := 20.0; col.b := 30.0; col.a := 40.0;
+  writeln('fcsum=', FColorSum(col));        { 100: four floats in SSE / HFA registers }
+  pt.x := 3.0; pt.y := 4.0;
+  writeln('fpsum=', FPointSum(pt));         { 7: one SSE eightbyte / two s-registers }
+  mx.n := 5; mx.f := 2.0;
+  writeln('fmix=', FMixSum(mx));            { 7: an int+float eightbyte rides a gp reg }
+  dp.a := 1.0; dp.b := 3.0;
+  writeln('dpsum=', DPairSum(dp));          { 4: two double eightbytes / d-registers }
+  rp := MkFP(1, 2);                         { an FP struct returned by value }
+  writeln('mkfp=', rp.x, ' ', rp.y);        { 1 2 }
+  rc := MkColor(1, 2, 3, 4);                { a 16-byte FP struct returned by value }
+  writeln('mkc=', rc.r, ' ', rc.g, ' ', rc.b, ' ', rc.a);   { 1 2 3 4 }
+  rd := MkDPair(5, 6);                       { a double HFA / two SSE eightbytes }
+  writeln('mkd=', rd.a, ' ', rd.b);          { 5 6 }
+end.

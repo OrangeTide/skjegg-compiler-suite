@@ -387,6 +387,12 @@ kpb_func_begin(const char *name, int is_local, int is_variadic,
     if (nparams) {
         fn->param_class = arena_zalloc(&M.arena, (size_t)nparams * sizeof(int));
         fn->param_fw = arena_zalloc(&M.arena, (size_t)nparams * sizeof(signed char));
+        /* psABI slots per param: allocated here (zero = "derive one register from
+           param_class" in kpb_func_end) so kpb_paramagg can set a by-value register
+           struct's slot count and per-slot classes before the function closes. */
+        fn->param_neb = arena_zalloc(&M.arena, (size_t)nparams * sizeof(signed char));
+        fn->param_cls = arena_zalloc(&M.arena,
+                                     (size_t)nparams * 4 * sizeof(signed char));
     }
     if (ftail)
         ftail->next = fn;
@@ -416,6 +422,34 @@ kpb_paramfw(int fw)
 {
     if (cur_fn->param_fw && pfw_i < cur_fn->nparams)
         cur_fn->param_fw[pfw_i++] = (signed char)fw;
+}
+
+void
+kpb_paramagg(int idx, int neb, int c0, int c1, int c2, int c3)
+{
+    /* A cdecl callee's by-value register-struct parameter: set its psABI slot count and
+       per-slot classes (0 INTEGER, 1 SSE/double, 2 float single) directly, so the backend
+       reconstructs the struct from the argument registers into the param slot.  A nonzero
+       param_neb here suppresses the scalar derivation in kpb_func_end. */
+    if (!cur_fn->param_neb || !cur_fn->param_cls || idx < 0 || idx >= cur_fn->nparams)
+        return;
+    cur_fn->param_neb[idx] = (signed char)neb;
+    cur_fn->param_cls[4 * idx + 0] = (signed char)c0;
+    cur_fn->param_cls[4 * idx + 1] = (signed char)c1;
+    cur_fn->param_cls[4 * idx + 2] = (signed char)c2;
+    cur_fn->param_cls[4 * idx + 3] = (signed char)c3;
+}
+
+void
+kpb_retagg(int neb, int c0, int c1, int c2, int c3)
+{
+    /* A cdecl callee returning a small plain-data record: the return-struct slot count and
+       per-slot classes, scattered into the return registers by IR_RETV_AGG. */
+    cur_fn->ret_neb = (signed char)neb;
+    cur_fn->ret_cls[0] = (signed char)c0;
+    cur_fn->ret_cls[1] = (signed char)c1;
+    cur_fn->ret_cls[2] = (signed char)c2;
+    cur_fn->ret_cls[3] = (signed char)c3;
 }
 
 void
@@ -523,13 +557,12 @@ kpb_func_end(void)
     /* Mirror kpm_read's read_func: derive the psABI param_cls/param_neb from
        the scalar param_class the front end supplies (one eightbyte each, SSE
        for a float, INTEGER otherwise), so the shared selectors read the right
-       register for a float parameter. */
-    if (fn->nparams && fn->param_class) {
-        fn->param_neb = arena_zalloc(&M.arena,
-                                     (size_t)fn->nparams * sizeof(signed char));
-        fn->param_cls = arena_zalloc(&M.arena,
-                                     (size_t)fn->nparams * 4 * sizeof(signed char));
+       register for a float parameter.  A by-value register-struct parameter has
+       already set param_neb (> 0) via kpb_paramagg; leave those untouched. */
+    if (fn->nparams && fn->param_class && fn->param_neb && fn->param_cls) {
         for (int pi = 0; pi < fn->nparams; pi++) {
+            if (fn->param_neb[pi] != 0)
+                continue;               /* explicit aggregate classes already set */
             fn->param_neb[pi] = 1;
             fn->param_cls[4 * pi] = (signed char)(fn->param_class[pi] == 1 ? 1 : 0);
         }

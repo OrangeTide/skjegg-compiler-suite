@@ -128,6 +128,10 @@ void kpbp_func_begin(const void *name, int is_local, int is_variadic,
 void kpbp_slotsize(int size) { kpb_slotsize(size); }
 void kpbp_paramclass(int cls) { kpb_paramclass(cls); }
 void kpbp_paramfw(int fw) { kpb_paramfw(fw); }
+void kpbp_paramagg(int idx, int neb, int c0, int c1, int c2, int c3)
+{ kpb_paramagg(idx, neb, c0, c1, c2, c3); }
+void kpbp_retagg(int neb, int c0, int c1, int c2, int c3)
+{ kpb_retagg(neb, c0, c1, c2, c3); }
 
 void kpbp_insn(const void *mnem, int dst, int a, int b, int64_t imm,
                int slot, int lab, int nargs, const void *sym)

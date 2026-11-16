@@ -1,0 +1,29 @@
+{ By-value small-struct FFI: an all-integer record of up to 8 bytes crosses a cdecl
+  boundary by value, in a single general register (SysV / AAPCS64), both as an
+  argument and as a result. The glue (sfhost.c) takes and returns the C struct by
+  value, so a correct sum or round-trip proves the register ABI. }
+program byval;
+
+type
+  P2 = record x: integer; y: integer; end;            { 8 bytes: one eightbyte }
+  C4 = record r: byte; g: byte; b: byte; a: byte; end; { 4 bytes }
+
+function Sum2(p: P2): integer; cdecl; external name 'bv_sum2';
+function SumC(c: C4): integer; cdecl; external name 'bv_sumc';
+function Mk2(a: integer; b: integer): P2; cdecl; external name 'bv_mk2';
+function Mix(n: integer; p: P2): integer; cdecl; external name 'bv_mix';
+
+var
+  p, q: P2;
+  c: C4;
+
+begin
+  p.x := 10; p.y := 32;
+  writeln('sum2=', Sum2(p));            { 42: x+y, 8-byte record by value }
+  c.r := 1; c.g := 2; c.b := 3; c.a := 4;
+  writeln('sumc=', SumC(c));            { 10: four bytes by value }
+  q := Mk2(100, 23);                    { an 8-byte record returned by value }
+  writeln('mk=', q.x, ' ', q.y);        { 100 23 }
+  writeln('mix=', Mix(1000, p));        { 1042: a struct after an int, so it lands
+                                          in the next consecutive registers }
+end.

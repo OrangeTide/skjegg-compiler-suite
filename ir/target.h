@@ -30,10 +30,40 @@
 #ifndef SKJ_TARGET_H
 #define SKJ_TARGET_H
 
-/* Derive the width from the instruction-set selector (unless a tool set it
-   explicitly). A 64-bit ISA is LP64; everything else is ILP32. */
+/* A tool that selects an instruction set names it with one of these; code with
+   no ISA selector (a native-unit glue object, the freestanding guest runtime)
+   is compiled by the target's own C compiler, so its pointer width is that
+   compiler's data model. */
+#if defined(X86_BITS) || defined(CC_ARM64) || defined(CC_RISCV) \
+    || defined(CC_M68K) || defined(CC_MIPS)
+#  define SKJ_HAVE_ISA_SELECTOR 1
+#else
+#  define SKJ_HAVE_ISA_SELECTOR 0
+#endif
+
+/* Derive the width (unless a tool set it explicitly).
+
+   With an ISA selector a 64-bit ISA is LP64 and everything else is ILP32.
+
+   With no selector there are two cases, told apart by KP_FREESTANDING. A
+   native-unit glue object and the freestanding guest runtime are compiled by
+   the target's OWN C compiler (KP_FREESTANDING set), so their pointer width is
+   that compiler's data model: an LP64 host compiler builds LP64 glue, a 32-bit
+   cross compiler (rv32, ColdFire) builds ILP32 glue. This is what lets a
+   native-unit glue get the right kp_gptr width without a hand-set -DSKJ_LP64,
+   which would be wrong the moment a 32-bit target reused the same flags.
+
+   Every other selector-less tool (the TinScheme and BASIC front ends, which
+   name no ISA to keep cf_emit.c's CC_M68K paths off, and host utilities) is a
+   cross compiler running on a 64-bit host while targeting a 32-bit ISA, so it
+   stays ILP32 as before. */
 #ifndef SKJ_LP64
 #  if (defined(X86_BITS) && (X86_BITS == 64)) || defined(CC_ARM64)
+#    define SKJ_LP64 1
+#  elif SKJ_HAVE_ISA_SELECTOR
+#    define SKJ_LP64 0
+#  elif defined(KP_FREESTANDING) && (defined(__LP64__) || defined(_LP64) \
+        || (defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8))
 #    define SKJ_LP64 1
 #  else
 #    define SKJ_LP64 0
@@ -55,6 +85,21 @@
 #endif
 #if (defined(CC_RISCV) || defined(CC_M68K) || defined(CC_MIPS)) && SKJ_LP64
 #  error "RV32/ColdFire/MIPS target must be ILP32, not LP64"
+#endif
+
+/* For freestanding glue/runtime with no ISA selector the width must match the
+   compiler's own data model, so a -DSKJ_LP64 that contradicts it (e.g. forcing
+   LP64 into a 32-bit glue) is a build error rather than a silent wrong-width
+   pointer. This does not constrain the selector-less cross tools (TinScheme,
+   BASIC), which target a 32-bit ISA from a 64-bit host and are ILP32 by the
+   derivation above. */
+#if defined(KP_FREESTANDING) && !SKJ_HAVE_ISA_SELECTOR && defined(__SIZEOF_POINTER__)
+#  if SKJ_LP64 && (__SIZEOF_POINTER__ != 8)
+#    error "SKJ_LP64=1 but the compiler's pointer is not 64-bit"
+#  endif
+#  if !SKJ_LP64 && (__SIZEOF_POINTER__ == 8)
+#    error "SKJ_LP64=0 but the compiler's pointer is 64-bit"
+#  endif
 #endif
 
 #if SKJ_LP64

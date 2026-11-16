@@ -1,0 +1,24 @@
+{ Smoke test for the curl unit. It fetches a committed fixture through a file://
+  URL, so it needs no network and is deterministic. The absolute path to the
+  fixture is passed as the program's argument (ParamStr(1)); file:// reads it
+  through the same libcurl path an http:// fetch uses, exercising the easy handle,
+  the write-callback shim, and the string marshaling. A second fetch of a missing
+  file checks the failure path (LastOk false). file:// has no HTTP status, so
+  LastStatus is 0. }
+program curldemo;
+uses curl as http;
+
+var
+  body: string;
+
+begin
+  body := http.Get('file://' + ParamStr(1));
+  if http.LastOk then
+    writeln('ok=yes status=', http.LastStatus)
+  else
+    writeln('ok=no');
+  write(body);
+
+  body := http.Get('file:///no/such/skjegg/file.txt');
+  if http.LastOk then writeln('missing=yes') else writeln('missing=no');
+end.

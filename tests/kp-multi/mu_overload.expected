@@ -1,0 +1,5 @@
+int:nonneg
+int:neg
+str:hi
+bool:true
+bool:false

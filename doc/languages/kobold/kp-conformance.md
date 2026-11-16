@@ -53,7 +53,7 @@ a conformance claim.
 | `array [index] of T`, multi-dimensional | Done | Fixed arrays with ordinal index ranges. |
 | `record`, including variant records | Done | |
 | `set of` an ordinal base | Done | |
-| `packed` structures | Omitted | No `packed` keyword; layout is the host's concern. |
+| `packed` structures | Done | `packed record` caps field alignment at 1; `{$A n}` caps it at *n* (1/2/4/8/16) for the records that follow. Controls the padding between fields for a C struct declared `__attribute__((packed))` or `#pragma pack(n)`. See `kp-native-units.md`. |
 | `file of T` and `text` | Omitted | No file type. File input is a host `external` primitive. |
 | Pointer types (`^T`), `nil` pointers | Omitted | No pointers by design. Host objects are opaque handles; `nil` is the empty handle. |
 | `@` address-of | Extension (labels only) | `@name` takes the address of a code label, yielding a second-class `label` value for a computed `goto` (threaded dispatch). It is not a general address-of: the only operand is a label name. |
@@ -89,6 +89,8 @@ a conformance claim.
 | Value and `var` parameters | Done | |
 | Procedural and functional parameters | Done | A procedure or function value is a bare code pointer, no captured environment. |
 | `cdecl` callback types across the FFI | Done | A procedure type may be marked `cdecl`. A Kobold routine value is a C function pointer, so it may be passed to a C routine that calls it back, and a C-returned function pointer may be called from Kobold. ABI-identical to the native convention; no trampoline. |
+| Records across the FFI | By reference | A `record` crosses an `external` routine's boundary as a C pointer: a `var` record is `T*`, a `const` record `const T*`, with field layout matching the C struct (`byte` / `shortint` a 1-byte `char`, `word` / `smallint` a 2-byte `short`, `integer` a 4-byte `int`, `int64` 8, `single` a 4-byte `float`; a variant record overlays like a C union; `packed record` / `{$A n}` match a packed struct). The record must be plain data; a managed field (string, dynamic array, map, interface, handle) is rejected. A small plain-data record also crosses a `cdecl` boundary by value in registers on x86-64, arm64, and rv32, following the C register ABI: a record of 16 bytes or less on the LP64 targets (SysV eightbytes, or an arm64 floating-point HFA) and 8 bytes or less on rv32 (integer words), with integer slots in general registers and float slots in SSE / HFA registers; one that does not fit the remaining argument registers passes on the stack. This holds both ways: a Kobold `cdecl` routine is also the callee, so a C library may call a Kobold callback with a record by value and take its record result in registers; the callback reconstructs the record from the argument registers and scatters its result into the return registers. It also holds through an indirect call: a `cdecl` procedure value (a C function pointer) that returns a small record by value returns it in registers just as a call named at the site does. A record too large for the register class, a record with a managed field, or the ColdFire / MIPS targets still require by-reference. See `kp-native-units.md`. |
+| `packed record` and `{$A n}` field alignment | Done | A record's fields pack at natural alignment by default; `packed record` (or `{$A1}`) removes inter-field padding and `{$A n}` caps field alignment at *n*, matching a C `#pragma pack(n)` / `__attribute__((packed))` struct. |
 | Nested routines with access to enclosing locals | Done | No closures: a nested routine that captures a local may be called but not stored or returned. |
 | `forward` declarations | Done | |
 | Function result via function name | Done | Also `exit(value)`. |
@@ -138,7 +140,7 @@ Kobold accepts a subset of the Free Pascal dialect, so these family features app
 | `//` line comments | Done | |
 | Hexadecimal literals `$1F` | Done | |
 | Character-code literals `#10`, `#$0A` | Done | |
-| Sized integer types `shortint`, `byte`, `word`, `cardinal`, `longint`, `int64`, `qword` | Done | `integer` is 32-bit; `int64` / `qword` are true 64-bit. |
+| Sized integer types `shortint`, `byte`, `smallint`, `word`, `cardinal`, `longint`, `int64`, `qword` | Done | Each has its true storage width: `byte` / `shortint` 1 byte, `word` / `smallint` 2, `cardinal` / `longint` / `integer` 4, `int64` / `qword` 8. A narrow type occupies its width in a record or FFI struct and widens to 32-bit for arithmetic. |
 | `single` (32-bit) and `double` (64-bit) reals | Done | `double` aliases `real`. |
 | `shl`, `shr`, bitwise `and` / `or` / `not` on integers | Done | |
 | `break`, `continue` | Done | |

@@ -1,0 +1,12 @@
+{ A record too large for the register class may not cross the FFI as a by-value C
+  result: the register by-value path covers at most two eightbytes (16 bytes) on the
+  LP64 targets and two words (8 bytes) on rv32, so a 20-byte record must come back
+  through a var parameter. }
+program err_record_return;
+type Big = record a: integer; b: integer; c: integer; d: integer; e: integer; end;  { 20 bytes }
+function mk(a: integer; b: integer; c: integer): Big; cdecl; external;
+var p: Big;
+begin
+  p := mk(5, 6, 7);
+  writeln(p.a, ' ', p.b, ' ', p.c);
+end.

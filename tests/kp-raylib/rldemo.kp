@@ -1,0 +1,48 @@
+{ Smoke test for the raylib unit. It opens a real window and draws one frame
+  under a virtual X server with software GL (the Makefile runs it through
+  xvfb-run), so it is deterministic and needs no GPU or display. It exercises the
+  by-value record FFI: a Color crosses by value and comes back from GetColor by
+  value, a Vector2 crosses by value and Vector2Add returns one, and the window and
+  draw calls run the real raylib path. The unit uses raylib's own names, which the
+  unit namespacing keeps from colliding with raylib's C symbols. }
+program rldemo;
+uses raylib as rl;
+
+var
+  c: rl.Color;
+  v, s: rl.Vector2;
+  r: rl.Rectangle;
+  bits: integer;
+
+begin
+  rl.SetTraceLogLevel(rl.LOG_NONE);
+  rl.InitWindow(320, 240, 'rl demo');
+  if rl.IsWindowReady then writeln('window=ok') else writeln('window=fail');
+  writeln('size=', rl.GetScreenWidth, ' ', rl.GetScreenHeight);
+
+  { Color by value in, packed to an int, then returned by value from GetColor. }
+  c.r := 10; c.g := 20; c.b := 30; c.a := 255;
+  bits := rl.ColorToInt(c);
+  writeln('toint=', bits);
+  c := rl.GetColor(bits);
+  writeln('fromint=', c.r, ' ', c.g, ' ', c.b, ' ', c.a);
+
+  { Vector2 by value in and out. (3,4)+(3,4) = (6,8); |(3,4)| = 5. }
+  v.x := 3.0; v.y := 4.0;
+  s := rl.Vector2Add(v, v);
+  writeln('vadd=', Trunc(s.x), ' ', Trunc(s.y));
+  writeln('vlen=', Trunc(rl.Vector2Length(v)));
+
+  { Draw one real frame. No stdout, but it must run the GL path without crashing. }
+  r.x := 50.0; r.y := 60.0; r.width := 20.0; r.height := 10.0;
+  rl.BeginDrawing;
+  rl.ClearBackground(rl.GetColor(0));
+  rl.DrawRectangle(10, 20, 30, 40, c);
+  rl.DrawRectangleRec(r, c);
+  rl.DrawCircle(160, 120, 15.0, c);
+  rl.DrawText('skjegg', 12, 12, 20, c);
+  rl.EndDrawing;
+  writeln('draw=ok');
+
+  rl.CloseWindow;
+end.

@@ -1,0 +1,36 @@
+{ Records cross the C FFI by reference: a `var` record is a C pointer the glue
+  reads and writes, a `const` record a read-only pointer. Field offsets and widths
+  match the C struct for word-width-and-larger fields (integer = 4-byte int, single
+  = 4-byte float). A packed record (or the $A switch) controls the padding between
+  fields, so a packed record matches a C packed struct: here the int64 sits at
+  offset 4, not 8. }
+program roundtrip;
+
+type
+  Point = record x: integer; y: integer; end;
+  Nat   = record a: integer; b: int64; end;
+  Pak   = packed record a: integer; b: int64; end;
+
+function bump(var p: Point): integer; cdecl; external;    { read and write by var }
+procedure fillnat(var r: Nat); cdecl; external;           { natural: b at offset 8 }
+procedure fillpak(var r: Pak); cdecl; external;           { packed: b at offset 4 }
+
+var
+  pt: Point;
+  n: Nat;
+  p: Pak;
+  s: integer;
+begin
+  pt.x := 3;
+  pt.y := 4;
+  s := bump(pt);
+  writeln('sum=', s);
+  writeln('x=', pt.x);
+  writeln('y=', pt.y);
+
+  fillnat(n);
+  writeln('nat=', n.a, ' ', n.b);
+
+  fillpak(p);
+  writeln('pak=', p.a, ' ', p.b);
+end.

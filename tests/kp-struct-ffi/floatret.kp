@@ -1,0 +1,22 @@
+{ A `single` (float32) field crosses the FFI by const reference, and a `single`
+  result returns from a cdecl call: area(const FRect) reads the float fields and
+  returns their product. (Skipped on rv32, whose only C compiler, zig's hard-float
+  ilp32d musl, disagrees with skjegg's soft-float ilp32 on how a float crosses a
+  call; the integer FFI agrees and still runs.) }
+program floatret;
+
+type FRect = record x: single; y: single; w: single; h: single; end;
+
+function area(const r: FRect): single; cdecl; external;
+
+var
+  r: FRect;
+  a: single;
+begin
+  r.x := 0.0;
+  r.y := 0.0;
+  r.w := 3.0;
+  r.h := 4.0;
+  a := area(r);
+  writeln('area=', a);
+end.

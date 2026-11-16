@@ -225,7 +225,12 @@ MapType          = 'map' [ '[' Type ']' ] 'of' Type .
                     counts, TryGet(m, k, v) fetches, and MapFirst/MapNext iterate with a 'mapiter'
                     cursor. A map is a value type: assignment eager-copies, like a dynamic array *)
 
-RecordType       = 'record' FieldList [ VariantPart ] 'end' .
+RecordType       = [ 'packed' ] 'record' FieldList [ VariantPart ] 'end' .
+                   (* 'packed' lays the fields out with no inter-field padding
+                      (field alignment 1), matching a packed C struct; it is
+                      contextual, usable as an identifier elsewhere. The {$A n}
+                      directive caps field alignment at n for the records that
+                      follow it. *)
 FieldList        = [ FieldDecl { ';' FieldDecl } [ ';' ] ] .
 FieldDecl        = IdentList ':' Type
                  | Identifier ':' Type AccessorSpec .

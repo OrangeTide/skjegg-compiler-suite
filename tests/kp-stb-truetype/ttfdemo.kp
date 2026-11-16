@@ -1,0 +1,46 @@
+{ Smoke test for the stb_truetype unit. It loads the vendored OFL font
+  (third_party/fonts/SourceCodePro-Regular.ttf, path relative to the repository
+  root where the harness runs) and pins the whole chain: the font crosses as a
+  Kobold string, stb parses it, and the integer-id handles, the scaled vertical
+  metrics, the code-point advance, and the rasterized glyph all return the right
+  numbers. The font and stb_truetype are both vendored and version-pinned, so the
+  output is deterministic (identical on x86-64 and arm64). Rendering the space
+  (code point 32), which has no outline, returns the 0 handle. }
+program ttfdemo;
+uses stb_truetype as ttf;
+
+var
+  f, g, x, y, cov, covered, maxc: integer;
+
+begin
+  f := ttf.LoadFont('third_party/fonts/SourceCodePro-Regular.ttf');
+  if f = 0 then
+  begin
+    writeln('load=fail');
+    halt(1);
+  end;
+
+  { vertical metrics and the advance of 'A', scaled to a 32-pixel cell. }
+  writeln('vmetrics=', ttf.Ascent(f, 32), ' ', ttf.Descent(f, 32), ' ', ttf.LineGap(f, 32));
+  writeln('advA=', ttf.Advance(f, 65, 32));
+
+  { rasterize 'A' (code point 65) and read the coverage bitmap. }
+  g := ttf.Render(f, 65, 32);
+  writeln('glyph=', ttf.GlyphWidth(g), ' ', ttf.GlyphHeight(g), ' ',
+          ttf.GlyphXOff(g), ' ', ttf.GlyphYOff(g));
+  covered := 0;
+  maxc := 0;
+  for y := 0 to ttf.GlyphHeight(g) - 1 do
+    for x := 0 to ttf.GlyphWidth(g) - 1 do
+    begin
+      cov := ttf.Coverage(g, x, y);
+      if cov > 0 then covered := covered + 1;
+      if cov > maxc then maxc := cov;
+    end;
+  writeln('coverage=', covered, ' max=', maxc);
+  ttf.FreeGlyph(g);
+
+  { the space has no outline, so Render yields the 0 handle. }
+  writeln('space=', ttf.Render(f, 32, 32));
+  ttf.FreeFont(f);
+end.

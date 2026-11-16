@@ -1,0 +1,67 @@
+{ Headless smoke test for the sdl3 unit. The dummy video driver and the software
+  renderer let real SDL3 run with no display, so this is CI-safe wherever SDL3 is
+  installed. It drives the record surface end to end: a Color (byte fields), a
+  Rect and an FRect (integer and single fields), a window handle with var-out
+  size, the 2D draw calls, and the 128-byte Event buffer. }
+program sdldemo;
+uses sdl3 as sdl;
+
+var
+  win, ren, w, h: integer;
+  col: sdl.Color;
+  ra, rb, ri: sdl.Rect;
+  fa, fb, fri: sdl.FRect;
+  box: sdl.FRect;
+  ev: sdl.Event;
+  ok: boolean;
+
+begin
+  if not sdl.InitVideo then
+  begin
+    writeln('init=fail');
+    halt(1);
+  end;
+  writeln('init=ok');
+
+  win := sdl.CreateWindow('sdl3 demo', 320, 240);
+  sdl.GetWindowSize(win, w, h);
+  writeln('winsize=', w, ' ', h);
+  { the title is a Kobold string crossing to C and back: the glue reads it with
+    kp_str_bytes on the way in and rebuilds it with kp_str_new on the way out. }
+  writeln('title=', sdl.GetWindowTitle(win));
+
+  { Color: the sub-word byte fields, packed to RGBA8888 (0x0A141EFF). }
+  col.r := 10; col.g := 20; col.b := 30; col.a := 255;
+  writeln('rgba8888=', sdl.MapRGBA(col));
+
+  { geometry: integer and float rectangle intersection, record in and out. }
+  ra.x := 0; ra.y := 0; ra.w := 4; ra.h := 4;
+  rb.x := 2; rb.y := 1; rb.w := 4; rb.h := 4;
+  if sdl.RectIntersect(ra, rb, ri) then
+    writeln('rect=', ri.x, ' ', ri.y, ' ', ri.w, ' ', ri.h);
+  fa.x := 0.0; fa.y := 0.0; fa.w := 4.0; fa.h := 4.0;
+  fb.x := 2.0; fb.y := 1.0; fb.w := 4.0; fb.h := 4.0;
+  if sdl.RectIntersectF(fa, fb, fri) then
+    writeln('frect=', fri.x, ' ', fri.y, ' ', fri.w, ' ', fri.h);
+
+  { 2D drawing against the software renderer. }
+  ren := sdl.CreateRenderer(win);
+  ok := ren > 0;
+  ok := ok and sdl.SetDrawColor(ren, col);
+  ok := ok and sdl.Clear(ren);
+  box.x := 10.0; box.y := 10.0; box.w := 100.0; box.h := 80.0;
+  ok := ok and sdl.FillRect(ren, box);
+  sdl.Present(ren);
+  if ok then writeln('draw=ok') else writeln('draw=fail');
+
+  { events: PollEvent fills the 128-byte Event buffer; drain the queue, reading
+    each event's type through the accessor (the window-creation events the driver
+    emits are version-dependent, so only that the queue empties is asserted). }
+  while sdl.PollEvent(ev) do
+    if sdl.EventType(ev) = sdl.EvQuit then halt(9);
+  writeln('events=drained');
+
+  sdl.DestroyRenderer(ren);
+  sdl.DestroyWindow(win);
+  sdl.Quit;
+end.

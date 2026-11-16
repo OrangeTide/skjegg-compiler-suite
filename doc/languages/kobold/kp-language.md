@@ -123,13 +123,16 @@ integer value given a real type is promoted (`const Tau: real = 6` is 6.0).
 
 ### Ordinal types
 
-The integer types differ only in width and signedness at declaration; arithmetic is done
-at 32 or 64 bits.
+The integer types differ in storage width and signedness; arithmetic is done at 32
+or 64 bits. A narrow type occupies its width in memory, which is what a record field
+or an FFI struct uses, but it widens to 32 bits (zero- or sign-extended by its
+signedness) when it takes part in an expression.
 
 | Name | Width | Signed |
 |---|---|---|
 | `shortint` | 8 | yes |
 | `byte` | 8 | no |
+| `smallint` | 16 | yes |
 | `word` | 16 | no |
 | `integer` / `longint` | 32 | yes |
 | `cardinal` | 32 | no |
@@ -376,7 +379,15 @@ g := @current;                { @ takes current's address, not a call }
 function-with-parameters already yields; for a parameterless function it is the only way to
 take the address rather than call. (`@` on a name that is not a routine is the label-address
 operator for a computed `goto`; the two do not collide, since a routine resolves as an
-ordinary name and a label is separate.)
+ordinary name and a label is separate.) `@unit.routine` takes the value of a routine exported
+by a used unit, so a qualified import may supply a callback as well.
+
+When the named routine is overloaded, the value has no call arguments to select an overload,
+so the target proc type does: the overload chosen is the one whose signature matches the
+variable it is assigned to or the parameter it is passed to. `g := @Tag` and `register(@Tag)`
+each pick the `Tag` overload matching `g`'s type or the parameter type. This holds for the
+qualified form (`@unit.Tag`) the same as the bare one. If no overload matches the target, the
+assignment or argument is rejected as a type mismatch.
 
 #### Callbacks across the FFI
 

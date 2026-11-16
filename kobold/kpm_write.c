@@ -210,6 +210,26 @@ write_func(FILE *out, const struct ir_func *fn)
             putc('\n', out);
         }
     }
+    /* a cdecl callee's by-value register-struct parameters: one line per such param,
+       `.paramagg <idx> <neb> <c0> <c1> <c2> <c3>`, carrying the psABI slot count and
+       per-slot classes the shared derivation cannot reconstruct from .paramclass alone.
+       Emit only when the explicit classification differs from that derivation (one slot,
+       first class from param_class), so an ordinary scalar param stays on .paramclass. */
+    if (fn->nparams > 0 && fn->param_neb && fn->param_cls && fn->param_class) {
+        for (int i = 0; i < fn->nparams; i++) {
+            int derived = (fn->param_class[i] == 1) ? 1 : 0;
+            if (fn->param_neb[i] != 1 || fn->param_cls[4 * i] != derived)
+                fprintf(out, "    .paramagg %d %d %d %d %d %d\n", i,
+                        (int)fn->param_neb[i], (int)fn->param_cls[4 * i],
+                        (int)fn->param_cls[4 * i + 1], (int)fn->param_cls[4 * i + 2],
+                        (int)fn->param_cls[4 * i + 3]);
+        }
+    }
+    /* a cdecl callee returning a small plain-data record in registers (RETV_AGG) */
+    if (fn->ret_neb > 0)
+        fprintf(out, "    .retagg %d %d %d %d %d\n", (int)fn->ret_neb,
+                (int)fn->ret_cls[0], (int)fn->ret_cls[1], (int)fn->ret_cls[2],
+                (int)fn->ret_cls[3]);
     for (in = fn->head; in; in = in->next)
         write_insn(out, in);
     fputs(".endfunc\n", out);

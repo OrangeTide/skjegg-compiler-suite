@@ -1,0 +1,11 @@
+{ A record crossing the FFI must be plain data: a managed field (here a string) is
+  a reference-counted descriptor, not inline C struct bytes, so it is rejected even
+  when the record is passed by reference. }
+program err_managed_field;
+type Bad = record tag: integer; name: string; end;
+procedure take(var b: Bad); cdecl; external;
+var x: Bad;
+begin
+  x.tag := 1;
+  take(x);
+end.

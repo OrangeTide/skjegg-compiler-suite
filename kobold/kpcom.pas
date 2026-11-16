@@ -178,8 +178,16 @@ type
                                   native and C conventions are ABI-identical on every target, so
                                   this never changes codegen; it names a type for the FFI boundary
                                   and stays signature-compatible with a plain proc type. }
+    ExternC: Boolean;           { the routine is BOTH external and cdecl: a real C callee, so a
+                                  by-value small-struct argument/result follows the C register ABI
+                                  (IsByValRegStruct). A Kobold-defined cdecl routine keeps the
+                                  internal address convention (its callee side is not reconstructed),
+                                  so only this flag, not Cdecl, enables the register lowering. }
     FloatBits: LongInt;         { a real's storage width: 32 for single, else 64 (double) }
-    IntBits: LongInt;           { an integer's storage width: 64 for int64, else 32 }
+    IntBits: LongInt;           { an integer's storage width in bits: 8 (byte/shortint),
+                                  16 (word/smallint), 32 (integer/cardinal), 64 (int64) }
+    Signed: Boolean;            { an integer type's signedness, for the sub-word load's sign
+                                  extension (shortint/smallint sign-extend, byte/word zero-extend) }
     Size: LongInt;              { explicit byte size, or -1 to compute from the layout }
     Align: LongInt;             { explicit byte alignment, or -1 to compute }
     Opaque: Boolean;            { an exported record whose fields are hidden from consumers }
@@ -231,11 +239,15 @@ type
                                   global cell, even when introduced at program scope (kp-errors.md) }
     DisambDone: Boolean;        { EmittedRoutineName has resolved this routine's overload suffix }
     DisambName: string;         { cached overload-disambiguated emit name, or '' for no suffix }
+    RegStruct: Boolean;         { a cdecl callee's by-value register-struct parameter: its slot holds
+                                  the struct inline (reconstructed from the argument registers), not a
+                                  pointer, so it is addressed in place rather than by reference }
   end;
 
   TIntArray = array of LongInt;
   TInt64Array = array of Int64;       { a typed word-array global's init values }
   TSetWords = array[0..3] of Int64;   { a set value's up to four 64-bit words }
+  TAbiCls = array[0..3] of LongInt;   { a by-value record's per-slot register class }
 
   TScope = record
     Parent: LongInt;
@@ -495,6 +507,11 @@ var
   MainFiles: array of string;   { driver input files, compiled after the argument scan }
   UnitSrcDir: string;
   CompilingUnitName: string;
+  { declared here (ahead of DeclRoutine and Analyze, which read it) rather than beside the
+    other lowering state: a unit's routines are namespaced by unit name, so DeclRoutine needs
+    this during sema. }
+  ModIsUnit: Boolean;           { the compilation unit is a `unit`, emitted as an object module }
+  ModUnitNode: LongInt;         { the nkUnit node when ModIsUnit, for the interface section }
   { The loaded dependency interfaces, keyed by name (case-insensitive). UUScope is the
     detached scope holding a unit's exported symbols; UUState marks a unit unloaded (0),
     on the current resolution stack (1, a back-edge to it is a cycle), or done (2). }
@@ -533,6 +550,10 @@ var
   tyErr, tyVoid, tyInt, tyReal, tyBool, tyChar, tyStr, tyProcess, tyNil: LongInt;
   tySingle: LongInt;    { single-precision real; tyReal is double }
   tyInt64: LongInt;     { 64-bit integer; tyInt is 32-bit }
+  tyByte, tyWord, tyShortint, tySmallint: LongInt;   { sub-word integers: byte (u8), word
+                        (u16), shortint (s8), smallint (s16). One byte or two in storage
+                        (a record field, array element, or global); a register value is the
+                        32-bit extended form, so arithmetic and locals use the int path. }
   tyText: LongInt;      { a text stream; Output and ErrOutput are its only values }
   tyMapIter: LongInt;   { a map iterator handle, produced by MapFirst, advanced by MapNext }
   tyLabel: LongInt;     { the `label` code-address value type; second-class, @name makes it,
@@ -556,6 +577,10 @@ var
     construct's source position governs whether it is checked. }
   OptRangeChecks: Boolean;    { R+: array index bounds, raising INDEX_RANGE }
   OptOverflowChecks: Boolean; { Q+: checked arithmetic, raising OVERFLOW }
+  AlignCap: LongInt;          { A<n>: the current max record-field alignment (C #pragma pack);
+                                0 is the default natural alignment. A record declared while this
+                                is set, and a `packed` record (cap 1), lay their fields out capped
+                                to it, so the layout matches a packed C struct. }
 
 { ---- Character helpers (ASCII only, per the grammar) ---- }
 
@@ -1165,6 +1190,24 @@ begin
             if (CurCh = '+') or (CurCh = '-') then
               if kw = 'r' then OptRangeChecks := CurCh = '+'
               else OptOverflowChecks := CurCh = '+';
+            SkipToBrace;
+          end
+          else if kw = 'a' then begin
+            { the record field-alignment switch, matching C #pragma pack(n): $A1,
+              $A2, $A4, $A8, $A16 cap a record's field alignment (and its own);
+              $A- is packed (cap 1); $A+ restores natural alignment (no cap). An
+              unrecognized value restores natural alignment. }
+            if CurCh = '-' then AlignCap := 1
+            else if CurCh = '+' then AlignCap := 0
+            else begin
+              arg := ReadDirectiveArg;
+              if arg = '1' then AlignCap := 1
+              else if arg = '2' then AlignCap := 2
+              else if arg = '4' then AlignCap := 4
+              else if arg = '8' then AlignCap := 8
+              else if arg = '16' then AlignCap := 16
+              else AlignCap := 0;
+            end;
             SkipToBrace;
           end
           else
@@ -1932,11 +1975,17 @@ begin
       Nodes[n].A := ParseFactor();   { () forces the recursive call }
     end;
     tkAt: begin
-      { `@name` takes the address of a label in the current routine, yielding a
-        `label` value for a computed `goto`. The only legal operand is a label
-        name (checked in sema). }
+      { `@name` takes the address of a label in the current routine (a `label` value for
+        a computed `goto`) or a routine's procedural value; which one is decided in sema.
+        `@unit.name` takes the value of a routine exported by a used unit: the qualifier
+        is kept in A as an ident node and the member name in Text. }
       n := NewNode(nkLabelAddr); NextToken;
-      Nodes[n].Text := EatIdent('a label name after ''@''');
+      Nodes[n].Text := EatIdent('a name after ''@''');
+      if Accept(tkDot) then begin
+        Nodes[n].A := NewNode(nkIdent);
+        Nodes[Nodes[n].A].Text := Nodes[n].Text;   { the unit qualifier }
+        Nodes[n].Text := EatIdent('a routine name after ''@unit.''');
+      end;
     end;
     tkLBracket: n := ParseSetConstructor;
     tkStart: n := ParseStart;
@@ -2273,6 +2322,7 @@ var
   r, f: LongInt;
 begin
   r := NewNode(nkRecordType);
+  Nodes[r].IntVal := AlignCap;   { the field-alignment cap in effect (the $A switch); 0 = natural. a packed record overrides to 1 }
   Expect(tkRecord);
   while Tok.Kind = tkIdent do begin
     f := NewNode(nkFieldDecl);
@@ -2304,6 +2354,17 @@ var
   name: string;
   ln, cl: LongInt;
 begin
+  { `packed record ... end` lays the record's fields out with no padding (field
+    alignment capped to 1), matching a C `__attribute__((packed))` struct. `packed`
+    is contextual, so it stays usable as an ordinary identifier unless it precedes
+    `record`. }
+  if IsDirective('packed') and (PeekTokenKind = tkRecord) then begin
+    NextToken;                 { consume `packed` }
+    n := ParseRecordType;
+    Nodes[n].IntVal := 1;      { cap field alignment at 1 byte }
+    ParseType := n;
+    Exit;
+  end;
   case Tok.Kind of
     tkArray: begin
       n := NewNode(nkArrayType); NextToken;
@@ -3270,10 +3331,13 @@ procedure CheckConstArray(arrTy, dim, node: LongInt); forward;
 function RoundUp(x, a: LongInt): LongInt; forward;
 function TypeSize(ty: LongInt): LongInt; forward;
 function TypeAlign(ty: LongInt): LongInt; forward;
+function FieldOffset(recTy, m: LongInt): LongInt; forward;
+function SlotBytes(ty: LongInt): LongInt; forward;
 function AnalyzeExpr(node: LongInt): LongInt; forward;
 procedure AnalyzeStmt(node: LongInt); forward;
 procedure AnalyzeBlock(node: LongInt); forward;
 function AssignCompatible(dst, src: LongInt): Boolean; forward;
+function ResolveRoutineValue(node, target: LongInt): LongInt; forward;
 function IsDynArray(ty: LongInt): Boolean; forward;
 function IsBuffer(ty: LongInt): Boolean; forward;
 function IsMap(ty: LongInt): Boolean; forward;
@@ -3285,6 +3349,10 @@ function Wide64(ty: LongInt): Boolean; forward;
 function IsRealType(ty: LongInt): Boolean; forward;
 function IsAggregate(ty: LongInt): Boolean; forward;
 function IsHandle(ty: LongInt): Boolean; forward;
+function IsIntLeafType(ty: LongInt): Boolean; forward;
+function IsValLeafType(ty: LongInt): Boolean; forward;
+function AbiAgg(ty: LongInt; var cls: TAbiCls; var stride: LongInt): LongInt; forward;
+function IsByValRegStruct(ty: LongInt): Boolean; forward;
 
 procedure SemErrCode(node: LongInt; const code, msg: string);
 { A semantic error with an explicit class code. SemErr and SemErrName wrap it with the two
@@ -3380,6 +3448,9 @@ begin
   SemTypes[SemCount].Variadic := False;
   SemTypes[SemCount].FloatBits := 64;
   SemTypes[SemCount].IntBits := 32;
+  SemTypes[SemCount].Signed := False;
+  SemTypes[SemCount].Cdecl := False;
+  SemTypes[SemCount].ExternC := False;
   SemTypes[SemCount].Size := -1;
   SemTypes[SemCount].Align := -1;
   SemTypes[SemCount].Opaque := False;
@@ -3838,6 +3909,7 @@ begin
   Syms[idx].BinderVar := False;
   Syms[idx].DisambDone := False;
   Syms[idx].DisambName := '';
+  Syms[idx].RegStruct := False;
   AddMember(CurScope, idx);
   AddSym := idx;
 end;
@@ -4070,6 +4142,25 @@ begin
   end;
 end;
 
+function FfiHandleField(recTy: LongInt): string;
+{ The name of the first field of record recTy whose type is, or contains, a managed
+  handle (a string, dynamic array, map, interface, or process), else '' when every
+  field is plain data. Such a field holds a reference-counted descriptor, not inline
+  bytes, so a record carrying one does not have C struct layout and cannot cross the
+  FFI as a struct. Used to reject it with the offending field named. }
+var
+  i: LongInt;
+begin
+  FfiHandleField := '';
+  if (recTy < 0) or (recTy >= SemCount) or (SemTypes[recTy].Kind <> skRecord) then Exit;
+  for i := 0 to High(SemTypes[recTy].Subs) do
+    if TypeHasHandle(SemTypes[recTy].Subs[i]) then begin
+      if i <= High(SemTypes[recTy].Names) then FfiHandleField := SemTypes[recTy].Names[i]
+      else FfiHandleField := '?';
+      Exit;
+    end;
+end;
+
 function OrdinalRange(ty: LongInt; var lo, hi: Int64): Boolean;
 { The inclusive ordinal range of an ordinal type used as an array index. }
 begin
@@ -4173,6 +4264,7 @@ var
   lo, hi: Int64;
   rec, vp, f, f2, nm: LongInt;
   cur, vbase, vmax, voff, dt, kt: LongInt;
+  cap, fa, maxfa: LongInt;
 begin
   ResolveType := tyErr;
   if node < 0 then Exit;
@@ -4317,6 +4409,10 @@ begin
     nkRecordType: begin
       rec := NewSemType(skRecord);
       cur := 0;
+      { the field-alignment cap in effect: 0 = natural, else a packed record or the $A
+        switch caps each field's (and the record's) alignment, matching a packed C struct. }
+      cap := Nodes[node].IntVal;
+      maxfa := 1;
       for i := 0 to High(Nodes[node].Kids) do begin
         f := Nodes[node].Kids[i];
         if Nodes[f].Kind = nkFieldDecl then begin
@@ -4339,7 +4435,10 @@ begin
           end
           else
             for v := 0 to High(Nodes[f].Kids) do begin
-              cur := RoundUp(cur, TypeAlign(fld));
+              fa := TypeAlign(fld);
+              if (cap > 0) and (fa > cap) then fa := cap;
+              if fa > maxfa then maxfa := fa;
+              cur := RoundUp(cur, fa);
               AddMember(rec, Nodes[Nodes[f].Kids[v]].Text, fld);
               SetMemberOff(rec, cur);
               cur := cur + TypeSize(fld);
@@ -4349,7 +4448,10 @@ begin
           vp := f;
           if Nodes[vp].Text <> '' then begin
             dt := ResolveType(Nodes[vp].A);
-            cur := RoundUp(cur, TypeAlign(dt));
+            fa := TypeAlign(dt);
+            if (cap > 0) and (fa > cap) then fa := cap;
+            if fa > maxfa then maxfa := fa;
+            cur := RoundUp(cur, fa);
             AddMember(rec, Nodes[vp].Text, dt);
             SetMemberOff(rec, cur);
             cur := cur + TypeSize(dt);
@@ -4366,7 +4468,10 @@ begin
               if Nodes[f2].Kind = nkFieldDecl then begin
                 fld := ResolveType(Nodes[f2].A);
                 for s := 0 to High(Nodes[f2].Kids) do begin
-                  voff := RoundUp(voff, TypeAlign(fld));
+                  fa := TypeAlign(fld);
+                  if (cap > 0) and (fa > cap) then fa := cap;
+                  if fa > maxfa then maxfa := fa;
+                  voff := RoundUp(voff, fa);
                   AddMember(rec, Nodes[Nodes[f2].Kids[s]].Text, fld);
                   SetMemberOff(rec, voff);
                   voff := voff + TypeSize(fld);
@@ -4377,6 +4482,13 @@ begin
           end;
           cur := vmax;
         end;
+      end;
+      { a capped record carries its own alignment (the widest capped field alignment)
+        and padded size explicitly, so TypeAlign/TypeSize honor the cap rather than
+        recomputing the natural layout; a natural record leaves them to be computed. }
+      if cap > 0 then begin
+        SemTypes[rec].Align := maxfa;
+        SemTypes[rec].Size := RoundUp(cur, maxfa);
       end;
       ResolveType := rec;
     end;
@@ -4479,6 +4591,14 @@ begin
       CoerceCharLit(Nodes[node].Kids[i], SemTypes[sig].ParamTypes[i]);
       aty := tyChar;
     end;
+    { an overloaded routine value (`@routine` / `@unit.routine`) passed to a proc-typed
+      parameter resolves to the overload matching that parameter type; a value carries no
+      arguments, so the parameter type is what selects the overload }
+    if (SemTypes[sig].ParamTypes[i] >= 0) and (SemTypes[sig].ParamTypes[i] < SemCount) and
+       (SemTypes[SemTypes[sig].ParamTypes[i]].Kind = skProc) and
+       (i < Length(Nodes[node].Kids)) and
+       (Nodes[Nodes[node].Kids[i]].Kind = nkLabelAddr) then
+      aty := ResolveRoutineValue(Nodes[node].Kids[i], SemTypes[sig].ParamTypes[i]);
     if not AssignCompatible(SemTypes[sig].ParamTypes[i], aty) then
       SemErr(node, 'argument ' + IntToStr(i + 1) + ': cannot pass ' +
         TypeName(argtys[i]) + ' to ' + TypeName(SemTypes[sig].ParamTypes[i]));
@@ -4499,6 +4619,45 @@ begin
       SetLength(cands, n + 1); cands[n] := s; Inc(n);
     end;
   end;
+end;
+
+function ResolveRoutineValue(node, target: LongInt): LongInt;
+{ node is an nkLabelAddr holding a routine's procedural value (`@routine` or `@unit.routine`).
+  Taking a routine value carries no call arguments, so an overloaded name binds the first
+  candidate during expression analysis. When `target` is a proc type (the type of the variable,
+  field, or parameter the value flows into), rebind node to the overload whose signature matches
+  target, the way a call resolves its overload by argument type. Returns the (possibly rebound)
+  value type. A non-routine node, a non-proc target, or an already-matching binding is left
+  unchanged. }
+var
+  s, scope, qi, i: LongInt;
+  cands: TIntArray;
+begin
+  ResolveRoutineValue := Nodes[node].Ty;
+  if Nodes[node].Kind <> nkLabelAddr then Exit;
+  s := Nodes[node].Sym;
+  if (s < 0) or not (Syms[s].Kind in [syProc, syFunc]) then Exit;
+  if (target < 0) or (target >= SemCount) or (SemTypes[target].Kind <> skProc) then Exit;
+  { the first-bound candidate already matches: nothing to choose }
+  if AssignCompatible(target, Syms[s].TypeId) then Exit;
+  { the overload set lives in the routine's own scope: the used unit's export scope for a
+    qualified value (Flag 1), the symbol's declaring scope for a bare one }
+  if Nodes[node].Flag = 1 then begin
+    qi := QualIndex(Nodes[Nodes[node].A].Text);
+    if qi < 0 then Exit;
+    scope := QScope[qi];
+  end
+  else
+    scope := Syms[s].Scope;
+  CollectRoutines(Syms[s].Name, scope, cands);
+  for i := 0 to High(cands) do
+    if AssignCompatible(target, Syms[cands[i]].TypeId) then begin
+      Nodes[node].Sym := cands[i];
+      Syms[cands[i]].Used := True;
+      Nodes[node].Ty := Syms[cands[i]].TypeId;
+      ResolveRoutineValue := Syms[cands[i]].TypeId;
+      Exit;
+    end;
 end;
 
 function ResolveOverload(const cands, argtys: TIntArray; out nmatch: LongInt): LongInt;
@@ -4725,7 +4884,7 @@ function AnalyzeCallOf(callee: LongInt; const argtys: TIntArray;
 { Resolve and check a call of the given callee designator with the given
   argument types. Shared by a call expression and a bare call statement. }
 var
-  s, sig, ret, best, nmatch: LongInt;
+  s, sig, ret, best, nmatch, qi: LongInt;
   cands: TIntArray;
   bn: string;
 begin
@@ -4887,7 +5046,36 @@ begin
   else begin
     { for a method call the callee is a field; take its raw proc type rather
       than the auto-called value type }
-    if Nodes[callee].Kind = nkField then sig := AnalyzeField(callee)
+    if Nodes[callee].Kind = nkField then begin
+      sig := AnalyzeField(callee);
+      { A unit-qualified routine reference (ov.Foo, Flag 1) is bound to the first
+        candidate by name in AnalyzeField. When the unit exports overloads of that
+        name, resolve among them here by argument type, the way a bare call does, and
+        rebind the callee to the chosen overload so lowering emits its symbol. }
+      s := Nodes[callee].Sym;
+      if (Nodes[callee].Flag = 1) and (s >= 0) and
+         (Syms[s].Kind in [syProc, syFunc]) and
+         (Nodes[Nodes[callee].A].Kind = nkIdent) then begin
+        qi := QualIndex(Nodes[Nodes[callee].A].Text);
+        if qi >= 0 then begin
+          CollectRoutines(Nodes[callee].Text, QScope[qi], cands);
+          if Length(cands) > 1 then begin
+            best := ResolveOverload(cands, argtys, nmatch);
+            if best < 0 then
+              SemErr(errNode, 'no overload of ''' + QName[qi] + '.' +
+                Nodes[callee].Text + ''' matches the arguments')
+            else begin
+              if nmatch > 1 then
+                SemErr(errNode, 'call to ''' + QName[qi] + '.' +
+                  Nodes[callee].Text + ''' is ambiguous');
+              Nodes[callee].Sym := best;
+              Syms[best].Used := True;
+              sig := Syms[best].TypeId;
+            end;
+          end;
+        end;
+      end;
+    end
     else sig := AnalyzeExpr(callee);
     { record the callee's type on the node: the field path bypasses the AnalyzeExpr
       wrapper that normally stores it, and lowering classifies the callee by it }
@@ -5361,6 +5549,35 @@ begin
     nkToStr:   AnalyzeExpr := CheckInterpHole(node);
     nkNil:     AnalyzeExpr := tyNil;
     nkLabelAddr: begin
+      if Nodes[node].A >= 0 then begin
+        { `@unit.routine` takes the value of a routine exported by a used unit. Resolve the
+          member in that unit's export scope; an overload binds the first candidate here and
+          is re-resolved by its target proc type at the assignment or argument (see
+          ResolveRoutineValue). Flag 1 marks it as a qualified routine value for lowering. }
+        at := QualIndex(Nodes[Nodes[node].A].Text);
+        if at < 0 then begin
+          SemErr(node, '''' + Nodes[Nodes[node].A].Text + ''' is not a unit qualifier');
+          Nodes[node].Sym := -1;
+          AnalyzeExpr := tyErr;
+        end
+        else begin
+          s := FindLocal(Nodes[node].Text, QScope[at]);
+          if (s < 0) or not (Syms[s].Kind in [syProc, syFunc]) then begin
+            SemErr(node, 'unit ''' + QName[at] + ''' has no exported routine ''' +
+              Nodes[node].Text + '''');
+            Nodes[node].Sym := -1;
+            AnalyzeExpr := tyErr;
+          end
+          else begin
+            Nodes[node].Sym := s;
+            Nodes[node].Flag := 1;
+            Syms[s].Used := True;
+            CheckRoutineValue(node, s);
+            AnalyzeExpr := Syms[s].TypeId;
+          end;
+        end;
+      end
+      else begin
       s := Lookup(Nodes[node].Text);
       if (s >= 0) and (Syms[s].Kind in [syProc, syFunc]) then begin
         { `@routine` takes the routine's procedural value, a bare code pointer. This is
@@ -5379,6 +5596,7 @@ begin
         Nodes[node].Sym := -1;
         LabelIntern(Nodes[node].Text, node);
         AnalyzeExpr := tyLabel;
+      end;
       end;
     end;
     nkIdent: begin
@@ -5631,6 +5849,11 @@ begin
   { a one-character string literal assigned to a char is that char }
   CoerceCharLit(Nodes[node].B, tt);
   if Nodes[Nodes[node].B].Ty = tyChar then vt := tyChar;
+  { an overloaded routine value assigned to a proc-typed variable resolves to the overload
+    matching that variable's type (ResolveRoutineValue) }
+  if (tt >= 0) and (tt < SemCount) and (SemTypes[tt].Kind = skProc) and
+     (Nodes[Nodes[node].B].Kind = nkLabelAddr) then
+    vt := ResolveRoutineValue(Nodes[node].B, tt);
   if (tt <> tyErr) and (vt <> tyErr) and not AssignCompatible(tt, vt) then
     SemErr(node, 'cannot assign ' + TypeName(vt) + ' to ' + TypeName(tt))
   else if IsNarrowing(tt, vt) then
@@ -6391,6 +6614,7 @@ var
   savedFunc, savedRSym, savedRScope, savedAnswer: LongInt;
   savedLabelBase: LongInt;
   savedFailable: Boolean;
+  rkw: string;
 begin
   isFunc := Nodes[node].Kind = nkFuncDecl;
   { build the signature in the enclosing scope }
@@ -6413,6 +6637,8 @@ begin
     SemErr(node, 'a routine cannot return a ''label'' value; it may live only ' +
       'in the frame of the routine that made it');
   SemTypes[sig].Failable := Nodes[node].Failable = 1;
+  SemTypes[sig].Cdecl := Nodes[node].CConv = 1;   { the C convention, for the by-value struct ABI }
+  SemTypes[sig].ExternC := (Nodes[node].CConv = 1) and (Nodes[node].Flag = 2);   { a real C callee }
   { a failable routine returns its value through a hidden caller buffer (sret) and the error in
     the integer register, so a real, int64, or record result works; an integer-class result
     keeps the two-register RETV2/CALL2 fast path. This holds for a method too: its receiver is
@@ -6453,11 +6679,77 @@ begin
   end;
   Nodes[node].Sym := s;   { the routine's own symbol, for lowering }
 
+  { FFI aggregate contract. A record crosses the C boundary of an `external` routine
+    BY REFERENCE, as a pointer: a `var` record is a C `T*`, a `const` record a
+    `const T*`. Three things are rejected here, each a silent miscompile otherwise:
+      - a by-VALUE record argument or a record result: the by-value small-struct C
+        ABI (fields in registers per the platform psABI) is not classified by the
+        selector backends yet, and the compiler would instead pass the record's
+        address or assume an sret slot, disagreeing with the C side;
+      - a record whose fields are not plain data: a string, dynamic array, map,
+        interface, or process field (or one nested in a field) is a reference-counted
+        descriptor, not inline bytes, so the record does not have C struct layout and
+        the C side would read a pointer where it expects data.
+    See doc/languages/kobold/kp-native-units.md. }
+  { The FFI record rules apply to a routine that crosses the C boundary: an `external`
+    import (Flag = 2, where Kobold is the caller) and a Kobold-defined `cdecl` routine
+    (where C is the caller, the Phase 3 callee).  A plain Kobold routine is exempt: it keeps
+    the native convention and passes a record by reference internally. }
+  if (Nodes[node].Flag = 2) or SemTypes[Syms[s].TypeId].Cdecl then begin
+    if SemTypes[Syms[s].TypeId].Cdecl then rkw := 'cdecl routine '''
+    else rkw := 'external routine ''';
+    for i := 0 to High(SemTypes[Syms[s].TypeId].ParamTypes) do begin
+      pty := SemTypes[Syms[s].TypeId].ParamTypes[i];
+      if (pty >= 0) and (SemTypes[pty].Kind = skRecord) then begin
+        if (i <= High(SemTypes[Syms[s].TypeId].ParamModes)) and
+           (SemTypes[Syms[s].TypeId].ParamModes[i] = 0) then begin
+          { a by-value record: a cdecl boundary carries a small plain-data record in registers
+            per the platform psABI (IsByValRegStruct). Everything else (a record too large
+            for the register class, a record with a managed field, or ColdFire / MIPS,
+            whose ABI has no register struct class) has no by-value path and must cross as
+            a pointer. }
+          if not (SemTypes[Syms[s].TypeId].Cdecl and IsByValRegStruct(pty)) then
+            SemErrName(node, rkw + Nodes[node].Text +
+              ''' takes a record by value; mark the parameter ''var'' or ''const'' ' +
+              '(only a small plain-data record crosses a cdecl FFI by value in registers)');
+        end
+        else if FfiHandleField(pty) <> '' then
+          SemErrName(node, rkw + Nodes[node].Text +
+            ''' passes a record whose field ''' + FfiHandleField(pty) +
+            ''' is a managed type (a string, array, map, interface, or handle) ' +
+            'across the FFI; such a field is a reference, not inline C struct data');
+      end;
+    end;
+    if (SemTypes[Syms[s].TypeId].RetType >= 0) and
+       (SemTypes[SemTypes[Syms[s].TypeId].RetType].Kind = skRecord) and
+       not (SemTypes[Syms[s].TypeId].Cdecl and
+            IsByValRegStruct(SemTypes[Syms[s].TypeId].RetType)) then
+      SemErrName(node, rkw + Nodes[node].Text +
+        ''' returns a record by value; return it through a ''var'' parameter ' +
+        'instead (only a small plain-data record crosses a cdecl FFI by value in registers)');
+  end;
+
   { an `external ... name '<csym>'` alias (nkStrLit in slot C) links and imports the routine
     under <csym> rather than its Kobold name; LinkNameOf/EmittedRoutineName then emit <csym>
     at the import declaration and every call site. }
   if Nodes[node].C >= 0 then
     Syms[s].LinkName := Nodes[Nodes[node].C].Text;
+
+  { Namespace a unit's own routines by the unit name, so the emitted symbol is
+    `<unit>.<name>` rather than the bare name. A unit that binds a C library can
+    then reuse that library's bare names (raylib's InitWindow, DrawText) without
+    its public wrappers colliding with the C symbols at link time. Excluded: an
+    external import (Flag = 2) and a cdecl routine, which must keep the exact C
+    symbol; a method, which is already qualified by its receiver type; and the
+    main program (CompilingUnitName empty), whose routines are not unit exports.
+    The qualifier is the base name; EmittedRoutineName adds any overload suffix
+    after it, and ComputeInterface carries the final symbol as the routine's
+    `link` name so a consumer calls it by the same symbol. See
+    doc/languages/kobold/kp-native-units.md. }
+  if ModIsUnit and (Syms[s].LinkName = '')
+     and (Nodes[node].Flag <> 2) and (Nodes[node].A < 0)
+     and not SemTypes[Syms[s].TypeId].Cdecl then
+    Syms[s].LinkName := CompilingUnitName + '.' + Nodes[node].Text;
 
   { record a method against its receiver type for x.method resolution, unless the body just
     completed a heading that already registered it }
@@ -6613,6 +6905,17 @@ begin
   tyProcess := NewSemType(skProcess); SemTypes[tyProcess].Name := 'process';
   tyNil  := NewSemType(skNil);          SemTypes[tyNil].Name  := 'nil';
   tyText := NewSemType(skInteger);      SemTypes[tyText].Name := 'text';
+  { sub-word integers: distinct types with a 1- or 2-byte storage width and a signedness,
+    so a record field or array element matches a C char/short/uchar/ushort }
+  SemTypes[tyInt].Signed := True;
+  tyByte := NewSemType(skInteger);     SemTypes[tyByte].Name := 'byte';
+  SemTypes[tyByte].IntBits := 8;       SemTypes[tyByte].Signed := False;
+  tyShortint := NewSemType(skInteger); SemTypes[tyShortint].Name := 'shortint';
+  SemTypes[tyShortint].IntBits := 8;   SemTypes[tyShortint].Signed := True;
+  tyWord := NewSemType(skInteger);     SemTypes[tyWord].Name := 'word';
+  SemTypes[tyWord].IntBits := 16;      SemTypes[tyWord].Signed := False;
+  tySmallint := NewSemType(skInteger); SemTypes[tySmallint].Name := 'smallint';
+  SemTypes[tySmallint].IntBits := 16;  SemTypes[tySmallint].Signed := True;
   tyMapIter := NewSemType(skMapIter);   SemTypes[tyMapIter].Name := 'mapiter';
   tyLabel := NewSemType(skLabel);       SemTypes[tyLabel].Name := 'label';
   tyErrorVal := NewSemType(skErrorVal); SemTypes[tyErrorVal].Name := 'error';
@@ -6631,13 +6934,15 @@ begin
   RegType('mapiter', tyMapIter);
   RegType('label', tyLabel);
   RegType('error', tyErrorVal);
-  RegType('byte', tyInt);
-  RegType('shortint', tyInt);
-  RegType('word', tyInt);
+  RegType('byte', tyByte);
+  RegType('shortint', tyShortint);
+  RegType('word', tyWord);
+  RegType('smallint', tySmallint);
   RegType('longint', tyInt);
   RegType('cardinal', tyInt);
   RegType('int64', tyInt64);
   RegType('qword', tyInt64);
+  SemTypes[tyInt64].Signed := True;
   RegType('text', tyText);
   s := Declare('true', syConst, -1);  Syms[s].TypeId := tyBool; Syms[s].Ordinal := 1;
   s := Declare('false', syConst, -1); Syms[s].TypeId := tyBool; Syms[s].Ordinal := 0;
@@ -6860,6 +7165,10 @@ begin
     Exit;
   end;
   if (nm = 'integer') or (nm = 'int') then RefToType := tyInt
+  else if nm = 'byte' then RefToType := tyByte
+  else if nm = 'word' then RefToType := tyWord
+  else if nm = 'shortint' then RefToType := tyShortint
+  else if nm = 'smallint' then RefToType := tySmallint
   else if nm = 'int64' then RefToType := tyInt64
   else if nm = 'boolean' then RefToType := tyBool
   else if nm = 'char' then RefToType := tyChar
@@ -7179,11 +7488,20 @@ begin
       NextField(line, dpos);               { '->' }
       val := NextField(line, dpos);        { the result type }
       SemTypes[sig].RetType := RefToType(val, uscope);
-      if NextField(line, dpos) = 'fails' then SemTypes[sig].Failable := True;
+      { trailing tokens: 'fails', and 'link <symbol>' (the unit-qualified emitted
+        name, so a call reaches the same symbol the defining unit emitted) }
+      cls := '';
+      base := NextField(line, dpos);
+      while base <> '' do begin
+        if base = 'fails' then SemTypes[sig].Failable := True
+        else if base = 'link' then cls := NextField(line, dpos);
+        base := NextField(line, dpos);
+      end;
       if SemTypes[sig].RetType >= 0 then s := AddSym(nm, syFunc)
       else s := AddSym(nm, syProc);
       Syms[s].TypeId := sig;
       Syms[s].Imported := True;
+      if cls <> '' then Syms[s].LinkName := cls;
     end
     else if inIntf and (kw = '.method') then begin
       CurScope := uscope;
@@ -7486,12 +7804,14 @@ begin
   InitSema;
   if prog < 0 then Exit;
   if Nodes[prog].Kind = nkProgram then begin
+    ModIsUnit := False;               { a program's routines are not unit exports }
     CompilingUnitName := Nodes[prog].Text;
     BindUses(Nodes[prog].B);
     AnalyzeBlock(Nodes[prog].A);
     CheckImplements(Nodes[prog].A);   { conformance assertions, after methods are registered }
   end
   else if Nodes[prog].Kind = nkUnit then begin
+    ModIsUnit := True;                { set early (before Lower) so DeclRoutine namespaces exports }
     CompilingUnitName := Nodes[prog].Text;
     BindUses(Nodes[prog].A);
     AnalyzeUnit(prog);
@@ -7527,6 +7847,14 @@ type
     SlotSize: array of LongInt;     { one entry per slot; Length = nslots }
     ParamClass: array of LongInt;   { 0 int/pointer, 1 float; one per param }
     ParamFW: array of LongInt;      { 1 = a single-precision (f32) float param, else 0 }
+    ParamNeb: array of LongInt;     { per param: 0 = a scalar (derive one register from ParamClass);
+                                      >0 = a by-value register struct of this many slots, with the
+                                      per-slot classes in ParamCls4 (a cdecl callee reconstructs it) }
+    ParamCls4: array of LongInt;    { four entries per param (0 INTEGER, 1 SSE/double, 2 float single),
+                                      valid when ParamNeb[p] > 0 }
+    RetNeb: LongInt;                { 0 = scalar/void/sret return; >0 = a by-value register struct
+                                      returned in this many slots, classes in RetCls4 (RETV_AGG) }
+    RetCls4: array of LongInt;      { the return struct's per-slot classes, valid when RetNeb > 0 }
     Insns: array of TIrInsn;
     NInsns: LongInt;
   end;
@@ -7575,10 +7903,11 @@ var
   IrExportCount: LongInt;
   NeedGlobalInit: Boolean;      { the program has const-array globals whose setup (__init)
                                   every entry point must run before it touches them }
-  ModIsUnit: Boolean;           { the compilation unit is a `unit`, emitted as an object module }
-  ModUnitNode: LongInt;         { the nkUnit node when ModIsUnit, for the interface section }
   CurFn: LongInt;               { index into IrFuncs of the function being lowered }
   CurResultSlot: LongInt;       { function result slot, or -1 in a procedure }
+  CurRetRegStruct: Boolean;     { the current function returns a by-value register struct (a cdecl
+                                  callee): CurResultSlot is a local buffer holding the struct, and the
+                                  result is addressed by its own address, not through an sret pointer }
   CurCancelLabel: LongInt;      { cancel-unwind cleanup label for a yielding routine,
                                   or -1 when the routine has no yield (cancel-by-unwind) }
   CurExitLabel: LongInt;        { the routine's scope-exit label; `Exit` jumps here so the
@@ -8070,6 +8399,213 @@ begin
      ((SemTypes[ty].Kind = skSet) and (SetWords(ty) > 1)));
 end;
 
+function IsIntLeafType(ty: LongInt): Boolean;
+{ True when ty holds only integer-class bytes: an ordinal scalar (int, char, bool,
+  enum, subrange, including the sub-word widths and int64), or a record or fixed
+  array built entirely of such. A real/single leaf (an SSE/HFA eightbyte), a managed
+  handle, a string, a pointer, or a proc disqualifies it. This is the all-INTEGER
+  test for the by-value small-struct ABI, where the record rides general registers. }
+var
+  i: LongInt;
+begin
+  IsIntLeafType := False;
+  if (ty < 0) or (ty >= SemCount) then Exit;
+  if IsOrdinalType(ty) then begin IsIntLeafType := True; Exit; end;
+  case SemTypes[ty].Kind of
+    skRecord:
+      begin
+        for i := 0 to High(SemTypes[ty].Subs) do
+          if not IsIntLeafType(SemTypes[ty].Subs[i]) then Exit;
+        IsIntLeafType := True;
+      end;
+    skArray:
+      if Length(SemTypes[ty].Subs) > 0 then   { a fixed array; a dyn array is a handle }
+        IsIntLeafType := IsIntLeafType(SemTypes[ty].Base);
+  end;
+end;
+
+function IsValLeafType(ty: LongInt): Boolean;
+{ Like IsIntLeafType, but also admits a real or single leaf: the plain-data test for a
+  by-value record that may ride floating-point registers (an SSE eightbyte on x86-64, a
+  HFA element on arm64). A managed handle, string, pointer, or proc leaf still
+  disqualifies it, since those are a reference-counted descriptor rather than inline C
+  struct bytes. }
+var
+  i: LongInt;
+begin
+  IsValLeafType := False;
+  if (ty < 0) or (ty >= SemCount) then Exit;
+  if IsOrdinalType(ty) or IsInt64(ty) or IsRealType(ty) or IsSingle(ty) then
+    begin IsValLeafType := True; Exit; end;
+  case SemTypes[ty].Kind of
+    skRecord:
+      begin
+        for i := 0 to High(SemTypes[ty].Subs) do
+          if not IsValLeafType(SemTypes[ty].Subs[i]) then Exit;
+        IsValLeafType := True;
+      end;
+    skArray:
+      if Length(SemTypes[ty].Subs) > 0 then   { a fixed array; a dyn array is a handle }
+        IsValLeafType := IsValLeafType(SemTypes[ty].Base);
+  end;
+end;
+
+procedure EbClassify(ty, base: LongInt; var cls: TAbiCls);
+{ Accumulate the SysV class of each eightbyte of ty (placed at byte `base` within the
+  top-level record) into cls[0..1]: 0 INTEGER, 1 SSE, -1 unset. INTEGER dominates SSE.
+  A scalar leaf classes the eightbyte(s) its bytes fall in; a record recurses into its
+  fields (a variant's overlapping fields merge, like a C union), a fixed array into its
+  elements. Mirrors cc's eb_classify. }
+var
+  i, foff, es, n, k, lo, hi, c: LongInt;
+begin
+  if (ty < 0) or (ty >= SemCount) then Exit;
+  if SemTypes[ty].Kind = skRecord then begin
+    for i := 0 to High(SemTypes[ty].Subs) do begin
+      foff := FieldOffset(ty, i);
+      if foff >= 0 then EbClassify(SemTypes[ty].Subs[i], base + foff, cls);
+    end;
+    Exit;
+  end;
+  if (SemTypes[ty].Kind = skArray) and (Length(SemTypes[ty].Subs) > 0) then begin
+    es := TypeSize(SemTypes[ty].Base);
+    if es > 0 then n := TypeSize(ty) div es else n := 0;
+    for k := 0 to n - 1 do
+      EbClassify(SemTypes[ty].Base, base + k * es, cls);
+    Exit;
+  end;
+  { a scalar leaf: class its eightbyte(s), merging INTEGER over SSE }
+  lo := base div 8;
+  hi := (base + TypeSize(ty) - 1) div 8;
+  if IsRealType(ty) or IsSingle(ty) then c := 1 else c := 0;
+  if lo <= 1 then
+    if (c = 0) or (cls[lo] = 0) then cls[lo] := 0 else cls[lo] := 1;
+  if (hi <= 1) and (hi <> lo) then
+    if (c = 0) or (cls[hi] = 0) then cls[hi] := 0 else cls[hi] := 1;
+end;
+
+function HfaWalk(ty: LongInt; var elem: LongInt; var n: LongInt): Boolean;
+{ Walk the leaves of a candidate Homogeneous Floating-point Aggregate (AAPCS64). Every
+  leaf must be the same float type: elem records it once seen (0 single, 1 double), and n
+  counts the leaves. A record with overlapping (variant / union) fields is not an HFA, nor
+  is any aggregate with a non-float leaf. Mirrors cc's hfa_walk. }
+var
+  i, es, cnt, k, lk, maxEnd, foff: LongInt;
+begin
+  HfaWalk := False;
+  if (ty < 0) or (ty >= SemCount) then Exit;
+  if IsSingle(ty) then lk := 0
+  else if IsRealType(ty) then lk := 1
+  else lk := -1;
+  if lk >= 0 then begin
+    if elem = -1 then elem := lk
+    else if elem <> lk then Exit;
+    n := n + 1;
+    HfaWalk := True;
+    Exit;
+  end;
+  if SemTypes[ty].Kind = skRecord then begin
+    maxEnd := 0;
+    for i := 0 to High(SemTypes[ty].Subs) do begin
+      foff := FieldOffset(ty, i);
+      if foff >= 0 then begin
+        if foff < maxEnd then Exit;   { fields overlap: a variant / union, not an HFA }
+        if foff + TypeSize(SemTypes[ty].Subs[i]) > maxEnd then
+          maxEnd := foff + TypeSize(SemTypes[ty].Subs[i]);
+        if not HfaWalk(SemTypes[ty].Subs[i], elem, n) then Exit;
+      end;
+    end;
+    HfaWalk := True;
+    Exit;
+  end;
+  if (SemTypes[ty].Kind = skArray) and (Length(SemTypes[ty].Subs) > 0) then begin
+    es := TypeSize(SemTypes[ty].Base);
+    if es > 0 then cnt := TypeSize(ty) div es else cnt := 0;
+    for k := 0 to cnt - 1 do
+      if not HfaWalk(SemTypes[ty].Base, elem, n) then Exit;
+    HfaWalk := True;
+  end;
+  { any other leaf leaves HfaWalk False }
+end;
+
+function AbiAgg(ty: LongInt; var cls: TAbiCls; var stride: LongInt): LongInt;
+{ Classify a record for the by-value register ABI, mirroring cc's abi_agg. Returns the
+  slot count (1-4) and fills cls[0..3] with each slot's class (0 INTEGER, 1 SSE/double, 2
+  float single) and `stride` with the per-slot byte stride; returns -1 for the MEMORY
+  class (too large for registers), or 0 when ty is not a by-value register record. The
+  record must be plain data (IsValLeafType): a managed or pointer leaf yields 0, so such
+  a record stays by reference. }
+var
+  sz, n, j, elem, cnt: LongInt;
+begin
+  cls[0] := -1; cls[1] := -1; cls[2] := -1; cls[3] := -1;
+  stride := 8;
+  AbiAgg := 0;
+  if (ty < 0) or (ty >= SemCount) or (SemTypes[ty].Kind <> skRecord) then Exit;
+  if not ((CurTarget.PtrBytes = 8) or (CurTarget.Arch = 'rv32')) then Exit;
+  if not IsValLeafType(ty) then Exit;
+  sz := TypeSize(ty);
+  if sz < 1 then Exit;
+  if CurTarget.Arch = 'rv32' then begin
+    { rv32 ilp32: 1-2 four-byte integer words; a float leaf rides an integer word too
+      (soft-float), so there is no HFA rule.  A larger record is passed by reference. }
+    if sz > 8 then begin AbiAgg := -1; Exit; end;
+    n := (sz + 3) div 4;
+    for j := 0 to n - 1 do cls[j] := 0;
+    stride := 4;
+    AbiAgg := n;
+    Exit;
+  end;
+  if CurTarget.Arch = 'arm64' then begin
+    { AAPCS64: a 1-4 member HFA rides the fp registers (s-regs for a float HFA, d-regs for
+      a double HFA); any other record of 16 bytes or less rides 1-2 x-registers. }
+    elem := -1; cnt := 0;
+    if HfaWalk(ty, elem, cnt) and (cnt >= 1) and (cnt <= 4) then begin
+      if elem = 0 then begin
+        for j := 0 to cnt - 1 do cls[j] := 2;
+        stride := 4;
+      end
+      else begin
+        for j := 0 to cnt - 1 do cls[j] := 1;
+        stride := 8;
+      end;
+      AbiAgg := cnt;
+      Exit;
+    end;
+    if sz > 16 then begin AbiAgg := -1; Exit; end;
+    n := (sz + 7) div 8;
+    for j := 0 to n - 1 do cls[j] := 0;
+    stride := 8;
+    AbiAgg := n;
+    Exit;
+  end;
+  { x86-64 SysV: 1-2 eightbytes, each INTEGER (gp) or SSE (xmm). }
+  if sz > 16 then begin AbiAgg := -1; Exit; end;
+  n := (sz + 7) div 8;
+  EbClassify(ty, 0, cls);
+  if cls[0] = -1 then cls[0] := 0;
+  if (n = 2) and (cls[1] = -1) then cls[1] := 0;
+  stride := 8;
+  AbiAgg := n;
+end;
+
+function IsByValRegStruct(ty: LongInt): Boolean;
+{ A record that crosses a cdecl FFI by value in registers rather than as a pointer. On an
+  LP64 target (x86-64 / arm64) a plain-data record of 16 bytes or less rides 1-2 argument
+  registers by the platform psABI: an all-integer record in general registers, a
+  floating-point record in SSE (x86-64) or HFA s/d registers (arm64), a mixed record split
+  across both.  On rv32 (ilp32) a record of 8 bytes or less rides 1-2 integer words.  A
+  larger record (the MEMORY class), a record with a managed or pointer field, and the
+  ColdFire / MIPS targets, whose ABI has no register struct class, are outside this: a
+  by-value record there would have to cross as a pointer.  See
+  doc/languages/kobold/kp-native-units.md. }
+var
+  cls: TAbiCls;
+  stride: LongInt;
+begin
+  IsByValRegStruct := AbiAgg(ty, cls, stride) > 0;
+end;
+
 function FailWideResult(sig: LongInt): Boolean;
 { True when a failable routine's result is returned through caller storage (an sret-style
   hidden pointer) rather than the integer value register: a real, a 64-bit value (int64 or a
@@ -8087,10 +8623,13 @@ end;
 
 function ParamByRef(s: LongInt): Boolean;
 { True when parameter s occupies a pointer slot rather than holding its value: an
-  aggregate (addressed in place), or a scalar `var`/`out` parameter (mode 1 or 3). }
+  aggregate (addressed in place), or a scalar `var`/`out` parameter (mode 1 or 3). A
+  cdecl callee's by-value register-struct parameter (RegStruct) is the exception: its
+  slot holds the struct inline, reconstructed from the argument registers, so it is
+  addressed in place like a local record, not through a pointer. }
 begin
   ParamByRef := (Syms[s].Kind = syParam) and
-    (IsAggregate(Syms[s].TypeId) or
+    ((IsAggregate(Syms[s].TypeId) and not Syms[s].RegStruct) or
      (Syms[s].ParamMode = 1) or (Syms[s].ParamMode = 3));
 end;
 
@@ -8116,10 +8655,11 @@ begin
   if (ty < 0) or (ty >= SemCount) then begin TypeAlign := 4; Exit; end;
   if IsPtrSized(ty) then begin TypeAlign := CurTarget.PtrBytes; Exit; end;   { handle / code pointer }
   case SemTypes[ty].Kind of
+    skInteger: TypeAlign := SemTypes[ty].IntBits div 8;   { byte 1, word 2, integer 4 }
     skSet: TypeAlign := 8;   { a small set is an i64 word }
     skArray: TypeAlign := TypeAlign(SemTypes[ty].Base);
     skRecord: begin
-      m := 4;
+      m := 1;   { the record aligns to its widest field; a sub-word-only record can be 1 or 2 }
       for i := 0 to High(SemTypes[ty].Subs) do
         if ((i > High(SemTypes[ty].PropGet)) or (SemTypes[ty].PropGet[i] = '')) and
            (TypeAlign(SemTypes[ty].Subs[i]) > m) then   { a computed field has no storage }
@@ -8143,6 +8683,7 @@ begin
   if (ty < 0) or (ty >= SemCount) then begin TypeSize := 4; Exit; end;
   if IsPtrSized(ty) then begin TypeSize := CurTarget.PtrBytes; Exit; end;   { handle / code pointer }
   case SemTypes[ty].Kind of
+    skInteger: TypeSize := SemTypes[ty].IntBits div 8;   { byte 1, word 2, integer 4 }
     skSet: TypeSize := SetWords(ty) * 8;   { a small set is one i64 word, a large set 2-4 }
     skArray: begin
       count := 1;
@@ -8364,6 +8905,33 @@ begin
   EmitLB := d;
 end;
 
+function EmitSizedLoad(const op: string; a: LongInt): LongInt;
+{ A sized, extending load from a guest address: LBS/LH/LHS (byte sign, half zero/sign).
+  The backends widen the loaded value to the register width, so the result is a normal
+  32-bit integer temp. }
+var
+  d: LongInt;
+begin
+  d := NewTemp;
+  PushI(op, d, a, -1, 0, -1, -1, 0, '');
+  EmitSizedLoad := d;
+end;
+
+procedure EmitSizedStore(const op: string; addr, val: LongInt);
+{ A sized store to a guest address: SB (one byte) or SH (two bytes), truncating the
+  32-bit value to the field width. }
+begin
+  PushI(op, -1, addr, val, 0, -1, -1, 0, '');
+end;
+
+function IsSubWordInt(ty: LongInt): Boolean;
+{ A sub-word integer type (byte/word/shortint/smallint): one or two bytes in storage,
+  so a record field, array element, or global of it is loaded and stored at that width. }
+begin
+  IsSubWordInt := (ty >= 0) and (ty < SemCount) and
+    (SemTypes[ty].Kind = skInteger) and (SemTypes[ty].IntBits < 32);
+end;
+
 function EmitUn(const op: string; a: LongInt): LongInt;
 var
   d: LongInt;
@@ -8481,6 +9049,15 @@ begin
   PushI('RETV2', -1, a, b, 0, -1, -1, 0, '');
 end;
 
+procedure EmitRetvAgg(a: LongInt);
+{ Return a by-value register struct: a is the struct's address.  The backend scatters each
+  of the function's return slots (ret_neb / ret_cls) out of the struct into the return
+  registers (rax:rdx or xmm0:xmm1 on x86-64, the x- or s/d registers on arm64, a0:a1 on
+  rv32).  A cdecl callee returning a small plain-data record emits this. }
+begin
+  PushI('RETV_AGG', -1, a, -1, 0, -1, -1, 0, '');
+end;
+
 procedure EmitFArgSingle(a: LongInt);
 { Pass a float argument to a single-precision parameter: the JIT narrows it to f32. }
 begin
@@ -8508,6 +9085,18 @@ begin
   d := NewTemp;
   PushI('FLD', d, a, -1, 0, -1, -1, 0, '');
   EmitFLD := d;
+end;
+
+function EmitFLDw(a, width: LongInt): LongInt;
+{ Load a float from addr at an explicit width: width 4 loads a single (f32, movss on
+  x86-64, an s-register load on arm64) for a float-HFA slot; width 0 loads a double
+  (movsd / d-register) for an SSE eightbyte.  Used by the by-value record ABI. }
+var
+  d: LongInt;
+begin
+  d := NewTemp;
+  PushI('FLD', d, a, -1, width, -1, -1, 0, '');
+  EmitFLDw := d;
 end;
 
 procedure EmitFSD(addr, val: LongInt);
@@ -8615,6 +9204,16 @@ begin
   if WideStore(ty) then EmitLoadScalar := EmitLD64(addr)
   else if IsSingle(ty) then EmitLoadScalar := EmitFLS(addr)
   else if IsRealType(ty) then EmitLoadScalar := EmitFLD(addr)
+  else if IsSubWordInt(ty) then begin
+    if SemTypes[ty].IntBits = 8 then begin
+      if SemTypes[ty].Signed then EmitLoadScalar := EmitSizedLoad('LBS', addr)
+      else EmitLoadScalar := EmitLB(addr);
+    end
+    else begin
+      if SemTypes[ty].Signed then EmitLoadScalar := EmitSizedLoad('LHS', addr)
+      else EmitLoadScalar := EmitSizedLoad('LH', addr);
+    end;
+  end
   else EmitLoadScalar := EmitLW(addr);
 end;
 
@@ -8625,12 +9224,25 @@ begin
   if WideStore(ty) then EmitST64(addr, val)
   else if IsSingle(ty) then EmitFSS(addr, val)
   else if IsRealType(ty) then EmitFSD(addr, val)
+  else if IsSubWordInt(ty) then begin
+    if SemTypes[ty].IntBits = 8 then EmitSizedStore('SB', addr, val)
+    else EmitSizedStore('SH', addr, val);
+  end
   else EmitSW(addr, val);
 end;
 
 procedure EmitArg64(a: LongInt);
 begin
   PushI('ARG64', -1, a, -1, 0, -1, -1, 0, '');
+end;
+
+procedure EmitArgMem(a, size: LongInt);
+{ Pass a `size`-byte aggregate by value on the stack: ARG_MEM copies the bytes at
+  address a onto the outgoing argument area.  Used when a by-value register record's
+  slots do not all fit in the remaining argument registers, so the psABI passes the
+  whole record in memory. }
+begin
+  PushI('ARG_MEM', -1, a, -1, size, -1, -1, 0, '');
 end;
 
 procedure EmitArgPtr(a: LongInt);
@@ -8662,6 +9274,10 @@ begin
   SetLength(IrFuncs[n].SlotSize, 0);
   SetLength(IrFuncs[n].ParamClass, 0);
   SetLength(IrFuncs[n].ParamFW, 0);
+  SetLength(IrFuncs[n].ParamNeb, 0);
+  SetLength(IrFuncs[n].ParamCls4, 0);
+  IrFuncs[n].RetNeb := 0;
+  SetLength(IrFuncs[n].RetCls4, 0);
   SetLength(IrFuncs[n].Insns, 0);
   IrFuncs[n].NInsns := 0;
   Inc(IrFuncCount);
@@ -8814,6 +9430,10 @@ function TypeRef(ty: LongInt): string;
 begin
   if ty < 0 then TypeRef := 'void'
   else if ty = tyInt then TypeRef := 'integer'
+  else if ty = tyByte then TypeRef := 'byte'
+  else if ty = tyWord then TypeRef := 'word'
+  else if ty = tyShortint then TypeRef := 'shortint'
+  else if ty = tySmallint then TypeRef := 'smallint'
   else if ty = tyInt64 then TypeRef := 'int64'
   else if ty = tyBool then TypeRef := 'boolean'
   else if ty = tyChar then TypeRef := 'char'
@@ -9210,7 +9830,7 @@ procedure EnsureBinderSlot(s: LongInt);
   written before it is read, so the first StoreSym/VarAddr touch allocates it. }
 begin
   if (s >= 0) and Syms[s].BinderVar and (Syms[s].Slot < 0) then
-    Syms[s].Slot := NewSlot(TypeSize(Syms[s].TypeId));
+    Syms[s].Slot := NewSlot(SlotBytes(Syms[s].TypeId));
 end;
 
 function VarAddr(s: LongInt): LongInt;
@@ -9223,9 +9843,12 @@ var
 begin
   EnsureBinderSlot(s);
   if Syms[s].Kind = syFunc then
-    { the current function's aggregate result: its storage is the caller's buffer, reached
-      through the hidden sret pointer that CurResultSlot holds }
-    VarAddr := EmitLDLAddr(CurResultSlot)
+    { the current function's aggregate result.  A by-value register-struct return (a cdecl
+      callee) builds the result in a local buffer, addressed by its own address; every other
+      aggregate result lives in the caller's buffer, reached through the hidden sret pointer
+      that CurResultSlot holds }
+    if CurRetRegStruct then VarAddr := EmitADL(CurResultSlot)
+    else VarAddr := EmitLDLAddr(CurResultSlot)
   else if Syms[s].WithBase >= 0 then begin
     baseNode := Syms[s].WithBase;
     recTy := Nodes[baseNode].Ty;
@@ -9383,6 +10006,16 @@ begin
   if ((pmode = 1) or (pmode = 3)) and not IsAggregate(effTy) then begin
     at := AddrOf(argNode);   { a scalar var/out arg passes its address }
     if CurTarget.PtrBytes = 8 then ak := 2 else ak := 0;   { a 64-bit address rides ARG64 }
+  end
+  else if (pmode = 0) and (sig >= 0) and (SemTypes[sig].Kind = skProc) and
+          SemTypes[sig].Cdecl and IsByValRegStruct(effTy) then begin
+    { a by-value small record to a cdecl callee crosses in registers.  Evaluate the
+      record to its address here (preserving argument order); EmitStagedArgs decomposes
+      it into one ARG per ABI register slot (ARG64 / ARG for an integer eightbyte or
+      word, FARG for an SSE eightbyte or HFA element), or a stack copy when the slots do
+      not all fit.  Marker ak = 5 carries the record address in `at`. }
+    at := LowerExpr(argNode);
+    ak := 5;
   end
   else if IsSingle(effTy) then begin
     at := AsFloat(argNode);   { widen an integer argument }
@@ -9577,25 +10210,98 @@ begin
   if ownRecv >= 0 then EmitRelease(ownRecv);
 end;
 
-procedure StageArgs(sig: LongInt; const argNodes: array of LongInt; var owned: TIntArray);
+function EmitRegArgs(const argt, argk, argeff: array of LongInt): LongInt;
+{ Emit the classified arguments in declaration order and return the number of machine
+  arguments emitted (one per scalar; one per register slot of a by-value record, or one
+  stack copy when the record does not fit).  A scalar goes by its staging kind; a by-value
+  record (ak = 5, argt its address, argeff its type) is decomposed by its ABI
+  classification.  On x86-64 / arm64 the running register tallies iu / fu decide, per the
+  psABI all-or-nothing rule, whether the record's slots all fit the remaining argument
+  registers; if not, the whole record is passed as a stack copy (ARG_MEM).  rv32 ilp32 has
+  no all-or-nothing rule: a record always decomposes into its words, which the selector
+  places in consecutive registers then the stack. }
+var
+  i, j, nslot, stride, iu, fu, nint, needI, needF, c, addr, emitted: LongInt;
+  cls: TAbiCls;
+  fits: Boolean;
+begin
+  iu := 0; fu := 0; emitted := 0;
+  if CurTarget.Arch = 'arm64' then nint := 8 else nint := 6;
+  for i := 0 to High(argt) do begin
+    if argk[i] = 5 then begin
+      nslot := AbiAgg(argeff[i], cls, stride);
+      if CurTarget.Arch = 'rv32' then begin
+        for j := 0 to nslot - 1 do begin
+          if j = 0 then addr := argt[i] else addr := AddOff(argt[i], j * stride);
+          EmitArg(EmitLW(addr));
+          emitted := emitted + 1;
+        end;
+      end
+      else begin
+        needI := 0; needF := 0;
+        for j := 0 to nslot - 1 do
+          if cls[j] = 0 then needI := needI + 1 else needF := needF + 1;
+        fits := (iu + needI <= nint) and (fu + needF <= 8);
+        if fits then begin
+          iu := iu + needI; fu := fu + needF;
+          for j := 0 to nslot - 1 do begin
+            if j = 0 then addr := argt[i] else addr := AddOff(argt[i], j * stride);
+            c := cls[j];
+            if c = 2 then EmitFArgSingle(EmitFLDw(addr, 4))
+            else if c = 1 then EmitFArg(EmitFLDw(addr, 0))
+            else EmitArg64(EmitLD64(addr));
+            emitted := emitted + 1;
+          end;
+        end
+        else begin
+          EmitArgMem(argt[i], TypeSize(argeff[i]));
+          emitted := emitted + 1;
+        end;
+      end;
+    end
+    else begin
+      case argk[i] of
+        1: begin EmitFArg(argt[i]); if fu < 8 then fu := fu + 1; end;
+        2: begin EmitArg64(argt[i]); if iu < nint then iu := iu + 1; end;
+        3: begin EmitFArgSingle(argt[i]); if fu < 8 then fu := fu + 1; end;
+      else
+        begin EmitArg(argt[i]); if iu < nint then iu := iu + 1; end;
+      end;
+      emitted := emitted + 1;
+    end;
+  end;
+  EmitRegArgs := emitted;
+end;
+
+function StageArgs(sig: LongInt; const argNodes: array of LongInt;
+  var owned: TIntArray): LongInt;
 { Lower and stage each argument for a call, coercing an integer to float where the
   parameter is real, and using ARG/FARG/ARG64 by the argument's class. A by-value handle
   argument that is an owned temporary is recorded in `owned`, so the caller releases it
-  after the call: the callee borrows the handle, it does not take ownership. }
+  after the call: the callee borrows the handle, it does not take ownership. Returns the
+  number of machine arguments emitted, which exceeds the source argument count when a
+  by-value record expands into several register slots. }
 var
-  na, i: LongInt;
-  argt, argk: array of LongInt;
+  na, np, i: LongInt;
+  argt, argk, argeff: array of LongInt;
 begin
   SetLength(owned, 0);
   na := Length(argNodes);
   SetLength(argt, na);
   SetLength(argk, na);
+  SetLength(argeff, na);
+  np := 0;
+  if (sig >= 0) and (SemTypes[sig].Kind = skProc) then
+    np := Length(SemTypes[sig].ParamTypes);
   { evaluate arguments right-to-left (the order FPC uses), while still emitting them in
     declaration order below. This keeps the compiler's own output identical whether it was
     built by FPC or by itself, which self-hosting's fixed point requires. }
-  for i := na - 1 downto 0 do
+  for i := na - 1 downto 0 do begin
     ClassifyArg(sig, i, argNodes[i], argt[i], argk[i], owned);
-  EmitStagedArgs(argt, argk);
+    if (argk[i] = 5) and (i < np) then argeff[i] := SemTypes[sig].ParamTypes[i]
+    else argeff[i] := -1;
+  end;
+  StageArgs := EmitRegArgs(argt, argk, argeff);
 end;
 
 procedure ReleaseOwnedArgs(const owned: TIntArray);
@@ -9613,14 +10319,33 @@ function LowerIndirectCall(fp, sig: LongInt; const argNodes: array of LongInt;
   `sig` for the argument classes and result. A procedural value carries no
   environment, so there are no capture arguments. }
 var
-  na, ret, d: LongInt;
+  na, ret, d, retbuf, rnslot, rstride, rslotbytes, rj: LongInt;
+  renc: Int64;
+  rcls: TAbiCls;
+  regRet: Boolean;
   owned: TIntArray;
 begin
-  na := Length(argNodes);
-  StageArgs(sig, argNodes, owned);
+  LowerIndirectCall := -1;
+  na := StageArgs(sig, argNodes, owned);   { machine arg count: a by-value record expands }
   ret := -1;
   if (sig >= 0) and (SemTypes[sig].Kind = skProc) then ret := SemTypes[sig].RetType;
-  if wantVal and (ret >= 0) then begin
+  { a cdecl proc value returning a small record brings it back in registers, not through
+    an sret buffer: CALLI_AGG makes the indirect call and scatters the result registers
+    into a hidden slot per the per-slot class encoded in imm, so the call evaluates to that
+    slot's address like any other aggregate value. Mirrors the direct CALL_AGG path. }
+  regRet := (ret >= 0) and (sig >= 0) and (SemTypes[sig].Kind = skProc) and
+            SemTypes[sig].Cdecl and IsByValRegStruct(ret);
+  if regRet then begin
+    rnslot := AbiAgg(ret, rcls, rstride);
+    rslotbytes := rnslot * 8;
+    if rslotbytes < 8 then rslotbytes := 8;
+    retbuf := NewSlot(rslotbytes);
+    renc := rnslot;
+    for rj := 0 to rnslot - 1 do renc := renc or (Int64(rcls[rj]) shl (3 + 2 * rj));
+    PushI('CALLI_AGG', -1, fp, -1, renc, retbuf, -1, na, '');
+    if wantVal then LowerIndirectCall := EmitADL(retbuf);
+  end
+  else if wantVal and (ret >= 0) then begin
     d := NewTemp;
     EmitTypedCall(d, ret, 'CALLI', '', fp, na);
     LowerIndirectCall := d;
@@ -10412,7 +11137,10 @@ function LowerDirectCall(s: LongInt; const argNodes: array of LongInt;
   variables passed as hidden by-pointer arguments, and result-class call emission. }
 var
   i, sig, ret, d, na, retbuf, z, extra, errSlot, nn: LongInt;
-  aggRet, wideFail: Boolean;
+  rnslot, rstride, rslotbytes, rj: LongInt;
+  renc: Int64;
+  rcls: TAbiCls;
+  aggRet, wideFail, regRet: Boolean;
   roffs, owned: TIntArray;
   snm: string;
 begin
@@ -10439,7 +11167,11 @@ begin
     buffer, zero its handle fields so a later copy-out and cleanup see nil, pass its address
     as a hidden final argument, and let the call evaluate to that address (an aggregate value
     is its address) }
-  aggRet := (ret >= 0) and IsAggregate(ret);
+  { a cdecl callee returns a small all-integer record in the integer register (SysV
+    rax / AAPCS64 x0), not through an sret buffer: the register path, below }
+  regRet := (ret >= 0) and (sig >= 0) and (SemTypes[sig].Kind = skProc) and
+            SemTypes[sig].Cdecl and IsByValRegStruct(ret);
+  aggRet := (ret >= 0) and IsAggregate(ret) and not regRet;
   { a failable real, 64-bit, or record result returns through the same caller buffer (sret),
     with the error in the integer return register rather than the CALL2 second register }
   wideFail := (errSlot >= 0) and FailWideResult(sig);
@@ -10456,7 +11188,7 @@ begin
   end
   else if wideFail then
     retbuf := NewSlot(TypeSize(ret));   { a real or 64-bit value buffer (no handle fields) }
-  StageArgs(sig, argNodes, owned);
+  na := StageArgs(sig, argNodes, owned);   { machine arg count: a by-value record expands }
   { a nested routine's captured variables follow as hidden by-pointer arguments }
   for i := 0 to High(RoutineCaptures[s]) do EmitArg(VarAddr(RoutineCaptures[s][i]));
   extra := Length(RoutineCaptures[s]);
@@ -10486,6 +11218,20 @@ begin
   else if aggRet then begin
     PushI('CALL', -1, -1, -1, 0, -1, -1, nn, snm);   { the callee fills the buffer }
     LowerDirectCall := EmitADL(retbuf);
+  end
+  else if regRet then begin
+    { the record comes back in registers (SysV rax:rdx / xmm0:xmm1, AAPCS64 x0:x1 or the
+      s/d HFA registers, rv32 a0:a1).  CALL_AGG makes the call and stores the result
+      registers into a hidden slot per the per-slot class encoded in imm, so the call
+      evaluates to that slot's address like any other aggregate value. }
+    rnslot := AbiAgg(ret, rcls, rstride);
+    rslotbytes := rnslot * 8;
+    if rslotbytes < 8 then rslotbytes := 8;
+    retbuf := NewSlot(rslotbytes);
+    renc := rnslot;
+    for rj := 0 to rnslot - 1 do renc := renc or (Int64(rcls[rj]) shl (3 + 2 * rj));
+    PushI('CALL_AGG', -1, -1, -1, renc, retbuf, -1, nn, snm);
+    if wantVal then LowerDirectCall := EmitADL(retbuf);
   end
   else if wantVal and (ret >= 0) then begin
     d := NewTemp;
@@ -12747,7 +13493,7 @@ begin
         if i = s then ord := cnt;
         Inc(cnt);
       end;
-    if cnt > 1 then Syms[s].DisambName := Syms[s].Name + '$' + IntToStr(ord)
+    if cnt > 1 then Syms[s].DisambName := LinkNameOf(s) + '$' + IntToStr(ord)
     else Syms[s].DisambName := '';
     Syms[s].DisambDone := True;
   end;
@@ -12781,9 +13527,15 @@ end;
 
 function SlotBytes(ty: LongInt): LongInt;
 { Byte size of a slot: the value's size (a real is 8, a scalar 4, an aggregate
-  its full byte size). }
+  its full byte size). A sub-word integer local keeps a full word slot: its value
+  lives there as a 32-bit integer loaded and stored whole (the 1- or 2-byte width
+  applies to aggregate and global storage, not a register-resident local). }
 begin
-  SlotBytes := TypeSize(ty);
+  if (ty >= 0) and (ty < SemCount) and
+     (SemTypes[ty].Kind = skInteger) and (SemTypes[ty].IntBits < 32) then
+    SlotBytes := 4
+  else
+    SlotBytes := TypeSize(ty);
 end;
 
 procedure AssignBlockSlots(block: LongInt);
@@ -12834,9 +13586,11 @@ end;
 procedure LowerRoutine(node: LongInt);
 { node is nkProcDecl or nkFuncDecl with a body. }
 var
-  isFunc, realRet, wideRet, byref, failRet, failWide: Boolean;
-  s, i, j, prm, sym, sl, block, comp, pty, retTy, z, rsym, savedFunc, failPtrSlot: LongInt;
-  savedLabelBase: LongInt;
+  isFunc, realRet, wideRet, byref, failRet, failWide, cdeclCallee, regStructParam,
+    retRegStruct: Boolean;
+  s, i, j, k, prm, sym, sl, block, comp, pty, retTy, z, rsym, savedFunc, failPtrSlot: LongInt;
+  savedLabelBase, neb, stride, aggBytes: LongInt;
+  cls: TAbiCls;
   fname: string;
   hslots, hoffs: TIntArray;
 begin
@@ -12844,6 +13598,11 @@ begin
   if block < 0 then Exit;   { forward or external: no body to lower }
   s := Nodes[node].Sym;
   isFunc := Nodes[node].Kind = nkFuncDecl;
+  { a cdecl routine defined in Kobold (its body is here) is a C callee: a C caller passes and
+    returns a small plain-data record in registers per the platform psABI, so its by-value
+    record parameters are reconstructed from the argument registers and a record result is
+    scattered into the return registers (Phase 3, the callee side of the by-value FFI). }
+  cdeclCallee := (Syms[s].TypeId >= 0) and SemTypes[Syms[s].TypeId].Cdecl;
   failRet := (Syms[s].TypeId >= 0) and SemTypes[Syms[s].TypeId].Failable;
   { a bare function name in the body denotes the result variable; lowering reads and writes
     the result slot when it sees CurFuncSym, so track the routine being lowered }
@@ -12863,6 +13622,7 @@ begin
   if Nodes[node].A >= 0 then rsym := Nodes[Nodes[node].A].Sym;
   CurFn := AddIrFunc(fname, True);
   CurResultSlot := -1;
+  CurRetRegStruct := False;
   CurErrorSlot := -1;
   failPtrSlot := -1;
   FailCaptureSlot := -1;
@@ -12883,6 +13643,9 @@ begin
     IrFuncs[CurFn].ParamClass[prm] := 0;
     SetLength(IrFuncs[CurFn].ParamFW, prm + 1);
     IrFuncs[CurFn].ParamFW[prm] := 0;
+    SetLength(IrFuncs[CurFn].ParamNeb, prm + 1);
+    IrFuncs[CurFn].ParamNeb[prm] := 0;
+    SetLength(IrFuncs[CurFn].ParamCls4, (prm + 1) * 4);
     Inc(prm);
   end;
   for i := 0 to High(Nodes[node].Kids) do
@@ -12890,18 +13653,41 @@ begin
       for j := 0 to High(Nodes[Nodes[node].Kids[i]].Kids) do begin
         sym := Nodes[Nodes[Nodes[node].Kids[i]].Kids[j]].Sym;
         if sym >= 0 then pty := Syms[sym].TypeId else pty := -1;
+        { a cdecl callee's by-value register struct: its slot holds the reconstructed struct
+          (one or more argument registers scattered in), so it is addressed in place, not by
+          reference.  AbiAgg gives the slot count, per-slot classes, and stride. }
+        regStructParam := cdeclCallee and (sym >= 0) and (Syms[sym].ParamMode = 0) and
+          IsByValRegStruct(pty);
+        if sym >= 0 then Syms[sym].RegStruct := regStructParam;
         { a by-reference parameter (an aggregate, or a scalar var/out) is passed as
           a pointer: its slot holds the address, and the pointer travels in a
           general register even when the pointee is real or single }
         byref := (sym >= 0) and ParamByRef(sym);
-        if byref then sl := NewSlot(CurTarget.PtrBytes) else sl := NewSlot(SlotBytes(pty));
+        neb := 0;
+        if regStructParam then begin
+          neb := AbiAgg(pty, cls, stride);
+          aggBytes := neb * stride;
+          if aggBytes < TypeSize(pty) then aggBytes := TypeSize(pty);
+          sl := NewSlot(aggBytes);
+        end
+        else if byref then sl := NewSlot(CurTarget.PtrBytes)
+        else sl := NewSlot(SlotBytes(pty));
         if sym >= 0 then Syms[sym].Slot := sl;
         SetLength(IrFuncs[CurFn].ParamClass, prm + 1);
-        if (not byref) and IsRealType(pty) then IrFuncs[CurFn].ParamClass[prm] := 1
+        if (not byref) and (not regStructParam) and IsRealType(pty) then
+          IrFuncs[CurFn].ParamClass[prm] := 1
         else IrFuncs[CurFn].ParamClass[prm] := 0;
         SetLength(IrFuncs[CurFn].ParamFW, prm + 1);
-        if (not byref) and IsSingle(pty) then IrFuncs[CurFn].ParamFW[prm] := 1
+        if (not byref) and (not regStructParam) and IsSingle(pty) then
+          IrFuncs[CurFn].ParamFW[prm] := 1
         else IrFuncs[CurFn].ParamFW[prm] := 0;
+        SetLength(IrFuncs[CurFn].ParamNeb, prm + 1);
+        SetLength(IrFuncs[CurFn].ParamCls4, (prm + 1) * 4);
+        if regStructParam then begin
+          IrFuncs[CurFn].ParamNeb[prm] := neb;
+          for k := 0 to 3 do IrFuncs[CurFn].ParamCls4[prm * 4 + k] := cls[k];
+        end
+        else IrFuncs[CurFn].ParamNeb[prm] := 0;
         Inc(prm);
       end;
   { captured enclosing variables are hidden by-pointer parameters after the
@@ -12913,18 +13699,28 @@ begin
     IrFuncs[CurFn].ParamClass[prm] := 0;
     SetLength(IrFuncs[CurFn].ParamFW, prm + 1);
     IrFuncs[CurFn].ParamFW[prm] := 0;
+    SetLength(IrFuncs[CurFn].ParamNeb, prm + 1);
+    IrFuncs[CurFn].ParamNeb[prm] := 0;
+    SetLength(IrFuncs[CurFn].ParamCls4, (prm + 1) * 4);
     Inc(prm);
   end;
+  { a cdecl callee returning a small plain-data record hands it back in the return registers,
+    not through an sret buffer: the result is built in a local slot and scattered into the
+    registers (RETV_AGG) at the return.  A failable record result keeps the sret path. }
+  retRegStruct := cdeclCallee and isFunc and (not failRet) and IsByValRegStruct(retTy);
   { an aggregate result is returned through caller storage (sret): a hidden final pointer
     parameter carries the caller's buffer address, and the result is addressed through it. A
     failable real or 64-bit result takes the same hidden pointer (failPtrSlot), with its value
     held in a local slot and stored through the pointer at the return. }
-  if isFunc and IsAggregate(retTy) then begin
+  if isFunc and IsAggregate(retTy) and not retRegStruct then begin
     CurResultSlot := NewSlot(CurTarget.PtrBytes);   { the sret buffer address }
     SetLength(IrFuncs[CurFn].ParamClass, prm + 1);
     IrFuncs[CurFn].ParamClass[prm] := 0;
     SetLength(IrFuncs[CurFn].ParamFW, prm + 1);
     IrFuncs[CurFn].ParamFW[prm] := 0;
+    SetLength(IrFuncs[CurFn].ParamNeb, prm + 1);
+    IrFuncs[CurFn].ParamNeb[prm] := 0;
+    SetLength(IrFuncs[CurFn].ParamCls4, (prm + 1) * 4);
     Inc(prm);
   end
   else if failWide then begin
@@ -12933,12 +13729,25 @@ begin
     IrFuncs[CurFn].ParamClass[prm] := 0;
     SetLength(IrFuncs[CurFn].ParamFW, prm + 1);
     IrFuncs[CurFn].ParamFW[prm] := 0;
+    SetLength(IrFuncs[CurFn].ParamNeb, prm + 1);
+    IrFuncs[CurFn].ParamNeb[prm] := 0;
+    SetLength(IrFuncs[CurFn].ParamCls4, (prm + 1) * 4);
     Inc(prm);
   end;
   IrFuncs[CurFn].Nparams := prm;
   AssignBlockSlots(block);
-  if isFunc and not IsAggregate(retTy) then begin
-    if realRet or wideRet then CurResultSlot := NewSlot(8)
+  if isFunc and (not IsAggregate(retTy) or retRegStruct) then begin
+    if retRegStruct then begin
+      neb := AbiAgg(retTy, cls, stride);
+      aggBytes := neb * stride;
+      if aggBytes < TypeSize(retTy) then aggBytes := TypeSize(retTy);
+      CurResultSlot := NewSlot(aggBytes);   { a local buffer holding the result struct }
+      CurRetRegStruct := True;
+      IrFuncs[CurFn].RetNeb := neb;
+      SetLength(IrFuncs[CurFn].RetCls4, 4);
+      for k := 0 to 3 do IrFuncs[CurFn].RetCls4[k] := cls[k];
+    end
+    else if realRet or wideRet then CurResultSlot := NewSlot(8)
     else CurResultSlot := NewSlot(4);
   end;
   { a failable routine reports its error beside the value; the slot defaults to 0 (success),
@@ -12997,7 +13806,8 @@ begin
     else EmitRetv2(EmitLIC(0), EmitLDL(CurErrorSlot));
   end
   else if isFunc then
-    if realRet then EmitFRetv(EmitFLDL(CurResultSlot), IsSingle(retTy))
+    if CurRetRegStruct then EmitRetvAgg(EmitADL(CurResultSlot))
+    else if realRet then EmitFRetv(EmitFLDL(CurResultSlot), IsSingle(retTy))
     else if wideRet then EmitRetv64(EmitLDL64(CurResultSlot))
     else EmitRetv(EmitLDL(CurResultSlot))
   else EmitRet;
@@ -13910,9 +14720,15 @@ begin
       if sharedFlag then line := line + ' shared';
       InterfaceEntryFromSym := line;
     end;
-    syProc, syFunc:
-      InterfaceEntryFromSym := '    .routine ' + Syms[s].Name + ' ' +
-        ProcSigRef(Syms[s].TypeId);
+    syProc, syFunc: begin
+      line := '    .routine ' + Syms[s].Name + ' ' + ProcSigRef(Syms[s].TypeId);
+      { carry the emitted symbol when it is not the bare name, so a consumer calls
+        the routine by the same `<unit>.<name>` symbol the unit defines (and a
+        re-exported routine keeps its origin unit's symbol) }
+      if EmittedRoutineName(s) <> Syms[s].Name then
+        line := line + ' link ' + EmittedRoutineName(s);
+      InterfaceEntryFromSym := line;
+    end;
   end;
 end;
 
@@ -14018,6 +14834,8 @@ procedure kpbp_func_begin(const name: string; isLocal, isVariadic, nparams, nslo
 procedure kpbp_slotsize(size: LongInt); cdecl; external;
 procedure kpbp_paramclass(cls: LongInt); cdecl; external;
 procedure kpbp_paramfw(fw: LongInt); cdecl; external;
+procedure kpbp_paramagg(idx, neb, c0, c1, c2, c3: LongInt); cdecl; external;
+procedure kpbp_retagg(neb, c0, c1, c2, c3: LongInt); cdecl; external;
 procedure kpbp_insn(const mnem: string; dst, a, b: LongInt; imm: Int64; slot, lab, nargs: LongInt; const sym: string); cdecl; external;
 function kpbp_asm(const args: string): LongInt; cdecl; external;
 procedure kpbp_func_end; cdecl; external;
@@ -14095,6 +14913,17 @@ begin
         for j := 0 to IrFuncs[fi].Nparams - 1 do
           kpbp_paramfw(IrFuncs[fi].ParamFW[j]);
     end;
+    { a cdecl callee's by-value register-struct parameters and record result: the per-slot
+      ABI classes, beyond the scalar paramclass channel (Phase 3, the by-value FFI callee) }
+    if Length(IrFuncs[fi].ParamNeb) = IrFuncs[fi].Nparams then
+      for j := 0 to IrFuncs[fi].Nparams - 1 do
+        if IrFuncs[fi].ParamNeb[j] > 0 then
+          kpbp_paramagg(j, IrFuncs[fi].ParamNeb[j],
+            IrFuncs[fi].ParamCls4[j * 4], IrFuncs[fi].ParamCls4[j * 4 + 1],
+            IrFuncs[fi].ParamCls4[j * 4 + 2], IrFuncs[fi].ParamCls4[j * 4 + 3]);
+    if IrFuncs[fi].RetNeb > 0 then
+      kpbp_retagg(IrFuncs[fi].RetNeb, IrFuncs[fi].RetCls4[0], IrFuncs[fi].RetCls4[1],
+        IrFuncs[fi].RetCls4[2], IrFuncs[fi].RetCls4[3]);
     for j := 0 to IrFuncs[fi].NInsns - 1 do begin
       if IrFuncs[fi].Insns[j].IsAsm then begin
         if kpbp_asm(IrFuncs[fi].Insns[j].Args) <> 0 then Inc(ErrCount);

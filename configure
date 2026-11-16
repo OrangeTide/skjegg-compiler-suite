@@ -17,17 +17,24 @@
 set -u
 
 PKG_CONFIG="${PKG_CONFIG:-pkg-config}"
+CC="${CC:-cc}"
 OUT=config.mk
 
 with_sdl3=auto
+with_libcurl=auto
+with_raylib=auto
 
 for arg in "$@"; do
     case $arg in
         --with-sdl3=*) with_sdl3=${arg#*=} ;;
+        --with-libcurl=*) with_libcurl=${arg#*=} ;;
+        --with-raylib=*) with_raylib=${arg#*=} ;;
         --help | -h)
             cat <<'EOF'
 Usage: ./configure [options]
-  --with-sdl3=yes|no    force the SDL3 unit on (fail if absent) or off
+  --with-sdl3=yes|no     force the SDL3 unit on (fail if absent) or off
+  --with-libcurl=yes|no  force the curl unit on (fail if absent) or off
+  --with-raylib=yes|no   force the raylib unit on (fail if absent) or off
 Environment:
   PKG_CONFIG            pkg-config program (default: pkg-config)
 EOF
@@ -79,7 +86,61 @@ detect_pkg() {
     fi
 }
 
+# detect_raylib force : like detect_pkg, but raylib often installs with no .pc
+# file (a from-source `make install` drops the static lib and headers under
+# /usr/local). Try pkg-config first, then probe the header and the static link
+# line directly. A static libraylib.a needs its transitive deps named here.
+detect_raylib() {
+    _force=$1
+    if [ "$_force" = no ]; then
+        summary="$summary
+  raylib: off (--with-raylib=no)"
+        return 0
+    fi
+    if "$PKG_CONFIG" --exists raylib 2>/dev/null; then
+        _ver=$("$PKG_CONFIG" --modversion raylib 2>/dev/null)
+        {
+            echo "HAVE_RAYLIB := 1"
+            echo "RAYLIB_CFLAGS := $("$PKG_CONFIG" --cflags raylib)"
+            echo "RAYLIB_LIBS := $("$PKG_CONFIG" --libs raylib)"
+        } >> "$tmp"
+        summary="$summary
+  raylib: yes ($_ver, pkg-config)"
+        return 0
+    fi
+    # No .pc: probe the compiler. /usr/local is on the default search path for
+    # most toolchains; add it explicitly in case it is not.
+    _rl_cflags="-I/usr/local/include"
+    _rl_libs="-L/usr/local/lib -lraylib -lGL -lm -lpthread -ldl -lrt -lX11"
+    _probe="$OUT.probe.$$.c"
+    _probe_bin="$OUT.probe.$$"
+    cat > "$_probe" <<'PROBE'
+#include "raylib.h"
+int main(void) { SetTraceLogLevel(LOG_NONE); return 0; }
+PROBE
+    if $CC $_rl_cflags "$_probe" -o "$_probe_bin" $_rl_libs >/dev/null 2>&1; then
+        {
+            echo "HAVE_RAYLIB := 1"
+            echo "RAYLIB_CFLAGS := $_rl_cflags"
+            echo "RAYLIB_LIBS := $_rl_libs"
+        } >> "$tmp"
+        summary="$summary
+  raylib: yes (probed, no pkg-config)"
+    else
+        if [ "$_force" = yes ]; then
+            echo "configure: --with-raylib=yes but raylib's header and static library could not be linked" >&2
+            rm -f "$_probe" "$_probe_bin"
+            exit 1
+        fi
+        summary="$summary
+  raylib: no"
+    fi
+    rm -f "$_probe" "$_probe_bin"
+}
+
 detect_pkg SDL3 sdl3 "$with_sdl3"
+detect_pkg LIBCURL libcurl "$with_libcurl"
+detect_raylib "$with_raylib"
 
 mv "$tmp" "$OUT"
 trap - EXIT INT

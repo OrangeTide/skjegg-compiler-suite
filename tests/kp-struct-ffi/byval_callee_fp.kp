@@ -1,0 +1,54 @@
+{ By-value floating-point small-struct FFI, the callee side (Phase 3): a Kobold `cdecl`
+  routine takes or returns a float-bearing record by value, so C calls it back across the
+  floating-point register ABI.  On x86-64 (SysV) a float eightbyte rides an SSE register;
+  on arm64 (AAPCS64) a homogeneous float aggregate rides the s registers.  The Kobold
+  routine reconstructs the record from those registers and scatters a record result into
+  them.  The glue (sfhost.c) receives each routine as a C function pointer and calls it
+  with a by-value record.  Skipped on rv32 (its soft-float ilp32 ABI disagrees with the zig
+  hard-float glue on how a float-bearing struct crosses). }
+program byval_callee_fp;
+
+type
+  FPoint = record x, y: single; end;              { 8 bytes: one SSE eightbyte / a 2-float HFA }
+  FColor = record r, g, b, a: single; end;        { 16 bytes: two SSE eightbytes / a 4-float HFA }
+  FPFn = function(p: FPoint): single cdecl;
+  FCFn = function(c: FColor): single cdecl;
+  MkFPFn = function(a: integer; b: integer): FPoint cdecl;
+  MkFCFn = function(r: integer; g: integer; b: integer; a: integer): FColor cdecl;
+
+function CallFP(f: FPFn): single; cdecl; external name 'cb_call_fp';
+function CallFC(f: FCFn): single; cdecl; external name 'cb_call_fc';
+function CallMkFP(f: MkFPFn): single; cdecl; external name 'cb_call_mkfp';
+function CallMkFC(f: MkFCFn): single; cdecl; external name 'cb_call_mkfc';
+
+{ the Kobold callbacks: `cdecl`, so C's floating-point register ABI reaches them }
+function SumFP(p: FPoint): single; cdecl;
+begin
+  SumFP := p.x + p.y;
+end;
+
+function SumFC(c: FColor): single; cdecl;
+begin
+  SumFC := c.r + c.g + c.b + c.a;
+end;
+
+function MakeFP(a: integer; b: integer): FPoint; cdecl;
+begin
+  MakeFP.x := a;
+  MakeFP.y := b;
+end;
+
+function MakeFC(r: integer; g: integer; b: integer; a: integer): FColor; cdecl;
+begin
+  MakeFC.r := r;
+  MakeFC.g := g;
+  MakeFC.b := b;
+  MakeFC.a := a;
+end;
+
+begin
+  writeln('fp=', CallFP(SumFP));         { C passes a 3,4 float record -> 7 }
+  writeln('fc=', CallFC(SumFC));         { C passes a 10,20,30,40 float record -> 100 }
+  writeln('mkfp=', CallMkFP(MakeFP));    { Kobold returns a 1,2 float record, C sums -> 3 }
+  writeln('mkfc=', CallMkFC(MakeFC));    { Kobold returns a 1,2,3,4 float record, C sums -> 10 }
+end.

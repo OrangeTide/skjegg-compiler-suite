@@ -265,7 +265,7 @@ CC_SRC_A64 := $(CC_FE) $(CC_CPP) $(IR_SRC) $(BE_A64_SEL)
 CC_SRC_RV := $(CC_FE) $(CC_CPP) $(IR_SRC) $(BE_RV)
 CC_SRC_MIPS := $(CC_FE) $(CC_CPP) $(IR_SRC) $(BE_MIPS)
 
-build/skj-cc: $(CC_SRC) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h ir/exepath.h | build
+build/skj-cc: $(CC_SRC) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h ir/target.h ir/exepath.h | build
 	$(CC) $(CFLAGS) -DCC_M68K $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC)
 
 # The cross C compilers, keyed by the tool-name suffix so one pattern rule
@@ -290,7 +290,7 @@ cc_flags_rv          := -DCC_RISCV $(SKJ_INC_DEF) -Icc -Icpp -Iir
 cc_flags_mips        := -DCC_MIPS $(SKJ_INC_DEF) -Icc -Icpp -Iir
 cc_flags_mips-sf     := -DCC_MIPS -DMIPS_SOFTFLOAT $(SKJ_INC_DEF) -Icc -Icpp -Iir
 
-build/skj-cc-%: $$(cc_src_$$*) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h ir/exepath.h $(wildcard backend/*.h) | build
+build/skj-cc-%: $$(cc_src_$$*) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h ir/target.h ir/exepath.h $(wildcard backend/*.h) | build
 	$(CC) $(CFLAGS) $(cc_flags_$*) -o $@ $(cc_src_$*)
 
 ## skjcc: the cross driver.  One command runs the per-target cc -> as -> ld
@@ -315,7 +315,7 @@ JIT_FE  := cc/lex.c cc/parse.c cc/type.c cc/lower.c
 JIT_SRC := jit/main.c jit/jit_common.c jit/jit_arena.c jit/jit_x86.c jit/emit_x86.c jit/code.c \
            jit/call_guest_x86.S \
            backend/x86_select.c backend/regalloc_x86.c $(JIT_FE) $(CC_CPP) $(IR_SRC)
-build/skj-jit: $(JIT_SRC) cc/cc.h jit/jit_common.h jit/jit_arena.h jit/jit_x86.h jit/emit_x86.h jit/code.h backend/mc.h backend/x86_select.h ir/ir.h Makefile build/version.h | build
+build/skj-jit: $(JIT_SRC) cc/cc.h jit/jit_common.h jit/jit_arena.h jit/jit_x86.h jit/emit_x86.h jit/code.h backend/mc.h backend/x86_select.h ir/ir.h ir/target.h Makefile build/version.h | build
 	$(CC) $(CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -DCC_PSABI -DCC_STRUCT_ABI $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ijit -Ibackend -o $@ $(JIT_SRC)
 
 ## Run the C suite in-process through skj-jit and compare exit codes, the
@@ -633,7 +633,7 @@ KP_RT_A64 := kobold/kpm.c kobold/str_core.c kobold/str_fmt.c kobold/dynarr.c kob
              backend/arm64_select.c backend/regalloc_arm64.c $(IR_SRC)
 KP_HDRS_A64 := kobold/kpm.h kobold/str.h kobold/dynarr.h kobold/map.h kobold/rt_glue.h kobold/obj.h kobold/gheap_core.h kobold/co.h kobold/kp_rt_io.h \
                kobold/handle.h kobold/lowmem.h kobold/kp_host.h jit/jit_common.h jit/jit_arena.h fs/fs.h fs/hostfs.h \
-               jit/emit_arm64.h jit/code.h backend/arm64_mc.h backend/arm64_select.h ir/ir.h
+               jit/emit_arm64.h jit/code.h backend/arm64_mc.h backend/arm64_select.h ir/ir.h ir/target.h
 KP_CFLAGS_A64 := $(CFLAGS) -DKP_FREESTANDING -DKP_REAL=double -DKP_GLUE_HOSTED -Iir -Ijit -Ibackend -Ikobold
 
 ## ColdFire shares the arm64/rv flag set (no -DX86_BITS); it cross-builds the
@@ -676,7 +676,7 @@ check-kp: build/skj-kpc
 ## IR core only (no backend).  Built -DX86_BITS=64, matching skj-kpc, so it reads
 ## the x86-64 modules skj-kpc emits with -D KP_TARGET_X64.
 build/skj-kpm-roundtrip: tests/kpm_roundtrip.c kobold/kpm.c kobold/kpm_write.c $(IR_SRC) \
-                         kobold/kpm.h kobold/kp_aot.h ir/ir.h Makefile | build
+                         kobold/kpm.h kobold/kp_aot.h ir/ir.h ir/target.h Makefile | build
 	$(CC) $(CFLAGS) -DX86_BITS=64 -Iir -Ibackend -Ikobold -o $@ \
 	    tests/kpm_roundtrip.c kobold/kpm.c kobold/kpm_write.c $(IR_SRC)
 
@@ -702,7 +702,7 @@ check-kpm-roundtrip: build/skj-kpm-roundtrip build/skj-kpc build/skj-kpc
 ## builder, emit pipeline, and the x86-64 selector backend.
 build/skj-kpbuild-selftest: tests/kpbuild_selftest.c kobold/kpbuild.c kobold/kpm.c \
                             kobold/kp_aot.c $(IR_SRC) $(BE_X64_SEL) \
-                            kobold/kpbuild.h kobold/kpm.h kobold/kp_aot.h ir/ir.h Makefile | build
+                            kobold/kpbuild.h kobold/kpm.h kobold/kp_aot.h ir/ir.h ir/target.h Makefile | build
 	$(CC) $(CFLAGS) -DX86_BITS=64 -Iir -Ibackend -Ikobold -o $@ \
 	    tests/kpbuild_selftest.c kobold/kpbuild.c kobold/kpm.c kobold/kp_aot.c \
 	    $(IR_SRC) $(BE_X64_SEL)
@@ -1000,6 +1000,37 @@ check-kp-callback-arm64: build/skj-kpc-arm64 build/libkpaot-arm64.a $(A64_ASM_DE
 	    KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" \
 	    KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
 	    sh tests/run-kp-callback-tests.sh
+
+## ---- struct-FFI boundary (tests/kp-struct-ffi) ----
+## A record crosses the C FFI by reference, as a pointer: a `var` record is a C
+## `T*`, a `const` record a `const T*`.  The positive test round-trips a record
+## through C glue (read, write, mixed field layout, single-precision fields); the
+## err_* tests pin the guard that rejects a by-value record argument or result
+## (no implemented C ABI).  No compiler change was needed for the by-reference
+## path; see doc/languages/kobold/kp-native-units.md.
+PHONY += check-kp-struct-ffi
+check-kp-struct-ffi: build/skj-kpc build/libkpaot.a $(X64_ASM_DEP)
+	@KPAOT=build/skj-kpc KPAOTLIB=build/libkpaot.a \
+	    KPAOTCC="$(CC)" KPAOTAS="$(X64_ASM) $(X64_ASMFLAGS)" \
+	    sh tests/run-kp-struct-ffi-tests.sh
+
+PHONY += check-kp-struct-ffi-arm64
+check-kp-struct-ffi-arm64: build/skj-kpc-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP)
+	@KPAOT=build/skj-kpc-arm64 KPAOTLIB=build/libkpaot-arm64.a \
+	    KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" \
+	    KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
+	    sh tests/run-kp-struct-ffi-tests.sh
+
+## The rv32 glue is built with zig's riscv32-linux-musl, which is hard-float
+## (ilp32d), while skjegg's rv backend uses the soft-float ilp32 convention: the two
+## agree on the integer ABI (so the by-value integer-struct tests run) but not on
+## how a float crosses a call, so the float-result test is skipped here.
+PHONY += check-kp-struct-ffi-rv
+check-kp-struct-ffi-rv: build/skj-kpc-rv build/libkpaot-rv.a
+	@KPAOT=build/skj-kpc-rv KPAOTLIB=build/libkpaot-rv.a \
+	    KPAOTCC="$(RVJIT_CC)" KPAOTQEMU="$(QEMU_RV)" KPAOTNOPIE="" \
+	    KP_SF_SKIP="floatret byval_fp byval_callee_fp byval_ind_fp" \
+	    sh tests/run-kp-struct-ffi-tests.sh
 
 ## ---- file I/O provided as a Kobold unit (tests/kp-files) ----
 ## The `files` library unit (kobold/lib/files.pas) gives a program whole-file
@@ -1324,6 +1355,356 @@ check-kp-osthreads-arm64: build/kp-osthreads-arm64/std/osthreads.a build/skj-kpc
 	   && echo "kp-osthreads-arm64: 1 passed (real OS threads run a Kobold worker)" \
 	   || { echo "FAIL check-kp-osthreads-arm64"; echo "-- out --"; cat build/kp-osthreads-arm64/out.txt; \
 	        echo "-- err --"; cat build/kp-osthreads-arm64/err.txt; exit 1; }
+
+## ---- stb_image: an image loader as a native-backed unit (tests/kp-stb-image) ----
+## A thin binding to stb_image.h, the public-domain single-header image loader
+## vendored at third_party/stb_image.h.  Because the header is vendored the unit
+## has no external dependency and is built unconditionally, like std.osthreads; its
+## glue (stb_image_glue.c) carries the one stb implementation and decodes a Kobold
+## string path through kp_str_bytes, so it is compiled against the freestanding
+## runtime headers (-DKP_FREESTANDING).  The -lm stb's decoders need rides in the
+## stb_image.link sidecar.  Ahead-of-time only.
+## The glue decodes Kobold strings, so kp_gptr must match the compiling
+## toolchain's pointer width (LP64 on x86-64/arm64, ILP32 on a 32-bit cross).
+## target.h derives SKJ_LP64 from the compiler when no ISA selector is set, so
+## the glue needs no -DSKJ_LP64 here; a wrong width is a build error, not a
+## silently truncated guest pointer.
+STB_GLUE_CFLAGS := -std=c99 -O2 -DKP_FREESTANDING -Ithird_party -Ikobold -Iir
+
+build/kp-stb-image/stb_image.a: kobold/lib/stb_image.pas kobold/lib/stb_image_glue.c ir/target.h \
+                                third_party/stb_image.h build/skj-kpc build/skj-ar | build
+	@mkdir -p build/kp-stb-image
+	$(CC) $(STB_GLUE_CFLAGS) -c kobold/lib/stb_image_glue.c -o build/kp-stb-image/stb_image_glue.o
+	./build/skj-kpc --emit-kpm kobold/lib/stb_image.pas -o build/kp-stb-image/stb_image.kpm
+	sh tests/kp-archive.sh build/skj-ar $@ build/kp-stb-image/stb_image.kpm build/kp-stb-image/stb_image_glue.o
+	printf -- '-lm\n' > build/kp-stb-image/stb_image.link
+	@echo "  UNIT     stb_image.a (+ stb_image.link)"
+
+build/kp-stb-image-arm64/stb_image.a: kobold/lib/stb_image.pas kobold/lib/stb_image_glue.c ir/target.h \
+                                      third_party/stb_image.h build/skj-kpc-arm64 build/skj-ar | build
+	@mkdir -p build/kp-stb-image-arm64
+	$(A64_CC) $(STB_GLUE_CFLAGS) -c kobold/lib/stb_image_glue.c -o build/kp-stb-image-arm64/stb_image_glue.o
+	./build/skj-kpc-arm64 --emit-kpm kobold/lib/stb_image.pas -o build/kp-stb-image-arm64/stb_image.kpm
+	sh tests/kp-archive.sh build/skj-ar $@ build/kp-stb-image-arm64/stb_image.kpm build/kp-stb-image-arm64/stb_image_glue.o
+	printf -- '-lm\n' > build/kp-stb-image-arm64/stb_image.link
+	@echo "  UNIT     stb_image.a arm64 (+ stb_image.link)"
+
+all: build/kp-stb-image/stb_image.a
+
+PHONY += check-kp-stb-image
+check-kp-stb-image: build/kp-stb-image/stb_image.a build/skj-kpc build/libkpaot.a build/skj-as-x86-64 | build
+	@echo "== check-kp-stb-image: decode a known image through the stb_image unit =="
+	@./build/skj-kpc -U build/kp-stb-image --emit-kpm tests/kp-stb-image/stbdemo.kp -o build/kp-stb-image/stbdemo.kpm
+	@KOBOLD_UNITS=$(CURDIR)/build/kp-stb-image KPAOT=build/skj-kpc KPAOTLIB=build/libkpaot.a \
+	   KPAOTCC="$(CC)" KPAOTAS="build/skj-as-x86-64" \
+	   sh kobold/aot-run.sh build/kp-stb-image/stbdemo.kpm </dev/null \
+	   > build/kp-stb-image/out.txt 2>build/kp-stb-image/err.txt; \
+	 cmp -s build/kp-stb-image/out.txt tests/kp-stb-image/stbdemo.expected \
+	   && echo "kp-stb-image: 1 passed (decode a 3x2 BMP, read dimensions and pixels)" \
+	   || { echo "FAIL check-kp-stb-image"; echo "-- out --"; cat build/kp-stb-image/out.txt; \
+	        echo "-- err --"; cat build/kp-stb-image/err.txt; exit 1; }
+
+PHONY += check-kp-stb-image-arm64
+check-kp-stb-image-arm64: build/kp-stb-image-arm64/stb_image.a build/skj-kpc-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP) | build
+	@echo "== check-kp-stb-image-arm64: decode a known image through the stb_image unit =="
+	@./build/skj-kpc-arm64 -U build/kp-stb-image-arm64 --emit-kpm tests/kp-stb-image/stbdemo.kp -o build/kp-stb-image-arm64/stbdemo.kpm
+	@KOBOLD_UNITS=$(CURDIR)/build/kp-stb-image-arm64 KPAOT=build/skj-kpc-arm64 KPAOTLIB=build/libkpaot-arm64.a \
+	   KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
+	   sh kobold/aot-run.sh build/kp-stb-image-arm64/stbdemo.kpm </dev/null \
+	   > build/kp-stb-image-arm64/out.txt 2>build/kp-stb-image-arm64/err.txt; \
+	 cmp -s build/kp-stb-image-arm64/out.txt tests/kp-stb-image/stbdemo.expected \
+	   && echo "kp-stb-image-arm64: 1 passed (decode a 3x2 BMP, read dimensions and pixels)" \
+	   || { echo "FAIL check-kp-stb-image-arm64"; echo "-- out --"; cat build/kp-stb-image-arm64/out.txt; \
+	        echo "-- err --"; cat build/kp-stb-image-arm64/err.txt; exit 1; }
+
+PHONY += install-ext-stb-image
+install-ext-stb-image: build/kp-stb-image/stb_image.a build/kp-stb-image-arm64/stb_image.a
+	@$(INSTALL) -d $(DESTDIR)$(libdir)/kobold/x86-64
+	@$(INSTALL) -m 644 build/kp-stb-image/stb_image.a build/kp-stb-image/stb_image.link $(DESTDIR)$(libdir)/kobold/x86-64/
+	@$(INSTALL) -d $(DESTDIR)$(libdir)/kobold/arm64
+	@$(INSTALL) -m 644 build/kp-stb-image-arm64/stb_image.a build/kp-stb-image-arm64/stb_image.link $(DESTDIR)$(libdir)/kobold/arm64/
+	@echo "  INSTALL  stb_image unit -> $(DESTDIR)$(libdir)/kobold/{x86-64,arm64}"
+install: install-ext-stb-image
+
+## ---- stb_truetype: a TrueType loader/rasterizer as a native-backed unit ----
+## Same shape as stb_image: the single-header stb_truetype.h is vendored at
+## third_party/stb_truetype.h, so the unit has no external dependency and is built
+## unconditionally for x86-64 and arm64.  The glue decodes a Kobold string path
+## through kp_str_bytes (so it is compiled -DKP_FREESTANDING, the shared
+## STB_GLUE_CFLAGS) and the -lm the rasterizer needs rides in the .link sidecar.
+## The test decodes a vendored OFL font (third_party/fonts/SourceCodePro-Regular.ttf).
+build/kp-stb-truetype/stb_truetype.a: kobold/lib/stb_truetype.pas kobold/lib/stb_truetype_glue.c ir/target.h \
+                                      third_party/stb_truetype.h build/skj-kpc build/skj-ar | build
+	@mkdir -p build/kp-stb-truetype
+	$(CC) $(STB_GLUE_CFLAGS) -c kobold/lib/stb_truetype_glue.c -o build/kp-stb-truetype/stb_truetype_glue.o
+	./build/skj-kpc --emit-kpm kobold/lib/stb_truetype.pas -o build/kp-stb-truetype/stb_truetype.kpm
+	sh tests/kp-archive.sh build/skj-ar $@ build/kp-stb-truetype/stb_truetype.kpm build/kp-stb-truetype/stb_truetype_glue.o
+	printf -- '-lm\n' > build/kp-stb-truetype/stb_truetype.link
+	@echo "  UNIT     stb_truetype.a (+ stb_truetype.link)"
+
+build/kp-stb-truetype-arm64/stb_truetype.a: kobold/lib/stb_truetype.pas kobold/lib/stb_truetype_glue.c ir/target.h \
+                                            third_party/stb_truetype.h build/skj-kpc-arm64 build/skj-ar | build
+	@mkdir -p build/kp-stb-truetype-arm64
+	$(A64_CC) $(STB_GLUE_CFLAGS) -c kobold/lib/stb_truetype_glue.c -o build/kp-stb-truetype-arm64/stb_truetype_glue.o
+	./build/skj-kpc-arm64 --emit-kpm kobold/lib/stb_truetype.pas -o build/kp-stb-truetype-arm64/stb_truetype.kpm
+	sh tests/kp-archive.sh build/skj-ar $@ build/kp-stb-truetype-arm64/stb_truetype.kpm build/kp-stb-truetype-arm64/stb_truetype_glue.o
+	printf -- '-lm\n' > build/kp-stb-truetype-arm64/stb_truetype.link
+	@echo "  UNIT     stb_truetype.a arm64 (+ stb_truetype.link)"
+
+all: build/kp-stb-truetype/stb_truetype.a
+
+PHONY += check-kp-stb-truetype
+check-kp-stb-truetype: build/kp-stb-truetype/stb_truetype.a build/skj-kpc build/libkpaot.a build/skj-as-x86-64 | build
+	@echo "== check-kp-stb-truetype: load a font and rasterize a glyph through the unit =="
+	@./build/skj-kpc -U build/kp-stb-truetype --emit-kpm tests/kp-stb-truetype/ttfdemo.kp -o build/kp-stb-truetype/ttfdemo.kpm
+	@KOBOLD_UNITS=$(CURDIR)/build/kp-stb-truetype KPAOT=build/skj-kpc KPAOTLIB=build/libkpaot.a \
+	   KPAOTCC="$(CC)" KPAOTAS="build/skj-as-x86-64" \
+	   sh kobold/aot-run.sh build/kp-stb-truetype/ttfdemo.kpm </dev/null \
+	   > build/kp-stb-truetype/out.txt 2>build/kp-stb-truetype/err.txt; \
+	 cmp -s build/kp-stb-truetype/out.txt tests/kp-stb-truetype/ttfdemo.expected \
+	   && echo "kp-stb-truetype: 1 passed (font metrics and a rasterized glyph)" \
+	   || { echo "FAIL check-kp-stb-truetype"; echo "-- out --"; cat build/kp-stb-truetype/out.txt; \
+	        echo "-- err --"; cat build/kp-stb-truetype/err.txt; exit 1; }
+
+PHONY += check-kp-stb-truetype-arm64
+check-kp-stb-truetype-arm64: build/kp-stb-truetype-arm64/stb_truetype.a build/skj-kpc-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP) | build
+	@echo "== check-kp-stb-truetype-arm64: load a font and rasterize a glyph through the unit =="
+	@./build/skj-kpc-arm64 -U build/kp-stb-truetype-arm64 --emit-kpm tests/kp-stb-truetype/ttfdemo.kp -o build/kp-stb-truetype-arm64/ttfdemo.kpm
+	@KOBOLD_UNITS=$(CURDIR)/build/kp-stb-truetype-arm64 KPAOT=build/skj-kpc-arm64 KPAOTLIB=build/libkpaot-arm64.a \
+	   KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
+	   sh kobold/aot-run.sh build/kp-stb-truetype-arm64/ttfdemo.kpm </dev/null \
+	   > build/kp-stb-truetype-arm64/out.txt 2>build/kp-stb-truetype-arm64/err.txt; \
+	 cmp -s build/kp-stb-truetype-arm64/out.txt tests/kp-stb-truetype/ttfdemo.expected \
+	   && echo "kp-stb-truetype-arm64: 1 passed (font metrics and a rasterized glyph)" \
+	   || { echo "FAIL check-kp-stb-truetype-arm64"; echo "-- out --"; cat build/kp-stb-truetype-arm64/out.txt; \
+	        echo "-- err --"; cat build/kp-stb-truetype-arm64/err.txt; exit 1; }
+
+PHONY += install-ext-stb-truetype
+install-ext-stb-truetype: build/kp-stb-truetype/stb_truetype.a build/kp-stb-truetype-arm64/stb_truetype.a
+	@$(INSTALL) -d $(DESTDIR)$(libdir)/kobold/x86-64
+	@$(INSTALL) -m 644 build/kp-stb-truetype/stb_truetype.a build/kp-stb-truetype/stb_truetype.link $(DESTDIR)$(libdir)/kobold/x86-64/
+	@$(INSTALL) -d $(DESTDIR)$(libdir)/kobold/arm64
+	@$(INSTALL) -m 644 build/kp-stb-truetype-arm64/stb_truetype.a build/kp-stb-truetype-arm64/stb_truetype.link $(DESTDIR)$(libdir)/kobold/arm64/
+	@echo "  INSTALL  stb_truetype unit -> $(DESTDIR)$(libdir)/kobold/{x86-64,arm64}"
+install: install-ext-stb-truetype
+
+## ---- netchan: a reliable/unreliable channel protocol over UDP, as a unit ----
+## The netchan core and its UDP transport are vendored at third_party/netchan/ (a
+## small multi-file CC0 library the project is built to copy in), so the unit has no
+## external dependency and is built unconditionally for x86-64 and arm64.  The core
+## is transport-agnostic, so the glue (netchan_glue.c) owns the UDP socket and the
+## clock and drives the feed/send/service pump; it decodes Kobold string arguments
+## with kp_str_bytes (hence -DKP_FREESTANDING).  The vendored sources and the glue
+## use clock_gettime and the sockets API, so they compile with _POSIX_C_SOURCE.  The
+## link needs nothing beyond libc, so the .link sidecar is empty.
+NETCHAN_CFLAGS := -std=c99 -O2 -D_POSIX_C_SOURCE=200809L -Ithird_party/netchan
+NETCHAN_GLUE_CFLAGS := $(NETCHAN_CFLAGS) -DKP_FREESTANDING -Ikobold -Iir
+
+define NETCHAN_BUILD
+	@mkdir -p $(dir $@)
+	$1 $(NETCHAN_CFLAGS) -c third_party/netchan/netchan.c -o $(dir $@)netchan_core.o
+	$1 $(NETCHAN_CFLAGS) -c third_party/netchan/nc_udp.c -o $(dir $@)nc_udp.o
+	$1 $(NETCHAN_GLUE_CFLAGS) -c kobold/lib/netchan_glue.c -o $(dir $@)netchan_glue.o
+	$2 --emit-kpm kobold/lib/netchan.pas -o $(dir $@)netchan.kpm
+	sh tests/kp-archive.sh build/skj-ar $@ $(dir $@)netchan.kpm \
+	   $(dir $@)netchan_core.o $(dir $@)nc_udp.o $(dir $@)netchan_glue.o
+	printf '\n' > $(dir $@)netchan.link
+endef
+
+build/kp-netchan/netchan.a: kobold/lib/netchan.pas kobold/lib/netchan_glue.c ir/target.h \
+                            third_party/netchan/netchan.c third_party/netchan/nc_udp.c \
+                            build/skj-kpc build/skj-ar | build
+	$(call NETCHAN_BUILD,$(CC),./build/skj-kpc)
+	@echo "  UNIT     netchan.a (+ netchan.link)"
+
+build/kp-netchan-arm64/netchan.a: kobold/lib/netchan.pas kobold/lib/netchan_glue.c ir/target.h \
+                                  third_party/netchan/netchan.c third_party/netchan/nc_udp.c \
+                                  build/skj-kpc-arm64 build/skj-ar | build
+	$(call NETCHAN_BUILD,$(A64_CC),./build/skj-kpc-arm64)
+	@echo "  UNIT     netchan.a arm64 (+ netchan.link)"
+
+all: build/kp-netchan/netchan.a
+
+PHONY += check-kp-netchan
+check-kp-netchan: build/kp-netchan/netchan.a build/skj-kpc build/libkpaot.a build/skj-as-x86-64 | build
+	@echo "== check-kp-netchan: a loopback UDP client/server exchange through the unit =="
+	@./build/skj-kpc -U build/kp-netchan --emit-kpm tests/kp-netchan/netdemo.kp -o build/kp-netchan/netdemo.kpm
+	@KOBOLD_UNITS=$(CURDIR)/build/kp-netchan KPAOT=build/skj-kpc KPAOTLIB=build/libkpaot.a \
+	   KPAOTCC="$(CC)" KPAOTAS="build/skj-as-x86-64" \
+	   sh kobold/aot-run.sh build/kp-netchan/netdemo.kpm </dev/null \
+	   > build/kp-netchan/out.txt 2>build/kp-netchan/err.txt; \
+	 cmp -s build/kp-netchan/out.txt tests/kp-netchan/netdemo.expected \
+	   && echo "kp-netchan: 1 passed (reliable datagram over loopback UDP)" \
+	   || { echo "FAIL check-kp-netchan"; echo "-- out --"; cat build/kp-netchan/out.txt; \
+	        echo "-- err --"; cat build/kp-netchan/err.txt; exit 1; }
+
+PHONY += check-kp-netchan-arm64
+check-kp-netchan-arm64: build/kp-netchan-arm64/netchan.a build/skj-kpc-arm64 build/libkpaot-arm64.a $(A64_ASM_DEP) | build
+	@echo "== check-kp-netchan-arm64: a loopback UDP client/server exchange through the unit =="
+	@./build/skj-kpc-arm64 -U build/kp-netchan-arm64 --emit-kpm tests/kp-netchan/netdemo.kp -o build/kp-netchan-arm64/netdemo.kpm
+	@KOBOLD_UNITS=$(CURDIR)/build/kp-netchan-arm64 KPAOT=build/skj-kpc-arm64 KPAOTLIB=build/libkpaot-arm64.a \
+	   KPAOTCC="$(A64_CC)" KPAOTAS="$(A64_AS)" KPAOTQEMU="$(A64_RUN)" KPAOTNOPIE="$(HOST_NO_PIE)" \
+	   sh kobold/aot-run.sh build/kp-netchan-arm64/netdemo.kpm </dev/null \
+	   > build/kp-netchan-arm64/out.txt 2>build/kp-netchan-arm64/err.txt; \
+	 cmp -s build/kp-netchan-arm64/out.txt tests/kp-netchan/netdemo.expected \
+	   && echo "kp-netchan-arm64: 1 passed (reliable datagram over loopback UDP)" \
+	   || { echo "FAIL check-kp-netchan-arm64"; echo "-- out --"; cat build/kp-netchan-arm64/out.txt; \
+	        echo "-- err --"; cat build/kp-netchan-arm64/err.txt; exit 1; }
+
+PHONY += install-ext-netchan
+install-ext-netchan: build/kp-netchan/netchan.a build/kp-netchan-arm64/netchan.a
+	@$(INSTALL) -d $(DESTDIR)$(libdir)/kobold/x86-64
+	@$(INSTALL) -m 644 build/kp-netchan/netchan.a build/kp-netchan/netchan.link $(DESTDIR)$(libdir)/kobold/x86-64/
+	@$(INSTALL) -d $(DESTDIR)$(libdir)/kobold/arm64
+	@$(INSTALL) -m 644 build/kp-netchan-arm64/netchan.a build/kp-netchan-arm64/netchan.link $(DESTDIR)$(libdir)/kobold/arm64/
+	@echo "  INSTALL  netchan unit -> $(DESTDIR)$(libdir)/kobold/{x86-64,arm64}"
+install: install-ext-netchan
+
+## ---- optional sdl3 unit (kobold/lib/sdl3.pas) ----
+## Built only when ./configure found SDL3 (HAVE_SDL3 in config.mk).  The glue
+## object (kobold/lib/sdl3_glue.c) is archived inside sdl3.a and the -lSDL3 link
+## flags ride in the sidecar sdl3.link; aot-run.sh pulls both when a program
+## `uses sdl3` (the mechanism check-kp-native proves without a real library).  The
+## unit then joins `make`, its test joins check-all, and `make install` ships it;
+## without SDL3 none of this is defined, so the core build is unaffected.  The unit
+## is host-target only: configure probes the host's pkg-config, so a cross SDL3 is
+## not available here.
+ifeq ($(HAVE_SDL3),1)
+
+build/kp-ext/sdl3.a: kobold/lib/sdl3.pas kobold/lib/sdl3_glue.c ir/target.h \
+                     build/skj-kpc build/skj-ar | build
+	@mkdir -p build/kp-ext
+	$(CC) -std=c99 -O2 -Wall -DKP_FREESTANDING -Ikobold -Iir $(SDL3_CFLAGS) -c kobold/lib/sdl3_glue.c -o build/kp-ext/sdl3_glue.o
+	./build/skj-kpc --emit-kpm kobold/lib/sdl3.pas -o build/kp-ext/sdl3.kpm
+	sh tests/kp-archive.sh build/skj-ar $@ build/kp-ext/sdl3.kpm build/kp-ext/sdl3_glue.o
+	printf '%s\n' "$(SDL3_LIBS)" > build/kp-ext/sdl3.link
+	@echo "  UNIT     sdl3.a (+ sdl3.link)"
+
+all: build/kp-ext/sdl3.a
+
+## Headless smoke test: the dummy video driver and software renderer let the real
+## SDL3 run with no display, so this is CI-safe wherever SDL3 is installed.
+PHONY += check-kp-sdl3
+check-kp-sdl3: build/kp-ext/sdl3.a build/skj-kpc build/libkpaot.a build/skj-as-x86-64 | build
+	@echo "== check-kp-sdl3: the sdl3 unit, headless (dummy video, software renderer) =="
+	@./build/skj-kpc -U build/kp-ext --emit-kpm tests/kp-sdl3/sdldemo.kp -o build/kp-ext/sdldemo.kpm
+	@SDL_VIDEODRIVER=dummy SDL_RENDER_DRIVER=software \
+	   KOBOLD_UNITS=$(CURDIR)/build/kp-ext KPAOT=build/skj-kpc KPAOTLIB=build/libkpaot.a \
+	   KPAOTCC="$(CC)" KPAOTAS="build/skj-as-x86-64" \
+	   sh kobold/aot-run.sh build/kp-ext/sdldemo.kpm </dev/null \
+	   > build/kp-ext/sdldemo.out 2>build/kp-ext/sdldemo.err; \
+	 cmp -s build/kp-ext/sdldemo.out tests/kp-sdl3/sdldemo.expected \
+	   && echo "kp-sdl3: 1 passed (window, renderer, record draw; headless)" \
+	   || { echo "FAIL check-kp-sdl3"; echo "-- out --"; cat build/kp-ext/sdldemo.out; \
+	        echo "-- err --"; cat build/kp-ext/sdldemo.err; exit 1; }
+
+check-all: check-kp-sdl3
+
+## Install into the per-target unit dir so an installed skj-kpc finds it with no
+## KOBOLD_UNITS, the same convention as std.osthreads.
+PHONY += install-ext-sdl3
+install-ext-sdl3: build/kp-ext/sdl3.a
+	@$(INSTALL) -d $(DESTDIR)$(libdir)/kobold/x86-64
+	@$(INSTALL) -m 644 build/kp-ext/sdl3.a build/kp-ext/sdl3.link $(DESTDIR)$(libdir)/kobold/x86-64/
+	@echo "  INSTALL  sdl3 unit -> $(DESTDIR)$(libdir)/kobold/x86-64"
+install: install-ext-sdl3
+
+endif
+
+## ---- optional curl unit (kobold/lib/curl.pas) ----
+## Built only when ./configure found libcurl (HAVE_LIBCURL).  The glue carries the
+## write-callback shim libcurl delivers the body through; -lcurl rides in the
+## curl.link sidecar.  Host-target only (configure probes the host's libcurl), so
+## x86-64 only, like sdl3.  kp_gptr follows the host compiler's width (target.h
+## derives SKJ_LP64 with no ISA selector), so the glue needs no -DSKJ_LP64.
+ifeq ($(HAVE_LIBCURL),1)
+
+build/kp-ext/curl.a: kobold/lib/curl.pas kobold/lib/curl_glue.c ir/target.h \
+                     build/skj-kpc build/skj-ar | build
+	@mkdir -p build/kp-ext
+	$(CC) -std=c99 -O2 -Wall -DKP_FREESTANDING -Ikobold -Iir $(LIBCURL_CFLAGS) -c kobold/lib/curl_glue.c -o build/kp-ext/curl_glue.o
+	./build/skj-kpc --emit-kpm kobold/lib/curl.pas -o build/kp-ext/curl.kpm
+	sh tests/kp-archive.sh build/skj-ar $@ build/kp-ext/curl.kpm build/kp-ext/curl_glue.o
+	printf '%s\n' "$(LIBCURL_LIBS)" > build/kp-ext/curl.link
+	@echo "  UNIT     curl.a (+ curl.link)"
+
+all: build/kp-ext/curl.a
+
+## The test fetches a committed fixture through a file:// URL, so it needs no
+## network. The absolute path is passed as the program's argument (ParamStr(1)).
+PHONY += check-kp-curl
+check-kp-curl: build/kp-ext/curl.a build/skj-kpc build/libkpaot.a build/skj-as-x86-64 | build
+	@echo "== check-kp-curl: fetch a file:// URL through the curl unit =="
+	@./build/skj-kpc -U build/kp-ext --emit-kpm tests/kp-curl/curldemo.kp -o build/kp-ext/curldemo.kpm
+	@KOBOLD_UNITS=$(CURDIR)/build/kp-ext KPAOT=build/skj-kpc KPAOTLIB=build/libkpaot.a \
+	   KPAOTCC="$(CC)" KPAOTAS="build/skj-as-x86-64" \
+	   sh kobold/aot-run.sh build/kp-ext/curldemo.kpm $(CURDIR)/tests/kp-curl/fixture.txt </dev/null \
+	   > build/kp-ext/curldemo.out 2>build/kp-ext/curldemo.err; \
+	 cmp -s build/kp-ext/curldemo.out tests/kp-curl/curldemo.expected \
+	   && echo "kp-curl: 1 passed (fetch a file:// URL, read the body)" \
+	   || { echo "FAIL check-kp-curl"; echo "-- out --"; cat build/kp-ext/curldemo.out; \
+	        echo "-- err --"; cat build/kp-ext/curldemo.err; exit 1; }
+
+check-all: check-kp-curl
+
+PHONY += install-ext-curl
+install-ext-curl: build/kp-ext/curl.a
+	@$(INSTALL) -d $(DESTDIR)$(libdir)/kobold/x86-64
+	@$(INSTALL) -m 644 build/kp-ext/curl.a build/kp-ext/curl.link $(DESTDIR)$(libdir)/kobold/x86-64/
+	@echo "  INSTALL  curl unit -> $(DESTDIR)$(libdir)/kobold/x86-64"
+install: install-ext-curl
+
+endif
+
+## ---- optional raylib unit (kobold/lib/raylib.pas) ----
+## Built only when ./configure found raylib (HAVE_RAYLIB).  raylib's Color,
+## Vector2, and Rectangle cross by value in registers, so this is the by-value
+## record FFI's worked example; the raylib link flags ride in the raylib.link
+## sidecar.  Host-target only (configure probes the host's raylib), so x86-64 like
+## sdl3 and curl.  kp_gptr follows the host compiler's width (target.h derives
+## SKJ_LP64 with no ISA selector), so the glue needs no -DSKJ_LP64.
+ifeq ($(HAVE_RAYLIB),1)
+
+build/kp-ext/raylib.a: kobold/lib/raylib.pas kobold/lib/raylib_glue.c ir/target.h \
+                       build/skj-kpc build/skj-ar | build
+	@mkdir -p build/kp-ext
+	$(CC) -std=c99 -O2 -Wall -DKP_FREESTANDING -Ikobold -Iir $(RAYLIB_CFLAGS) -c kobold/lib/raylib_glue.c -o build/kp-ext/raylib_glue.o
+	./build/skj-kpc --emit-kpm kobold/lib/raylib.pas -o build/kp-ext/raylib.kpm
+	sh tests/kp-archive.sh build/skj-ar $@ build/kp-ext/raylib.kpm build/kp-ext/raylib_glue.o
+	printf '%s\n' "$(RAYLIB_LIBS)" > build/kp-ext/raylib.link
+	@echo "  UNIT     raylib.a (+ raylib.link)"
+
+all: build/kp-ext/raylib.a
+
+## raylib needs a real GL context, so unlike sdl3 there is no dummy driver. The
+## test runs the actual window and a frame under a virtual X server (xvfb-run)
+## with software GL (llvmpipe), so it is CI-safe without a GPU. It exercises the
+## by-value record FFI both ways: a Color and a Vector2 cross by value, and
+## GetColor and Vec2Add return a record by value.
+PHONY += check-kp-raylib
+check-kp-raylib: build/kp-ext/raylib.a build/skj-kpc build/libkpaot.a build/skj-as-x86-64 | build
+	@echo "== check-kp-raylib: the raylib unit, windowed under xvfb (software GL) =="
+	@./build/skj-kpc -U build/kp-ext --emit-kpm tests/kp-raylib/rldemo.kp -o build/kp-ext/rldemo.kpm
+	@LIBGL_ALWAYS_SOFTWARE=1 \
+	   KOBOLD_UNITS=$(CURDIR)/build/kp-ext KPAOT=build/skj-kpc KPAOTLIB=build/libkpaot.a \
+	   KPAOTCC="$(CC)" KPAOTAS="build/skj-as-x86-64" KPAOTQEMU="xvfb-run -a" \
+	   sh kobold/aot-run.sh build/kp-ext/rldemo.kpm </dev/null \
+	   > build/kp-ext/rldemo.out 2>build/kp-ext/rldemo.err; \
+	 cmp -s build/kp-ext/rldemo.out tests/kp-raylib/rldemo.expected \
+	   && echo "kp-raylib: 1 passed (window and a frame under xvfb; by-value record FFI)" \
+	   || { echo "FAIL check-kp-raylib"; echo "-- out --"; cat build/kp-ext/rldemo.out; \
+	        echo "-- err --"; cat build/kp-ext/rldemo.err; exit 1; }
+
+check-all: check-kp-raylib
+
+PHONY += install-ext-raylib
+install-ext-raylib: build/kp-ext/raylib.a
+	@$(INSTALL) -d $(DESTDIR)$(libdir)/kobold/x86-64
+	@$(INSTALL) -m 644 build/kp-ext/raylib.a build/kp-ext/raylib.link $(DESTDIR)$(libdir)/kobold/x86-64/
+	@echo "  INSTALL  raylib unit -> $(DESTDIR)$(libdir)/kobold/x86-64"
+install: install-ext-raylib
+
+endif
 
 PHONY += check-kp-stdlib-free
 check-kp-stdlib-free: build/skj-kpc-rv build/skj-kpc-rv build/skj-as-rv build/skj-ld-rv \
@@ -1882,7 +2263,7 @@ JIT_SRC_A64 := jit/main.c jit/jit_common.c jit/jit_arena.c jit/jit_arm64.c jit/e
                jit/code.c jit/call_guest_arm64.S \
                backend/arm64_select.c backend/regalloc_arm64.c \
                $(JIT_FE) $(CC_CPP) $(IR_SRC)
-build/skj-jit-arm64: $(JIT_SRC_A64) cc/cc.h jit/jit_common.h jit/jit_arena.h jit/jit_x86.h jit/emit_arm64.h jit/code.h backend/arm64_mc.h backend/arm64_select.h ir/ir.h Makefile build/version.h | build
+build/skj-jit-arm64: $(JIT_SRC_A64) cc/cc.h jit/jit_common.h jit/jit_arena.h jit/jit_x86.h jit/emit_arm64.h jit/code.h backend/arm64_mc.h backend/arm64_select.h ir/ir.h ir/target.h Makefile build/version.h | build
 	$(A64_CC) $(CFLAGS) -DSKJ_LP64=1 -DCC_PSABI -DCC_ARM64 $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ijit -Ibackend -o $@ $(JIT_SRC_A64)
 
 ## Run the C suite in-process through skj-jit-arm64 under qemu-aarch64.  The
@@ -1944,7 +2325,7 @@ JIT_SRC_RV := jit/main.c jit/jit_common.c jit/jit_arena.c jit/jit_rv.c jit/emit_
               jit/code.c jit/call_guest_rv.S jit/rv_jit_i64.S \
               backend/rv_select.c backend/regalloc_rv.c \
               $(JIT_FE) $(CC_CPP) $(IR_SRC)
-build/skj-jit-rv: $(JIT_SRC_RV) cc/cc.h jit/jit_common.h jit/jit_arena.h jit/jit_x86.h jit/emit_rv.h jit/code.h backend/rv_mc.h backend/rv_select.h ir/ir.h runtime/i64_rv.S Makefile build/version.h | build
+build/skj-jit-rv: $(JIT_SRC_RV) cc/cc.h jit/jit_common.h jit/jit_arena.h jit/jit_x86.h jit/emit_rv.h jit/code.h backend/rv_mc.h backend/rv_select.h ir/ir.h ir/target.h runtime/i64_rv.S Makefile build/version.h | build
 	$(RVJIT_CC) $(CFLAGS) -DCC_RISCV $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ijit -Ibackend -o $@ $(JIT_SRC_RV)
 
 ## Run the C suite in-process through skj-jit-rv under qemu-riscv32.  The RV JIT
@@ -3069,7 +3450,7 @@ build/mips/soft64_div.o: runtime/soft64.c | build/mips
 
 ## I64 integration test
 I64_TEST_MIPS_SRC := tests/test_i64.c $(IR_SRC) $(BE_MIPS)
-build/test_i64_mips: $(I64_TEST_MIPS_SRC) ir/ir.h | build
+build/test_i64_mips: $(I64_TEST_MIPS_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Iir -o $@ $(I64_TEST_MIPS_SRC)
 build/mips/i64_test.s: build/test_i64_mips | build/mips
 	./build/test_i64_mips -o $@
@@ -3083,7 +3464,7 @@ test-i64-mips: build/mips/i64_test
 
 ## Unsigned 32-bit ops integration test
 OPS_TEST_MIPS_SRC := tests/test_ops.c $(IR_SRC) $(BE_MIPS)
-build/test_ops_mips: $(OPS_TEST_MIPS_SRC) ir/ir.h | build
+build/test_ops_mips: $(OPS_TEST_MIPS_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Iir -o $@ $(OPS_TEST_MIPS_SRC)
 build/mips/ops_test.s: build/test_ops_mips | build/mips
 	./build/test_ops_mips -o $@
@@ -3098,7 +3479,7 @@ test-ops-mips: build/mips/ops_test
 ## FPU integration test (hardware coprocessor 1; links half.o for FLH/FSH,
 ## since MIPS I has no hardware half-float)
 FPU_TEST_MIPS_SRC := tests/test_fpu.c $(IR_SRC) $(BE_MIPS)
-build/test_fpu_mips: $(FPU_TEST_MIPS_SRC) ir/ir.h | build
+build/test_fpu_mips: $(FPU_TEST_MIPS_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Iir -o $@ $(FPU_TEST_MIPS_SRC)
 build/mips/fpu_test.s: build/test_fpu_mips | build/mips
 	./build/test_fpu_mips -o $@
@@ -3112,7 +3493,7 @@ test-fpu-mips: build/mips/fpu_test
 
 ## Native single-precision (IR_F32) integration test
 F32_TEST_MIPS_SRC := tests/test_f32.c $(IR_SRC) $(BE_MIPS)
-build/test_f32_mips: $(F32_TEST_MIPS_SRC) ir/ir.h | build
+build/test_f32_mips: $(F32_TEST_MIPS_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Iir -o $@ $(F32_TEST_MIPS_SRC)
 build/mips/f32_test.s: build/test_f32_mips | build/mips
 	./build/test_f32_mips -o $@
@@ -3148,7 +3529,7 @@ test-softfloat: build/test_softfloat
 ## FPU integration test, soft-float: same IR as test-fpu-mips, but the backend
 ## emits softfloat.c calls.  Links half.o (FLH/FSH still narrow through the
 ## half helpers) and softfloat.o.
-build/test_fpu_mips_sf: $(FPU_TEST_MIPS_SRC) ir/ir.h | build
+build/test_fpu_mips_sf: $(FPU_TEST_MIPS_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -DMIPS_SOFTFLOAT -Iir -o $@ $(FPU_TEST_MIPS_SRC)
 build/mips/fpu_test_sf.s: build/test_fpu_mips_sf | build/mips
 	./build/test_fpu_mips_sf -o $@
@@ -3164,7 +3545,7 @@ test-fpu-mips-sf: build/mips/fpu_test_sf
 	@$(QEMU_MIPS) ./build/mips/fpu_test_sf && echo "PASS: fpu_test (mips soft-float)" || (echo "FAIL: fpu_test (mips soft-float)"; exit 1)
 
 ## F32 integration test, soft-float.
-build/test_f32_mips_sf: $(F32_TEST_MIPS_SRC) ir/ir.h | build
+build/test_f32_mips_sf: $(F32_TEST_MIPS_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -DMIPS_SOFTFLOAT -Iir -o $@ $(F32_TEST_MIPS_SRC)
 build/mips/f32_test_sf.s: build/test_f32_mips_sf | build/mips
 	./build/test_f32_mips_sf -o $@
@@ -3560,7 +3941,7 @@ check-emu-all: check-emu check-rv-emu check-mips-emu test-coop-read \
                check-kp-jit-rv check-kp-jit-arm64 check-kp-aot-rv check-kp-aot-arm64 \
                check-kp-free check-kp-corpus-rv check-kp-corpus-arm64 \
                check-kp-multi-rv check-kp-multi-arm64 \
-               check-kp-callback-arm64 check-kp-osthreads-arm64 \
+               check-kp-callback-arm64 check-kp-struct-ffi-arm64 check-kp-struct-ffi-rv check-kp-osthreads-arm64 check-kp-stb-image-arm64 check-kp-stb-truetype-arm64 check-kp-netchan-arm64 \
                check-kp-io-rv check-kp-io-arm64 check-kp-io-free \
                check-kp-inc-rv check-kp-inc-arm64 check-kp-inc-free
 	@echo "All emulator test suites passed."
@@ -3648,7 +4029,7 @@ check-emu-san: build/san/test_rv_run build/san/test_guest_mmap \
 build/san/skj-cpp: cpp/main.c $(CPP_SRC) cpp/cpp.h cpp/internal.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Icpp -Iir -o $@ cpp/main.c $(CPP_SRC)
 
-build/san/skj-cc: $(CC_SRC) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h build/version.h | build build/san
+build/san/skj-cc: $(CC_SRC) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h ir/target.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -DCC_M68K $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC)
 
 build/san/skj-as: $(AS_SRC) as/as.h as/asm_lex.h as/asm_obj.h dwarf/dwarf.h build/version.h | build build/san
@@ -3680,7 +4061,7 @@ build/san/skj-kpc: $(HOST_PC) tests/pascal_kpcom_host.c build/pascal_rt_host.o $
 
 # The KPM1 reader-pipeline fuzz harness (kpm_read -> regalloc -> target_emit).
 # This path maps no executable memory, so full ASan applies beside UBSan.
-build/san/kpm-fuzz: kobold/kpm_fuzz.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL) kobold/kpm.h kobold/kp_aot.h ir/ir.h \
+build/san/kpm-fuzz: kobold/kpm_fuzz.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL) kobold/kpm.h kobold/kp_aot.h ir/ir.h ir/target.h \
                     backend/mc_text.h backend/x86_select.h tests/fuzz_mutate.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -DX86_BITS=64 -Iir -Ibackend -Ikobold -Itests -o $@ \
 	    kobold/kpm_fuzz.c kobold/kpm.c $(IR_SRC) $(BE_X64_SEL)
@@ -3732,13 +4113,13 @@ build/san/as-aarch64-fuzz: as/as_fuzz.c $(AS_A64_FUZZ_LIB) as/aarch64.h as/asm_l
 # defined later than this rule, so the pascal and moo prerequisites list the
 # sources explicitly (the deferred-definition hazard noted on the san rules).
 build/san/fe-pascal-fuzz: tests/fe_fuzz.c pascal/lex.c pascal/parse.c pascal/lower.c \
-                          $(IR_SRC) $(BE_CF) pascal/pascal.h ir/ir.h \
+                          $(IR_SRC) $(BE_CF) pascal/pascal.h ir/ir.h ir/target.h \
                           tests/fuzz_mutate.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DFEFUZZ_PASCAL -Ipascal -Iir -Itests -o $@ \
 	    tests/fe_fuzz.c pascal/lex.c pascal/parse.c pascal/lower.c $(IR_SRC) $(BE_CF)
 
 build/san/fe-moo-fuzz: tests/fe_fuzz.c moo/lex.c moo/parse.c moo/typecheck.c moo/lower.c \
-                       $(IR_SRC) $(BE_CF) moo/moo.h ir/ir.h \
+                       $(IR_SRC) $(BE_CF) moo/moo.h ir/ir.h ir/target.h \
                        tests/fuzz_mutate.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DFEFUZZ_MOO -Imoo -Iir -Itests -o $@ \
 	    tests/fe_fuzz.c moo/lex.c moo/parse.c moo/typecheck.c moo/lower.c $(IR_SRC) $(BE_CF)
@@ -3748,12 +4129,12 @@ build/san/fe-moo-fuzz: tests/fe_fuzz.c moo/lex.c moo/parse.c moo/typecheck.c moo
 # straight to the parser (the one cc test with a # directive dies early in the
 # lexer, which is fine).  -DCC_M68K matches the shipping skj-cc type model.
 build/san/fe-cc-fuzz: tests/fe_fuzz.c cc/lex.c cc/parse.c cc/type.c cc/lower.c \
-                      $(IR_SRC) $(BE_CF) cc/cc.h ir/ir.h \
+                      $(IR_SRC) $(BE_CF) cc/cc.h ir/ir.h ir/target.h \
                       tests/fuzz_mutate.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DCC_M68K -DFEFUZZ_CC -Icc -Iir -Itests -o $@ \
 	    tests/fe_fuzz.c cc/lex.c cc/parse.c cc/type.c cc/lower.c $(IR_SRC) $(BE_CF)
 
-build/san/skj-jit: $(JIT_SRC) cc/cc.h jit/jit_common.h jit/jit_arena.h jit/jit_x86.h jit/emit_x86.h jit/code.h backend/mc.h backend/x86_select.h ir/ir.h build/version.h | build build/san
+build/san/skj-jit: $(JIT_SRC) cc/cc.h jit/jit_common.h jit/jit_arena.h jit/jit_x86.h jit/emit_x86.h jit/code.h backend/mc.h backend/x86_select.h ir/ir.h ir/target.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -DX86_BITS=64 -DSKJ_LP64=1 -DCC_PSABI -DCC_STRUCT_ABI $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ijit -Ibackend -o $@ $(JIT_SRC)
 
 # The remaining front ends (scheme, moo, Pascal) and the archive tool
@@ -3767,15 +4148,15 @@ build/san/skj-jit: $(JIT_SRC) cc/cc.h jit/jit_common.h jit/jit_arena.h jit/jit_x
 # before this point, so those rules use the variable directly.
 build/san/skj-sc: scheme/lex.c scheme/parse.c scheme/print.c scheme/main.c \
                   scheme/gc.c scheme/lower.c $(IR_SRC) $(BE_CF) \
-                  scheme/scheme.h scheme/gc.h ir/ir.h build/version.h | build build/san
+                  scheme/scheme.h scheme/gc.h ir/ir.h ir/target.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Ischeme -Iir -o $@ $(SC_SRC)
 
 build/san/skj-mooc: moo/lex.c moo/parse.c moo/typecheck.c moo/lower.c moo/main.c \
-                    $(IR_SRC) $(BE_CF) moo/moo.h ir/ir.h build/version.h | build build/san
+                    $(IR_SRC) $(BE_CF) moo/moo.h ir/ir.h ir/target.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Imoo -Iir -o $@ $(MOO_SRC)
 
 build/san/skj-pc: pascal/lex.c pascal/parse.c pascal/lower.c pascal/main.c \
-                  $(IR_SRC) $(BE_CF) pascal/pascal.h ir/ir.h build/version.h | build build/san
+                  $(IR_SRC) $(BE_CF) pascal/pascal.h ir/ir.h ir/target.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Ipascal -Iir -o $@ $(PC_SRC)
 
 build/san/skj-ar: $(AR_SRC) ld/mapfile.h ir/util.h ir/arena.h build/version.h | build build/san
@@ -4113,10 +4494,10 @@ sc_src_x86-64 := $(SC_FE) $(BE_X64)
 sc_def_arm64  := -DSKJ_LP64=1
 sc_def_x86-64 := -DX86_BITS=64 -DSKJ_LP64=1
 
-build/skj-sc: $(SC_SRC) scheme/scheme.h scheme/gc.h ir/ir.h | build
+build/skj-sc: $(SC_SRC) scheme/scheme.h scheme/gc.h ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Ischeme -Iir -o $@ $(SC_SRC)
 
-build/skj-sc-%: $$(sc_src_$$*) scheme/scheme.h scheme/gc.h ir/ir.h | build
+build/skj-sc-%: $$(sc_src_$$*) scheme/scheme.h scheme/gc.h ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) $(sc_def_$*) -Ischeme -Iir -o $@ $(sc_src_$*)
 
 ## TinScheme codegen tests (.scm -> .s via skj-sc)
@@ -4591,7 +4972,7 @@ audit-rv32-mutants: $(RV32_AUDIT_GUESTS)
 ## MooScript compiler
 MOO_SRC := moo/lex.c moo/parse.c moo/typecheck.c moo/lower.c moo/main.c $(IR_SRC) $(BE_CF)
 
-build/skj-mooc: $(MOO_SRC) moo/moo.h ir/ir.h | build
+build/skj-mooc: $(MOO_SRC) moo/moo.h ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Imoo -Iir -o $@ $(MOO_SRC)
 
 ## Excelsior compiler (reader + resolver + type checker + IR lowering,
@@ -4629,7 +5010,7 @@ $(MOO_TOY_BINS): build/%: build/%.o $(MOO_TOY_RT_OBJS) build/skj-ld
 ## Pascal compiler
 PC_SRC := pascal/lex.c pascal/parse.c pascal/lower.c pascal/main.c $(IR_SRC) $(BE_CF)
 
-build/skj-pc: $(PC_SRC) pascal/pascal.h ir/ir.h | build
+build/skj-pc: $(PC_SRC) pascal/pascal.h ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Ipascal -Iir -o $@ $(PC_SRC)
 
 ## BASIC compiler (skj-bc): the core of the BASIDE dialect
@@ -4692,7 +5073,7 @@ pc_flags_arm64  := -DSKJ_LP64=1 -Ipascal -Iir -Ibackend
 pc_src_mips   := $(PC_FE) $(IR_SRC) $(BE_MIPS)
 pc_flags_mips := -DMIPS_SOFTFLOAT -Ipascal -Iir -Ibackend
 
-build/skj-pc-%: $$(pc_src_$$*) pascal/pascal.h ir/ir.h $(wildcard backend/*.h) | build
+build/skj-pc-%: $$(pc_src_$$*) pascal/pascal.h ir/ir.h ir/target.h $(wildcard backend/*.h) | build
 	$(CC) $(CFLAGS) $(pc_flags_$*) -o $@ $(pc_src_$*)
 
 ## Host Pascal runtime (native libc): x86-64 built by the host cc, aarch64 by
@@ -4960,7 +5341,7 @@ test-basic-bmi: build/bmi_selftest
 ## FPU integration test (IR builder → ColdFire asm → qemu-m68k)
 FPU_TEST_SRC := tests/test_fpu.c $(IR_SRC) $(BE_CF)
 
-build/test_fpu: $(FPU_TEST_SRC) ir/ir.h | build
+build/test_fpu: $(FPU_TEST_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Iir -o $@ $(FPU_TEST_SRC)
 
 build/fpu_test.s: build/test_fpu | build
@@ -4981,7 +5362,7 @@ test-fpu: build/fpu_test
 ## computes wide, so F32 is storage-only (round on store); the test's checks
 ## are integer-valued, so they pass under the compute-wide model.
 F32_TEST_CF_SRC := tests/test_f32.c $(IR_SRC) $(BE_CF)
-build/test_f32_cf: $(F32_TEST_CF_SRC) ir/ir.h | build
+build/test_f32_cf: $(F32_TEST_CF_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Iir -o $@ $(F32_TEST_CF_SRC)
 build/f32_test.s: build/test_f32_cf | build
 	./build/test_f32_cf -o $@
@@ -4996,7 +5377,7 @@ test-f32: build/f32_test
 ## I64 integration test (IR builder → ColdFire asm → qemu-m68k)
 I64_TEST_CF_SRC := tests/test_i64.c $(IR_SRC) $(BE_CF)
 
-build/test_i64_cf: $(I64_TEST_CF_SRC) ir/ir.h | build
+build/test_i64_cf: $(I64_TEST_CF_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Iir -o $@ $(I64_TEST_CF_SRC)
 
 build/i64_test_cf.s: build/test_i64_cf | build
@@ -5016,7 +5397,7 @@ test-i64: build/i64_test_cf
 ## I64 integration test (IR builder → RISC-V asm → qemu-riscv32)
 I64_TEST_RV_SRC := tests/test_i64.c $(IR_SRC) $(BE_RV)
 
-build/test_i64_rv: $(I64_TEST_RV_SRC) ir/ir.h | build
+build/test_i64_rv: $(I64_TEST_RV_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Iir -o $@ $(I64_TEST_RV_SRC)
 
 build/rv/i64_test.s: build/test_i64_rv | build/rv
@@ -5897,6 +6278,9 @@ install: $(TOOLS) \
          $(DRIVER_LIB_CF) $(DRIVER_LIB_RV) $(DRIVER_LIB_MIPS) \
          $(DRIVER_LIB_X64) $(DRIVER_LIB_A64) $(INSTALL_KPAOT) \
          build/kp-osthreads/std/osthreads.a build/kp-osthreads-arm64/std/osthreads.a \
+         build/kp-stb-image/stb_image.a build/kp-stb-image-arm64/stb_image.a \
+         build/kp-stb-truetype/stb_truetype.a build/kp-stb-truetype-arm64/stb_truetype.a \
+         build/kp-netchan/netchan.a build/kp-netchan-arm64/netchan.a \
          $(INSTALL_PSX_TOOLS) $(INSTALL_PSX_SDK)
 	@echo "  INSTALL  tools -> $(DESTDIR)$(bindir)"
 	@$(INSTALL) -d $(DESTDIR)$(bindir)
@@ -6675,7 +7059,7 @@ test-mips-selfhost: build/skjcc build/skj-cc-mips build/skj-as-mips build/skj-ld
 ## I64 integration test (IR builder → arm64 asm → qemu-aarch64)
 I64_TEST_A64_SRC := tests/test_i64.c $(IR_SRC) $(BE_A64)
 
-build/test_i64_arm64: $(I64_TEST_A64_SRC) ir/ir.h | build
+build/test_i64_arm64: $(I64_TEST_A64_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Iir -o $@ $(I64_TEST_A64_SRC)
 
 build/arm64/i64_test.s: build/test_i64_arm64 | build/arm64
@@ -6695,7 +7079,7 @@ test-i64-arm64: build/arm64/i64_test
 ## I64 integration test (IR builder → x86-64 asm → qemu-x86_64)
 I64_TEST_X64_SRC := tests/test_i64.c $(IR_SRC) $(BE_X64)
 
-build/test_i64_x64: $(I64_TEST_X64_SRC) ir/ir.h | build
+build/test_i64_x64: $(I64_TEST_X64_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -DX86_BITS=64 -Iir -o $@ $(I64_TEST_X64_SRC)
 
 build/x86_64/i64_test.s: build/test_i64_x64 | build/x86_64
@@ -6716,7 +7100,7 @@ test-i64-x86-64: build/x86_64/i64_test
 ## IR_LABADDR + IR_IJMP, the computed-goto primitive, self-checking.
 THREADED_TEST_X64_SRC := tests/test_threaded.c $(IR_SRC) $(BE_X64)
 
-build/test_threaded_x64: $(THREADED_TEST_X64_SRC) ir/ir.h | build
+build/test_threaded_x64: $(THREADED_TEST_X64_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -DX86_BITS=64 -Iir -o $@ $(THREADED_TEST_X64_SRC)
 
 build/x86_64/threaded_test.s: build/test_threaded_x64 | build/x86_64
@@ -6735,7 +7119,7 @@ test-threaded-x86-64: build/x86_64/threaded_test
 
 ## Threaded-dispatch test on ColdFire (IR builder → ColdFire asm → qemu-m68k)
 THREADED_TEST_CF_SRC := tests/test_threaded.c $(IR_SRC) $(BE_CF)
-build/test_threaded_cf: $(THREADED_TEST_CF_SRC) ir/ir.h | build
+build/test_threaded_cf: $(THREADED_TEST_CF_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Iir -o $@ $(THREADED_TEST_CF_SRC)
 build/threaded_test_cf.s: build/test_threaded_cf | build
 	./build/test_threaded_cf -o $@
@@ -6750,7 +7134,7 @@ test-threaded: build/threaded_test_cf
 
 ## Threaded-dispatch test on RISC-V (IR builder → RISC-V asm → qemu-riscv32)
 THREADED_TEST_RV_SRC := tests/test_threaded.c $(IR_SRC) $(BE_RV)
-build/test_threaded_rv: $(THREADED_TEST_RV_SRC) ir/ir.h | build
+build/test_threaded_rv: $(THREADED_TEST_RV_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Iir -o $@ $(THREADED_TEST_RV_SRC)
 build/rv/threaded_test.s: build/test_threaded_rv | build/rv
 	./build/test_threaded_rv -o $@
@@ -6765,7 +7149,7 @@ test-threaded-rv: build/rv/threaded_test
 
 ## Threaded-dispatch test on arm64 (IR builder → arm64 asm → qemu-aarch64)
 THREADED_TEST_A64_SRC := tests/test_threaded.c $(IR_SRC) $(BE_A64)
-build/test_threaded_arm64: $(THREADED_TEST_A64_SRC) ir/ir.h | build
+build/test_threaded_arm64: $(THREADED_TEST_A64_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Iir -o $@ $(THREADED_TEST_A64_SRC)
 build/arm64/threaded_test.s: build/test_threaded_arm64 | build/arm64
 	./build/test_threaded_arm64 -o $@
@@ -6780,7 +7164,7 @@ test-threaded-arm64: build/arm64/threaded_test
 
 ## Threaded-dispatch test on MIPS (IR builder → MIPS asm → qemu-mipsel)
 THREADED_TEST_MIPS_SRC := tests/test_threaded.c $(IR_SRC) $(BE_MIPS)
-build/test_threaded_mips: $(THREADED_TEST_MIPS_SRC) ir/ir.h | build
+build/test_threaded_mips: $(THREADED_TEST_MIPS_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Iir -o $@ $(THREADED_TEST_MIPS_SRC)
 build/mips/threaded_test.s: build/test_threaded_mips | build/mips
 	./build/test_threaded_mips -o $@
@@ -6796,7 +7180,7 @@ test-threaded-mips: build/mips/threaded_test
 ## Unsigned 32-bit ops integration test (IR builder → ColdFire asm → qemu-m68k)
 OPS_TEST_CF_SRC := tests/test_ops.c $(IR_SRC) $(BE_CF)
 
-build/test_ops_cf: $(OPS_TEST_CF_SRC) ir/ir.h | build
+build/test_ops_cf: $(OPS_TEST_CF_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Iir -o $@ $(OPS_TEST_CF_SRC)
 
 build/ops_test_cf.s: build/test_ops_cf | build
@@ -6816,7 +7200,7 @@ test-ops: build/ops_test_cf
 ## Unsigned 32-bit ops integration test (IR builder → RISC-V asm → qemu-riscv32)
 OPS_TEST_RV_SRC := tests/test_ops.c $(IR_SRC) $(BE_RV)
 
-build/test_ops_rv: $(OPS_TEST_RV_SRC) ir/ir.h | build
+build/test_ops_rv: $(OPS_TEST_RV_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Iir -o $@ $(OPS_TEST_RV_SRC)
 
 build/rv/ops_test.s: build/test_ops_rv | build/rv
@@ -6836,7 +7220,7 @@ test-ops-rv: build/rv/ops_test
 ## Unsigned 32-bit ops integration test (IR builder → arm64 asm → qemu-aarch64)
 OPS_TEST_A64_SRC := tests/test_ops.c $(IR_SRC) $(BE_A64)
 
-build/test_ops_arm64: $(OPS_TEST_A64_SRC) ir/ir.h | build
+build/test_ops_arm64: $(OPS_TEST_A64_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Iir -o $@ $(OPS_TEST_A64_SRC)
 
 build/arm64/ops_test.s: build/test_ops_arm64 | build/arm64
@@ -6856,7 +7240,7 @@ test-ops-arm64: build/arm64/ops_test
 ## Unsigned 32-bit ops integration test (IR builder → x86-64 asm → qemu-x86_64)
 OPS_TEST_X64_SRC := tests/test_ops.c $(IR_SRC) $(BE_X64)
 
-build/test_ops_x64: $(OPS_TEST_X64_SRC) ir/ir.h | build
+build/test_ops_x64: $(OPS_TEST_X64_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -DX86_BITS=64 -Iir -o $@ $(OPS_TEST_X64_SRC)
 
 build/x86_64/ops_test.s: build/test_ops_x64 | build/x86_64
@@ -6878,7 +7262,7 @@ test-ops-x86-64: build/x86_64/ops_test
 ## _Float16 FLH/FSH are native fcvt on AArch64, so no half.o helper is linked.
 FPU_TEST_A64_SRC := tests/test_fpu.c $(IR_SRC) $(BE_A64)
 
-build/test_fpu_arm64: $(FPU_TEST_A64_SRC) ir/ir.h | build
+build/test_fpu_arm64: $(FPU_TEST_A64_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Iir -o $@ $(FPU_TEST_A64_SRC)
 
 build/arm64/fpu_test.s: build/test_fpu_arm64 | build/arm64
@@ -6901,7 +7285,7 @@ test-fpu-arm64: build/arm64/fpu_test
 ## generic build/rv/%.o pattern is integer-only rv32im).
 FPU_TEST_RV_SRC := tests/test_fpu.c $(IR_SRC) $(BE_RV)
 
-build/test_fpu_rv: $(FPU_TEST_RV_SRC) ir/ir.h | build
+build/test_fpu_rv: $(FPU_TEST_RV_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Iir -o $@ $(FPU_TEST_RV_SRC)
 
 build/rv/fpu_test.s: build/test_fpu_rv | build/rv
@@ -6923,7 +7307,7 @@ test-fpu-rv: build/rv/fpu_test
 ## half.o is compiled natively (64-bit) here.
 FPU_TEST_X64_SRC := tests/test_fpu.c $(IR_SRC) $(BE_X64)
 
-build/test_fpu_x64: $(FPU_TEST_X64_SRC) ir/ir.h | build
+build/test_fpu_x64: $(FPU_TEST_X64_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -DX86_BITS=64 -Iir -o $@ $(FPU_TEST_X64_SRC)
 
 build/x86_64/fpu_test.s: build/test_fpu_x64 | build/x86_64
@@ -6951,7 +7335,7 @@ test-fpu-x86-64: build/x86_64/fpu_test
 
 ## Native single-precision (IR_F32) integration test on x86-64
 F32_TEST_X64_SRC := tests/test_f32.c $(IR_SRC) $(BE_X64)
-build/test_f32_x64: $(F32_TEST_X64_SRC) ir/ir.h | build
+build/test_f32_x64: $(F32_TEST_X64_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -DX86_BITS=64 -Iir -o $@ $(F32_TEST_X64_SRC)
 build/x86_64/f32_test.s: build/test_f32_x64 | build/x86_64
 	./build/test_f32_x64 -o $@
@@ -6964,7 +7348,7 @@ test-f32-x86-64: build/x86_64/f32_test
 	@$(QEMU_X64) ./build/x86_64/f32_test && echo "PASS: f32_test (x86-64)" || (echo "FAIL: f32_test (x86-64)"; exit 1)
 
 F32_TEST_A64_SRC := tests/test_f32.c $(IR_SRC) $(BE_A64)
-build/test_f32_arm64: $(F32_TEST_A64_SRC) ir/ir.h | build
+build/test_f32_arm64: $(F32_TEST_A64_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -DSKJ_LP64=1 -Iir -o $@ $(F32_TEST_A64_SRC)
 build/arm64/f32_test.s: build/test_f32_arm64 | build/arm64
 	./build/test_f32_arm64 -o $@
@@ -6977,7 +7361,7 @@ test-f32-arm64: build/arm64/f32_test
 	@$(QEMU_A64) ./build/arm64/f32_test && echo "PASS: f32_test (arm64)" || (echo "FAIL: f32_test (arm64)"; exit 1)
 
 F32_TEST_RV_SRC := tests/test_f32.c $(IR_SRC) $(BE_RV)
-build/test_f32_rv: $(F32_TEST_RV_SRC) ir/ir.h | build
+build/test_f32_rv: $(F32_TEST_RV_SRC) ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Iir -o $@ $(F32_TEST_RV_SRC)
 build/rv/f32_test.s: build/test_f32_rv | build/rv
 	./build/test_f32_rv -o $@
@@ -9695,7 +10079,7 @@ check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
            test-cc-rv-psabi-gcc-stock test-cc-rv-psabi-archive \
            test-cc-rv-psabi-struct test-cc-driver check-libc \
            check-kp \
-           check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-corpus check-kp-corpus-cf check-kp-multi check-kp-callback check-kp-osthreads check-kp-files check-kp-textfile check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-inc check-kp-native
+           check-kp-frontend check-kp-jit check-kp-aot check-kp-asm check-kp-corpus check-kp-corpus-cf check-kp-multi check-kp-callback check-kp-struct-ffi check-kp-osthreads check-kp-stb-image check-kp-stb-truetype check-kp-netchan check-kp-files check-kp-textfile check-kp-dirs check-kp-stdlib check-kp-stdlib-free check-kp-stdlib-free-cf check-kp-io check-kp-inc check-kp-native
 	@echo "All architecture test suites passed."
 
 PHONY += clean

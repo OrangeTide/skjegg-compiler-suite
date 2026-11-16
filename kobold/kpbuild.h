@@ -59,6 +59,8 @@ void kpb_func_begin(const char *name, int is_local, int is_variadic,
 void kpb_slotsize(int size);
 void kpb_paramclass(int cls);
 void kpb_paramfw(int fw);
+void kpb_paramagg(int idx, int neb, int c0, int c1, int c2, int c3);
+void kpb_retagg(int neb, int c0, int c1, int c2, int c3);
 void kpb_insn(const char *mnem, int dst, int a, int b, long long imm,
               int slot, int label, int nargs, const char *sym);
 void kpb_asm_basic(const char *tmpl);
