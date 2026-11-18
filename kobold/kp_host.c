@@ -207,6 +207,8 @@ kp_install_runtime(struct kp_binding *binds, int *n, int cap)
 
     BIND("kp_retain", kp_retain);
     BIND("kp_release", kp_release);
+    BIND("kp_weak_set", kp_weak_set);
+    BIND("kp_weak_get", kp_weak_get);
     BIND("kp_trap_index", host_trap_index);
     BIND("kp_trap_div_zero", host_trap_div_zero);
     BIND("kp_trap_overflow", host_trap_overflow);

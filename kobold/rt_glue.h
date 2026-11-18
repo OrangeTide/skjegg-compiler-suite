@@ -41,6 +41,8 @@ kp_gptr  gheap_realloc(kp_gptr addr, uint32_t nbytes);
 uint32_t kp_gheap_live(void);          /* live heap bytes, for a guest leak check */
 void     kp_retain(kp_gptr v);
 void     kp_release(kp_gptr v);
+kp_gptr  kp_weak_set(kp_gptr id);      /* pack a handle as a non-retaining weak value */
+kp_gptr  kp_weak_get(kp_gptr weakval); /* the live referent, or nil once released (borrowed) */
 void     rt_register_final(uint32_t kind, void (*fn)(kp_gptr addr));
 void     rt_trap(uint32_t kind);
 

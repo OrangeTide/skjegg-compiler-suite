@@ -137,6 +137,8 @@ void rt_register_final(uint32_t kind, void (*fn)(kp_gptr addr))
    co_shim.c.  Host opaque handles will route the same way once ported. */
 void co_table_retain(kp_gptr id);
 void co_table_release(kp_gptr id);
+uint32_t co_table_generation(kp_gptr id);
+kp_gptr co_table_weak_get(kp_gptr id, uint32_t generation);
 
 /* GH_POISON (off by default) is the guest-heap write-after-free instrument;
    gheap_core.h documents the poison/verify half (the GH_WAF report).  This half
@@ -206,6 +208,49 @@ void kp_release(kp_gptr v)
     fin = (h->kind < KP_OBJ_NKINDS) ? g_final[h->kind] : NULL;
     if (fin)
         fin(v);                 /* the reclaimer frees the block and any storage it owns */
+}
+
+/* Weak references.  A weak reference is a handle-backed value (an interface or a
+   process, low bit 1) that does not retain its referent: the front end stores
+   through kp_weak_set and reads through kp_weak_get, and the slot is never
+   retained or released, so it breaks a reference cycle a strong field would keep
+   alive.  The weak value packs the handle id with the slot's generation at the
+   time of the store; a read returns the live id (borrowed, not retained) only while
+   that same occupant is interned, and nil once it has been released (its slot freed,
+   generation bumped).
+   The generation rides in the high bits of the value, above the small handle id,
+   where a weak slot's bits are private to these two helpers.  nil is weak-nil. */
+#if SKJ_LP64
+#define WEAK_GEN_SHIFT 32
+#define WEAK_ID_MASK   0xFFFFFFFFu
+#else
+#define WEAK_GEN_SHIFT 16
+#define WEAK_ID_MASK   0xFFFFu
+#endif
+
+kp_gptr kp_weak_set(kp_gptr id)
+{
+    uint32_t gen;
+
+    if (id == 0 || !KP_VAL_IS_TABLE(id))
+        return id;              /* nil, or (sema forbids) a non-handle value */
+    gen = co_table_generation(id);
+    return (kp_gptr)(id & WEAK_ID_MASK)
+         | ((kp_gptr)gen << WEAK_GEN_SHIFT);
+}
+
+kp_gptr kp_weak_get(kp_gptr weakval)
+{
+    kp_gptr id;
+    uint32_t gen;
+
+    if (weakval == 0)
+        return 0;
+    id = weakval & WEAK_ID_MASK;
+    gen = (uint32_t)(weakval >> WEAK_GEN_SHIFT);
+    if (!KP_VAL_IS_TABLE(id))
+        return 0;
+    return co_table_weak_get(id, gen);
 }
 
 /****************************************************************

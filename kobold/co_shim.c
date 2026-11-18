@@ -43,6 +43,9 @@ struct ht_entry {
     int kind;
     void *obj;
     kp_finalize fin;
+    uint32_t generation;        /* bumped each time the slot is freed, so a weak
+                                   reference captured against an earlier occupant
+                                   no longer matches (see co_table_weak_get) */
 };
 
 static struct ht_entry *ht;
@@ -118,6 +121,7 @@ kp_handle_sweep(void)
             ht[i].obj = NULL;
             ht[i].fin = NULL;
             ht[i].kind = 0;
+            ht[i].generation++;
             if (fin)
                 fin(NULL, obj);
         }
@@ -153,8 +157,46 @@ co_table_release(kp_gptr id)
     e->obj = NULL;
     e->fin = NULL;
     e->kind = 0;
+    e->generation++;             /* invalidate any weak reference to this occupant */
     if (fin)
         fin(NULL, obj);
+}
+
+/* Weak references over the handle table.  A weak reference does not hold a count:
+   it stores the id together with the slot's generation at the time of the store,
+   and reads back as the live id only while that same occupant is still interned.
+   Once the referent is released its slot is freed, the generation is bumped, and
+   a later read no longer matches, so it reads as nil.  This breaks a reference
+   cycle that a strong field would otherwise keep alive.  rt_host.c's kp_weak_set /
+   kp_weak_get pack and unpack the (id, generation) pair and route here. */
+
+/* The current generation of a live slot, or 0 for a nil or freed id.  kp_weak_set
+   snapshots this into the weak value. */
+uint32_t
+co_table_generation(kp_gptr id)
+{
+    struct ht_entry *e = ht_lookup(id);
+
+    if (!e || e->refcount == 0)
+        return 0;
+    return e->generation;
+}
+
+/* Resolve a weak reference: if the slot is still the occupant the weak value was
+   captured against (live and matching generation), return the id; otherwise return
+   nil.  The id is borrowed, not retained: a weak read yields a reference the caller
+   owns no more than an ordinary handle-field load does, so it composes with the
+   existing borrowed-field ownership (the caller retains it if it keeps it). The VM
+   is single-threaded and cooperative, so the referent cannot be released between
+   this check and the caller's use within the same expression. */
+kp_gptr
+co_table_weak_get(kp_gptr id, uint32_t generation)
+{
+    struct ht_entry *e = ht_lookup(id);
+
+    if (!e || e->refcount == 0 || e->generation != generation)
+        return 0;
+    return id;
 }
 
 /****************************************************************

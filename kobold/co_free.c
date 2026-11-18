@@ -28,6 +28,7 @@ typedef uint32_t u32;
 /* From rt_free.c (the guest heap, the finalizer registry, the fatal trap) and
    io_free.c (the trap kinds share the exit path). */
 u32  gheap_alloc(u32 nbytes);
+u32  gheap_realloc(u32 addr, u32 nbytes);
 void gheap_free(u32 addr);
 void rt_register_final(u32 kind, void (*fn)(u32 addr));
 void rt_trap(u32 kind);
@@ -70,6 +71,9 @@ struct coro {
     u32           started;          /* resumed at least once, so it has live frames */
     u32           cancelling;       /* being torn down: yields do not suspend */
     u32           dead;             /* last reference went while running */
+    u32           weakslot;         /* 1-based index into the weak registry, or 0
+                                       if no weak reference has been taken (see the
+                                       weak-reference registry below) */
 };
 
 #define CO_STACK_SIZE  (64u * 1024u)
@@ -79,6 +83,7 @@ static u32 current;
 
 static void co_final(u32 co);
 static void co_reclaim(u32 co);
+static void co_weak_invalidate(struct coro *co);
 
 static struct coro *
 coro_ptr(u32 co)
@@ -257,6 +262,7 @@ co_reclaim(u32 co_addr)
 
     if (co->state == CO_SUSPENDED && co->started)
         co_cancel(co_addr);
+    co_weak_invalidate(co);     /* a weak reference to this coroutine now reads nil */
     if (co->stack)
         gheap_free(co->stack);
     gheap_free(co_addr);
@@ -273,4 +279,112 @@ co_final(u32 co)
         coro_ptr(co)->dead = 1;
     else
         co_reclaim(co);
+}
+
+/****************************************************************
+ * Weak-reference registry
+ *
+ * A weak field holds a process without counting the reference, so it must read
+ * back as nil once the coroutine is reclaimed.  The hosted tier gets this from the
+ * handle table: a process there is a table-id slot carrying a generation, and the
+ * slot outlives the object.  This tier has no handle table; a process is a gheap
+ * object whose address is recycled on free, so a stored address cannot tell a live
+ * coroutine from a freed-and-reused block.
+ *
+ * The registry supplies the missing persistent slot.  Each coroutine that is ever
+ * weakly referenced is assigned a slot, lazily, holding its live address and a
+ * generation.  The slot array is never freed back to the heap, so reading a slot is
+ * always safe; reclaiming a coroutine clears its slot's address and bumps the
+ * generation, so a weak value captured against it no longer matches.  A coroutine
+ * that is never weakly referenced gets no slot and costs nothing.  rt_free.c packs
+ * the (slot, generation) pair into the weak value and routes the two calls here.
+ ****************************************************************/
+
+struct co_slot {
+    u32 addr;           /* the live coroutine's gheap address, 0 when free */
+    u32 generation;     /* bumped each time the slot is freed; carried across
+                           occupants, so a stale weak value never re-matches */
+};
+
+static u32 wk_slots;    /* gheap address of the slot array, or 0 before first use */
+static u32 wk_cap;      /* number of slots allocated */
+
+static struct co_slot *
+wk_ptr(void)
+{
+    return (struct co_slot *)(uintptr_t)wk_slots;
+}
+
+/* Clear a coroutine's slot at reclaim.  Called for every coroutine; a no-op for
+   one that was never weakly referenced. */
+static void
+co_weak_invalidate(struct coro *co)
+{
+    struct co_slot *s;
+
+    if (co->weakslot == 0)
+        return;
+    s = &wk_ptr()[co->weakslot - 1];
+    s->addr = 0;
+    s->generation++;
+    co->weakslot = 0;
+}
+
+/* Assign a slot to a coroutine on its first weak reference, growing the array if
+   full.  gheap_realloc traps fatally on exhaustion, so this never returns a bad
+   slot. */
+static u32
+co_weak_slot_assign(struct coro *co, u32 co_addr)
+{
+    struct co_slot *s;
+    u32 i;
+
+    if (co->weakslot)
+        return co->weakslot;
+    s = wk_ptr();
+    for (i = 0; i < wk_cap; i++)
+        if (s[i].addr == 0)
+            break;
+    if (i == wk_cap) {
+        u32 ncap = wk_cap ? wk_cap * 2u : 16u;
+
+        wk_slots = gheap_realloc(wk_slots, ncap * (u32)sizeof(struct co_slot));
+        s = wk_ptr();
+        memset(&s[wk_cap], 0, (ncap - wk_cap) * (u32)sizeof(struct co_slot));
+        wk_cap = ncap;
+    }
+    s[i].addr = co_addr;        /* generation carries over from the last occupant */
+    co->weakslot = i + 1;
+    return co->weakslot;
+}
+
+/* Ensure a slot for a process value and report its generation.  Returns the 1-based
+   slot index, or 0 for a nil process (which packs as a nil weak value). */
+u32
+co_free_weak_slot(u32 co_addr, u32 *gen_out)
+{
+    u32 slot;
+
+    if (co_addr == 0) {
+        *gen_out = 0;
+        return 0;
+    }
+    slot = co_weak_slot_assign(coro_ptr(co_addr), co_addr);
+    *gen_out = wk_ptr()[slot - 1].generation;
+    return slot;
+}
+
+/* Resolve a weak value's (slot, generation) to the live coroutine address, or 0 if
+   the slot is free or now holds a different occupant. */
+u32
+co_free_weak_addr(u32 slot, u32 generation)
+{
+    struct co_slot *s;
+
+    if (slot == 0 || slot > wk_cap)
+        return 0;
+    s = &wk_ptr()[slot - 1];
+    if (s->addr == 0 || s->generation != generation)
+        return 0;
+    return s->addr;
 }

@@ -65,9 +65,10 @@ shared shl shr slice start string then to type unit until uses var while with yi
 view. `map` opens `map of T`, `as` is the import alias
 in a `uses` clause, and `reexport` names a unit's re-exported surface. `property` declares an
 accessor-backed value with uniform access, as a declaration or a computed record field (see
-`kp-property.md`). `out`, `cdecl`, `export`, `read`, and `write` are contextual: they act as
-keywords only where a routine or property declaration expects them, so an ordinary
-identifier may still carry one of these names.
+`kp-property.md`). `out`, `cdecl`, `export`, `read`, `write`, and `weak` are contextual: they act as
+keywords only where a routine, property, or record-field declaration expects them, so an
+ordinary identifier may still carry one of these names. `weak` qualifies a handle-typed
+record field (see [Records](#records)).
 
 ## Constants and literals
 
@@ -306,6 +307,25 @@ begin t.c := (v - 32) * 5 div 9; end;
 ```
 
 See [Properties](#properties) and `kp-property.md`.
+
+A **weak field** holds a handle (an `interface` or a `process`) without keeping its
+referent alive. It is written by prefixing the field with `weak`:
+
+```pascal
+type Node = record
+  weak parent: INode;   { a back-reference that does not own the parent }
+  value: integer;
+end;
+```
+
+A read of a weak field yields the referent while it is still alive and `nil` once the
+last strong reference has been released and the object reclaimed. A store does not retain,
+so a weak field never contributes to the reference count. This is how a reference cycle is
+broken: a parent holds its children strongly, and a child points back at its parent weakly,
+so dropping the parent reclaims the whole subtree. The qualifier is allowed only on a field
+whose type is `interface` or `process` (the handle types), and not together with `read`/`write`
+(a computed field runs accessors instead of storing a handle). See [Memory and
+lifetime](kp-guide.md#weak-references) for the full rationale.
 
 ### Sets
 

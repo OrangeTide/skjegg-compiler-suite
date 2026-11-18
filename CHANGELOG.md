@@ -6,6 +6,24 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.55.0
+
+#### Added
+- Weak references. A record field of a handle type, an `interface` or a `process`,
+  may be qualified `weak`, as in `weak parent: INode;`. A weak field holds its
+  referent without counting the reference, so it does not keep the object alive and
+  reads as nil once the last strong reference is released and the object reclaimed.
+  This breaks a reference cycle that automatic reference counting cannot free: a
+  parent that owns its children and a child that points back at its parent weakly is
+  reclaimed as a whole when the parent drops. The qualifier is rejected on a field
+  that is not a handle type, and on a computed field. It works on every backend and
+  tier. A `weak process` field is supported on the hosted JIT and AOT paths and on
+  the freestanding rv32 and ColdFire runtimes alike; `weak interface` is a
+  hosted-tier feature, since the freestanding tier materializes no interface handles.
+- The Kobold manual now states the memory model: automatic reference counting, the
+  reference cycle it cannot reclaim, and `weak` as the tool to break a deliberate
+  cycle, with the parent-pointer and observer back-edges as the worked examples.
+
 ### 0.54.0
 
 #### Added

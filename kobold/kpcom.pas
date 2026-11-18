@@ -196,6 +196,9 @@ type
     Rank: LongInt;              { a buffer's dimension count: 1 for `buffer of T`, 2 for
                                   `buffer[,] of T`, etc. 0/1 for any non-buffer dynamic array }
     FromUnit: string;           { the dependency unit an imported type was read from, else '' }
+    Weak: array of Boolean;     { per record member: a `weak` field (a non-retaining interface or
+                                  process reference, so it breaks a reference cycle a strong field
+                                  would keep alive); False for every non-weak member and type }
   end;
 
   TSymKind = (
@@ -2326,12 +2329,20 @@ begin
   Expect(tkRecord);
   while Tok.Kind = tkIdent do begin
     f := NewNode(nkFieldDecl);
+    { `weak` is a contextual qualifier: `weak <name>: <interface|process>`. It stays usable as a
+      field name (`weak: integer`), told apart because a qualifier is followed by another name. }
+    if IsDirective('weak') and (PeekTokenKind = tkIdent) then begin
+      NextToken;                 { consume `weak` }
+      Nodes[f].Flag := 2;        { a weak field (see nkRecordType sema and the Weak member array) }
+    end;
     ParseIdentList(f);
     Expect(tkColon);
     Nodes[f].A := ParseType;
     if IsDirective('read') then begin
       { a computed field: `name: Type read getX [write setX]` (doc/languages/kobold/kp-property.md).
         Only a single-name field may be computed. }
+      if Nodes[f].Flag = 2 then
+        ParseErr('a ''weak'' field cannot be a computed field');
       if High(Nodes[f].Kids) <> 0 then
         ParseErr('a computed field names one field only');
       Nodes[f].Flag := 1;
@@ -3947,10 +3958,19 @@ begin
   SetLength(SemTypes[ty].Subs, n + 1);
   SetLength(SemTypes[ty].PropGet, n + 1);
   SetLength(SemTypes[ty].PropSet, n + 1);
+  SetLength(SemTypes[ty].Weak, n + 1);
   SemTypes[ty].Names[n] := nm;
   SemTypes[ty].Subs[n] := mty;
   SemTypes[ty].PropGet[n] := '';
   SemTypes[ty].PropSet[n] := '';
+  SemTypes[ty].Weak[n] := False;
+end;
+
+procedure SetMemberWeak(ty: LongInt);
+{ Mark the most recently added member of record ty as a `weak` field: a non-retaining
+  reference, so it does not keep its referent alive and breaks a reference cycle. }
+begin
+  SemTypes[ty].Weak[High(SemTypes[ty].Names)] := True;
 end;
 
 procedure SetMemberProp(ty: LongInt; const g, s: string);
@@ -4433,7 +4453,14 @@ begin
             SetMemberOff(rec, -1);
             SetMemberProp(rec, Nodes[Nodes[f].B].Text, PropSetterName(f));
           end
-          else
+          else begin
+            { a `weak` field (parser Flag 2) is a non-retaining reference, so it may hold only a
+              handle: an interface or a process. It breaks a reference cycle a strong field would
+              keep alive (doc/languages/kobold weak references). }
+            if (Nodes[f].Flag = 2) and
+               not (SemTypes[fld].Kind in [skInterface, skProcess]) then
+              SemErr(f, 'a ''weak'' field must be an interface or process; ''' +
+                TypeName(fld) + ''' is not a handle type');
             for v := 0 to High(Nodes[f].Kids) do begin
               fa := TypeAlign(fld);
               if (cap > 0) and (fa > cap) then fa := cap;
@@ -4441,8 +4468,10 @@ begin
               cur := RoundUp(cur, fa);
               AddMember(rec, Nodes[Nodes[f].Kids[v]].Text, fld);
               SetMemberOff(rec, cur);
+              if Nodes[f].Flag = 2 then SetMemberWeak(rec);
               cur := cur + TypeSize(fld);
             end;
+          end;
         end
         else if Nodes[f].Kind = nkVariantPart then begin
           vp := f;
@@ -7285,7 +7314,7 @@ function LoadUnitInterface(node: LongInt; const uname: string): LongInt;
 var
   u, savedScope, uscope, pos, dpos, sig, s, ety, idx: LongInt;
   text, line, kw, nm, cls, val, base: string;
-  inIntf: Boolean;
+  inIntf, isWeak: Boolean;
 begin
   u := UUFind(uname);
   if u >= 0 then begin
@@ -7384,9 +7413,12 @@ begin
         NextField(line, dpos);                { '(' }
         val := NextField(line, dpos);         { a field name, or ')' }
         while (val <> ')') and (val <> '') do begin
-          base := NextField(line, dpos);      { the field type }
+          base := NextField(line, dpos);      { the field type, maybe `weak:`-prefixed }
+          isWeak := (Length(base) >= 5) and (Copy(base, 1, 5) = 'weak:');
+          if isWeak then base := Copy(base, 6, Length(base) - 5);
           AddMember(ety, val, RefToType(base, uscope));
           SetMemberOff(ety, ParseI64(NextField(line, dpos)));
+          if isWeak then SetMemberWeak(ety);
           val := NextField(line, dpos);
         end;
         s := AddSym(nm, syType);
@@ -11843,6 +11875,23 @@ begin
     ComputedFieldGetter := SemTypes[rt].PropGet[m];
 end;
 
+function IsWeakField(node: LongInt): Boolean;
+{ True when nkField `node` reads or writes a `weak` record field: a non-retaining
+  interface or process reference. A weak field stores a packed (id, generation)
+  value (see kp_weak_set / kp_weak_get), so it is read through kp_weak_get and
+  written through kp_weak_set, and the handle-field reclamation skips it. }
+var
+  rt, m: LongInt;
+begin
+  IsWeakField := False;
+  if (Nodes[node].Kind <> nkField) or (Nodes[node].Flag = 1) then Exit;
+  rt := Nodes[Nodes[node].A].Ty;
+  if (rt < 0) or (rt >= SemCount) or (SemTypes[rt].Kind <> skRecord) then Exit;
+  m := FindMember(rt, Nodes[node].Text);
+  if (m >= 0) and (m <= High(SemTypes[rt].Weak)) then
+    IsWeakField := SemTypes[rt].Weak[m];
+end;
+
 function LowerComputedFieldRead(node: LongInt; const getter: string): LongInt;
 { Read a computed record field by calling its getter method: synthesize rec.getter(). }
 var
@@ -11958,6 +12007,12 @@ begin
       else if IsMethodField(node) then
         { a no-argument method named as a value auto-calls, e.g. ok := e.alive }
         LowerExpr := LowerMethodCall(node, [], True)
+      else if IsWeakField(node) then
+        { a weak field holds a packed (id, generation) value: resolve it to the live
+          referent, or nil if it has been released. kp_weak_get borrows the result (no
+          retain), so a weak read has the same ownership as an ordinary field load. }
+        LowerExpr := EmitStrCall1('kp_weak_get',
+          EmitLoadScalar(AddrOf(node), Nodes[node].Ty))
       else if IsAggregate(Nodes[node].Ty) then LowerExpr := AddrOf(node)
       else LowerExpr := EmitLoadScalar(AddrOf(node), Nodes[node].Ty);
     end;
@@ -12431,7 +12486,10 @@ begin
   case SemTypes[ty].Kind of
     skRecord:
       for i := 0 to High(SemTypes[ty].Subs) do
-        CollectHandleOffsets(SemTypes[ty].Subs[i], baseOff + FieldOffset(ty, i), offs);
+        { a weak field is non-retaining, so it is not part of the handle-field
+          reclamation: it is never retained on copy nor released on teardown }
+        if (i > High(SemTypes[ty].Weak)) or not SemTypes[ty].Weak[i] then
+          CollectHandleOffsets(SemTypes[ty].Subs[i], baseOff + FieldOffset(ty, i), offs);
     skArray:
       if Length(SemTypes[ty].Subs) > 0 then begin   { fixed array; dynamic is a handle }
         cnt := 1;
@@ -12468,7 +12526,9 @@ begin
   case SemTypes[ty].Kind of
     skRecord:
       for i := 0 to High(SemTypes[ty].Subs) do
-        CollectHandleKinds(SemTypes[ty].Subs[i], baseOff + FieldOffset(ty, i), offs, kinds);
+        { skip a weak field: non-retaining, so outside the copy/teardown reclamation }
+        if (i > High(SemTypes[ty].Weak)) or not SemTypes[ty].Weak[i] then
+          CollectHandleKinds(SemTypes[ty].Subs[i], baseOff + FieldOffset(ty, i), offs, kinds);
     skArray:
       if Length(SemTypes[ty].Subs) > 0 then begin   { fixed array; dynamic is a handle }
         cnt := 1;
@@ -12968,7 +13028,7 @@ end;
 
 procedure LowerAssign(node: LongInt);
 var
-  target, v, s, tt, addr, old, i, rt, m, sf: LongInt;
+  target, v, s, tt, addr, old, i, rt, m, sf, wv: LongInt;
   aoffs, akinds, clones, argv, aops: TIntArray;
 begin
   target := Nodes[node].A;
@@ -13045,6 +13105,19 @@ begin
     Exit;
   end;
   if IsHandle(tt) then begin
+    { a weak field takes no ownership: pack the referent with kp_weak_set and store it
+      without retaining, and overwrite the old weak value without releasing it (it owned
+      nothing). An owned right-hand side (a fresh transfer) is released, since the weak slot
+      does not keep it alive; if it was the last reference the referent dies at once and the
+      weak field reads nil, the correct ARC outcome. }
+    if IsWeakField(target) then begin
+      v := LowerExpr(Nodes[node].B);
+      wv := EmitStrCall1('kp_weak_set', v);
+      if IsOwnedExpr(Nodes[node].B) then EmitRelease(v);
+      addr := AddrOf(target);
+      EmitStorePtr(addr, wv);
+      Exit;
+    end;
     { retain a borrowed value (a transfer already owns its reference), store, and
       release the previous owner }
     if IsEmptyArrayLit(Nodes[node].B) then
@@ -14663,7 +14736,7 @@ function InterfaceEntryFromSym(s: LongInt; sharedFlag: Boolean): string;
   Shared by the native declarations and the re-exported names. }
 var
   ety, m: LongInt;
-  line: string;
+  line, wk: string;
 begin
   InterfaceEntryFromSym := '';
   case Syms[s].Kind of
@@ -14685,9 +14758,14 @@ begin
           same layout the defining unit uses }
         line := '    .type ' + Syms[s].Name + ' record ' +
           IntToStr(TypeSize(ety)) + ' ' + IntToStr(TypeAlign(ety)) + ' (';
-        for m := 0 to High(SemTypes[ety].Names) do
+        for m := 0 to High(SemTypes[ety].Names) do begin
+          { a weak field carries a `weak:` prefix on its type token, so a consumer reconstructs
+            the field as weak and gives it the same non-retaining lowering (its type is always a
+            simple interface or process name, so the prefix never collides) }
+          if (m <= High(SemTypes[ety].Weak)) and SemTypes[ety].Weak[m] then wk := 'weak:' else wk := '';
           line := line + ' ' + SemTypes[ety].Names[m] + ' ' +
-            TypeRef(SemTypes[ety].Subs[m]) + ' ' + IntToStr(SemTypes[ety].MemberOff[m]);
+            wk + TypeRef(SemTypes[ety].Subs[m]) + ' ' + IntToStr(SemTypes[ety].MemberOff[m]);
+        end;
         InterfaceEntryFromSym := line + ' )';
       end
       else if (ety >= 0) and (ety < SemCount) and (SemTypes[ety].Kind = skInterface) then begin

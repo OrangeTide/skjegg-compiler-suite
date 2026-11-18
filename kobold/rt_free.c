@@ -418,3 +418,43 @@ kp_release(kp_gptr v)
     if (fin)
         fin(v);
 }
+
+/****************************************************************
+ * Weak references
+ *
+ * A weak field holds a process without counting the reference, so it breaks a
+ * reference cycle a strong field would keep alive, and reads back as nil once the
+ * coroutine is reclaimed.  This tier has no handle table, so the weak value cannot
+ * be the process address (a gheap address is recycled on free): co_free.c keeps a
+ * never-freed slot registry with a generation per slot, and the weak value packs the
+ * (slot, generation) pair.  The pair stays readable after the coroutine is gone, and
+ * the generation no longer matches, so the read yields nil.  The packed value is
+ * private to these two helpers and the weak field, and is never dereferenced as an
+ * address: a weak field is excluded from reference counting and every read goes
+ * through kp_weak_get.
+ *
+ * The generation rides in the high bits, above the small slot index.  This tier is
+ * ILP32 (rv32, cf), so a 16-bit split matches the hosted ILP32 packing. */
+#define WEAK_GEN_SHIFT 16
+#define WEAK_SLOT_MASK 0xFFFFu
+
+uint32_t co_free_weak_slot(uint32_t co, uint32_t *gen_out);
+uint32_t co_free_weak_addr(uint32_t slot, uint32_t generation);
+
+kp_gptr
+kp_weak_set(kp_gptr id)
+{
+    uint32_t gen;
+    uint32_t slot = co_free_weak_slot((uint32_t)id, &gen);
+
+    return (kp_gptr)slot | ((kp_gptr)gen << WEAK_GEN_SHIFT);
+}
+
+kp_gptr
+kp_weak_get(kp_gptr weakval)
+{
+    uint32_t slot = (uint32_t)(weakval & WEAK_SLOT_MASK);
+    uint32_t gen  = (uint32_t)(weakval >> WEAK_GEN_SHIFT);
+
+    return co_free_weak_addr(slot, gen);
+}

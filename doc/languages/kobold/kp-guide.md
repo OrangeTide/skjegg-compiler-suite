@@ -143,6 +143,48 @@ events.
 its own refcounted private stack, so it can be stored and resumed across ticks
 from any depth.
 
+### Weak references
+
+A handle is managed by automatic reference counting. The compiler retains the
+referent when a handle is copied and releases it when the handle goes out of scope
+or is overwritten, and the host reclaims the object when its count reaches zero. This
+needs no collector and reclaims promptly, but it cannot free a cycle: if two objects
+hold strong handles to each other, neither count ever reaches zero and both leak, even
+after every outside reference is gone.
+
+A `weak` field breaks the cycle. It holds a handle (an `interface` or a `process`)
+without counting the reference, so it does not keep the referent alive:
+
+```pascal
+type
+  INode = interface
+    id: function: integer;
+  end;
+  TNode = record
+    weak parent: INode;   { points up the tree without owning the parent }
+    value: integer;
+  end;
+```
+
+Reading a weak field yields the referent while it is still alive, and `nil` once the
+last strong reference has been released and the object reclaimed. The read is a plain
+handle load, so the usual rule applies: the value is borrowed, and keeping it past the
+expression retains it like any other handle. A store never retains.
+
+The common shape is a parent that owns its children and a child that points back at
+its parent. The parent holds the children strongly, so the subtree stays alive as long
+as the parent does; each child's `weak parent` does not count, so dropping the parent
+reclaims the whole subtree instead of leaving a parent-child cycle behind. The same
+shape covers an observer that watches a subject it must not keep alive, and a cache
+entry that should disappear with its target. When the referent is gone the weak field
+simply reads `nil`, which the holder checks before use.
+
+`weak` is allowed only on a field whose type is a handle (`interface` or `process`),
+since only those are separately reclaimable objects a cycle can form through. A string,
+array, or map field is a value and is not eligible. A weak field also cannot be a
+computed field, because a computed field runs accessor methods rather than storing a
+handle.
+
 ### Overloaded routines
 
 There is no special `write`/`writeln` syntax baked into the grammar. Output is
