@@ -1,0 +1,6 @@
+after remove: count=4
+v=0 4 2 3
+count=3
+cleared=0
+reuse=1 42
+s=cb 2

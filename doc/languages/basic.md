@@ -25,8 +25,10 @@ production the compiler does not yet accept is noted where it matters.
 - Fully structured. There are no line numbers and no `GOTO`.
 - Four value types: `INT`, `FLOAT`, `BYTE`, `STRING`.
 - Variables are declared with `DIM name AS type`. There are no type sigils.
-- Procedures (`PROC`) and functions (`FN`) take typed parameters. Variables
-  declared inside a routine are local to it.
+- Procedures (`PROC`) and functions (`FN`) take typed parameters. A variable
+  declared at module scope is a global, visible in every routine; a variable
+  declared inside a routine is local to it. Every variable starts at its zero
+  value.
 - Statements are one per line, or several per line separated by `:`.
 - Keywords and identifiers are case-insensitive. `Print`, `PRINT`, and `print`
   are the same token, and `count` and `Count` are the same variable.
@@ -75,7 +77,9 @@ VectorType = 'VECTOR' 'OF' Type .
 ```
 
 `BYTE` exists mainly for buffer and array work. A `BYTE` promotes to `INT` in
-arithmetic and truncates on assignment back to a `BYTE`.
+arithmetic and keeps the low 8 bits on assignment back to a `BYTE`, so a store
+wraps modulo 256. `INT` arithmetic is 64-bit two's complement and wraps modulo
+2^64 on overflow; it does not trap.
 
 The name `INT` is both this type and the truncation function `INT(x)`; which is
 meant is clear from context, a type after `AS`, a function in an expression.
@@ -115,6 +119,21 @@ ConstExprList = ConstExpr { ',' ConstExpr } .
 BASIDE's `AT addr` mapped-array form (binding a `DIM` onto a memory address) is a
 host-memory facility and is not part of skjegg's core BASIC.
 
+### Scope and initial values
+
+A variable declared at module scope is a global: its storage lives for the whole
+run and every `PROC` and `FN` reads and writes it by name. A variable declared
+inside a routine is local to that routine, and a local may shadow a global of the
+same name, in which case the local wins inside that routine. Routines share no
+other state, so a routine reaches beyond itself only through a global, through its
+parameters, or through its return values. A name that is not a declared variable,
+constant, routine, or built-in is an error.
+
+Every variable starts at its zero value before any assignment: `INT` and `BYTE`
+are `0`, a `FLOAT` is `0.0`, a `STRING` is empty, an array or record is filled
+with those zeros, and a `VECTOR` is empty. Reading a variable before it is
+assigned yields that zero value, not an undefined result.
+
 ## Aggregate types
 
 ### Records
@@ -130,10 +149,22 @@ copied on assignment and when passed without `REF`.
 
 ### Vectors
 
-A `VECTOR OF T` is a growable typed list of `T`. Elements are reached by a
-zero-based index like an array. `APPEND v, x` adds an element, `REMOVE v, i`
-drops one, `CLEAR v` empties it, and `COUNT(v)` is the element count. (The vector
-runtime lands in a later phase; see the roadmap in `PLAN.md`.)
+A `VECTOR OF T` is a growable typed list of `T`, where `T` is a scalar, a
+`STRING`, or a record. `DIM v AS VECTOR OF T` creates an empty vector. Elements
+are reached by a zero-based index like an array, `v(i)`, and the statements that
+change a vector are:
+
+- `APPEND v, x` adds `x` as a new last element (a record is copied in by value).
+- `REMOVE v, i` drops element `i` by moving the last element into its place, so
+  it is cheap but does not preserve the order of the remaining elements.
+- `CLEAR v` empties the vector.
+
+`COUNT(v)` is the element count. An index outside `0 .. COUNT(v) - 1` is a
+runtime fault. A vector grows on demand, so its storage moves as it fills; a
+value of vector type is a handle, so assigning one vector to another, or passing
+one to a routine, shares the same elements rather than copying them. A record
+element is reached through a field, `v(i).field`, or copied whole with `v(i) = r`
+and `r = v(i)`. `FOR EACH` walks a vector the same way it walks an array.
 
 ## Procedures and functions
 
@@ -187,8 +218,9 @@ WaitStmt   = 'WAIT' Expression .   (* pause for Expression milliseconds *)
 ```
 
 `END` halts the program. `WAIT` pauses for the given number of milliseconds (a
-non-positive count returns at once). `AT` and `TAB` console cursor positioning
-are not yet implemented.
+non-positive count returns at once). `PRINT AT row, column` moves the console
+cursor, and `PRINT TAB(column)` pads to a column; both are described under
+Console I/O.
 
 ### IF
 
@@ -220,8 +252,12 @@ ForEachStmt = 'FOR' 'EACH' IDENTIFIER 'IN' Designator NEWLINE
 - `WHILE` tests before the body; `REPEAT` tests after, so its body runs at least
   once.
 - The `FOR` control variable is a declared numeric variable (`INT`, `FLOAT`, or
-  `BYTE`). `STEP` defaults to 1 and may be negative. An identifier after `NEXT`
-  must match the control variable.
+  `BYTE`). `STEP` defaults to 1 and may be negative. The start, limit, and step
+  are each evaluated once, before the loop. After the loop the control variable
+  holds the first value that failed the limit test, one `STEP` past the last
+  value the body ran with. An identifier after `NEXT` must match the control
+  variable. (A `FLOAT` control variable, limit, or step is not yet implemented;
+  the three must be integers.)
 - `FOR EACH v IN coll` walks an array or vector, binding `v` as a reference to
   each element in turn. `v` is declared by the loop and scoped to it.
 - `FOR` and `FOR EACH` are told apart by one token of lookahead: `EACH` after
@@ -253,7 +289,7 @@ PrintItem = Expression
           | 'AT' Expression ',' Expression    (* move the cursor *)
           | 'TAB' '(' Expression ')' .        (* pad to a column *)
 PrintSep  = ',' | ';' .
-            (* ';' joins items with no space; ',' advances to the next column.
+            (* ';' joins items with nothing between them; ',' writes one space.
                A trailing separator suppresses the newline. *)
 
 InputStmt = 'INPUT' [ STRING_LITERAL ';' ] Designator { ',' Designator } .
@@ -261,12 +297,24 @@ InputStmt = 'INPUT' [ STRING_LITERAL ';' ] Designator { ',' Designator } .
 
 `PRINT` writes values at the console cursor. An `INT` prints in full; a `FLOAT`
 prints the shortest digits that read back to the same value; a `STRING` prints
-its characters. The `FLOAT` form is fixed-point with at least one fractional
+its characters. A number prints with no leading or trailing space (a negative
+sign is the only prefix), so the separators and any literal text are the whole of
+the spacing: `;` writes nothing between items and `,` writes a single space.
+There are no comma column zones. The `FLOAT` form is fixed-point with at least
+one fractional
 digit, turning to scientific notation for a decimal exponent outside the range
 [-4, 17). The shortest digits come from the Dragon4 algorithm and `VAL`/`INPUT`
 round the digits back correctly, so a value survives a print-and-read round trip;
 both run in exact integer arithmetic and give identical output on every target.
-`INPUT` reads one line and parses a value per designator. BASIDE's
+The `AT row, column` print item moves the cursor before the next item: both
+coordinates are zero-based and clamped at zero, emitted as a terminal cursor
+escape so output lands at that cell. The `TAB(column)` item pads with spaces up
+to the zero-based column, and emits nothing when the cursor is already at or past
+it; the runtime tracks the column as it writes, and a newline returns it to the
+left margin. `INPUT` reads one line and fills its designators from it left to
+right. Numeric fields are separated by commas, and each parses a leading number
+the way `VAL` and `VALINT` do; a field with no number reads as `0`. A `STRING`
+designator takes the rest of the line, so it is normally the last field. BASIDE's
 `INK`/`PAPER` print items set display colours and belong to its console module,
 so they are not part of core BASIC.
 
@@ -315,12 +363,41 @@ equality operator. `DIV` is integer division; `/` produces a `FLOAT`.
 `BAND`, `BOR`, `BXOR`, `SHL`, `SHR`, and prefix `BNOT` work on the bits of an
 `INT` and bind at the multiplicative level. `BNOT x` is `x BXOR -1`.
 
+### Operand types and results
+
+`INT` and `BYTE` operands compute in 64-bit `INT`. When either operand of `+`,
+`-`, `*`, a comparison, `MIN`, `MAX`, `CLAMP`, or `LERP` is a `FLOAT`, the other
+promotes to `FLOAT` and the result is a `FLOAT`. `/` always produces a `FLOAT`,
+while `DIV` and `MOD` are integer. An integer `DIV` or `MOD` by zero is a runtime
+fault; a `FLOAT` divided by zero is not a fault and follows IEEE 754, giving an
+infinity or a NaN.
+
+`^` raises an `INT` to an `INT` power and yields an `INT`. A negative exponent
+gives `0`, and `0 ^ 0` is `1`. (A `FLOAT` base is not yet implemented.)
+
+A condition is true when its value is a nonzero `INT` or a nonzero `FLOAT`, and a
+comparison yields the `INT` `1` or `0`. The six relational operators order two
+`STRING` operands by unsigned byte value, shorter-is-smaller when one is a prefix
+of the other. `+` concatenates two `STRING` operands; a `STRING` cannot combine
+with a number in the same operator. A `STRING` is a sequence of bytes, so `LEN`
+counts bytes and `ASC`/`CHR$` work on byte values.
+
 ### Multiple assignment
 
 `a, b = e1, e2` assigns several scalar or `STRING` places at once. The right-hand
 side is an expression list in which a call to an `FN` returning several values
 counts for each of them, so `lo, hi = minmax(x, y)` balances. Every right-hand
 value is computed before any store, so `x, y = y, x` swaps.
+
+## Runtime faults
+
+A few conditions stop the program with a message on standard error and a nonzero
+exit status: a vector index outside `0 .. COUNT(v) - 1`, and an integer `DIV` or
+`MOD` by zero. An array index is not range-checked, so an out-of-range array
+subscript reads or writes outside the array and its effect is undefined; keep an
+index within its declared bound. A `FLOAT` divided by zero is not a fault (see
+Operand types and results). A program that reaches `END`, or runs off the end of
+its module-scope statements, exits with status 0.
 
 ## Core built-in functions
 

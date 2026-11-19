@@ -116,15 +116,75 @@ sec_add_reloc(struct section *s, uint32_t offset, int sym_idx, int32_t addend)
  * Symbol table
  ****************************************************************/
 
+/* The symbol table is name-indexed by an open-addressing hash so a lookup does
+ * not scan every entry (the scan made a large assembly quadratic in its symbol
+ * count).  A bucket holds a symbol index plus one, leaving 0 for an empty
+ * bucket.  A name maps to its first (lowest-index) entry, so a lookup returns
+ * the same symbol the old linear scan did even when a bare sym_add has appended
+ * a second entry with that name. */
+static unsigned
+sym_hash(const char *s)
+{
+    unsigned h = 2166136261u;           /* FNV-1a */
+    while (*s) {
+        h ^= (unsigned char)*s++;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+/* Record symbol `idx` in the hash, unless its name is already present (keep the
+ * first, lower-index entry). The caller guarantees spare bucket capacity. */
+static void
+sym_hash_insert(struct symtab *st, int idx)
+{
+    unsigned mask = (unsigned)st->hash_cap - 1;
+    unsigned i = sym_hash(st->syms[idx].name) & mask;
+
+    for (;;) {
+        int slot = st->hash[i];
+        if (slot == 0) {                /* empty bucket: claim it */
+            st->hash[i] = idx + 1;
+            return;
+        }
+        if (strcmp(st->syms[slot - 1].name, st->syms[idx].name) == 0)
+            return;                     /* name already indexed: keep the first */
+        i = (i + 1) & mask;
+    }
+}
+
+/* Grow (or create) the bucket array and reinsert every symbol into it. */
+static void
+sym_rehash(struct symtab *st, int newcap)
+{
+    int k;
+
+    st->hash = realloc(st->hash, (size_t)newcap * sizeof(int));
+    if (!st->hash)
+        die("out of memory growing the symbol index");
+    memset(st->hash, 0, (size_t)newcap * sizeof(int));
+    st->hash_cap = newcap;
+    for (k = 0; k < st->nsyms; k++)
+        sym_hash_insert(st, k);
+}
+
 int
 sym_lookup(struct symtab *st, const char *name)
 {
-    int k;
-    for (k = 0; k < st->nsyms; k++) {
-        if (strcmp(st->syms[k].name, name) == 0)
-            return k;
+    unsigned mask, i;
+
+    if (st->hash_cap == 0)              /* no symbols added yet */
+        return -1;
+    mask = (unsigned)st->hash_cap - 1;
+    i = sym_hash(name) & mask;
+    for (;;) {
+        int slot = st->hash[i];
+        if (slot == 0)
+            return -1;
+        if (strcmp(st->syms[slot - 1].name, name) == 0)
+            return slot - 1;
+        i = (i + 1) & mask;
     }
-    return -1;
 }
 
 int
@@ -145,6 +205,14 @@ sym_add(struct symtab *st, const char *name)
     st->syms[idx].defined = 0;
     st->syms[idx].is_func = 0;
     st->syms[idx].size = 0;
+
+    /* Keep the name index in step, growing it to stay under a ~0.7 load factor.
+     * A rehash reinserts every symbol (including this one); otherwise just add
+     * this one. */
+    if ((long)st->nsyms * 10 > (long)st->hash_cap * 7)
+        sym_rehash(st, st->hash_cap ? st->hash_cap * 2 : 64);
+    else
+        sym_hash_insert(st, idx);
     return idx;
 }
 

@@ -65,6 +65,9 @@ struct symtab {
     struct symbol *syms;
     int nsyms;
     int cap;
+    int *hash;          /* name index: open-addressing bucket -> sym index + 1
+                           (0 marks an empty bucket); NULL until the first add */
+    int hash_cap;       /* bucket count, a power of two, 0 until the first add */
     struct arena *arena;
 };
 

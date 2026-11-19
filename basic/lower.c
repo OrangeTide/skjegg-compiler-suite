@@ -24,7 +24,7 @@
    this handle; reading it whole yields TY_HANDLE, while a field access (valid
    only inside the defining module, where the record's fields are known) reaches
    through it. Like a STRING, a handle is a pointer and follows the target width. */
-enum { TY_INT, TY_FLOAT, TY_BYTE, TY_STRING, TY_RECORD, TY_HANDLE };
+enum { TY_INT, TY_FLOAT, TY_BYTE, TY_STRING, TY_RECORD, TY_HANDLE, TY_VECTOR };
 
 /* Pointer width follows the target (ir/target.h): LP64 on x86-64/arm64, ILP32 on
    ColdFire/rv32/MIPS. A pointer value (STRING or HANDLE handle, a record/array
@@ -93,13 +93,29 @@ struct var {
     int         is_array;
     int         ndims;
     int         dims[MAX_DIMS];
-    int         elem_size;      /* bytes per element (array only) */
+    int         elem_size;      /* bytes per element (array or vector) */
+    int         is_vector;      /* slot holds a growable-vector handle; ty is the
+                                   element type and elem_size its byte width */
+    int         elem_rec;       /* element record index when a vector's element
+                                   type is TY_RECORD, else -1 */
     int         is_record;
     int         rec;            /* record type index (record only) */
     int         is_ref;         /* slot holds a pointer (REF record parameter) */
+    int         is_global;      /* storage is a module-scope global at gsym, not a
+                                   frame slot; every access uses gsym's address */
+    char       *gsym;           /* the global's assembler symbol (is_global only) */
 };
 static struct var *vars;
 static int         nvars, var_cap;
+
+/* Module-scope variables are globals: they live in their own zeroed storage and
+   are visible inside every PROC and FN, not only the main program. They are kept
+   in a separate table that outlives the per-function `vars` scratch. A reference
+   to a global from any function imports a local alias (tagged is_global) so the
+   vars[] access paths keep working unchanged. */
+static struct var *gvars;
+static int         ngvars, gvar_cap;
+static int         cur_scope_global;    /* 1 while lowering module-scope statements */
 
 /* Routine signatures, for resolving calls (collected before any body is
    lowered, so a call may precede its definition). */
@@ -180,6 +196,10 @@ func_register(struct node *n)
     /* fn_ret_ty has already resolved and validated the return type name, so the
        lookup here cannot fail when the return is a handle. */
     f->ret_rec = (f->ret_ty == TY_HANDLE) ? rec_lookup(n->sval) : -1;
+    /* a vector return crosses as a handle; it is not a module value class, so an
+       exported routine cannot carry one */
+    if (f->ret_ty == TY_VECTOR && n->is_export)
+        die("line %d: an exported FN cannot return a VECTOR", n->line);
     /* an EXTERNAL routine crosses INT at the C `int` width (i32); a BASIC-to-BASIC
        routine keeps the native 64-bit INT */
     f->ret_i32 = (n->link && n->kind == N_FN && n->op == TY_DECL_INT);
@@ -213,6 +233,15 @@ func_register(struct node *n)
                 f->param_rec[np] = ri;
                 f->param_ref[np] = 1;
             }
+        } else if (pm->op == TY_DECL_VECTOR) {
+            /* a vector passes by reference (its handle); it is not a module
+               value class, so an exported routine cannot take one */
+            if (n->is_export)
+                die("line %d: an exported routine cannot take a VECTOR parameter",
+                    n->line);
+            f->param_ty[np] = TY_VECTOR;
+            f->param_rec[np] = -1;
+            f->param_ref[np] = 0;
         } else {
             f->param_ty[np] = decl_to_ty(pm->op);
             f->param_rec[np] = -1;
@@ -419,12 +448,49 @@ ty_slot_size(int ty)
     return ty == TY_STRING ? BAS_PTR_BYTES : 8;
 }
 
+static struct var *
+local_alloc(const char *name)           /* append a blank local var entry */
+{
+    if (nvars == var_cap) {
+        var_cap = var_cap ? var_cap * 2 : 16;
+        vars = realloc(vars, var_cap * sizeof(*vars));
+        if (!vars)
+            die("oom");
+    }
+    memset(&vars[nvars], 0, sizeof(vars[nvars]));
+    vars[nvars].name = name;
+    return &vars[nvars++];
+}
+
+static struct var *
+global_alloc(const char *name)          /* append a blank module-scope global */
+{
+    if (ngvars == gvar_cap) {
+        gvar_cap = gvar_cap ? gvar_cap * 2 : 16;
+        gvars = realloc(gvars, gvar_cap * sizeof(*gvars));
+        if (!gvars)
+            die("oom");
+    }
+    memset(&gvars[ngvars], 0, sizeof(gvars[ngvars]));
+    gvars[ngvars].name = name;
+    return &gvars[ngvars++];
+}
+
 static int
 var_find(const char *name)
 {
     for (int i = 0; i < nvars; i++)
         if (strcmp(vars[i].name, name) == 0)
             return i;
+    /* A module-scope global is visible from any function. Import a local alias
+       (a copy, so is_global and gsym come with it) and the vars[] access paths
+       below reach the global through its symbol without further change. */
+    for (int i = 0; i < ngvars; i++)
+        if (strcmp(gvars[i].name, name) == 0) {
+            struct var *v = local_alloc(gvars[i].name);
+            *v = gvars[i];
+            return (int)(v - vars);
+        }
     return -1;
 }
 
@@ -440,17 +506,52 @@ elem_bytes(int ty)
 static struct var *
 var_new(const char *name, int line)
 {
-    if (var_find(name) >= 0)
-        die("line %d: variable '%s' is already declared", line, name);
-    if (nvars == var_cap) {
-        var_cap = var_cap ? var_cap * 2 : 16;
-        vars = realloc(vars, var_cap * sizeof(*vars));
-        if (!vars)
-            die("oom");
+    /* A declaration lands in the scope it is written in: a module-scope DIM makes
+       a global, a DIM inside a routine makes a local (which may shadow a global
+       of the same name). The duplicate check scans only that scope. */
+    if (cur_scope_global) {
+        for (int i = 0; i < ngvars; i++)
+            if (strcmp(gvars[i].name, name) == 0)
+                die("line %d: variable '%s' is already declared", line, name);
+        return global_alloc(name);
     }
-    memset(&vars[nvars], 0, sizeof(vars[nvars]));
-    vars[nvars].name = name;
-    return &vars[nvars++];
+    for (int i = 0; i < nvars; i++)
+        if (strcmp(vars[i].name, name) == 0)
+            die("line %d: variable '%s' is already declared", line, name);
+    return local_alloc(name);
+}
+
+/* Emit a zeroed module-scope global of `bytes` bytes: a .bss byte blob aligned
+   for the widest access it holds. Scalars, arrays, records, and vector or STRING
+   handles all live in such a blob, reached through its symbol's address. */
+static void
+emit_global_blob(const char *sym, int bytes)
+{
+    struct ir_global *g = arena_zalloc(lower_arena, sizeof(*g));
+    g->name = arena_strdup(lower_arena, sym);
+    g->base_type = IR_I8;
+    g->arr_size = bytes;
+    g->align = 8;
+    g->is_local = 1;
+    g->next = cur_prog->globals;
+    cur_prog->globals = g;
+}
+
+/* Give a freshly declared variable its storage: a global blob at module scope, a
+   frame slot inside a routine. */
+static void
+place_var(struct var *v, int bytes)
+{
+    if (cur_scope_global) {
+        int n = snprintf(NULL, 0, "__bgv_%s", v->name);
+        char *sym = arena_alloc(lower_arena, n + 1);
+        snprintf(sym, n + 1, "__bgv_%s", v->name);
+        v->is_global = 1;
+        v->gsym = sym;
+        emit_global_blob(sym, bytes);
+    } else {
+        v->slot = alloc_slot(bytes);
+    }
 }
 
 static void
@@ -458,7 +559,7 @@ var_declare(const char *name, int ty, int line)
 {
     struct var *v = var_new(name, line);
     v->ty = ty;
-    v->slot = alloc_slot(ty_slot_size(ty));
+    place_var(v, ty_slot_size(ty));
 }
 
 /* Declare an array: one slot holds every element row-major. The slot's byte size
@@ -484,7 +585,24 @@ var_declare_array(const char *name, int elem_ty, int *dims, int ndims, int line)
     v->elem_size = elem_bytes(elem_ty);
     bytes = total * v->elem_size;
     bytes = (bytes + 7) & ~7;
-    v->slot = alloc_slot(bytes);
+    place_var(v, bytes);
+}
+
+/* Declare a vector: its slot holds a pointer-width handle to a growable-vector
+   object that the runtime allocates (see __basic_vec_new). ty is the element
+   type and elem_size its byte width, reused for the element load/store path. A
+   record element carries its record index in elem_rec and is sized by the whole
+   record; a scalar or STRING element carries elem_rec = -1. */
+static void
+var_declare_vector(const char *name, int elem_ty, int elem_rec, int line)
+{
+    struct var *v = var_new(name, line);
+    v->ty = elem_ty;
+    v->is_vector = 1;
+    v->elem_rec = elem_rec;
+    v->elem_size = (elem_ty == TY_RECORD) ? rec_tbl[elem_rec].size
+                                          : elem_bytes(elem_ty);
+    place_var(v, BAS_PTR_BYTES);
 }
 
 static int
@@ -592,6 +710,8 @@ fn_ret_ty(struct node *def)
 {
     int ri;
 
+    if (def->op == TY_DECL_VECTOR)
+        return TY_VECTOR;
     if (def->op != TY_DECL_RECORD)
         return decl_to_ty(def->op);
     ri = rec_lookup(def->sval);
@@ -616,7 +736,7 @@ var_declare_record(const char *name, int rec, int is_ref, int line)
     v->is_ref = is_ref;
     /* a REF/handle slot holds a pointer (BAS_PTR_BYTES); a by-value record slot
        holds the record bytes */
-    v->slot = alloc_slot(is_ref ? BAS_PTR_BYTES : rec_tbl[rec].size);
+    place_var(v, is_ref ? BAS_PTR_BYTES : rec_tbl[rec].size);
 }
 
 /* A 32-bit integer constant (for exit's status, the return value, and the
@@ -670,6 +790,48 @@ emit_store_ptr(int slot, int val)       /* store a pointer value into a slot */
     struct ir_insn *ins = emit(BAS_LP64 ? IR_STL64 : IR_STL);
     ins->slot = slot;
     ins->a = val;
+}
+
+static int
+emit_load_ptr_at(int addr)              /* load a pointer value from an address */
+{
+    struct ir_insn *ins = emit(BAS_LP64 ? IR_LD64 : IR_LW);
+    ins->dst = new_temp();
+    ins->a = addr;
+    mark_ptr(ins->dst);
+    return ins->dst;
+}
+
+static void
+emit_store_ptr_at(int addr, int val)    /* store a pointer value to an address */
+{
+    struct ir_insn *ins = emit(BAS_LP64 ? IR_ST64 : IR_SW);
+    ins->a = addr;
+    ins->b = val;
+}
+
+/* The three access wrappers below pick a variable's storage: a frame slot for a
+   local, or the global symbol's address for a module-scope global. */
+static int
+var_ptr_addr(struct var *v)             /* address of v's storage (aggregate base) */
+{
+    return v->is_global ? emit_lea_sym(v->gsym) : emit_adl(v->slot);
+}
+
+static int
+var_load_ptr(struct var *v)             /* load the pointer/handle held in v */
+{
+    return v->is_global ? emit_load_ptr_at(emit_lea_sym(v->gsym))
+                        : emit_load_ptr(v->slot);
+}
+
+static void
+var_store_ptr(struct var *v, int val)   /* store a pointer/handle into v */
+{
+    if (v->is_global)
+        emit_store_ptr_at(emit_lea_sym(v->gsym), val);
+    else
+        emit_store_ptr(v->slot, val);
 }
 
 static int
@@ -783,6 +945,7 @@ static struct val lower_call(struct node *n);
 static struct val lower_builtin(struct node *n);
 static struct val lower_str_value(struct node *s);
 static struct val lower_index_read(struct node *n);
+static struct val load_scalar(int addr, int ety);
 static struct val lower_field_read(struct node *n);
 static int        record_arg_addr(struct node *arg, int want_rec, int line);
 static int        as_i32(struct val v);
@@ -1086,14 +1249,18 @@ lower_expr(struct node *n)
             die("line %d: undeclared variable '%s'", n->line, n->name);
         if (vars[vi].is_array)
             die("line %d: the array '%s' needs an index", n->line, n->name);
+        if (vars[vi].is_vector)         /* a bare vector yields its handle */
+            return (struct val){ var_load_ptr(&vars[vi]), TY_VECTOR, -1 };
         if (vars[vi].is_record) {
             /* an opaque-type variable used whole yields its handle (the pointer
                in its slot); a transparent record must be used through a field. */
             if (!rec_tbl[vars[vi].rec].opaque)
                 die("line %d: the record '%s' needs a field", n->line, n->name);
-            return (struct val){ emit_load_ptr(vars[vi].slot), TY_HANDLE,
+            return (struct val){ var_load_ptr(&vars[vi]), TY_HANDLE,
                                  vars[vi].rec };
         }
+        if (vars[vi].is_global)         /* a scalar global: load from its symbol */
+            return load_scalar(emit_lea_sym(vars[vi].gsym), vars[vi].ty);
         if (vars[vi].ty == TY_FLOAT) {
             ins = emit(IR_FLDL);
             ins->dst = new_temp();
@@ -1103,7 +1270,7 @@ lower_expr(struct node *n)
             return (struct val){ ins->dst, TY_FLOAT, -1 };
         }
         if (vars[vi].ty == TY_STRING)
-            return (struct val){ emit_load_ptr(vars[vi].slot), TY_STRING, -1 };
+            return (struct val){ var_load_ptr(&vars[vi]), TY_STRING, -1 };
         /* INT reads as INT; BYTE promotes to INT (its slot holds 0..255). */
         ins = emit(IR_LDL64);
         ins->dst = new_temp();
@@ -1403,6 +1570,11 @@ lower_call(struct node *n)
                     handle_type_name(v.rec),
                     handle_type_name(f->param_rec[nargs]));
             args[nargs] = v.temp;               /* opaque handle, pointer-width */
+        } else if (f->param_ty[nargs] == TY_VECTOR) {
+            if (v.ty != TY_VECTOR)
+                die("line %d: argument %d of '%s' must be a vector",
+                    n->line, nargs + 1, n->name);
+            args[nargs] = v.temp;               /* vector handle, pointer-width */
         } else if (f->param_ty[nargs] == TY_FLOAT) {
             if (v.ty == TY_STRING)
                 die("line %d: argument %d of '%s' is a STRING but the parameter "
@@ -1431,6 +1603,9 @@ lower_call(struct node *n)
     if (f->ret_ty == TY_HANDLE)
         return (struct val){ emit_call_retptr(f->link, args, nargs), TY_HANDLE,
                              f->ret_rec };
+    if (f->ret_ty == TY_VECTOR)
+        return (struct val){ emit_call_retptr(f->link, args, nargs), TY_VECTOR,
+                             -1 };
     /* INT or BYTE result: BYTE promotes to INT at the call site. A foreign i32
        result is read as a 32-bit value and sign-extended to INT. */
     if (f->ret_i32)
@@ -1514,6 +1689,17 @@ lower_builtin(struct node *n)
         if (nargs != 1) die("line %d: LEN takes one argument", n->line);
         args[0] = str_arg(n->a, n->op);
         return int_from_i32(emit_call_ret32("__basic_str_len", args, 1));
+
+    case BF_COUNT: {
+        int vi, h;
+        if (nargs != 1 || !n->a || n->a->kind != N_VAR)
+            die("line %d: COUNT takes one vector", n->line);
+        vi = var_find(n->a->name);
+        if (vi < 0 || !vars[vi].is_vector)
+            die("line %d: COUNT needs a vector", n->line);
+        h = var_load_ptr(&vars[vi]);
+        return int_from_i32(emit_call_ret32("__basic_vec_count", &h, 1));
+    }
 
     case BF_ASC:
         if (nargs != 1) die("line %d: ASC takes one argument", n->line);
@@ -1963,11 +2149,29 @@ lower_elem_addr(struct var *v, struct node *args, int line)
 
     /* the base is the array slot's address (pointer-width); the index offset is a
        signed 32-bit byte count, added with emit_addp (sign-extended under LP64) */
-    base = emit_adl(v->slot);
+    base = var_ptr_addr(v);
     return emit_addp(base, off);
 }
 
-/* Read array element n->name(n->a...). */
+/* The address of vector element v(index): the runtime resolves it from the
+   handle, with a bounds check. A vector is one-dimensional. */
+static int
+lower_vec_elem_addr(struct var *v, struct node *args, int line)
+{
+    struct val iv;
+    int a[2];
+
+    if (!args || args->next)
+        die("line %d: a vector takes exactly one index", line);
+    iv = lower_expr(args);
+    if (iv.ty != TY_INT && iv.ty != TY_BYTE)
+        die("line %d: a vector index must be an integer", line);
+    a[1] = as_i32(iv);
+    a[0] = var_load_ptr(v);
+    return emit_call_retptr("__basic_vec_elem", a, 2);
+}
+
+/* Read array or vector element n->name(n->a...). */
 static struct val
 lower_index_read(struct node *n)
 {
@@ -1977,6 +2181,12 @@ lower_index_read(struct node *n)
     if (vi < 0)
         die("line %d: undefined '%s'", n->line, n->name);
     v = &vars[vi];
+    if (v->ty == TY_RECORD)
+        die("line %d: a record element of '%s' is used through a field "
+            "(%s(i).field) or copied whole, not read as a value",
+            n->line, n->name, n->name);
+    if (v->is_vector)
+        return load_scalar(lower_vec_elem_addr(v, n->a, n->line), v->ty);
     if (!v->is_array)
         die("line %d: '%s' is not an array", n->line, n->name);
     return load_scalar(lower_elem_addr(v, n->a, n->line), v->ty);
@@ -1993,6 +2203,11 @@ lower_index_store(struct node *desig, struct val val, int line)
     if (vi < 0)
         die("line %d: undefined '%s'", line, desig->name);
     v = &vars[vi];
+    if (v->is_vector) {
+        store_scalar(lower_vec_elem_addr(v, desig->a, line), v->ty, val, line,
+                     desig->name);
+        return;
+    }
     if (!v->is_array)
         die("line %d: '%s' is not an array", line, desig->name);
     store_scalar(lower_elem_addr(v, desig->a, line), v->ty, val, line,
@@ -2006,37 +2221,64 @@ lower_index_store(struct node *desig, struct val val, int line)
 static int
 record_base(struct var *v)
 {
-    return v->is_ref ? emit_load_ptr(v->slot) : emit_adl(v->slot);
+    return v->is_ref ? var_load_ptr(v) : var_ptr_addr(v);
 }
 
-/* Resolve a field designator (N_FIELD: a = record variable, name = field),
-   returning the field's address and type. Only one level this phase. */
+/* The address of a record designator and its record index: a record variable
+   (its slot or, for a REF, the pointer it holds), or a record element of a
+   vector or array (resolved through the element-address path). This is the one
+   place that turns "where a record lives" into an address, so field access,
+   whole-record copy, and record-argument passing all reach a vector element. */
+static int
+lower_record_desig(struct node *d, int *rec_out)
+{
+    int vi;
+    struct var *v;
+
+    if (d->kind == N_VAR) {
+        vi = var_find(d->name);
+        if (vi < 0)
+            die("line %d: undefined '%s'", d->line, d->name);
+        v = &vars[vi];
+        if (!v->is_record)
+            die("line %d: '%s' is not a record", d->line, d->name);
+        *rec_out = v->rec;
+        return record_base(v);
+    }
+    if (d->kind == N_CALL) {                 /* an indexed element */
+        vi = var_find(d->name);
+        if (vi < 0)
+            die("line %d: undefined '%s'", d->line, d->name);
+        v = &vars[vi];
+        if (v->ty != TY_RECORD || (!v->is_vector && !v->is_array))
+            die("line %d: '%s' is not a record collection", d->line, d->name);
+        *rec_out = v->elem_rec;
+        return v->is_vector ? lower_vec_elem_addr(v, d->a, d->line)
+                            : lower_elem_addr(v, d->a, d->line);
+    }
+    die("line %d: expected a record", d->line);
+    return 0;
+}
+
+/* Resolve a field designator (N_FIELD: a = record designator, name = field),
+   returning the field's address and type. The base may be a record variable or
+   an indexed record element (v(i).field). Fields are scalars (one level). */
 static int
 lower_field_addr(struct node *n, int *ty_out, int line)
 {
-    struct node *base = n->a;
-    int vi;
-    struct var *v;
+    int rec, addr;
     struct rfield *fld;
-    int addr;
 
-    if (base->kind != N_VAR)
-        die("line %d: a field must be read from a record variable", line);
-    vi = var_find(base->name);
-    if (vi < 0)
-        die("line %d: undefined '%s'", line, base->name);
-    v = &vars[vi];
-    if (!v->is_record)
-        die("line %d: '%s' is not a record", line, base->name);
-    if (rec_tbl[v->rec].opaque && rec_tbl[v->rec].nfields == 0)
+    addr = lower_record_desig(n->a, &rec);
+    if (rec_tbl[rec].opaque && rec_tbl[rec].nfields == 0)
         die("line %d: '%s' is an opaque TYPE; its fields are private to its "
-            "module", line, rec_tbl[v->rec].name);
-    fld = rec_field(&rec_tbl[v->rec], n->name);
+            "module", line, rec_tbl[rec].name);
+    fld = rec_field(&rec_tbl[rec], n->name);
     if (!fld)
-        die("line %d: record '%s' has no field '%s'", line, base->name, n->name);
+        die("line %d: record '%s' has no field '%s'", line,
+            rec_tbl[rec].name, n->name);
     *ty_out = fld->ty;
 
-    addr = record_base(v);
     if (fld->offset != 0)
         addr = emit_addp(addr, lower_const32(fld->offset));
     return addr;
@@ -2050,44 +2292,29 @@ lower_field_read(struct node *n)
     return load_scalar(addr, ety);
 }
 
-/* The address of a record argument (which must be a record variable of the
-   wanted type), for passing a REF record parameter. */
+/* The address of a record argument (a record variable or indexed record element
+   of the wanted type), for passing a REF record parameter. */
 static int
 record_arg_addr(struct node *arg, int want_rec, int line)
 {
-    int vi;
-    struct var *v;
+    int rec, addr = lower_record_desig(arg, &rec);
 
-    if (arg->kind != N_VAR)
-        die("line %d: a record argument must be a record variable", line);
-    vi = var_find(arg->name);
-    if (vi < 0)
-        die("line %d: undefined '%s'", line, arg->name);
-    v = &vars[vi];
-    if (!v->is_record || v->rec != want_rec)
-        die("line %d: record argument '%s' is the wrong type", line, arg->name);
-    return record_base(v);
+    if (rec != want_rec)
+        die("line %d: record argument is the wrong type", line);
+    return addr;
 }
 
-/* Whole-record assignment r = src (a block copy of the record bytes). The source
-   must be a record variable of the same type. */
+/* Whole-record assignment dst = src (a block copy of the record bytes). The
+   source is a record designator (a record variable or an indexed element) of
+   the same type. */
 static void
 lower_record_assign(struct var *dst, struct node *srcnode, int line)
 {
-    int svi;
-    struct var *src;
-    int sb, db, nb, args[3];
+    int rec, sb, db, nb, args[3];
 
-    if (srcnode->kind != N_VAR)
-        die("line %d: a record is assigned only from a record variable", line);
-    svi = var_find(srcnode->name);
-    if (svi < 0)
-        die("line %d: undefined '%s'", line, srcnode->name);
-    src = &vars[svi];
-    if (!src->is_record || src->rec != dst->rec)
+    sb = lower_record_desig(srcnode, &rec);
+    if (rec != dst->rec)
         die("line %d: record assignment type mismatch", line);
-
-    sb = record_base(src);
     db = record_base(dst);
     nb = lower_const32(rec_tbl[dst->rec].size);
     args[0] = db;
@@ -2150,7 +2377,25 @@ lower_print(struct node *n)
         if (prev && prev->op == TK_COMMA)
             emit_call("__basic_write_sp", NULL, 0);
 
-        {
+        if (item->ival == PI_AT) {
+            struct val r = lower_expr(item->a);
+            struct val c = lower_expr(item->b);
+            int args[2];
+            if ((r.ty != TY_INT && r.ty != TY_BYTE) ||
+                (c.ty != TY_INT && c.ty != TY_BYTE))
+                die("line %d: PRINT AT needs an integer row and column",
+                    n->line);
+            args[0] = r.temp;
+            args[1] = c.temp;
+            emit_call("__basic_at", args, 2);
+        } else if (item->ival == PI_TAB) {
+            struct val c = lower_expr(item->a);
+            int arg;
+            if (c.ty != TY_INT && c.ty != TY_BYTE)
+                die("line %d: PRINT TAB needs an integer column", n->line);
+            arg = c.temp;
+            emit_call("__basic_tab", &arg, 1);
+        } else {
             struct val v = lower_expr(item->a);
             int args[1];
             args[0] = v.temp;
@@ -2184,7 +2429,12 @@ store_var(int vi, struct val v, int line)
         if (vars[vi].ty != TY_STRING || v.ty != TY_STRING)
             die("line %d: cannot mix STRING and a number in an assignment "
                 "to '%s'", line, vars[vi].name);
-        emit_store_ptr(vars[vi].slot, v.temp);   /* pointer-width handle */
+        var_store_ptr(&vars[vi], v.temp);   /* pointer-width handle */
+        return;
+    }
+    if (vars[vi].is_global) {    /* a numeric global: coerce then store to its symbol */
+        store_scalar(emit_lea_sym(vars[vi].gsym), vars[vi].ty, v, line,
+                     vars[vi].name);
         return;
     }
     if (vars[vi].ty == TY_FLOAT) {
@@ -2341,6 +2591,12 @@ read_scalar_var(int vi)
 {
     struct ir_insn *ins;
 
+    if (vars[vi].is_global) {           /* load a scalar global from its symbol */
+        struct val r = load_scalar(emit_lea_sym(vars[vi].gsym), vars[vi].ty);
+        if (vars[vi].ty == TY_BYTE)
+            r.ty = TY_BYTE;
+        return r;
+    }
     if (vars[vi].ty == TY_FLOAT) {
         ins = emit(IR_FLDL);
         ins->dst = new_temp();
@@ -2350,12 +2606,36 @@ read_scalar_var(int vi)
         return (struct val){ ins->dst, TY_FLOAT, -1 };
     }
     if (vars[vi].ty == TY_STRING)
-        return (struct val){ emit_load_ptr(vars[vi].slot), TY_STRING, -1 };
+        return (struct val){ var_load_ptr(&vars[vi]), TY_STRING, -1 };
     ins = emit(IR_LDL64);                    /* INT, or BYTE held 0..255 */
     ins->dst = new_temp();
     ins->slot = vars[vi].slot;
     mark_i64(ins->dst);
     return (struct val){ ins->dst, vars[vi].ty == TY_BYTE ? TY_BYTE : TY_INT, -1 };
+}
+
+/* The address of the current FOR EACH element, given the 0-based index in islot:
+   resolved through the vector runtime for a vector (so a grown data block is
+   followed and the index is bounds-checked), or base + index*esz for an array. */
+static int
+foreach_elem_addr(struct var *arr, int islot, int is_vec, int esz)
+{
+    struct ir_insn *ins;
+    int i, off, base, esz_c;
+
+    ins = emit(IR_LDL); ins->dst = new_temp(); ins->slot = islot;
+    i = ins->dst;
+    if (is_vec) {
+        int a[2];
+        a[0] = var_load_ptr(arr);
+        a[1] = i;
+        return emit_call_retptr("__basic_vec_elem", a, 2);
+    }
+    esz_c = lower_const32(esz);
+    ins = emit(IR_MUL); ins->dst = new_temp();
+    ins->a = i; ins->b = esz_c; off = ins->dst;
+    base = var_ptr_addr(arr);
+    return emit_addp(base, off);
 }
 
 /* Lower a control-flow statement (IF / WHILE / REPEAT / FOR / EXIT / CASE). */
@@ -2467,8 +2747,7 @@ lower_control(struct node *n)
             emit_bz(truth_i32(asc), ldesc);     /* step < 0 -> descending test */
         }
         /* ascending test */
-        ins = emit(IR_LDL64); ins->dst = new_temp(); ins->slot = vars[vi].slot;
-        mark_i64(ins->dst); v = ins->dst;
+        v = read_scalar_var(vi).temp;           /* control var (local or global) */
         ins = emit(IR_LDL64); ins->dst = new_temp(); ins->slot = limslot;
         mark_i64(ins->dst); a = ins->dst;
         ins = emit(IR_CMP64GTS); ins->dst = new_temp(); ins->a = v; ins->b = a;
@@ -2477,8 +2756,7 @@ lower_control(struct node *n)
         emit_jmp(lbody);
         /* descending test */
         emit_label(ldesc);
-        ins = emit(IR_LDL64); ins->dst = new_temp(); ins->slot = vars[vi].slot;
-        mark_i64(ins->dst); v = ins->dst;
+        v = read_scalar_var(vi).temp;           /* control var (local or global) */
         ins = emit(IR_LDL64); ins->dst = new_temp(); ins->slot = limslot;
         mark_i64(ins->dst); a = ins->dst;
         ins = emit(IR_CMP64LTS); ins->dst = new_temp(); ins->a = v; ins->b = a;
@@ -2493,8 +2771,7 @@ lower_control(struct node *n)
         /* increment: var = var + step */
         {
             int vv, ss, sum;
-            ins = emit(IR_LDL64); ins->dst = new_temp(); ins->slot = vars[vi].slot;
-            mark_i64(ins->dst); vv = ins->dst;
+            vv = read_scalar_var(vi).temp;      /* control var (local or global) */
             ins = emit(IR_LDL64); ins->dst = new_temp(); ins->slot = stepslot;
             mark_i64(ins->dst); ss = ins->dst;
             ins = emit(IR_ADD64); ins->dst = new_temp(); ins->a = vv; ins->b = ss;
@@ -2509,35 +2786,48 @@ lower_control(struct node *n)
     case N_FOREACH: {
         int ai = var_find(n->a->name);
         struct var *arr;
-        int ety, total, esz, islot, vi;
+        int ety, total = 1, esz, islot, vi, is_vec, is_rec;
         int ltop = new_label(), lend = new_label();
 
         if (ai < 0)
             die("line %d: undeclared collection '%s'", n->line, n->a->name);
         arr = &vars[ai];
-        if (!arr->is_array)
-            die("line %d: FOR EACH needs an array; '%s' is not one",
+        is_vec = arr->is_vector;
+        if (!arr->is_array && !is_vec)
+            die("line %d: FOR EACH needs an array or vector; '%s' is not one",
                 n->line, n->a->name);
         ety = arr->ty;
         esz = arr->elem_size;
-        total = 1;
-        for (int k = 0; k < arr->ndims; k++)
-            total *= arr->dims[k];
+        if (!is_vec)
+            for (int k = 0; k < arr->ndims; k++)
+                total *= arr->dims[k];
 
         /* The element variable is declared by the loop, with the element type.
-           The flat symbol table has no block scope, so a name reused by a later
-           FOR EACH is accepted when it still has the matching scalar type. */
+           A record element binds the variable as an aliasing reference (its slot
+           holds the element address), so a field write reaches the element in
+           place; a scalar or STRING element binds by value and is written back
+           after the body. The flat symbol table has no block scope, so a name
+           reused by a later FOR EACH is accepted when it still matches. */
+        is_rec = (ety == TY_RECORD);
         vi = var_find(n->name);
         if (vi < 0) {
-            var_declare(n->name, ety, n->line);
+            if (is_rec)
+                var_declare_record(n->name, arr->elem_rec, 1, n->line);
+            else
+                var_declare(n->name, ety, n->line);
             vi = var_find(n->name);
-        } else if (vars[vi].is_array || vars[vi].is_record ||
-                   vars[vi].ty != ety) {
-            die("line %d: FOR EACH variable '%s' conflicts with an existing "
-                "declaration", n->line, n->name);
+        } else {
+            struct var *lv = &vars[vi];
+            int ok = is_rec
+                     ? (lv->is_record && lv->is_ref && lv->rec == arr->elem_rec)
+                     : (!lv->is_array && !lv->is_record && !lv->is_vector &&
+                        lv->ty == ety);
+            if (!ok)
+                die("line %d: FOR EACH variable '%s' conflicts with an existing "
+                    "declaration", n->line, n->name);
         }
 
-        /* A 32-bit index counter, 0..total-1. */
+        /* A 32-bit index counter, 0..count-1. */
         islot = alloc_slot(8);
         {
             int zero = lower_const32(0);
@@ -2546,44 +2836,43 @@ lower_control(struct node *n)
 
         emit_label(ltop);
         {
-            int i, lim, cmp, base, off, addr, esz_c, one_c;
+            int i, lim, cmp, addr, one_c;
 
             /* Operands that themselves emit instructions (lower_const32) are
                computed into locals before the consuming instruction, never
-               inline on ins->a/b (that would emit the consumer first). */
+               inline on ins->a/b (that would emit the consumer first). The loop
+               limit is the live element count for a vector (so appends and
+               removes during the walk are seen) and the fixed total for an
+               array. */
             ins = emit(IR_LDL); ins->dst = new_temp(); ins->slot = islot;
             i = ins->dst;
-            lim = lower_const32(total);
+            if (is_vec) {
+                int h = var_load_ptr(arr);
+                lim = emit_call_ret32("__basic_vec_count", &h, 1);
+            } else {
+                lim = lower_const32(total);
+            }
             ins = emit(IR_CMPGES); ins->dst = new_temp();
             ins->a = i; ins->b = lim; cmp = ins->dst;
-            emit_bnz(cmp, lend);                /* index >= total -> exit */
+            emit_bnz(cmp, lend);                /* index >= count -> exit */
 
-            /* element address = &array + index * elem_size */
-            ins = emit(IR_LDL); ins->dst = new_temp(); ins->slot = islot;
-            i = ins->dst;
-            esz_c = lower_const32(esz);
-            ins = emit(IR_MUL); ins->dst = new_temp();
-            ins->a = i; ins->b = esz_c; off = ins->dst;
-            base = emit_adl(arr->slot);         /* pointer: array base address */
-            addr = emit_addp(base, off);        /* + signed 32-bit byte offset */
-
-            /* bind the element into the loop variable (reference semantics:
-               written back after the body) */
-            store_var(vi, load_scalar(addr, ety), n->line);
+            /* bind the element into the loop variable: alias a record in place,
+               or load a scalar/STRING by value (written back after the body) */
+            addr = foreach_elem_addr(arr, islot, is_vec, esz);
+            if (is_rec)
+                var_store_ptr(&vars[vi], addr);
+            else
+                store_var(vi, load_scalar(addr, ety), n->line);
 
             loop_push(EXIT_FOR, lend);
             lower_stmt_list(n->d);
             loop_pop();
 
-            /* write the (possibly updated) element back */
-            ins = emit(IR_LDL); ins->dst = new_temp(); ins->slot = islot;
-            i = ins->dst;
-            esz_c = lower_const32(esz);
-            ins = emit(IR_MUL); ins->dst = new_temp();
-            ins->a = i; ins->b = esz_c; off = ins->dst;
-            base = emit_adl(arr->slot);         /* pointer: array base address */
-            addr = emit_addp(base, off);        /* + signed 32-bit byte offset */
-            store_scalar(addr, ety, read_scalar_var(vi), n->line, n->name);
+            /* a by-value element is written back; a record alias needs no copy */
+            if (!is_rec) {
+                addr = foreach_elem_addr(arr, islot, is_vec, esz);
+                store_scalar(addr, ety, read_scalar_var(vi), n->line, n->name);
+            }
 
             /* index += 1 */
             ins = emit(IR_LDL); ins->dst = new_temp(); ins->slot = islot;
@@ -2620,7 +2909,28 @@ lower_stmt(struct node *n)
 {
     switch (n->kind) {
     case N_DIM:
-        if (n->op == TY_DECL_RECORD) {          /* a record variable */
+        if (n->op == TY_DECL_VECTOR) {          /* a growable vector */
+            int ety, erec = -1, esz, h, vi;
+            if (n->a)
+                die("line %d: a VECTOR has no fixed bound; drop the '(...)'",
+                    n->line);
+            if (n->velem == TY_DECL_RECORD) {
+                erec = rec_lookup(n->sval);
+                if (erec < 0)
+                    die("line %d: unknown record type '%s'", n->line, n->sval);
+                if (rec_tbl[erec].opaque && rec_tbl[erec].nfields == 0)
+                    die("line %d: VECTOR OF an opaque TYPE is not supported",
+                        n->line);
+                ety = TY_RECORD;
+            } else {
+                ety = decl_to_ty(n->velem);
+            }
+            var_declare_vector(n->name, ety, erec, n->line);
+            vi = var_find(n->name);
+            esz = lower_const32(vars[vi].elem_size);
+            h = emit_call_retptr("__basic_vec_new", &esz, 1);
+            var_store_ptr(&vars[vi], h);
+        } else if (n->op == TY_DECL_RECORD) {   /* a record variable */
             int ri = rec_lookup(n->sval);
             if (ri < 0)
                 die("line %d: unknown record type '%s'", n->line, n->sval);
@@ -2637,7 +2947,7 @@ lower_stmt(struct node *n)
                 if (rec_tbl[ri].size > 0) {
                     int sz = lower_const32(rec_tbl[ri].size);
                     int h = emit_call_retptr("__moo_arena_alloc", &sz, 1);
-                    emit_store_ptr(vars[vi].slot, h);
+                    var_store_ptr(&vars[vi], h);
                 }
             } else {
                 var_declare_record(n->name, ri, 0, n->line);
@@ -2654,6 +2964,22 @@ lower_stmt(struct node *n)
         } else {
             var_declare(n->name, decl_to_ty(n->op), n->line);
         }
+        /* A local's frame slot is not cleared on entry, so zero it: every
+           declared variable starts at its zero value (0, 0.0, "" for a STRING,
+           a zero-filled array or record). A global sits in zeroed .bss, a vector
+           is set by vec_new above, and an opaque handle by its allocation, so
+           none of those need this. */
+        {
+            int vi = var_find(n->name);
+            struct var *d = &vars[vi];
+            int opaque_handle = d->is_record && rec_tbl[d->rec].opaque;
+            if (!d->is_global && !d->is_vector && !opaque_handle) {
+                int z[2];
+                z[0] = emit_adl(d->slot);
+                z[1] = lower_const32(slot_sizes[d->slot]);
+                emit_call("__basic_bzero", z, 2);
+            }
+        }
         break;
 
     case N_ASSIGN:
@@ -2662,13 +2988,39 @@ lower_stmt(struct node *n)
             int ety, addr = lower_field_addr(n->b, &ety, n->line);
             store_scalar(addr, ety, v, n->line, "the field");
         } else if (n->b) {                      /* indexed target: a(i) = expr */
-            struct val v = lower_expr(n->a);
-            lower_index_store(n->b, v, n->line);
+            int tvi = var_find(n->b->name);
+            if (tvi >= 0 && vars[tvi].ty == TY_RECORD &&
+                (vars[tvi].is_vector || vars[tvi].is_array)) {
+                /* whole-record element assignment v(i) = r (a block copy) */
+                struct var *tv = &vars[tvi];
+                int rec, src, dst, cp[3];
+                dst = tv->is_vector
+                      ? lower_vec_elem_addr(tv, n->b->a, n->line)
+                      : lower_elem_addr(tv, n->b->a, n->line);
+                src = lower_record_desig(n->a, &rec);
+                if (rec != tv->elem_rec)
+                    die("line %d: record assignment type mismatch", n->line);
+                cp[0] = dst;
+                cp[1] = src;
+                cp[2] = lower_const32(tv->elem_size);
+                emit_call("__basic_blockcopy", cp, 3);
+            } else {
+                struct val v = lower_expr(n->a);
+                lower_index_store(n->b, v, n->line);
+            }
         } else {
             int vi = var_find(n->name);
             if (vi < 0)
                 die("line %d: undeclared variable '%s'", n->line, n->name);
-            if (vars[vi].is_record) {
+            if (vars[vi].is_vector) {
+                /* a vector variable holds a handle; assignment copies the handle
+                   (both names then refer to the same data), like a STRING */
+                struct val rv = lower_expr(n->a);
+                if (rv.ty != TY_VECTOR)
+                    die("line %d: '%s' is a vector and takes a vector value",
+                        n->line, n->name);
+                var_store_ptr(&vars[vi], rv.temp);
+            } else if (vars[vi].is_record) {
                 if (rec_tbl[vars[vi].rec].opaque) {
                     /* an opaque handle variable takes a handle value, stored as
                        the pointer in its slot (not a record block copy) */
@@ -2681,7 +3033,7 @@ lower_stmt(struct node *n)
                             "handle", n->line, n->name,
                             handle_type_name(vars[vi].rec),
                             handle_type_name(v.rec));
-                    emit_store_ptr(vars[vi].slot, v.temp);
+                    var_store_ptr(&vars[vi], v.temp);
                 } else {                        /* whole-record copy */
                     lower_record_assign(&vars[vi], n->a, n->line);
                 }
@@ -2727,6 +3079,11 @@ lower_stmt(struct node *n)
                     die("line %d: this FN returns a %s handle but a %s handle is "
                         "returned", n->line, handle_type_name(cur_ret_rec),
                         handle_type_name(v.rec));
+                ins = emit(BAS_LP64 ? IR_RETV64 : IR_RETV);   /* pointer handle */
+                ins->a = v.temp;
+            } else if (cur_ret_ty == TY_VECTOR) {
+                if (v.ty != TY_VECTOR)
+                    die("line %d: an FN of VECTOR must RETURN a vector", n->line);
                 ins = emit(BAS_LP64 ? IR_RETV64 : IR_RETV);   /* pointer handle */
                 ins->a = v.temp;
             } else if (cur_ret_ty == TY_FLOAT) {
@@ -2797,6 +3154,79 @@ lower_stmt(struct node *n)
                 n->line);
         arg = as_i32(ms);
         emit_call("__basic_wait", &arg, 1);
+        break;
+    }
+
+    case N_APPEND: {
+        int vi = var_find(n->a->name);
+        struct var *v;
+        struct val val;
+        int h, addr;
+
+        if (vi < 0)
+            die("line %d: undeclared vector '%s'", n->line, n->a->name);
+        v = &vars[vi];
+        if (!v->is_vector)
+            die("line %d: APPEND needs a vector; '%s' is not one",
+                n->line, n->a->name);
+        if (v->ty == TY_RECORD) {
+            /* Append a record element: grow the vector first, then resolve the
+               source record address and block-copy its bytes into the new slot.
+               Growing before resolving the source keeps the copy correct even
+               when the source is an element of this same vector (the grow may
+               move the data block, and the later resolve reads the new one). */
+            int rec, src, cp[3];
+            h = var_load_ptr(v);
+            addr = emit_call_retptr("__basic_vec_push", &h, 1);
+            src = lower_record_desig(n->b, &rec);
+            if (rec != v->elem_rec)
+                die("line %d: APPEND value is the wrong record type", n->line);
+            cp[0] = addr;
+            cp[1] = src;
+            cp[2] = lower_const32(v->elem_size);
+            emit_call("__basic_blockcopy", cp, 3);
+            break;
+        }
+        /* Evaluate the value before growing the vector, so a side effect in the
+           value expression cannot reallocate the storage under the slot address
+           that push returns. */
+        val = lower_expr(n->b);
+        h = var_load_ptr(v);
+        addr = emit_call_retptr("__basic_vec_push", &h, 1);
+        store_scalar(addr, v->ty, val, n->line, n->a->name);
+        break;
+    }
+
+    case N_REMOVE: {
+        int vi = var_find(n->a->name);
+        struct val iv;
+        int args[2];
+
+        if (vi < 0)
+            die("line %d: undeclared vector '%s'", n->line, n->a->name);
+        if (!vars[vi].is_vector)
+            die("line %d: REMOVE needs a vector; '%s' is not one",
+                n->line, n->a->name);
+        iv = lower_expr(n->b);
+        if (iv.ty != TY_INT && iv.ty != TY_BYTE)
+            die("line %d: a vector index must be an integer", n->line);
+        args[1] = as_i32(iv);
+        args[0] = var_load_ptr(&vars[vi]);
+        emit_call("__basic_vec_remove", args, 2);
+        break;
+    }
+
+    case N_CLEAR: {
+        int vi = var_find(n->a->name);
+        int h;
+
+        if (vi < 0)
+            die("line %d: undeclared vector '%s'", n->line, n->a->name);
+        if (!vars[vi].is_vector)
+            die("line %d: CLEAR needs a vector; '%s' is not one",
+                n->line, n->a->name);
+        h = var_load_ptr(&vars[vi]);
+        emit_call("__basic_vec_clear", &h, 1);
         break;
     }
 
@@ -2878,6 +3308,18 @@ lower_user_func(struct node *def)
                 die("line %d: unknown record type '%s'", def->line, pm->sval);
             /* a record parameter is REF: the slot holds a pointer */
             var_declare_record(pm->name, ri, 1, def->line);
+        } else if (pm->op == TY_DECL_VECTOR) {
+            /* a vector parameter: its slot holds the handle the caller passes */
+            int ety, erec = -1;
+            if (pm->velem == TY_DECL_RECORD) {
+                erec = rec_lookup(pm->sval);
+                if (erec < 0)
+                    die("line %d: unknown record type '%s'", def->line, pm->sval);
+                ety = TY_RECORD;
+            } else {
+                ety = decl_to_ty(pm->velem);
+            }
+            var_declare_vector(pm->name, ety, erec, def->line);
         } else {
             int ty = decl_to_ty(pm->op);
             var_declare(pm->name, ty, def->line);
@@ -2959,6 +3401,8 @@ lower_program(struct arena *a, struct node *ast)
 
     func_tbl = NULL; nfunc = 0; func_cap = 0;
     rec_tbl = NULL; nrec = 0; rec_cap = 0;
+    gvars = NULL; ngvars = 0; gvar_cap = 0;
+    cur_scope_global = 0;
     strctr = 0;
 
     if (!ast || ast->kind != N_PROGRAM)
@@ -2997,9 +3441,13 @@ lower_program(struct arena *a, struct node *ast)
         ins = emit(IR_FUNC);
         ins->sym = arena_strdup(a, "main");
         ins->nargs = 0;
+        /* Module-scope DIMs declare globals (visible in every routine); the main
+           program's own statements run here in source order. */
+        cur_scope_global = 1;
         for (s = ast->a; s; s = s->next)
             if (!is_def_node(s))
                 lower_stmt(s);
+        cur_scope_global = 0;
         args[0] = lower_const32(0);             /* implicit exit(0) */
         emit_call("exit", args, 1);
         ins = emit(IR_RETV);
@@ -3026,6 +3474,7 @@ lower_program(struct arena *a, struct node *ast)
 
     free(func_tbl); func_tbl = NULL; nfunc = 0; func_cap = 0;
     free(rec_tbl); rec_tbl = NULL; nrec = 0; rec_cap = 0;
+    free(gvars); gvars = NULL; ngvars = 0; gvar_cap = 0;
 
     return prog;
 }

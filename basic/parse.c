@@ -162,12 +162,35 @@ scalar_decl_type(struct parser *p)
    for the qualified form, matching how the opaque type was registered on
    import). -1 if none of these. */
 static int
-decl_type_spec(struct parser *p, char **recname)
+decl_type_spec(struct parser *p, char **recname, int *velem)
 {
-    int t = scalar_decl_type(p);
+    int t;
     char *name;
     struct mod_ent *m;
 
+    if (velem)
+        *velem = -1;
+
+    /* VECTOR OF <element>: the element is a scalar, STRING, or record type
+       (a vector of a vector is not allowed). */
+    if (is_kw(p, KW_VECTOR)) {
+        char *ename = NULL;
+        int et;
+        advance(p);                 /* VECTOR */
+        expect_kw(p, KW_OF, "expected OF after VECTOR");
+        et = decl_type_spec(p, &ename, NULL);
+        if (et < 0)
+            perr(p, "VECTOR OF needs an element type");
+        if (et == TY_DECL_VECTOR)
+            perr(p, "a VECTOR OF a VECTOR is not supported");
+        if (recname)
+            *recname = ename;       /* element record name, or NULL */
+        if (velem)
+            *velem = et;
+        return TY_DECL_VECTOR;
+    }
+
+    t = scalar_decl_type(p);
     if (t >= 0) {
         if (recname)
             *recname = NULL;
@@ -210,6 +233,7 @@ builtin_of_kw(int kw)
 {
     switch (kw) {
     case KW_LEN:   return BF_LEN;
+    case KW_COUNT: return BF_COUNT;
     case KW_ASC:   return BF_ASC;
     case KW_INSTR: return BF_INSTR;
     case KW_CHR:   return BF_CHR;
@@ -308,30 +332,30 @@ parse_primary(struct parser *p)
         if (p->cur.kind == TK_DOT && (m = mod_lookup(p, name)) != NULL)
             return parse_qualified_ref(p, m);
 
-        /* name '(' ... ')' is a function call. */
+        /* name '(' ... ')' is a function call or an array/vector index. */
         if (p->cur.kind == TK_LPAREN) {
             n = mknode(p, N_CALL);
             n->name = name;
             n->a = parse_args(p);
-            return n;
+        } else {
+            /* a defined constant folds to its value */
+            c = const_lookup(p, name, nlen);
+            if (c) {
+                n = mknode(p, N_INT);
+                n->ival = c->val;
+                return n;
+            }
+            /* PI is a predeclared FLOAT constant, unless the program shadows it. */
+            if (nlen == 2 && (name[0] == 'P' || name[0] == 'p') &&
+                (name[1] == 'I' || name[1] == 'i')) {
+                n = mknode(p, N_FLT);
+                n->fval = 3.14159265358979323846;
+                return n;
+            }
+            n = mknode(p, N_VAR);
+            n->name = name;
         }
-        /* a defined constant folds to its value */
-        c = const_lookup(p, name, nlen);
-        if (c) {
-            n = mknode(p, N_INT);
-            n->ival = c->val;
-            return n;
-        }
-        /* PI is a predeclared FLOAT constant, unless the program shadows it. */
-        if (nlen == 2 && (name[0] == 'P' || name[0] == 'p') &&
-            (name[1] == 'I' || name[1] == 'i')) {
-            n = mknode(p, N_FLT);
-            n->fval = 3.14159265358979323846;
-            return n;
-        }
-        n = mknode(p, N_VAR);
-        n->name = name;
-        /* record field access: var.field (one level this phase) */
+        /* record field access: var.field or v(i).field (fields are one level) */
         while (p->cur.kind == TK_DOT) {
             struct node *f = mknode(p, N_FIELD);
             advance(p);
@@ -662,7 +686,22 @@ parse_print(struct parser *p)
     advance(p);   /* 'PRINT' */
     while (!at_terminator(p)) {
         struct node *item = mknode(p, N_PRINTITEM);
-        item->a = parse_expr(p);
+        if (is_kw(p, KW_AT)) {
+            advance(p);                /* 'AT' */
+            item->ival = PI_AT;
+            item->a = parse_expr(p);
+            expect(p, TK_COMMA, "expected ',' between the AT row and column");
+            item->b = parse_expr(p);
+        } else if (is_kw(p, KW_TAB)) {
+            advance(p);                /* 'TAB' */
+            item->ival = PI_TAB;
+            expect(p, TK_LPAREN, "expected '(' after TAB");
+            item->a = parse_expr(p);
+            expect(p, TK_RPAREN, "expected ')' after the TAB column");
+        } else {
+            item->ival = PI_VALUE;
+            item->a = parse_expr(p);
+        }
         *tail = item;
         tail = &item->next;
 
@@ -715,12 +754,14 @@ parse_dim(struct parser *p, struct node ***tail)
         expect_kw(p, KW_AS, "expected AS in a DIM");
         {
             char *rn;
-            t = decl_type_spec(p, &rn);
+            int velem = -1;
+            t = decl_type_spec(p, &rn, &velem);
             if (t < 0)
                 perr(p, "a DIM variable needs a type (INT, FLOAT, BYTE, "
-                        "STRING, or a record type)");
+                        "STRING, a record type, or VECTOR OF one)");
             n->op = t;
             n->sval = rn;               /* record type name, or NULL */
+            n->velem = velem;           /* VECTOR element type, else -1 */
         }
         if (!first)
             first = n;
@@ -1153,10 +1194,13 @@ parse_params(struct parser *p)
             pm->name = ident_text(p);
             advance(p);
             expect_kw(p, KW_AS, "expected AS in a parameter");
-            t = decl_type_spec(p, &rn);
+            t = decl_type_spec(p, &rn, &pm->velem);
             if (t < 0)
                 perr(p, "a parameter needs a type (INT, FLOAT, BYTE, STRING, "
-                        "or a record type)");
+                        "a record type, or VECTOR OF one)");
+            if (t == TY_DECL_VECTOR && pm->ival)
+                perr(p, "REF is not allowed on a VECTOR; a vector already passes "
+                        "by reference");
             pm->op = t;
             pm->sval = rn;
             *tail = pm;
@@ -1207,7 +1251,7 @@ parse_fn(struct parser *p)
     advance(p);
     n->a = parse_params(p);
     expect_kw(p, KW_AS, "expected AS before the FN return type");
-    t = decl_type_spec(p, &n->sval);
+    t = decl_type_spec(p, &n->sval, &n->velem);
     if (t < 0)
         perr(p, "an FN must return INT, FLOAT, BYTE, STRING, or an opaque TYPE");
     n->op = t;
@@ -1251,7 +1295,7 @@ parse_declare(struct parser *p)
         advance(p);
         n->a = parse_params(p);
         expect_kw(p, KW_AS, "expected AS before the FN return type");
-        t = decl_type_spec(p, &n->sval);
+        t = decl_type_spec(p, &n->sval, &n->velem);
         if (t < 0)
             perr(p, "an FN must return INT, FLOAT, BYTE, STRING, or an opaque TYPE");
         n->op = t;
@@ -1352,7 +1396,7 @@ parse_type(struct parser *p)
         fld->name = ident_text(p);
         advance(p);
         expect_kw(p, KW_AS, "expected AS in a field");
-        t = decl_type_spec(p, &rn);
+        t = decl_type_spec(p, &rn, NULL);
         if (t < 0)
             perr(p, "a field needs a type");
         fld->op = t;
@@ -1411,6 +1455,40 @@ parse_statement(struct parser *p, struct node ***tail)
             n->a = parse_expr(p);       /* milliseconds */
             **tail = n; *tail = &n->next;
             return;
+        case KW_APPEND:
+            n = mknode(p, N_APPEND);
+            advance(p);                 /* APPEND */
+            if (p->cur.kind != TK_IDENT)
+                perr(p, "expected a vector variable after APPEND");
+            n->a = mknode(p, N_VAR);
+            n->a->name = ident_text(p);
+            advance(p);
+            expect(p, TK_COMMA, "expected ',' between the vector and the value");
+            n->b = parse_expr(p);       /* the value to append */
+            **tail = n; *tail = &n->next;
+            return;
+        case KW_REMOVE:
+            n = mknode(p, N_REMOVE);
+            advance(p);                 /* REMOVE */
+            if (p->cur.kind != TK_IDENT)
+                perr(p, "expected a vector variable after REMOVE");
+            n->a = mknode(p, N_VAR);
+            n->a->name = ident_text(p);
+            advance(p);
+            expect(p, TK_COMMA, "expected ',' between the vector and the index");
+            n->b = parse_expr(p);       /* the index to remove */
+            **tail = n; *tail = &n->next;
+            return;
+        case KW_CLEAR:
+            n = mknode(p, N_CLEAR);
+            advance(p);                 /* CLEAR */
+            if (p->cur.kind != TK_IDENT)
+                perr(p, "expected a vector variable after CLEAR");
+            n->a = mknode(p, N_VAR);
+            n->a->name = ident_text(p);
+            advance(p);
+            **tail = n; *tail = &n->next;
+            return;
         default:
             perr(p, "statement not supported in this phase");
         }
@@ -1434,12 +1512,26 @@ parse_statement(struct parser *p, struct node ***tail)
             struct node *desig = mknode(p, N_CALL);
             desig->name = name;
             desig->a = parse_args(p);
+            /* a trailing field chain makes it a record-element field target:
+               v(i).field = expr */
+            while (p->cur.kind == TK_DOT) {
+                struct node *f = mknode(p, N_FIELD);
+                advance(p);
+                if (p->cur.kind != TK_IDENT)
+                    perr(p, "expected a field name after '.'");
+                f->a = desig;
+                f->name = ident_text(p);
+                advance(p);
+                desig = f;
+            }
             if (p->cur.kind == TK_EQ) {
                 advance(p);
                 n = mknode(p, N_ASSIGN);
-                n->b = desig;                   /* indexed target */
+                n->b = desig;                   /* indexed element or field target */
                 n->a = parse_expr(p);
             } else {
+                if (desig->kind != N_CALL)
+                    perr(p, "expected '=' after a field designator");
                 n = desig;                      /* a PROC call */
             }
             **tail = n; *tail = &n->next;

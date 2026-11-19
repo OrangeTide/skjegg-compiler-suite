@@ -6,6 +6,41 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.56.0
+
+#### Added
+- BASIC gains the `VECTOR OF T` growable list, where `T` is a scalar, a `STRING`,
+  or a record. `APPEND`, `REMOVE` (which moves the last element into the gap, so it
+  is cheap but does not keep order), `CLEAR`, and `COUNT` manage it; elements are
+  reached by a zero-based index with a runtime bounds fault; `FOR EACH` walks it; a
+  record element is used through a field (`v(i).field`) or copied whole; and a
+  vector passes to a routine and returns from an `FN` by reference.
+- BASIC `PRINT AT row, column` positions the console cursor, and `PRINT TAB(column)`
+  pads to a column, with the runtime tracking the column as it writes.
+- BASIC module-scope variables are now globals, visible inside every `PROC` and
+  `FN` rather than only the main program. A routine's own `DIM` is still local and
+  may shadow a global of the same name.
+
+#### Changed
+- Every BASIC variable now starts at its zero value: `0`, `0.0`, an empty `STRING`,
+  a zero-filled array or record, an empty `VECTOR`. A global lives in zeroed `.bss`
+  and a local is cleared at its declaration.
+- The BASIC language reference now pins the observable semantics a separate
+  implementation must match: scope and initial values, operand-type promotion,
+  64-bit wraparound and `BYTE` truncation, the `^` power rules, integer
+  division-by-zero and vector-index faults, `PRINT` spacing, `INPUT` field
+  splitting, and `FOR` evaluation.
+- The in-tree assembler indexes its symbol table by a hash instead of scanning it
+  linearly, so assembling is linear in the symbol count rather than quadratic. A
+  large input now assembles several times faster (the Kobold front end's output
+  drops from about six seconds to under half a second), with byte-identical object
+  output. All five target assemblers share the change.
+
+#### Fixed
+- A declared but unassigned BASIC `STRING` now reads as an empty string instead of
+  faulting on a null handle. The same holds for an unassigned `STRING` array
+  element, record field, or vector element.
+
 ### 0.55.0
 
 #### Added

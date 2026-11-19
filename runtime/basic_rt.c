@@ -7,9 +7,16 @@
 
 extern int write(int fd, const char *buf, int n);
 
-/* Write exactly n bytes to stdout, advancing over a short write. */
+/* The console cursor column, zero-based. Every normal PRINT byte passes through
+   out_write and advances it; a newline returns it to the left margin. TAB pads
+   to a column with it, and AT sets it. */
+static int cur_col = 0;
+
+/* Write exactly n bytes to stdout, advancing over a short write. Does not touch
+   the column, so it carries control bytes (an AT cursor escape) that are not
+   printed text. */
 static void
-out_write(const char *p, int n)
+raw_write(const char *p, int n)
 {
     while (n > 0) {
         int w = write(1, p, n);
@@ -18,6 +25,21 @@ out_write(const char *p, int n)
         p += w;
         n -= w;
     }
+}
+
+/* Write n display bytes to stdout, tracking the cursor column. */
+static void
+out_write(const char *p, int n)
+{
+    int i;
+
+    for (i = 0; i < n; i++) {
+        if (p[i] == '\n')
+            cur_col = 0;
+        else
+            cur_col++;
+    }
+    raw_write(p, n);
 }
 
 /* PRINT of a string literal: raw bytes, already unescaped by the compiler. */
@@ -672,6 +694,18 @@ str_alloc(int len)
     return s;
 }
 
+/* The shared empty string. A declared-but-unassigned STRING slot is zero, and so
+   is a string element of a fresh array, record, or vector, so a null handle is
+   the value of a STRING that has not been assigned. It reads as "". Every string
+   consumer normalizes a null handle to this object through bs(). */
+static struct bstr empty_str;
+
+static struct bstr *
+bs(void *p)
+{
+    return p ? (struct bstr *)p : &empty_str;
+}
+
 /* Copy n bytes (a whole-record assignment or record argument copy). */
 void
 __basic_blockcopy(void *dst, void *src, int n)
@@ -684,11 +718,23 @@ __basic_blockcopy(void *dst, void *src, int n)
         d[i] = s[i];
 }
 
+/* Zero n bytes. A declared local's frame slot is not cleared on entry, so the
+   compiler calls this at a local DIM to give every variable its zero value. */
+void
+__basic_bzero(void *p, int n)
+{
+    char *d = p;
+    int i;
+
+    for (i = 0; i < n; i++)
+        d[i] = 0;
+}
+
 /* PRINT of a STRING: its bytes. */
 void
 __basic_write_str(void *p)
 {
-    struct bstr *s = p;
+    struct bstr *s = bs(p);
     out_write(s->data, s->len);
 }
 
@@ -696,7 +742,7 @@ __basic_write_str(void *p)
 void *
 __basic_str_cat(void *pa, void *pb)
 {
-    struct bstr *a = pa, *b = pb;
+    struct bstr *a = bs(pa), *b = bs(pb);
     struct bstr *r = str_alloc(a->len + b->len);
     int i;
 
@@ -711,7 +757,7 @@ __basic_str_cat(void *pa, void *pb)
 int
 __basic_str_cmp(void *pa, void *pb)
 {
-    struct bstr *a = pa, *b = pb;
+    struct bstr *a = bs(pa), *b = bs(pb);
     int n = a->len < b->len ? a->len : b->len;
     int i;
 
@@ -728,14 +774,14 @@ __basic_str_cmp(void *pa, void *pb)
 int
 __basic_str_len(void *p)
 {
-    return ((struct bstr *)p)->len;
+    return bs(p)->len;
 }
 
 /* ASC(s): the first byte, or 0 for the empty string. */
 int
 __basic_asc(void *p)
 {
-    struct bstr *s = p;
+    struct bstr *s = bs(p);
     return s->len > 0 ? (int)(unsigned char)s->data[0] : 0;
 }
 
@@ -744,7 +790,7 @@ __basic_asc(void *p)
 int
 __basic_instr(void *ph, void *pn)
 {
-    struct bstr *h = ph, *n = pn;
+    struct bstr *h = bs(ph), *n = bs(pn);
     int i, j;
 
     if (n->len == 0)
@@ -800,7 +846,7 @@ __basic_str_from_float(double v)
 long long
 __basic_val_bits(void *p)
 {
-    struct bstr *s = p;
+    struct bstr *s = bs(p);
 
     return parse_decimal(s->data, s->len);
 }
@@ -809,7 +855,7 @@ __basic_val_bits(void *p)
 long long
 __basic_valint(void *p)
 {
-    struct bstr *s = p;
+    struct bstr *s = bs(p);
     int i = 0, neg = 0;
     long long v = 0;
 
@@ -841,7 +887,7 @@ __basic_space(int n)
 void *
 __basic_string(int n, void *p)
 {
-    struct bstr *s = p, *r;
+    struct bstr *s = bs(p), *r;
     int i, j, k = 0;
 
     if (n < 0)
@@ -972,7 +1018,7 @@ __basic_zero(long long v, int w)
 void *
 __basic_rjust(void *p, int w)
 {
-    struct bstr *s = p, *r;
+    struct bstr *s = bs(p), *r;
     int pad, i, n = 0;
 
     pad = w - s->len;
@@ -990,7 +1036,7 @@ __basic_rjust(void *p, int w)
 void *
 __basic_ljust(void *p, int w)
 {
-    struct bstr *s = p, *r;
+    struct bstr *s = bs(p), *r;
     int pad, i, n = 0;
 
     pad = w - s->len;
@@ -1034,7 +1080,7 @@ __basic_left(void *p, int n)
 void *
 __basic_right(void *p, int n)
 {
-    struct bstr *s = p;
+    struct bstr *s = bs(p);
     if (n < 0)
         n = 0;
     if (n > s->len)
@@ -1056,7 +1102,7 @@ __basic_mid(void *p, int start, int len)
 void *
 __basic_ucase(void *p)
 {
-    struct bstr *s = p;
+    struct bstr *s = bs(p);
     struct bstr *r = str_alloc(s->len);
     int i;
 
@@ -1070,7 +1116,7 @@ __basic_ucase(void *p)
 void *
 __basic_lcase(void *p)
 {
-    struct bstr *s = p;
+    struct bstr *s = bs(p);
     struct bstr *r = str_alloc(s->len);
     int i;
 
@@ -1079,6 +1125,117 @@ __basic_lcase(void *p)
         r->data[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
     }
     return r;
+}
+
+/* ---- vectors ----
+
+   A BASIC VECTOR OF T is a handle: a pointer to a header whose data block holds
+   len elements of esz bytes each, laid out like a fixed array so the compiler
+   reaches an element with the same load/store path. The block grows by doubling;
+   like a string, a grown vector leaves its old block in the bump-allocated arena
+   (there is no free), so growth never moves a header, only its data. */
+
+extern void exit(int status);
+
+struct bvec {
+    int   len;      /* elements in use */
+    int   cap;      /* elements the data block can hold */
+    int   esz;      /* bytes per element */
+    char *data;     /* esz*cap bytes, or NULL while cap is 0 */
+};
+
+/* Double the capacity (from 4), copying the live bytes into the new block. */
+static void
+bvec_grow(struct bvec *v)
+{
+    int ncap = v->cap ? v->cap * 2 : 4;
+    char *nd = __moo_arena_alloc(ncap * v->esz);
+    int i, n = v->len * v->esz;
+
+    for (i = 0; i < n; i++)
+        nd[i] = v->data[i];
+    v->data = nd;
+    v->cap = ncap;
+}
+
+/* DIM v AS VECTOR OF T: a new empty vector whose elements are esz bytes. */
+void *
+__basic_vec_new(int esz)
+{
+    struct bvec *v = __moo_arena_alloc((int)sizeof(struct bvec));
+    v->len = 0;
+    v->cap = 0;
+    v->esz = esz;
+    v->data = 0;
+    return v;
+}
+
+/* COUNT(v): the number of elements. */
+int
+__basic_vec_count(void *h)
+{
+    return ((struct bvec *)h)->len;
+}
+
+/* An out-of-range vector index is a program fault, like an array overrun; report
+   it and exit rather than read or write past the data block. */
+static void
+vec_oob(void)
+{
+    static const char m[] = "basic: vector index out of range\n";
+    write(2, m, (int)sizeof(m) - 1);
+    exit(1);
+}
+
+/* The address of element i, bounds-checked against the current length. The
+   compiler loads or stores T through this pointer. */
+void *
+__basic_vec_elem(void *h, int i)
+{
+    struct bvec *v = h;
+
+    if (i < 0 || i >= v->len)
+        vec_oob();
+    return v->data + (long)i * v->esz;
+}
+
+/* APPEND v, x: grow by one element and return the address of the new last slot;
+   the compiler stores x there. */
+void *
+__basic_vec_push(void *h)
+{
+    struct bvec *v = h;
+
+    if (v->len == v->cap)
+        bvec_grow(v);
+    return v->data + (long)(v->len++) * v->esz;
+}
+
+/* REMOVE v, i: drop element i by moving the last element into its place. This is
+   O(1) and does not preserve the order of the remaining elements. */
+void
+__basic_vec_remove(void *h, int i)
+{
+    struct bvec *v = h;
+    int last, j;
+
+    if (i < 0 || i >= v->len)
+        vec_oob();
+    last = v->len - 1;
+    if (i != last) {
+        char *d = v->data + (long)i * v->esz;
+        char *s = v->data + (long)last * v->esz;
+        for (j = 0; j < v->esz; j++)
+            d[j] = s[j];
+    }
+    v->len--;
+}
+
+/* CLEAR v: empty the vector. The capacity is kept for reuse. */
+void
+__basic_vec_clear(void *h)
+{
+    ((struct bvec *)h)->len = 0;
 }
 
 /* ---- INPUT ----
@@ -1178,6 +1335,39 @@ void
 __basic_write_nl(void)
 {
     out_write("\n", 1);
+}
+
+/* PRINT AT row, column: move the console cursor with a 1-based ANSI CUP escape
+   (ESC [ row+1 ; col+1 H). Row and column are zero-based in the language and
+   clamped at zero. The cursor column is set directly, bypassing out_write's
+   counting, so the escape bytes are not mistaken for printed text. */
+void
+__basic_at(long long row, long long col)
+{
+    char buf[48];
+    int n = 0;
+
+    if (row < 0)
+        row = 0;
+    if (col < 0)
+        col = 0;
+    buf[n++] = 0x1b;
+    buf[n++] = '[';
+    n += fmt_int(row + 1, buf + n);
+    buf[n++] = ';';
+    n += fmt_int(col + 1, buf + n);
+    buf[n++] = 'H';
+    raw_write(buf, n);
+    cur_col = (int)col;
+}
+
+/* PRINT TAB(col): pad with spaces until the cursor reaches the zero-based column
+   col; nothing when the cursor is already at or past it. */
+void
+__basic_tab(long long col)
+{
+    while (cur_col < col)
+        out_write(" ", 1);
 }
 
 /* ---- core numeric built-ins ----

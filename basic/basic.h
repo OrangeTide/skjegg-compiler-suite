@@ -102,8 +102,9 @@ enum node_kind {
     N_DIM,        /* name = variable; op = TY_DECL_*, a scalar declaration */
     N_ASSIGN,     /* name = target variable; a = value expression */
     N_PRINT,      /* a = item list; ival = 1 to suppress the trailing newline */
-    N_PRINTITEM,  /* a = expression or N_STR; op = separator after it
-                     (TK_SEMI, TK_COMMA, or 0 for the last item) */
+    N_PRINTITEM,  /* ival = PI_* item kind; op = separator after it (TK_SEMI,
+                     TK_COMMA, or 0 for the last item). PI_VALUE: a = expression
+                     or N_STR. PI_AT: a = row, b = column. PI_TAB: a = column. */
     N_END,        /* halt the program */
 
     N_INT,        /* ival = integer literal value */
@@ -149,13 +150,18 @@ enum node_kind {
     N_TYPE,       /* name; a = field list (N_PARAM nodes) */
     N_FIELD,      /* name = field; a = base designator (N_VAR record variable) */
 
+    /* ---- vectors ---- */
+    N_APPEND,     /* a = vector N_VAR; b = value expression */
+    N_REMOVE,     /* a = vector N_VAR; b = index expression */
+    N_CLEAR,      /* a = vector N_VAR */
+
     /* ---- timing ---- */
     N_WAIT        /* a = milliseconds expression */
 };
 
 /* Built-in function ids for an N_BUILTIN node. */
 enum {
-    BF_LEN, BF_ASC, BF_INSTR,          /* -> INT */
+    BF_LEN, BF_ASC, BF_INSTR, BF_COUNT, /* -> INT (COUNT is a vector's length) */
     BF_CHR, BF_STR,                    /* -> STRING */
     BF_LEFT, BF_RIGHT, BF_MID,
     BF_UCASE, BF_LCASE,
@@ -175,6 +181,10 @@ enum {
     BF_RND, BF_SEED, BF_TIME             /* RND/TIME -> FLOAT; SEED(n) -> INT */
 };
 
+/* N_PRINTITEM ival: the kind of PRINT item. PI_VALUE prints an expression;
+   PI_AT moves the console cursor to (row, column); PI_TAB pads to a column. */
+enum { PI_VALUE, PI_AT, PI_TAB };
+
 /* N_EXIT op: which enclosing loop EXIT leaves. */
 enum { EXIT_WHILE, EXIT_REPEAT, EXIT_FOR };
 
@@ -184,7 +194,8 @@ enum { WI_VALUE, WI_RANGE, WI_REL };
 
 /* Declared type for an N_DIM / N_PARAM / FN-return op field. TY_DECL_RECORD
    names a record type whose name is carried in the node's sval. */
-enum { TY_DECL_INT, TY_DECL_FLOAT, TY_DECL_BYTE, TY_DECL_STRING, TY_DECL_RECORD };
+enum { TY_DECL_INT, TY_DECL_FLOAT, TY_DECL_BYTE, TY_DECL_STRING, TY_DECL_RECORD,
+       TY_DECL_VECTOR };
 
 /* AST operator ids for N_BINOP's op field. These have their own numbering,
    independent of TokenKind and Keyword, so the AST never conflates two lexer
@@ -204,6 +215,9 @@ struct node {
     int           line;
     int           is_export; /* N_PROC/N_FN/N_TYPE/N_CONST: part of a module's interface */
     int           op;      /* operator / separator, by kind */
+    int           velem;   /* N_DIM/N_PARAM/N_FIELD: the VECTOR element's TY_DECL_*
+                              when op == TY_DECL_VECTOR (sval names the element
+                              record when that element is a record) */
     long          ival;    /* N_INT value; N_PRINT newline-suppress flag */
     double        fval;    /* N_FLT value */
     char         *name;    /* N_DIM/N_ASSIGN/N_VAR identifier */
