@@ -35,6 +35,7 @@
  */
 
 #include "ir.h"
+#include "liveness.h"
 
 #include <stdlib.h>  /* qsort */
 
@@ -210,7 +211,6 @@ regalloc(struct ir_func *fn)
     int *is_i64;
     int *is_int;
     int ntemps;
-    int pos;
     int t;
     int max_pair;
     int int_num_regs;
@@ -237,18 +237,14 @@ regalloc(struct ir_func *fn)
     is_float = arena_zalloc(fn->arena, ntemps * sizeof(int));
     is_i64 = arena_zalloc(fn->arena, ntemps * sizeof(int));
     is_int = arena_alloc(fn->arena, ntemps * sizeof(int));
-    for (t = 0; t < ntemps; t++) {
-        first_def[t] = -1;
-        last_use[t] = -1;
-    }
 
-    pos = 0;
-    for (i = fn->head; i; i = i->next, pos++) {
+    /* control-flow-aware live intervals, shared across backends.  Fills
+       first_def/last_use; the per-backend int/float/i64 classification below
+       layers on top of it. */
+    ir_live_intervals(fn, first_def, last_use);
+
+    for (i = fn->head; i; i = i->next) {
         if (i->dst >= 0 && i->dst < ntemps) {
-            if (first_def[i->dst] < 0)
-                first_def[i->dst] = pos;
-            if (last_use[i->dst] < pos)
-                last_use[i->dst] = pos;
             if (ir_op_is_float_def(i->op)) {
 #ifdef MIPS_SOFTFLOAT
                 /* Soft-float: a float has no register class of its own.  A
@@ -274,28 +270,6 @@ regalloc(struct ir_func *fn)
 #endif
             } else if (ir_op_is_i64_def(i->op))
                 is_i64[i->dst] = 1;
-        }
-        if (i->a >= 0 && i->a < ntemps && last_use[i->a] < pos)
-            last_use[i->a] = pos;
-        if (i->b >= 0 && i->b < ntemps && last_use[i->b] < pos)
-            last_use[i->b] = pos;
-        /* Extended inline asm: the operand temps live in asm_info, not in
-           i->a/i->b, so register them here.  An output is a def, an input is
-           a use, and an in-out operand is both. */
-        if (i->op == IR_ASM && i->asm_info) {
-            int k;
-            for (k = 0; k < i->asm_info->noutputs + i->asm_info->ninputs; k++) {
-                int t = i->asm_info->ops[k].temp;
-                if (t < 0 || t >= ntemps)
-                    continue;
-                if (i->asm_info->ops[k].is_output ||
-                    i->asm_info->ops[k].is_inout) {
-                    if (first_def[t] < 0)
-                        first_def[t] = pos;
-                }
-                if (last_use[t] < pos)
-                    last_use[t] = pos;
-            }
         }
     }
 

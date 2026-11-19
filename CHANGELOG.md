@@ -6,6 +6,37 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.57.0
+
+#### Added
+- Two internals notes in the manual: one on the control-flow-aware liveness pass
+  and why the previous textual liveness was unsound, and one on the optimization
+  opportunities that remain on the three-address backends, grounded in the
+  measured instruction mix.
+
+#### Changed
+- Register allocation now computes live intervals with a shared control-flow-aware
+  pass. It builds a control-flow graph from the instruction list, solves liveness
+  by backward dataflow, and extends each value's range to cover every block where
+  it is live. This replaces the five near-identical textual scans the backends
+  carried and fixes a latent case where a value live across a loop back-edge was
+  given too short a range.
+- Move-coalescing is re-enabled on the two-address targets, x86-64 and ColdFire.
+  When a copy or a two-address operation has a source operand that dies at that
+  point, the allocator reuses the source register for the result and the setup
+  move is dropped. ColdFire retired instruction counts fall by up to five percent
+  on the benchmarks, with reg-to-reg moves down about 38 percent on the C corpus;
+  x86-64 reg-to-reg moves fall about 44 percent on the Kobold compiler. The
+  three-address targets emit no setup move, so they are intentionally left
+  unchanged.
+
+#### Fixed
+- A short-circuit `and` or `or` in Pascal now releases its right operand's managed
+  string temporaries on the path that evaluated them, rather than at the merge.
+  The previous unconditional release at the merge could free a string the
+  short-circuit path never created, a use-after-free that stayed hidden until
+  register pressure moved the temporary to the stack.
+
 ### 0.56.0
 
 #### Added

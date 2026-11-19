@@ -312,7 +312,8 @@ cp "$S/CHANGELOG.md" "$DEST/"
 # IR core (always present)
 mkdir -p "$DEST/ir"
 cp "$S/ir/ir.c" "$S/ir/ir.h" "$S/ir/util.c" "$S/ir/util.h" \
-   "$S/ir/arena.c" "$S/ir/arena.h" "$S/ir/target.h" "$S/ir/exepath.h" "$DEST/ir/"
+   "$S/ir/arena.c" "$S/ir/arena.h" "$S/ir/liveness.c" "$S/ir/liveness.h" \
+   "$S/ir/target.h" "$S/ir/exepath.h" "$DEST/ir/"
 
 # backends
 if [ "$has_cf" -eq 1 ]; then
@@ -818,7 +819,7 @@ fi
 # source variables
 {
     printf '\n# sources\n'
-    printf 'SKJ_IR := $(SKJEGG)ir/ir.c $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c\n'
+    printf 'SKJ_IR := $(SKJEGG)ir/ir.c $(SKJEGG)ir/util.c $(SKJEGG)ir/arena.c $(SKJEGG)ir/liveness.c\n'
 } >> "$MK"
 
 if [ "$has_cf" -eq 1 ]; then

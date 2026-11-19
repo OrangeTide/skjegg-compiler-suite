@@ -37,6 +37,7 @@
  */
 
 #include "ir.h"
+#include "liveness.h"
 
 #include <stdlib.h>  /* qsort */
 
@@ -77,7 +78,7 @@ sort_by_start(const void *pa, const void *pb)
 static int
 linscan(struct ir_func *fn, int *first_def, int *last_use,
         int *is_class, int num_regs, int first_reg, int spill_size,
-        int *force_spill, const int *reserved)
+        int *force_spill, const int *reserved, const int *hint)
 {
     struct interval *ivs;
     struct interval **active;
@@ -149,11 +150,35 @@ linscan(struct ir_func *fn, int *first_def, int *last_use,
         }
 
         got = -1;
-        for (k = 0; k < num_regs; k++) {
-            if (pool[k]) {
-                got = k + first_reg;
-                pool[k] = 0;
-                break;
+
+        /* Move-coalescing bias: if this temp is the destination of a copy or a
+           two-address op whose source operand dies exactly here, reuse the
+           source's register so the emitter's same-register guard drops the
+           move.  The source interval is still active (its end equals this
+           start, so the strict-< expiry above has not freed it); claim its
+           register and retire it, leaving the register marked busy because the
+           destination now holds it. */
+        if (hint && hint[iv->temp] >= 0) {
+            for (r = 0; r < nactive; r++) {
+                if (active[r]->temp == hint[iv->temp]
+                        && active[r]->end == iv->start
+                        && active[r]->reg >= 0) {
+                    got = active[r]->reg;
+                    for (w = r; w + 1 < nactive; w++)
+                        active[w] = active[w + 1];
+                    nactive--;
+                    break;
+                }
+            }
+        }
+
+        if (got < 0) {
+            for (k = 0; k < num_regs; k++) {
+                if (pool[k]) {
+                    got = k + first_reg;
+                    pool[k] = 0;
+                    break;
+                }
             }
         }
 
@@ -260,10 +285,16 @@ regalloc(struct ir_func *fn)
     is_float = arena_zalloc(fn->arena, ntemps * sizeof(int));
     is_i64 = arena_zalloc(fn->arena, ntemps * sizeof(int));
     is_int = arena_alloc(fn->arena, ntemps * sizeof(int));
-    for (t = 0; t < ntemps; t++) {
-        first_def[t] = -1;
-        last_use[t] = -1;
-    }
+    /* Move-coalescing hint: for a copy or two-address op, the source operand
+       whose register the destination would like to reuse (-1 = none). */
+    int *hint = arena_alloc(fn->arena, ntemps * sizeof(int));
+    for (t = 0; t < ntemps; t++)
+        hint[t] = -1;
+
+    /* control-flow-aware live intervals, shared across backends.  Fills
+       first_def/last_use; the per-backend float classification and the IR_ARG
+       to call extension below layer on top of it. */
+    ir_live_intervals(fn, first_def, last_use);
 
     /* call positions (for the float-across-call spill), and the resulting
        force-spill mask */
@@ -284,31 +315,23 @@ regalloc(struct ir_func *fn)
 
     pos = 0;
     for (i = fn->head; i; i = i->next, pos++) {
-        if (i->dst >= 0 && i->dst < ntemps) {
-            if (first_def[i->dst] < 0)
-                first_def[i->dst] = pos;
-            if (last_use[i->dst] < pos)
-                last_use[i->dst] = pos;
-            if (ir_op_is_float_def(i->op))
-                is_float[i->dst] = 1;
-        }
-        if (i->a >= 0 && i->a < ntemps && last_use[i->a] < pos)
-            last_use[i->a] = pos;
-        if (i->b >= 0 && i->b < ntemps && last_use[i->b] < pos)
-            last_use[i->b] = pos;
-        /* Extended inline asm operands live in asm_info, not i->a/i->b: an
-           output is a def, an input a use, an in-out operand both. */
-        if (i->op == IR_ASM && i->asm_info) {
-            int k, nops = i->asm_info->noutputs + i->asm_info->ninputs;
-            for (k = 0; k < nops; k++) {
-                int at = i->asm_info->ops[k].temp;
-                if (at < 0 || at >= ntemps)
-                    continue;
-                if ((i->asm_info->ops[k].is_output ||
-                     i->asm_info->ops[k].is_inout) && first_def[at] < 0)
-                    first_def[at] = pos;
-                if (last_use[at] < pos)
-                    last_use[at] = pos;
+        if (i->dst >= 0 && i->dst < ntemps && ir_op_is_float_def(i->op))
+            is_float[i->dst] = 1;
+
+        /* Record the coalescing hint: a copy or two-address op can reuse its
+           first source operand's register for the destination (the emitter
+           computes the result in place, starting with a move from a). */
+        if (i->dst >= 0 && i->dst < ntemps && i->a >= 0 && i->a < ntemps) {
+            switch (i->op) {
+            case IR_MOV:
+            case IR_ADD: case IR_SUB: case IR_MUL:
+            case IR_AND: case IR_OR: case IR_XOR:
+            case IR_ADD64: case IR_SUB64: case IR_MUL64:
+            case IR_AND64: case IR_OR64: case IR_XOR64:
+                hint[i->dst] = i->a;
+                break;
+            default:
+                break;
             }
         }
 
@@ -356,9 +379,11 @@ regalloc(struct ir_func *fn)
     }
 
     fn->nspills = linscan(fn, first_def, last_use,
-                  is_int, INT_NUM_REGS, INT_FIRST_REG, INT_SPILL, NULL, reserved);
+                  is_int, INT_NUM_REGS, INT_FIRST_REG, INT_SPILL, NULL,
+                  reserved, hint);
     fn->nfspills = linscan(fn, first_def, last_use,
-                   is_float, FP_NUM_REGS, FP_FIRST_REG, 8, float_cross, NULL);
+                   is_float, FP_NUM_REGS, FP_FIRST_REG, 8, float_cross, NULL,
+                   hint);
 
     arena_release(fn->arena, m);
 }

@@ -34,6 +34,7 @@
  */
 
 #include "ir.h"
+#include "liveness.h"
 
 #include <stdlib.h>  /* qsort */
 
@@ -234,10 +235,11 @@ regalloc(struct ir_func *fn)
     is_float = arena_zalloc(fn->arena, ntemps * sizeof(int));
     is_i64 = arena_zalloc(fn->arena, ntemps * sizeof(int));
     is_int = arena_alloc(fn->arena, ntemps * sizeof(int));
-    for (t = 0; t < ntemps; t++) {
-        first_def[t] = -1;
-        last_use[t] = -1;
-    }
+
+    /* control-flow-aware live intervals, shared across backends.  Fills
+       first_def/last_use; the per-backend int/float/i64 classification and the
+       IR_ARG to call extension below layer on top of it. */
+    ir_live_intervals(fn, first_def, last_use);
 
     /* An IR_ARG operand is consumed at the following call, not at the ARG itself
      * (emit_call_flush moves the pending args into the argument registers only
@@ -250,33 +252,10 @@ regalloc(struct ir_func *fn)
     pos = 0;
     for (i = fn->head; i; i = i->next, pos++) {
         if (i->dst >= 0 && i->dst < ntemps) {
-            if (first_def[i->dst] < 0)
-                first_def[i->dst] = pos;
-            if (last_use[i->dst] < pos)
-                last_use[i->dst] = pos;
             if (ir_op_is_float_def(i->op))
                 is_float[i->dst] = 1;
             else if (ir_op_is_i64_def(i->op))
                 is_i64[i->dst] = 1;
-        }
-        if (i->a >= 0 && i->a < ntemps && last_use[i->a] < pos)
-            last_use[i->a] = pos;
-        if (i->b >= 0 && i->b < ntemps && last_use[i->b] < pos)
-            last_use[i->b] = pos;
-        /* Extended inline asm operands live in asm_info, not i->a/i->b: an
-           output is a def, an input a use, an in-out operand both. */
-        if (i->op == IR_ASM && i->asm_info) {
-            int k, nops = i->asm_info->noutputs + i->asm_info->ninputs;
-            for (k = 0; k < nops; k++) {
-                int at = i->asm_info->ops[k].temp;
-                if (at < 0 || at >= ntemps)
-                    continue;
-                if ((i->asm_info->ops[k].is_output ||
-                     i->asm_info->ops[k].is_inout) && first_def[at] < 0)
-                    first_def[at] = pos;
-                if (last_use[at] < pos)
-                    last_use[at] = pos;
-            }
         }
 
         if (i->op == IR_ARG || i->op == IR_ARG64 || i->op == IR_FARG) {

@@ -2526,7 +2526,7 @@ static int
 lower_short_circuit(struct node *n, int is_and)
 {
     struct ir_insn *ins;
-    int result_slot, lshort, lend, res, l, r, cshort;
+    int result_slot, lshort, lend, res, l, r, cshort, rmark;
 
     result_slot = alloc_slot(4);
     l = lower_expr(n->a);
@@ -2536,10 +2536,16 @@ lower_short_circuit(struct node *n, int is_and)
         emit_bz(l, lshort);     /* left false: result is false */
     else
         emit_bnz(l, lshort);    /* left true: result is true */
+    /* The right operand is only evaluated on this path, so any string
+       temporaries it allocates must be released here, not by the enclosing
+       context after the merge.  Releasing them there would also run on the
+       short-circuit path, where they were never created, double-freeing. */
+    rmark = str_temp_mark();
     r = lower_expr(n->b);
     ins = emit(IR_STL);
     ins->a = r;
     ins->slot = result_slot;
+    release_str_temps_to(rmark);
     emit_jmp(lend);
     emit_label(lshort);
     cshort = lower_const(is_and ? 0 : 1);
@@ -2743,16 +2749,20 @@ lower_expr(struct node *n)
 
     case N_BINOP:
         if (n->op == T_AND_THEN) {
-            int result_slot, lfalse, lend, res, c0;
+            int result_slot, lfalse, lend, res, c0, rmark;
             result_slot = alloc_slot(4);
             l = lower_expr(n->a);
             lfalse = new_label();
             lend = new_label();
             emit_bz(l, lfalse);
+            /* right operand's string temporaries are released on this path
+               only (see lower_short_circuit) */
+            rmark = str_temp_mark();
             r = lower_expr(n->b);
             ins = emit(IR_STL);
             ins->a = r;
             ins->slot = result_slot;
+            release_str_temps_to(rmark);
             emit_jmp(lend);
             emit_label(lfalse);
             c0 = lower_const(0);
@@ -2767,16 +2777,20 @@ lower_expr(struct node *n)
             return res;
         }
         if (n->op == T_OR_ELSE) {
-            int result_slot, ltrue, lend, res, c1;
+            int result_slot, ltrue, lend, res, c1, rmark;
             result_slot = alloc_slot(4);
             l = lower_expr(n->a);
             ltrue = new_label();
             lend = new_label();
             emit_bnz(l, ltrue);
+            /* right operand's string temporaries are released on this path
+               only (see lower_short_circuit) */
+            rmark = str_temp_mark();
             r = lower_expr(n->b);
             ins = emit(IR_STL);
             ins->a = r;
             ins->slot = result_slot;
+            release_str_temps_to(rmark);
             emit_jmp(lend);
             emit_label(ltrue);
             c1 = lower_const(1);
