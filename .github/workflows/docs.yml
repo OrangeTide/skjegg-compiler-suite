@@ -25,8 +25,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Pandoc and fonts
-        run: sudo apt-get update && sudo apt-get install -y pandoc fonts-texgyre
+      - name: Install fonts
+        run: sudo apt-get update && sudo apt-get install -y fonts-texgyre
+
+      - name: Install Pandoc
+        # Pinned to match the version used in local development. The distro apt
+        # pandoc is older and line-wraps a long Markdown table cell so a "/ ..."
+        # token can land at the start of a generated typst line, which typst then
+        # reads as a description-list term and rejects ("expected colon"). A
+        # pinned release keeps CI in step with a local build, so running
+        # "make -C doc all" locally is a faithful preflight for this job.
+        run: |
+          curl -fsSL https://github.com/jgm/pandoc/releases/download/3.9.0.2/pandoc-3.9.0.2-linux-amd64.tar.gz \
+            | tar -xz --strip-components=2 -C /usr/local/bin pandoc-3.9.0.2/bin/pandoc
 
       - name: Install Typst
         run: |
