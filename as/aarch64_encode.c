@@ -220,6 +220,20 @@ a_sxtw(struct section *s, int Rd, int Rn)
          ((uint32_t)(Rn & 31) << 5) | (uint32_t)(Rd & 31));
 }
 
+/* 32-bit sub-word extensions: SBFM/UBFM Wd, Wn, #0, #imms (sf=0, N=0). */
+static void
+a_sxtb(struct section *s, int Rd, int Rn)
+{ w(s, (0x26u << 23) | (7u << 10) | ((uint32_t)(Rn & 31) << 5) | (uint32_t)(Rd & 31)); }
+static void
+a_sxth(struct section *s, int Rd, int Rn)
+{ w(s, (0x26u << 23) | (15u << 10) | ((uint32_t)(Rn & 31) << 5) | (uint32_t)(Rd & 31)); }
+static void
+a_uxtb(struct section *s, int Rd, int Rn)
+{ w(s, (1u << 30) | (0x26u << 23) | (7u << 10) | ((uint32_t)(Rn & 31) << 5) | (uint32_t)(Rd & 31)); }
+static void
+a_uxth(struct section *s, int Rd, int Rn)
+{ w(s, (1u << 30) | (0x26u << 23) | (15u << 10) | ((uint32_t)(Rn & 31) << 5) | (uint32_t)(Rd & 31)); }
+
 static void
 a_cset(struct section *s, int sf, int Rd, int cc)
 {
@@ -564,6 +578,10 @@ a64_encode(struct a64_asm *a, const char *mnem,
     if (!strcmp(mnem, "lsr"))  { dp2(s, gsf(&ops[0]), 0x09, ops[0].reg, ops[1].reg, ops[2].reg); return; }
     if (!strcmp(mnem, "asr"))  { dp2(s, gsf(&ops[0]), 0x0A, ops[0].reg, ops[1].reg, ops[2].reg); return; }
     if (!strcmp(mnem, "sxtw")) { a_sxtw(s, ops[0].reg, ops[1].reg); return; }
+    if (!strcmp(mnem, "sxtb")) { a_sxtb(s, ops[0].reg, ops[1].reg); return; }
+    if (!strcmp(mnem, "sxth")) { a_sxth(s, ops[0].reg, ops[1].reg); return; }
+    if (!strcmp(mnem, "uxtb")) { a_uxtb(s, ops[0].reg, ops[1].reg); return; }
+    if (!strcmp(mnem, "uxth")) { a_uxth(s, ops[0].reg, ops[1].reg); return; }
     if (!strcmp(mnem, "cset")) { a_cset(s, gsf(&ops[0]), ops[0].reg, ops[1].cond); return; }
 
     /* Loads and stores */

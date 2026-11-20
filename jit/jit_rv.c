@@ -230,6 +230,8 @@ void rv_mc_addi(struct rv_mc *m, int rd, int rs, int imm) { rv_addi(m->c, rd, rs
 void rv_mc_andi(struct rv_mc *m, int rd, int rs, int imm) { rv_andi(m->c, rd, rs, imm); }
 void rv_mc_xori(struct rv_mc *m, int rd, int rs, int imm) { rv_xori(m->c, rd, rs, imm); }
 void rv_mc_srai(struct rv_mc *m, int rd, int rs, int shamt) { rv_srai(m->c, rd, rs, shamt); }
+void rv_mc_slli(struct rv_mc *m, int rd, int rs, int shamt) { rv_slli(m->c, rd, rs, shamt); }
+void rv_mc_srli(struct rv_mc *m, int rd, int rs, int shamt) { rv_srli(m->c, rd, rs, shamt); }
 
 /****************************************************************
  * Integer arithmetic and logic

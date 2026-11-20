@@ -35,6 +35,7 @@
 
 #include "ir.h"
 #include "liveness.h"
+#include "promote.h"
 
 #include <stdlib.h>  /* qsort */
 
@@ -230,6 +231,8 @@ regalloc(struct ir_func *fn)
     int ntemps;
     int pos;
     int t;
+
+    ir_promote_slots(fn, 1);                      /* may add temps: before ntemps read */
 
     ntemps = fn->ntemps;
     fn->temp_reg = arena_alloc(fn->arena,

@@ -989,6 +989,32 @@ x86_select_func(struct mc *m, struct ir_func *fn, int tp,
                 wd(m, fn, &fr, in->dst, sd);
             }
             break;
+
+        case IR_MOV64: {
+            /* 64-bit reg move; mc_mov_rr is already a full-width mov on x86-64,
+               so this differs from the int IR_MOV only in the i64 class the
+               allocator gives the destination (8-byte spill). */
+            int sa = rs(m, fn, &fr, in->a, SC0);
+            int sd = rd(fn, in->dst, SC0);
+            if (sa != sd)
+                mc_mov_rr(m, sd, sa);
+            wd(m, fn, &fr, in->dst, sd);
+            break;
+        }
+
+        case IR_SEXTB: case IR_ZEXTB:
+        case IR_SEXTH: case IR_ZEXTH: {
+            int sa = rs(m, fn, &fr, in->a, SC0);
+            int sd = rd(fn, in->dst, SC0);
+            switch (in->op) {
+            case IR_SEXTB: mc_movsx_rb(m, sd, sa); break;
+            case IR_ZEXTB: mc_movzx_rb(m, sd, sa); break;
+            case IR_SEXTH: mc_movsx_rw(m, sd, sa); break;
+            case IR_ZEXTH: mc_movzx_rw(m, sd, sa); break;
+            }
+            wd(m, fn, &fr, in->dst, sd);
+            break;
+        }
         /* Address-capable arithmetic runs 64-bit so pointer math (a LEA
            result plus an offset, as in record-field and array addressing)
            is not truncated. For a plain i32 value the low 32 bits are still

@@ -6,6 +6,30 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.58.0
+
+#### Added
+- An internals note in the manual, "An Optimization Adventure", recording the
+  post-0.57.0 optimization exploration: the register-promotion pass, the dead
+  ends that did not pay off, the measured results across the backends, and the
+  debug-info analysis that cleared the way to enable the pass.
+
+#### Changed
+- Scalar register promotion is now on by default. A local variable whose address
+  is never taken, and which is reached only through its own load and store, is
+  kept in a register across its whole live range instead of round-tripping
+  through a frame slot at every basic-block boundary. The pass covers word
+  scalars, `char` and `short`, and pointers and longs. On the 64-bit targets a
+  `long long` is promoted in a single register; on the 32-bit targets a 64-bit
+  value is promoted as a register pair, except on MIPS, where the register
+  pressure of the pair costs more than it saves and the value is left in memory.
+  On the two-address targets, x86-64 and ColdFire, the promoted moves coalesce
+  into the surrounding instructions, so instruction counts fall along with memory
+  traffic, by up to about 3.6 percent on the ColdFire benchmarks. The
+  three-address targets see the reduction in memory traffic alone. The pass is
+  safe under `-g`, since the debug information is a line table that does not
+  record where a variable lives. Set `SKJ_NO_PROMOTE` to disable it.
+
 ### 0.57.0
 
 #### Added

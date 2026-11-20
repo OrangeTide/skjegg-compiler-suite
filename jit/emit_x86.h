@@ -97,6 +97,9 @@ void x_cmp_rr(struct code *c, int a, int b);
 void x_test_rr(struct code *c, int a, int b);
 void x_setcc_r(struct code *c, int cc, int reg);
 void x_movzx_rb(struct code *c, int dst, int src);
+void x_movsx_rb(struct code *c, int dst, int src);
+void x_movsx_rw(struct code *c, int dst, int src);
+void x_movzx_rw(struct code *c, int dst, int src);
 void x_movsxd_rr(struct code *c, int dst, int src);
 
 /* Load one byte, zero-extended into a 32-bit result (a string character read). */

@@ -221,6 +221,21 @@ enum ir_op {
        plain LABADDR / IJMP. */
     IR_LABADDR, IR_IJMP,
     IR_LABADDR64, IR_IJMP64,
+
+    /* Register-to-register sub-word sign/zero extension of the low byte or half
+       of operand a into dst (a normal i32 def).  The IR had none, since the
+       front ends sign/zero-extend sub-word values through a memory load; these
+       let scalar register promotion keep a char or short local in a register and
+       extend it in place.  Appended last so opcode numbers stay put. */
+    IR_SEXTB, IR_ZEXTB, IR_SEXTH, IR_ZEXTH,
+
+    /* 64-bit register-to-register move: dst <- a, full pointer width.  The i64
+       twin of IR_MOV, emitted by scalar register promotion on the LP64 targets
+       when it promotes an 8-byte slot (a pointer or long) that was round-tripped
+       through IR_LDL64 / IR_STL64.  Classified as an i64 def so the allocator
+       spills it at 8 bytes.  Appended last so existing opcode numbers are
+       undisturbed. */
+    IR_MOV64,
 };
 
 /****************************************************************

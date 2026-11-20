@@ -160,6 +160,16 @@ a_sxtw(struct code *c, int Rd, int Rn)
          ((uint32_t)(Rn & 31) << 5) | (uint32_t)(Rd & 31));
 }
 
+/* 32-bit sub-word extensions: SBFM/UBFM Wd, Wn, #0, #imms (sf=0, N=0). */
+void a_sxtb(struct code *c, int Rd, int Rn)
+{ w(c, (0x26u << 23) | (7u << 10) | ((uint32_t)(Rn & 31) << 5) | (uint32_t)(Rd & 31)); }
+void a_sxth(struct code *c, int Rd, int Rn)
+{ w(c, (0x26u << 23) | (15u << 10) | ((uint32_t)(Rn & 31) << 5) | (uint32_t)(Rd & 31)); }
+void a_uxtb(struct code *c, int Rd, int Rn)
+{ w(c, (1u << 30) | (0x26u << 23) | (7u << 10) | ((uint32_t)(Rn & 31) << 5) | (uint32_t)(Rd & 31)); }
+void a_uxth(struct code *c, int Rd, int Rn)
+{ w(c, (1u << 30) | (0x26u << 23) | (15u << 10) | ((uint32_t)(Rn & 31) << 5) | (uint32_t)(Rd & 31)); }
+
 /* CSINC Rd, Rn, Rm, cond; cset Rd, cc = csinc Rd, zr, zr, invert(cc). */
 void
 a_cset(struct code *c, int sf, int Rd, int cc)

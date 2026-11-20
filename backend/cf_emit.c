@@ -1101,6 +1101,24 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
     }
 
+    case IR_SEXTB: case IR_ZEXTB:
+    case IR_SEXTH: case IR_ZEXTH: {
+        /* Sign-extend with ext.w/ext.l (byte -> word -> long), zero-extend with
+           an and.l mask; m68k immediate shifts cap at 8, so no shift pair. */
+        const char *sa = rs(out, fn, i->a, 0);
+        const char *sd = rd(fn, i->dst, 0);
+        if (strcmp(sa, sd) != 0)
+            fprintf(out, "\tmove.l %s, %s\n", sa, sd);
+        switch (i->op) {
+        case IR_SEXTB: fprintf(out, "\text.w %s\n\text.l %s\n", sd, sd); break;
+        case IR_SEXTH: fprintf(out, "\text.l %s\n", sd); break;
+        case IR_ZEXTB: fprintf(out, "\tand.l #255, %s\n", sd); break;
+        case IR_ZEXTH: fprintf(out, "\tand.l #65535, %s\n", sd); break;
+        }
+        wd(out, fn, i->dst, sd);
+        break;
+    }
+
     case IR_MOV: {
         const char *sa = rs(out, fn, i->a, 0);
         const char *sd = rd(fn, i->dst, 0);
@@ -1669,6 +1687,20 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
             fprintf(out, "\tmove.l %s, %s\n", dregs[ahi], dregs[dhi]);
         fprintf(out, "\tand.l %s, %s\n", dregs[blo], dregs[dlo]);
         fprintf(out, "\tand.l %s, %s\n", dregs[bhi], dregs[dhi]);
+        i64_wd(out, fn, i->dst, dhi, dlo);
+        break;
+    }
+
+    case IR_MOV64: {
+        /* Register-pair copy (a promoted i64 local on ILP32). */
+        int ahi, alo, dhi, dlo;
+
+        i64_rs(out, fn, i->a, &ahi, &alo);
+        i64_rd(fn, i->dst, &dhi, &dlo);
+        if (dlo != alo)
+            fprintf(out, "\tmove.l %s, %s\n", dregs[alo], dregs[dlo]);
+        if (dhi != ahi)
+            fprintf(out, "\tmove.l %s, %s\n", dregs[ahi], dregs[dhi]);
         i64_wd(out, fn, i->dst, dhi, dlo);
         break;
     }

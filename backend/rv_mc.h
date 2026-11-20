@@ -55,6 +55,8 @@ void rv_mc_addi(struct rv_mc *m, int rd, int rs, int imm);     /* plain addi (in
 void rv_mc_andi(struct rv_mc *m, int rd, int rs, int imm);
 void rv_mc_xori(struct rv_mc *m, int rd, int rs, int imm);
 void rv_mc_srai(struct rv_mc *m, int rd, int rs, int shamt);
+void rv_mc_slli(struct rv_mc *m, int rd, int rs, int shamt);
+void rv_mc_srli(struct rv_mc *m, int rd, int rs, int shamt);
 
 /* ---- Integer three-register ops, rd = rs1 OP rs2. */
 void rv_mc_add(struct rv_mc *m, int rd, int rs1, int rs2);

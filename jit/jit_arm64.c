@@ -194,6 +194,10 @@ void mc64_msub(struct mc64 *m, int sf, int Rd, int Rn, int Rm, int Ra) { a_msub(
 void mc64_neg(struct mc64 *m, int sf, int Rd, int Rm) { a_neg(m->c, sf, Rd, Rm); }
 void mc64_mvn(struct mc64 *m, int sf, int Rd, int Rm) { a_mvn(m->c, sf, Rd, Rm); }
 void mc64_sxtw(struct mc64 *m, int Rd, int Rn) { a_sxtw(m->c, Rd, Rn); }
+void mc64_sxtb(struct mc64 *m, int Rd, int Rn) { a_sxtb(m->c, Rd, Rn); }
+void mc64_sxth(struct mc64 *m, int Rd, int Rn) { a_sxth(m->c, Rd, Rn); }
+void mc64_uxtb(struct mc64 *m, int Rd, int Rn) { a_uxtb(m->c, Rd, Rn); }
+void mc64_uxth(struct mc64 *m, int Rd, int Rn) { a_uxth(m->c, Rd, Rn); }
 void mc64_cmp(struct mc64 *m, int sf, int Rn, int Rm) { a_cmp_reg(m->c, sf, Rn, Rm); }
 void mc64_cset(struct mc64 *m, int sf, int Rd, int cc) { a_cset(m->c, sf, Rd, cc); }
 

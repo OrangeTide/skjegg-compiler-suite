@@ -154,7 +154,7 @@ endif
 # QEMU_X64=qemu-x86_64) to force the emulator on an x86-64 host.
 QEMU_X64 ?= $(if $(filter Linux-x86_64,$(shell uname -s)-$(shell uname -m)),,qemu-x86_64)
 
-IR_SRC  := ir/ir.c ir/util.c ir/arena.c ir/liveness.c
+IR_SRC  := ir/ir.c ir/util.c ir/arena.c ir/liveness.c ir/promote.c
 BE_CF   := backend/regalloc_cf.c backend/cf_emit.c
 # RISC-V has one convention (the ILP32 psABI; the stack convention was retired),
 # so the shared selector + GAS text sink replace rv_emit.c for every RV tool and

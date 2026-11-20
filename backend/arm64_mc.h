@@ -95,7 +95,11 @@ void mc64_asr(struct mc64 *m, int sf, int Rd, int Rn, int Rm);
 void mc64_lsr(struct mc64 *m, int sf, int Rd, int Rn, int Rm);
 void mc64_neg(struct mc64 *m, int sf, int Rd, int Rm);
 void mc64_mvn(struct mc64 *m, int sf, int Rd, int Rm);
-void mc64_sxtw(struct mc64 *m, int Rd, int Rn);      /* sign-extend Wn -> Xd */
+void mc64_sxtw(struct mc64 *m, int Rd, int Rn);
+void mc64_sxtb(struct mc64 *m, int Rd, int Rn);      /* sign-extend low byte -> Wd */
+void mc64_sxth(struct mc64 *m, int Rd, int Rn);      /* sign-extend low half -> Wd */
+void mc64_uxtb(struct mc64 *m, int Rd, int Rn);      /* zero-extend low byte -> Wd */
+void mc64_uxth(struct mc64 *m, int Rd, int Rn);      /* zero-extend low half -> Wd */      /* sign-extend Wn -> Xd */
 
 /* ---- Compare and condition materialization. */
 void mc64_cmp(struct mc64 *m, int sf, int Rn, int Rm);

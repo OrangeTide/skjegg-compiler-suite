@@ -108,6 +108,9 @@ void mc_cmp32_rr(struct mc *m, int a, int b);
 void mc_test32_rr(struct mc *m, int a, int b);
 void mc_setcc_r(struct mc *m, int cc, int reg);       /* 0/1 byte into reg's low byte */
 void mc_movzx_rb(struct mc *m, int dst, int src);     /* zero-extend low byte to 32 */
+void mc_movsx_rb(struct mc *m, int dst, int src);     /* sign-extend low byte to 32 */
+void mc_movsx_rw(struct mc *m, int dst, int src);     /* sign-extend low half to 32 */
+void mc_movzx_rw(struct mc *m, int dst, int src);     /* zero-extend low half to 32 */
 void mc_movsxd_rr(struct mc *m, int dst, int src);    /* sign-extend 32 to 64 */
 
 /* ---- Memory.  Sub-word loads extend into a 32-bit result; sub-word stores

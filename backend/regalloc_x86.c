@@ -38,6 +38,7 @@
 
 #include "ir.h"
 #include "liveness.h"
+#include "promote.h"
 
 #include <stdlib.h>  /* qsort */
 
@@ -263,6 +264,8 @@ regalloc(struct ir_func *fn)
     int max_pair;
     int int_num_regs;
 
+    ir_promote_slots(fn, 1);                      /* may add temps: before ntemps read */
+
     ntemps = fn->ntemps;
     fn->temp_reg = arena_alloc(fn->arena,
                                ntemps > 0 ? ntemps * sizeof(int) : 1);
@@ -324,6 +327,7 @@ regalloc(struct ir_func *fn)
         if (i->dst >= 0 && i->dst < ntemps && i->a >= 0 && i->a < ntemps) {
             switch (i->op) {
             case IR_MOV:
+            case IR_MOV64:
             case IR_ADD: case IR_SUB: case IR_MUL:
             case IR_AND: case IR_OR: case IR_XOR:
             case IR_ADD64: case IR_SUB64: case IR_MUL64:

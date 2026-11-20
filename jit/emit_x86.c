@@ -236,6 +236,36 @@ x_movsxd_rr(struct code *c, int dst, int src)
     modrm_rr(c, dst, src);
 }
 
+void
+x_movsx_rb(struct code *c, int dst, int src)
+{
+    /* movsx r32, r/m8 (0F BE /r): sign-extend the low byte into the 32-bit dst */
+    rex(c, 0, dst, 0, src, byte_needs_rex(src));
+    emit8(c, 0x0F);
+    emit8(c, 0xBE);
+    modrm_rr(c, dst, src);
+}
+
+void
+x_movsx_rw(struct code *c, int dst, int src)
+{
+    /* movsx r32, r/m16 (0F BF /r): sign-extend the low half into the 32-bit dst */
+    rex(c, 0, dst, 0, src, 0);
+    emit8(c, 0x0F);
+    emit8(c, 0xBF);
+    modrm_rr(c, dst, src);
+}
+
+void
+x_movzx_rw(struct code *c, int dst, int src)
+{
+    /* movzx r32, r/m16 (0F B7 /r): zero-extend the low half into the 32-bit dst */
+    rex(c, 0, dst, 0, src, 0);
+    emit8(c, 0x0F);
+    emit8(c, 0xB7);
+    modrm_rr(c, dst, src);
+}
+
 /****************************************************************
  * Memory access
  ****************************************************************/

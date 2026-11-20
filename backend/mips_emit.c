@@ -1252,6 +1252,22 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
     }
 
+    case IR_SEXTB: case IR_ZEXTB:
+    case IR_SEXTH: case IR_ZEXTH: {
+        /* MIPS I has no seb/seh: sign-extend with a shift pair, zero-extend with
+           andi (its immediate is 16-bit zero-extended, so 0xffff fits). */
+        const char *sa = rs(out, fn, i->a, 0);
+        const char *sd = rd(fn, i->dst, 0);
+        switch (i->op) {
+        case IR_SEXTB: fprintf(out, "\tsll %s, %s, 24\n\tsra %s, %s, 24\n", sd, sa, sd, sd); break;
+        case IR_SEXTH: fprintf(out, "\tsll %s, %s, 16\n\tsra %s, %s, 16\n", sd, sa, sd, sd); break;
+        case IR_ZEXTB: fprintf(out, "\tandi %s, %s, 0xff\n", sd, sa); break;
+        case IR_ZEXTH: fprintf(out, "\tandi %s, %s, 0xffff\n", sd, sa); break;
+        }
+        wd(out, fn, i->dst, sd);
+        break;
+    }
+
     case IR_MOV: {
         const char *sa = rs(out, fn, i->a, 0);
         const char *sd = rd(fn, i->dst, 0);
@@ -1998,6 +2014,23 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         const char *dhi = i64_rd_hi(fn, i->dst, 0);
         fprintf(out, "\tor %s, %s, %s\n", dhi, ahi, bhi);
         i64_wd_hi(out, fn, i->dst, dhi);
+        break;
+    }
+
+    case IR_MOV64: {
+        /* Register-pair copy (a promoted i64 local on ILP32). */
+        const char *alo = i64_rs_lo(out, fn, i->a, 0);
+        const char *dlo = i64_rd_lo(fn, i->dst, 0);
+        if (strcmp(alo, dlo) != 0)
+            fprintf(out, "\tmove %s, %s\n", dlo, alo);
+        i64_wd_lo(out, fn, i->dst, dlo);
+        {
+            const char *ahi = i64_rs_hi(out, fn, i->a, 0);
+            const char *dhi = i64_rd_hi(fn, i->dst, 0);
+            if (strcmp(ahi, dhi) != 0)
+                fprintf(out, "\tmove %s, %s\n", dhi, ahi);
+            i64_wd_hi(out, fn, i->dst, dhi);
+        }
         break;
     }
 

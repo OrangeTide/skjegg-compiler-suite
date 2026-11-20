@@ -69,6 +69,10 @@ void a_neg(struct code *c, int sf, int Rd, int Rm);   /* sub Rd, zr, Rm */
 void a_mvn(struct code *c, int sf, int Rd, int Rm);   /* orn Rd, zr, Rm */
 void a_mov_reg(struct code *c, int sf, int Rd, int Rn); /* orr Rd, zr, Rn */
 void a_sxtw(struct code *c, int Rd, int Rn);          /* sign-extend Wn -> Xd */
+void a_sxtb(struct code *c, int Rd, int Rn);          /* sign-extend low byte -> Wd */
+void a_sxth(struct code *c, int Rd, int Rn);          /* sign-extend low half -> Wd */
+void a_uxtb(struct code *c, int Rd, int Rn);          /* zero-extend low byte -> Wd */
+void a_uxth(struct code *c, int Rd, int Rn);          /* zero-extend low half -> Wd */
 
 /* ---- Compare and condition materialization. */
 void a_cmp_reg(struct code *c, int sf, int Rn, int Rm); /* subs zr, Rn, Rm */

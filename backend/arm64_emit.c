@@ -943,6 +943,15 @@ emit_insn(FILE *out, struct ir_func *fn, struct ir_insn *i)
         break;
     }
 
+    case IR_MOV64: {                            /* 64-bit reg move (promoted pointer/long) */
+        const char *sa = rsx(out, fn, i->a, 0);
+        const char *sd = rdx(fn, i->dst, 0);
+        if (strcmp(sa, sd) != 0)
+            fprintf(out, "\tmov %s, %s\n", sd, sa);
+        wd64(out, fn, i->dst, sd);
+        break;
+    }
+
     case IR_ADD:  emit_binop(out, fn, i, "add");  break;
     case IR_SUB:  emit_binop(out, fn, i, "sub");  break;
     case IR_MUL:  emit_binop(out, fn, i, "mul");  break;

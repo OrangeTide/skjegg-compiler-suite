@@ -171,6 +171,12 @@ void mc_setcc_r(struct mc *m, int cc, int r)
 { fprintf(m->out, "\tset%s %s\n", ccname[cc], reg8[r]); }
 void mc_movzx_rb(struct mc *m, int d, int s)
 { fprintf(m->out, "\tmovzx %s, %s\n", reg32[d], reg8[s]); }
+void mc_movsx_rb(struct mc *m, int d, int s)
+{ fprintf(m->out, "\tmovsx %s, %s\n", reg32[d], reg8[s]); }
+void mc_movsx_rw(struct mc *m, int d, int s)
+{ fprintf(m->out, "\tmovsx %s, %s\n", reg32[d], reg16[s]); }
+void mc_movzx_rw(struct mc *m, int d, int s)
+{ fprintf(m->out, "\tmovzx %s, %s\n", reg32[d], reg16[s]); }
 void mc_movsxd_rr(struct mc *m, int d, int s)
 { fprintf(m->out, "\tmovsxd %s, %s\n", reg64[d], reg32[s]); }
 

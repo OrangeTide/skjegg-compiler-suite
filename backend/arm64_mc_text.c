@@ -223,6 +223,14 @@ void mc64_mvn(struct mc64 *m, int sf, int Rd, int Rm)
 { fprintf(m->out, "\tmvn %s, %s\n", gn(sf, Rd), gn(sf, Rm)); }
 void mc64_sxtw(struct mc64 *m, int Rd, int Rn)
 { fprintf(m->out, "\tsxtw %s, %s\n", xn(Rd), wn(Rn)); }
+void mc64_sxtb(struct mc64 *m, int Rd, int Rn)
+{ fprintf(m->out, "\tsxtb %s, %s\n", wn(Rd), wn(Rn)); }
+void mc64_sxth(struct mc64 *m, int Rd, int Rn)
+{ fprintf(m->out, "\tsxth %s, %s\n", wn(Rd), wn(Rn)); }
+void mc64_uxtb(struct mc64 *m, int Rd, int Rn)
+{ fprintf(m->out, "\tuxtb %s, %s\n", wn(Rd), wn(Rn)); }
+void mc64_uxth(struct mc64 *m, int Rd, int Rn)
+{ fprintf(m->out, "\tuxth %s, %s\n", wn(Rd), wn(Rn)); }
 
 void mc64_cmp(struct mc64 *m, int sf, int Rn, int Rm)
 { fprintf(m->out, "\tcmp %s, %s\n", gn(sf, Rn), gn(sf, Rm)); }

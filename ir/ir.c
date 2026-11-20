@@ -157,6 +157,7 @@ ir_op_is_i64_def(int op)
     case IR_LEA64: case IR_ADL64:
     case IR_SEXT64: case IR_ZEXT64:
     case IR_CALL64: case IR_CALLI64:
+    case IR_MOV64:
         return 1;
     default:
         return 0;

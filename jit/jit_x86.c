@@ -171,6 +171,9 @@ void mc_cmp32_rr(struct mc *m, int a, int b) { x_cmp32_rr(m->c, a, b); }
 void mc_test32_rr(struct mc *m, int a, int b) { x_test32_rr(m->c, a, b); }
 void mc_setcc_r(struct mc *m, int cc, int r) { x_setcc_r(m->c, cc, r); }
 void mc_movzx_rb(struct mc *m, int d, int s) { x_movzx_rb(m->c, d, s); }
+void mc_movsx_rb(struct mc *m, int d, int s) { x_movsx_rb(m->c, d, s); }
+void mc_movsx_rw(struct mc *m, int d, int s) { x_movsx_rw(m->c, d, s); }
+void mc_movzx_rw(struct mc *m, int d, int s) { x_movzx_rw(m->c, d, s); }
 void mc_movsxd_rr(struct mc *m, int d, int s) { x_movsxd_rr(m->c, d, s); }
 
 /* Memory. */

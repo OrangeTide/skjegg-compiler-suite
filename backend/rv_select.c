@@ -1301,6 +1301,24 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
     case IR_NEG: emit_unop(m, fn, i, rv_mc_neg); break;
     case IR_NOT: emit_unop(m, fn, i, rv_mc_not); break;
 
+    case IR_SEXTB: case IR_ZEXTB:
+    case IR_SEXTH: case IR_ZEXTH: {
+        /* RV32 has no sub-word register extend, so synthesize it: a signed
+           extension is a left shift that drops the high bits then an arithmetic
+           right shift that fills them, and a zero extension masks or shifts in
+           zeros (0xFFFF exceeds a 12-bit andi, so a logical shift pair). */
+        int sa = rs(m, fn, i->a, 0);
+        int sd = rd(fn, i->dst, 0);
+        switch (i->op) {
+        case IR_SEXTB: rv_mc_slli(m, sd, sa, 24); rv_mc_srai(m, sd, sd, 24); break;
+        case IR_ZEXTB: rv_mc_andi(m, sd, sa, 0xFF); break;
+        case IR_SEXTH: rv_mc_slli(m, sd, sa, 16); rv_mc_srai(m, sd, sd, 16); break;
+        case IR_ZEXTH: rv_mc_slli(m, sd, sa, 16); rv_mc_srli(m, sd, sd, 16); break;
+        }
+        wd(m, fn, i->dst, sd);
+        break;
+    }
+
     case IR_LB:  emit_load(m, fn, i, rv_mc_lbu); break;
     case IR_LBS: emit_load(m, fn, i, rv_mc_lb);  break;
     case IR_LH:  emit_load(m, fn, i, rv_mc_lhu); break;
@@ -1852,6 +1870,25 @@ emit_insn(struct rv_mc *m, struct ir_func *fn, struct ir_insn *i, int *lbl,
         dhi = i64_rd_hi(fn, i->dst, 0);
         rv_mc_xor(m, dhi, ahi, bhi);
         i64_wd_hi(m, fn, i->dst, dhi);
+        break;
+    }
+
+    case IR_MOV64: {
+        /* Register-pair copy (a promoted i64 local on ILP32).  The pair model
+           gives a source and destination either the same pair or fully disjoint
+           registers, so lo-then-hi with a self-move guard is safe. */
+        int alo = i64_rs_lo(m, fn, i->a, 0);
+        int dlo = i64_rd_lo(fn, i->dst, 0);
+        if (alo != dlo)
+            rv_mc_mv(m, dlo, alo);
+        i64_wd_lo(m, fn, i->dst, dlo);
+        {
+            int ahi = i64_rs_hi(m, fn, i->a, 0);
+            int dhi = i64_rd_hi(fn, i->dst, 0);
+            if (ahi != dhi)
+                rv_mc_mv(m, dhi, ahi);
+            i64_wd_hi(m, fn, i->dst, dhi);
+        }
         break;
     }
 

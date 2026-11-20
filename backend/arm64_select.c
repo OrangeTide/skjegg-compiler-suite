@@ -962,6 +962,31 @@ arm64_select_func(struct mc64 *m, struct ir_func *fn, int tp,
                 wd32(m, fn, in->dst, sd);
             }
             break;
+
+        case IR_MOV64: {
+            /* 64-bit reg move (sf=1), 64-bit source read and dest write: the i64
+               twin of IR_MOV for a promoted pointer or long. */
+            int sa = rsx(m, fn, in->a, SC0);
+            int sd = rd(fn, in->dst, SC0);
+            if (sa != sd)
+                mc64_mov(m, 1, sd, sa);
+            wd64(m, fn, in->dst, sd);
+            break;
+        }
+
+        case IR_SEXTB: case IR_ZEXTB:
+        case IR_SEXTH: case IR_ZEXTH: {
+            int sa = rs(m, fn, in->a, SC0);
+            int sd = rd(fn, in->dst, SC0);
+            switch (in->op) {
+            case IR_SEXTB: mc64_sxtb(m, sd, sa); break;
+            case IR_ZEXTB: mc64_uxtb(m, sd, sa); break;
+            case IR_SEXTH: mc64_sxth(m, sd, sa); break;
+            case IR_ZEXTH: mc64_uxth(m, sd, sa); break;
+            }
+            wd32(m, fn, in->dst, sd);
+            break;
+        }
         case IR_LB:  { int b = ra(m, fn, in->a, SC0), d = rd(fn, in->dst, SC0); mc64_ldrb(m, d, b, 0);  wd32(m, fn, in->dst, d); break; }
         case IR_LBS: { int b = ra(m, fn, in->a, SC0), d = rd(fn, in->dst, SC0); mc64_ldrsb(m, d, b, 0); wd32(m, fn, in->dst, d); break; }
         case IR_LH:  { int b = ra(m, fn, in->a, SC0), d = rd(fn, in->dst, SC0); mc64_ldrh(m, d, b, 0);  wd32(m, fn, in->dst, d); break; }
