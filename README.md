@@ -35,6 +35,7 @@ Binutils-free assemblers, linkers, and archive tool:
 | `skj-as-mips`, `skj-ld-mips` | MIPS I assembler + linker (ELF and PlayStation PS-EXE) | Working |
 | `skj-as-x86-64`, `skj-ld-x86-64` | x86-64 assembler + linker (ELF64)  | Working |
 | `skj-as-aarch64`, `skj-ld-aarch64` | AArch64 assembler + linker (ELF64 and Mach-O) | Working |
+| `skj-ld-wasm`            | WebAssembly object linker (`skj-cc-wasm` emits the objects; links a WASI module) | Working |
 | `skj-ar`                 | `ar(1)` archive tool (any ELF target)     | Working |
 
 Runner, sandbox, and debugging:
@@ -49,7 +50,11 @@ Runner, sandbox, and debugging:
 Most compilers exist in per-backend variants (for example `skj-cc-rv`,
 `skj-cc-x86-64`, `skj-cc-arm64`).  The assembler and linker family is a
 binutils-free replacement for the ColdFire, RISC-V, MIPS, x86-64, and
-AArch64 targets, verified against GNU as and the qemu suites.
+AArch64 targets, verified against GNU as and the qemu suites.  The
+WebAssembly target is different in kind: `skj-cc-wasm` emits a WASI module
+or a relocatable WASM object directly (no separate assembler), and
+`skj-ld-wasm` links the objects into a module that runs under a WASM runtime
+such as `wasmtime`.
 
 ## Architecture
 
@@ -64,7 +69,9 @@ cc/      ──┘       │                       │
   │                │                       │
   │                └── ir/ir.c, ir/util.c  ├── backend/arm64_emit.c  (AArch64)
   │                                        │
-cpp/  (preprocessor library)               └── backend/mips_emit.c   (MIPS I / R2000/R3000)
+  │                                        ├── backend/mips_emit.c   (MIPS I / R2000/R3000)
+  │                                        │
+cpp/  (preprocessor library)               └── backend/wasm_emit.c   (WebAssembly / WASI)
 ```
 
 Each front end lowers source to the same IR (defined in `ir/ir.h`).
@@ -75,8 +82,13 @@ backend means writing a regalloc + emitter pair and a
 `runtime/start_*.S`.
 
 Not every front end targets every backend.  TinScheme runs on
-every backend.  The C compiler runs on ColdFire, RISC-V, x86-64,
-AArch64, and MIPS.  Pascal builds for ColdFire, x86-64, AArch64, and
+every native backend.  The C compiler runs on ColdFire, RISC-V, x86-64,
+AArch64, MIPS, and WebAssembly (the WASM target currently has the C front
+end only; the other front ends are backend-agnostic and need only their
+runtime wired up.  It lowers the full C
+feature set and runs under a WASI runtime; the in-tree libc links there
+too, minus the coroutine and thread layer, which WASM cannot express
+without the Asyncify transform).  Pascal builds for ColdFire, x86-64, AArch64, and
 MIPS, and its Kobold dialect (via `skj-kpc` and the Kobold JIT) also
 targets RISC-V.  MooScript is ColdFire only.  The genuine 32-bit ISAs
 (ColdFire, RISC-V RV32, MIPS) are ILP32; x86-64 and AArch64 are LP64,
@@ -101,14 +113,18 @@ pseudo-filesystem, and a gdb stub for remote debugging. See
 ## C standard library
 
 `libc/` is a small, freestanding-friendly C standard library shared
-across all five targets (ColdFire, RISC-V, MIPS, x86-64, AArch64). It
+across all five native targets (ColdFire, RISC-V, MIPS, x86-64, AArch64). It
 provides the headers plus string/ctype, the `snprintf`/`printf` family
 with floating conversions, the stdlib numerics and the `malloc` family
 over a single `__libc_sbrk` seam, buffered stdio, `errno`,
 `strtod`/`sscanf`, and `atexit` exit-time flushing. It factors out
 runtime pieces that each consumer used to duplicate (the 64-bit integer
-helpers, the bump arena, integer/float formatting). Built and checked
-with `make check-libc` and the per-target `check-libc-*`; see
+helpers, the bump arena, integer/float formatting). The same libc also
+links on WebAssembly, where the file, directory, and stat calls bottom out
+at a WASI preview1 shim (`runtime/wasi_file.c`) instead of a syscall seam;
+the coroutine and thread layer is the one part that does not, since WASM
+cannot switch stacks. Built and checked with `make check-libc` and the
+per-target `check-libc-*` (and `check-libc-wasm` under `wasmtime`); see
 `doc/tools/libc.md`.
 
 ## JIT runtime
@@ -212,6 +228,7 @@ make check-cc     # C compiler tests (skj-cc -> skj-as -> skj-ld -> qemu-m68k)
 make check-cpp    # C preprocessor tests
 make check-libc   # C standard library tests across every target
 make check-jit    # in-process JIT (skj-jit) tests
+make check-cc-wasm # C compiler corpus on WebAssembly, run under wasmtime
 make check-emu    # skj-run emulator and sandbox tests
 make check-rvas   # RV32 assembler/linker golden-master vs GNU as
 make check-all    # the whole qemu matrix across every backend
@@ -220,8 +237,8 @@ make clean        # remove build/
 ```
 
 `make help` prints the full target set (per-backend suites, the
-emulator tiers, the MIPS and PlayStation paths, and the integer/float
-integration tests).  `make check-smoke` exercises the full in-tree
+emulator tiers, the MIPS and PlayStation paths, the WebAssembly lanes,
+and the integer/float integration tests).  `make check-smoke` exercises the full in-tree
 pipeline (front end -> `skj-as` -> `skj-ld` -> `qemu-m68k`) without
 requiring `m68k-linux-gnu-as` or `m68k-linux-gnu-ld`.
 

@@ -6,6 +6,17 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.59.1
+
+#### Changed
+- The README now documents the WebAssembly target that 0.59.0 introduced: the
+  `skj-cc-wasm` compiler and the `skj-ld-wasm` object linker in the tool tables,
+  `backend/wasm_emit.c` in the architecture diagram, the C front end's WASM
+  target and its WASI-hosted libc (the file, directory, and stat calls go through
+  a WASI shim, and the coroutine and thread layer is the one part that does not
+  link), and the `check-cc-wasm` lane. No code change; the 0.59.0 binaries are
+  unaffected.
+
 ### 0.59.0
 
 #### Added
