@@ -163,6 +163,12 @@ BE_RV   := backend/regalloc_rv.c backend/rv_select.c backend/rv_mc_text.c
 BE_MIPS := backend/regalloc_mips.c backend/mips_emit.c
 BE_A64  := backend/regalloc_arm64.c backend/arm64_emit.c
 BE_X64  := backend/regalloc_x86.c backend/x86_emit.c
+# WASM: a stack machine, so the one emitter file is both the nop regalloc and
+# the code generator (no register allocator, no spill handling).  It emits WAT
+# text (assembled by wat2wasm) or, through the same instruction sink, a binary
+# module / relocatable object built with the wasm/enc.c encoding primitives.
+# See doc/internals/wasm-backend.md.
+BE_WASM := backend/wasm_emit.c wasm/enc.c
 
 # AArch64 selector + GAS text sink, driven by the shared AArch64 selector.
 # skj-cc-arm64 uses this; the stack-ABI arm64 scheme tool
@@ -264,6 +270,7 @@ CC_SRC_X64 := $(CC_FE) $(CC_CPP) $(IR_SRC) $(BE_X64_SEL)
 CC_SRC_A64 := $(CC_FE) $(CC_CPP) $(IR_SRC) $(BE_A64_SEL)
 CC_SRC_RV := $(CC_FE) $(CC_CPP) $(IR_SRC) $(BE_RV)
 CC_SRC_MIPS := $(CC_FE) $(CC_CPP) $(IR_SRC) $(BE_MIPS)
+CC_SRC_WASM := $(CC_FE) $(CC_CPP) $(IR_SRC) $(BE_WASM)
 
 build/skj-cc: $(CC_SRC) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h ir/target.h ir/exepath.h | build
 	$(CC) $(CFLAGS) -DCC_M68K $(SKJ_INC_DEF) -Icc -Icpp -Iir -o $@ $(CC_SRC)
@@ -283,15 +290,237 @@ cc_src_arm64-macho := $(CC_SRC_A64)
 cc_src_rv          := $(CC_SRC_RV)
 cc_src_mips        := $(CC_SRC_MIPS)
 cc_src_mips-sf     := $(CC_SRC_MIPS)
+cc_src_wasm        := $(CC_SRC_WASM)
 cc_flags_x86-64      := -DX86_BITS=64 -DSKJ_LP64=1 -DCC_PSABI -DCC_STRUCT_ABI $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ibackend
 cc_flags_arm64       := -DSKJ_LP64=1 -DCC_PSABI -DCC_ARM64 $(SKJ_INC_DEF) -Icc -Icpp -Iir
 cc_flags_arm64-macho := -DSKJ_LP64=1 -DCC_PSABI -DCC_ARM64 -DSKJ_DARWIN $(SKJ_INC_DEF) -Icc -Icpp -Iir
 cc_flags_rv          := -DCC_RISCV $(SKJ_INC_DEF) -Icc -Icpp -Iir
 cc_flags_mips        := -DCC_MIPS $(SKJ_INC_DEF) -Icc -Icpp -Iir
 cc_flags_mips-sf     := -DCC_MIPS -DMIPS_SOFTFLOAT $(SKJ_INC_DEF) -Icc -Icpp -Iir
+cc_flags_wasm        := -DCC_WASM $(SKJ_INC_DEF) -Icc -Icpp -Iir -Ibackend -Iwasm
 
 build/skj-cc-%: $$(cc_src_$$*) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h ir/target.h ir/exepath.h $(wildcard backend/*.h) | build
 	$(CC) $(CFLAGS) $(cc_flags_$*) -o $@ $(cc_src_$*)
+
+## check-wasm: compile the WASM self-test with skj-cc-wasm and run the exported
+## `run` under wasmtime, through both output paths.  The WAT text is assembled
+## with wat2wasm (WABT); the backend's own binary module is emitted directly and
+## must be byte-identical to that reference assembly, then is run on its own.
+## The program is self-checking (returns 0 on success, else the failing check's
+## index), so no I/O runtime is needed.  Skips cleanly when wat2wasm or wasmtime
+## is absent, the way the HV tier skips off an unsupported host.
+WAT2WASM ?= wat2wasm
+WASMTIME ?= wasmtime
+PHONY += check-wasm
+check-wasm: build/skj-cc-wasm | build
+	@if ! command -v $(WAT2WASM) >/dev/null 2>&1 || ! command -v $(WASMTIME) >/dev/null 2>&1; then \
+	    echo "check-wasm: wat2wasm or wasmtime not found, skipping"; \
+	else \
+	    set -e; \
+	    ./build/skj-cc-wasm -o build/wasm_selftest.wat tests/wasm_selftest.c; \
+	    $(WAT2WASM) build/wasm_selftest.wat -o build/wasm_selftest.wasm; \
+	    ./build/skj-cc-wasm -o build/wasm_selftest_bin.wasm tests/wasm_selftest.c; \
+	    if ! cmp -s build/wasm_selftest.wasm build/wasm_selftest_bin.wasm; then \
+	        echo "check-wasm: FAIL (binary module differs from wat2wasm output)"; exit 1; fi; \
+	    r=$$($(WASMTIME) run --invoke run build/wasm_selftest.wasm 2>/dev/null) || true; \
+	    rb=$$($(WASMTIME) run --invoke run build/wasm_selftest_bin.wasm 2>/dev/null) || true; \
+	    if [ "$$r" != "0" ] || [ "$$rb" != "0" ]; then \
+	        echo "check-wasm: FAIL (run returned $$r, binary $$rb)"; exit 1; fi; \
+	    ./build/skj-cc-wasm -o build/wasm_hello.wasm tests/wasm_hello.c; \
+	    h=$$($(WASMTIME) run build/wasm_hello.wasm 2>/dev/null) || true; \
+	    if [ "$$h" != "hello from wasm" ]; then \
+	        echo "check-wasm: FAIL (runtime program printed '$$h')"; exit 1; fi; \
+	    echo "check-wasm: PASS"; \
+	fi
+
+## check-wasm-obj: emit a relocatable WASM object and link it with wasm-ld into a
+## runnable module, then run it under wasmtime.  This validates the object format
+## (the symbol table, function-index and global-index relocations) against the
+## reference linker.  Covers the calls-only object: no data, no function
+## pointers.  Skips cleanly when wasm-ld or wasmtime is absent.
+WASM_LD ?= wasm-ld
+PHONY += check-wasm-obj
+check-wasm-obj: build/skj-cc-wasm | build
+	@if ! command -v $(WASM_LD) >/dev/null 2>&1 || ! command -v $(WASMTIME) >/dev/null 2>&1; then \
+	    echo "check-wasm-obj: wasm-ld or wasmtime not found, skipping"; \
+	else \
+	    set -e; \
+	    ./build/skj-cc-wasm -o build/wasm_obj.o tests/wasm_obj.c; \
+	    $(WASM_LD) --no-entry --export=compute build/wasm_obj.o -o build/wasm_obj.wasm; \
+	    r=$$($(WASMTIME) run --invoke compute build/wasm_obj.wasm 2>/dev/null) || true; \
+	    if [ "$$r" = "42" ]; then echo "check-wasm-obj: PASS"; \
+	    else echo "check-wasm-obj: FAIL (compute returned $$r)"; exit 1; fi; \
+	fi
+
+## test-wasm-enc: host round-trip self-test for the WASM binary encoding
+## primitives (wasm/enc.c), the foundation of the in-tree object + linker.
+build/wasm-enc-test: wasm/enc.c wasm/enc_test.c wasm/enc.h | build
+	$(CC) $(CFLAGS) -Iwasm -o $@ wasm/enc.c wasm/enc_test.c
+PHONY += test-wasm-enc
+test-wasm-enc: build/wasm-enc-test
+	@./build/wasm-enc-test
+
+## skj-ld-wasm: the in-tree WebAssembly linker.  It reads the relocatable
+## objects skj-cc-wasm emits, resolves symbols, renumbers and relocates them, and
+## writes a complete module, so the toolchain links WASM without wasm-ld.
+WLD_SRC := wasm/wld_main.c wasm/wobj.c wasm/wlink.c wasm/enc.c ir/util.c ir/arena.c
+build/skj-ld-wasm: $(WLD_SRC) wasm/wld.h wasm/enc.h ir/util.h | build
+	$(CC) $(CFLAGS) -Iwasm -Iir -o $@ $(WLD_SRC)
+
+## check-wasm-ld: link relocatable objects with the in-tree skj-ld-wasm (not
+## wasm-ld) into a runnable module and run it under wasmtime.  Covers the
+## calls-only link and the data merge (cross-object data addresses).  Skips
+## cleanly when wasmtime is absent.
+PHONY += check-wasm-ld
+check-wasm-ld: build/skj-cc-wasm build/skj-ld-wasm | build
+	@if ! command -v $(WASMTIME) >/dev/null 2>&1; then \
+	    echo "check-wasm-ld: wasmtime not found, skipping"; \
+	else \
+	    set -e; \
+	    ./build/skj-cc-wasm -o build/wasm_ld_a.o tests/wasm_ld_a.c; \
+	    ./build/skj-cc-wasm -o build/wasm_ld_b.o tests/wasm_ld_b.c; \
+	    ./build/skj-ld-wasm --no-entry --export=run -o build/wasm_ld.wasm \
+	        build/wasm_ld_a.o build/wasm_ld_b.o; \
+	    r=$$($(WASMTIME) run --invoke run build/wasm_ld.wasm 2>/dev/null) || true; \
+	    if [ "$$r" != "42" ]; then \
+	        echo "check-wasm-ld: FAIL (run returned $$r)"; exit 1; fi; \
+	    ./build/skj-cc-wasm -o build/wasm_ld_c.o tests/wasm_ld_c.c; \
+	    ./build/skj-cc-wasm -o build/wasm_ld_d.o tests/wasm_ld_d.c; \
+	    ./build/skj-ld-wasm --no-entry --export=sum3 -o build/wasm_ld_data.wasm \
+	        build/wasm_ld_c.o build/wasm_ld_d.o; \
+	    r=$$($(WASMTIME) run --invoke sum3 build/wasm_ld_data.wasm 2>/dev/null) || true; \
+	    if [ "$$r" != "42" ]; then \
+	        echo "check-wasm-ld: FAIL (sum3 returned $$r)"; exit 1; fi; \
+	    ./build/skj-cc-wasm -o build/wasm_ld_e.o tests/wasm_ld_e.c; \
+	    ./build/skj-cc-wasm -o build/wasm_ld_f.o tests/wasm_ld_f.c; \
+	    ./build/skj-ld-wasm --no-entry --export=go --export=go2 \
+	        -o build/wasm_ld_tab.wasm build/wasm_ld_e.o build/wasm_ld_f.o; \
+	    r=$$($(WASMTIME) run --invoke go build/wasm_ld_tab.wasm 2>/dev/null) || true; \
+	    if [ "$$r" != "42" ]; then \
+	        echo "check-wasm-ld: FAIL (go returned $$r)"; exit 1; fi; \
+	    r=$$($(WASMTIME) run --invoke go2 build/wasm_ld_tab.wasm 2>/dev/null) || true; \
+	    if [ "$$r" != "42" ]; then \
+	        echo "check-wasm-ld: FAIL (go2 returned $$r)"; exit 1; fi; \
+	    ./build/skj-cc-wasm -o build/wasm_errno_a.o tests/wasm_errno_a.c; \
+	    ./build/skj-cc-wasm -o build/wasm_errno_b.o tests/wasm_errno_b.c; \
+	    ./build/skj-ld-wasm --no-entry --export=run \
+	        -o build/wasm_errno.wasm build/wasm_errno_a.o build/wasm_errno_b.o; \
+	    r=$$($(WASMTIME) run --invoke run build/wasm_errno.wasm 2>/dev/null) || true; \
+	    if [ "$$r" != "42" ]; then \
+	        echo "check-wasm-ld: FAIL (errno run returned $$r)"; exit 1; fi; \
+	    echo "check-wasm-ld: PASS"; \
+	fi
+
+## check-wasm-exec: link a main-defining program with skj-ld-wasm into a WASI
+## command (synthesized _start + write/exit seam over the preview1 imports) and
+## run it under wasmtime, checking its stdout and exit status.  Skips cleanly
+## when wasmtime is absent.
+PHONY += check-wasm-exec
+check-wasm-exec: build/skj-cc-wasm build/skj-ld-wasm | build
+	@if ! command -v $(WASMTIME) >/dev/null 2>&1; then \
+	    echo "check-wasm-exec: wasmtime not found, skipping"; \
+	else \
+	    set -e; \
+	    ./build/skj-cc-wasm -o build/wasm_exec.o tests/wasm_exec.c; \
+	    ./build/skj-ld-wasm -o build/wasm_exec.wasm build/wasm_exec.o; \
+	    if out=$$($(WASMTIME) run build/wasm_exec.wasm 2>/dev/null); then rc=0; else rc=$$?; fi; \
+	    if [ "$$out" != "wasm runtime up" ]; then \
+	        echo "check-wasm-exec: FAIL (stdout '$$out')"; exit 1; fi; \
+	    if [ "$$rc" != "7" ]; then \
+	        echo "check-wasm-exec: FAIL (exit $$rc)"; exit 1; fi; \
+	    ./build/skj-cc-wasm -o build/wasm_sbrk.o tests/wasm_sbrk.c; \
+	    ./build/skj-ld-wasm -o build/wasm_sbrk.wasm build/wasm_sbrk.o; \
+	    if out=$$($(WASMTIME) run build/wasm_sbrk.wasm 2>/dev/null); then rc=0; else rc=$$?; fi; \
+	    if [ "$$out" != "sbrk ok" ]; then \
+	        echo "check-wasm-exec: FAIL (sbrk stdout '$$out')"; exit 1; fi; \
+	    if [ "$$rc" != "0" ]; then \
+	        echo "check-wasm-exec: FAIL (sbrk exit $$rc)"; exit 1; fi; \
+	    ./build/skj-cc-wasm -o build/wasm_vararg.o tests/wasm_vararg.c; \
+	    ./build/skj-ld-wasm -o build/wasm_vararg.wasm build/wasm_vararg.o; \
+	    if $(WASMTIME) run build/wasm_vararg.wasm >/dev/null 2>&1; then rc=0; else rc=$$?; fi; \
+	    if [ "$$rc" != "42" ]; then \
+	        echo "check-wasm-exec: FAIL (vararg exit $$rc)"; exit 1; fi; \
+	    echo "check-wasm-exec: PASS"; \
+	fi
+
+## check-libc-wasm: compile the WASI-linkable libc with skj-cc-wasm, link each
+## self-checking libc test against it with the in-tree skj-ld-wasm, and run it
+## under wasmtime (42 on success).  A test with a tests/<name>.input fixture is
+## fed that on stdin, and one with a tests/<name>.expected fixture also has its
+## stdout diffed against it, so the stream tests (libc_phase_c echoes stdin,
+## libc_phase_g checks exit-time flushing) verify output, not just exit code.
+## The exit finalizer runs because skj-ld-wasm calls __libc_fini (atexit handlers
+## plus the stdio flush, from libc/fini.c) in the synthesized _start before
+## proc_exit.  runtime/va_wasm.c supplies the varargs __va_arg helper;
+## runtime/wasi_file.c is the file/directory/stat shim over WASI preview1
+## (open/close/lseek, getdents, stat, the path operations), so stdio.c,
+## fileops.c, dirent.c, and stat.c now link.  Tests run with a preopened scratch
+## directory (wasmtime --dir), reset before each one.  Coroutine and thread
+## support stays out: WASM MVP cannot switch stacks, so libc/coro.c and
+## libc/threads.c need Asyncify, not a seam.  Skips when wasmtime is absent.
+WASM_LIBC_SRCS := libc/string.c libc/ctype.c libc/stdlib.c libc/printf.c \
+    libc/numfmt.c libc/stdio_core.c libc/stdio.c libc/assert.c libc/malloc.c \
+    libc/errno.c libc/strerror.c libc/rand.c runtime/rng.c libc/strtod.c \
+    libc/scanf.c libc/memstream.c libc/getenv.c libc/fini.c libc/time.c \
+    libc/stat.c libc/dirent.c libc/fileops.c \
+    runtime/va_wasm.c runtime/wasi_file.c
+WASM_LIBC_TESTS := libc_phase_a libc_phase_b libc_phase_c libc_phase_e \
+    libc_phase_f libc_phase_g libc_phase_h wasm_fileio
+WASM_LIBC_FSROOT := build/wlibc_fsroot
+PHONY += check-libc-wasm
+check-libc-wasm: build/skj-cc-wasm build/skj-ld-wasm | build
+	@if ! command -v $(WASMTIME) >/dev/null 2>&1; then \
+	    echo "check-libc-wasm: wasmtime not found, skipping"; \
+	else \
+	    set -e; \
+	    objs=""; \
+	    for src in $(WASM_LIBC_SRCS); do \
+	        o=build/wlibc_$$(basename $$src .c).o; \
+	        ./build/skj-cc-wasm -DSKJ_LIBC_FLOAT -c -o $$o $$src; \
+	        objs="$$objs $$o"; \
+	    done; \
+	    for t in $(WASM_LIBC_TESTS); do \
+	        ./build/skj-cc-wasm -DSKJ_LIBC_FLOAT -c -o build/$$t.o tests/$$t.c; \
+	        ./build/skj-ld-wasm -o build/$$t.wasm build/$$t.o $$objs; \
+	        rm -rf $(WASM_LIBC_FSROOT); mkdir -p $(WASM_LIBC_FSROOT); \
+	        in=/dev/null; \
+	        if [ -f tests/$$t.input ]; then in=tests/$$t.input; fi; \
+	        if $(WASMTIME) run --dir=$(WASM_LIBC_FSROOT)::. build/$$t.wasm \
+	                <$$in >build/$$t.out 2>/dev/null; then rc=0; else rc=$$?; fi; \
+	        if [ "$$rc" != "42" ]; then \
+	            echo "check-libc-wasm: FAIL ($$t exit $$rc)"; exit 1; fi; \
+	        if [ -f tests/$$t.expected ] && \
+	                ! diff -u tests/$$t.expected build/$$t.out; then \
+	            echo "check-libc-wasm: FAIL ($$t stdout mismatch)"; exit 1; fi; \
+	    done; \
+	    rm -rf $(WASM_LIBC_FSROOT); \
+	    echo "check-libc-wasm: PASS"; \
+	fi
+
+## check-cc-wasm: the C compiler corpus on WASM.  Each tests/cc_*.c is compiled
+## by skj-cc-wasm, linked against the synthesized WASI runtime by skj-ld-wasm,
+## run under wasmtime, and its exit code compared against the .exitcode fixture
+## (the same corpus check-cc and its cross-target siblings run).  Struct-by-value
+## passing and returning work: on WASM every struct is the MEMORY class, passed
+## as a pointer to a caller copy and returned through a hidden pointer, so the
+## backend only sees i32 pointers and aggregate copies.  The excluded tests fall
+## in three groups:
+##   - WASI proc_exit caps the exit code below 126, so the three tests that
+##     return a larger value (cc_t008 returns 128, cc_t056 255, cc_t058 127)
+##     cannot report it; the programs themselves are correct.
+##   - cc_t059 (_Float16), cc_t077 (inline asm), and cc_t111 (computed goto) use
+##     features the WASM backend does not implement.
+##   - cc_t071 uses the x86-64 __builtin_va_arg_* accessors and is excluded on
+##     every target (VARARGS_EXCLUDE); the portable <stdarg.h> varargs coverage
+##     is cc_t081, which passes.
+## Skips cleanly when wasmtime is absent.
+CC_WASM_EXCLUDE := cc_t008_dowhile cc_t056_longlong cc_t058_const_expr_array \
+    cc_t059_float16 cc_t077_inline_asm cc_t111_computed_goto cc_t071_varargs
+PHONY += check-cc-wasm
+check-cc-wasm: build/skj-cc-wasm build/skj-ld-wasm | build
+	@CCBIN="$(CURDIR)/build/skj-cc-wasm" LD="$(CURDIR)/build/skj-ld-wasm" \
+	 WASMTIME="$(WASMTIME)" OUTDIR="$(CURDIR)/build/cc-wasm" \
+	 EXCLUDE="$(CC_WASM_EXCLUDE)" sh tests/run-cc-wasm-tests.sh
 
 ## skjcc: the cross driver.  One command runs the per-target cc -> as -> ld
 ## pipeline and links the crt + runtime helpers from <libdir>/<target>/.  Lib
@@ -3008,7 +3237,7 @@ build/version.h: FORCE | build
 # build/skj-kpc-rv, -cf, and -arm64 are built from build/skj-pc-x86-64, so a
 # bootstrap that starts from a kpcom seed reaches them without `make all` first.
 VERSIONED := $(TOOLS) build/skj-sc-x86-64 \
-             build/skj-pc-x86-64 build/skj-pc-arm64
+             build/skj-pc-x86-64 build/skj-pc-arm64 build/skj-cc-wasm
 $(VERSIONED): build/version.h
 
 ## Verify version.mk and the git tag agree before cutting a release.

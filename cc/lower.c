@@ -1039,7 +1039,7 @@ eb_classify(struct cc_type *t, int base, int *cls)
 }
 #endif /* CC_STRUCT_ABI */
 
-#if !defined(CC_ARM64) && !defined(CC_RISCV)
+#if !defined(CC_ARM64) && !defined(CC_RISCV) && !defined(CC_WASM)
 /* SysV eightbyte classification of a struct/union type.  Returns the number
    of eightbytes passed in registers (1 or 2) and fills cls[] with each one's
    class (0 INTEGER, 1 SSE); returns -1 for the MEMORY class (larger than 16
@@ -1174,6 +1174,13 @@ abi_agg(struct cc_type *t, int *cls)
     return aapcs_agg(t, cls);
 #elif defined(CC_RISCV)
     return rv_agg(t, cls);
+#elif defined(CC_WASM)
+    /* WASM has no argument registers: every struct is the MEMORY class, passed
+       as a pointer to a caller copy and returned through a hidden pointer, the
+       same shape the RISC-V ilp32 path uses for its >8-byte structs.  The
+       backend then only ever sees i32 pointers and aggregate copies. */
+    cls[0] = cls[1] = cls[2] = cls[3] = -1;
+    return (t && (t->kind == TY_STRUCT || t->kind == TY_UNION)) ? -1 : 0;
 #else
     cls[2] = cls[3] = -1;
     return sysv_eightbytes(t, cls);
@@ -1182,7 +1189,7 @@ abi_agg(struct cc_type *t, int *cls)
 
 /* A register-struct slot is a 4-byte word on RISC-V ilp32, an 8-byte eightbyte
    on the LP64 targets. */
-#ifdef CC_RISCV
+#if defined(CC_RISCV) || defined(CC_WASM)
 #define ABI_SLOT_BYTES 4
 #else
 #define ABI_SLOT_BYTES 8
@@ -1455,8 +1462,14 @@ static int
 emit_addr_sym(const char *sym)
 {
     struct ir_insn *ins = emit(ADDR64 ? IR_LEA64 : IR_LEA);
+    struct global *gl = find_global(sym);
     ins->dst = new_temp();
     ins->sym = arena_strdup(lower_arena, sym);
+    /* mark a data-object address so a backend that must declare an undefined
+       symbol's kind (WASM) can tell &errno from the address of a function.
+       Every function is registered in the globals table (is_func set); a name
+       not registered (a string literal, a local static) is data. */
+    ins->sym_is_data = !(gl && gl->is_func);
     return ins->dst;
 }
 
@@ -2721,6 +2734,14 @@ lower_expr(struct cc_node *n)
             case TOK_PLUS:    ir_op = IR_ADD64; break;
             case TOK_MINUS:   ir_op = IR_SUB64; break;
             case TOK_STAR:    ir_op = IR_MUL64; break;
+#ifdef CC_WASM
+            /* WASM has native 64-bit division, so emit the native op and let
+               the backend lower it to i64.div_s/u (or rem_s/u).  The other
+               targets have no hardware i64 divide and call the soft-division
+               helper instead. */
+            case TOK_SLASH:   ir_op = is_uns ? IR_DIVU64 : IR_DIVS64; break;
+            case TOK_PERCENT: ir_op = is_uns ? IR_MODU64 : IR_MODS64; break;
+#else
             case TOK_SLASH: {
                 const char *helper = is_uns ? "__udivdi3" : "__divdi3";
                 ins = emit(IR_ARG64); ins->a = lhs; ins->imm = 0;
@@ -2741,6 +2762,7 @@ lower_expr(struct cc_node *n)
                 ins->nargs = 2;
                 return ins->dst;
             }
+#endif
             case TOK_AMP:     ir_op = IR_AND64; break;
             case TOK_PIPE:    ir_op = IR_OR64; break;
             case TOK_CARET:   ir_op = IR_XOR64; break;
@@ -2904,6 +2926,12 @@ lower_expr(struct cc_node *n)
             case TOK_PLUS_EQ:    ir_op = IR_ADD64; break;
             case TOK_MINUS_EQ:   ir_op = IR_SUB64; break;
             case TOK_STAR_EQ:    ir_op = IR_MUL64; break;
+#ifdef CC_WASM
+            /* native 64-bit division on WASM (see the binary-operator path);
+               falls through to the common store-back tail below */
+            case TOK_SLASH_EQ:   ir_op = t->is_unsigned ? IR_DIVU64 : IR_DIVS64; break;
+            case TOK_PERCENT_EQ: ir_op = t->is_unsigned ? IR_MODU64 : IR_MODS64; break;
+#else
             case TOK_SLASH_EQ: {
                 const char *h = t->is_unsigned ? "__udivdi3" : "__divdi3";
                 ins = emit(IR_ARG64); ins->a = old_val; ins->imm = 0;
@@ -2948,6 +2976,7 @@ lower_expr(struct cc_node *n)
                 emit_store(addr, new_val, t);
                 return new_val;
             }
+#endif
             case TOK_AMP_EQ:     ir_op = IR_AND64; break;
             case TOK_PIPE_EQ:    ir_op = IR_OR64; break;
             case TOK_CARET_EQ:   ir_op = IR_XOR64; break;
@@ -3476,17 +3505,17 @@ lower_expr(struct cc_node *n)
 #endif /* !CC_RISCV */
             }
             if (abi_struct_mem(at)) {
-#if defined(CC_ARM64) || defined(CC_RISCV)
-                /* AAPCS64 and RISC-V ilp32 (>8 bytes): pass a pointer to a
-                   caller-made copy (value semantics: the callee must not see
-                   later mutations) */
+#if defined(CC_ARM64) || defined(CC_RISCV) || defined(CC_WASM)
+                /* AAPCS64, RISC-V ilp32 (>8 bytes), and WASM (every struct):
+                   pass a pointer to a caller-made copy (value semantics: the
+                   callee must not see later mutations) */
                 int src = lower_expr(a);
                 int cslot = alloc_slot(cc_type_size(at), cc_type_align(at));
                 emit_aggregate_copy(emit_addr_slot(cslot), src,
                                     cc_type_size(at));
                 args[nargs] = emit_addr_slot(cslot);
-#ifdef CC_RISCV
-                arg_kind[nargs] = 0;    /* a 4-byte pointer in one a-register */
+#if defined(CC_RISCV) || defined(CC_WASM)
+                arg_kind[nargs] = 0;    /* a 4-byte pointer in one arg word */
 #else
                 arg_kind[nargs] = 2;    /* the pointer rides a gp reg */
 #endif
@@ -3553,13 +3582,21 @@ lower_expr(struct cc_node *n)
             args[nargs] = lower_expr(a);
             arg_fw[nargs] = 0;
             if (is_float_type(at)) {
+                /* C default argument promotion: a float passed as an unnamed
+                   (variadic) argument is converted to double (C11 6.5.2.2p7).
+                   Without this the caller would store a 4-byte single where
+                   the callee's va_arg(..., double) reads an 8-byte double. */
+                static struct cc_type ty_double = { .kind = TY_DOUBLE };
+                struct cc_type *pt = at;
+                if (this_vararg && at->kind == TY_FLOAT)
+                    pt = &ty_double;
                 arg_kind[nargs] = 1;
-                arg_fw[nargs] = fwidth(at);
+                arg_fw[nargs] = fwidth(pt);
                 if (fu < 8)
                     fu++;
-                /* convert the argument to the parameter's float type */
-                if (pp)
-                    args[nargs] = to_float(args[nargs], lvalue_type(a), at);
+                /* convert the argument to the parameter's (or promoted) type */
+                if (pp || pt != at)
+                    args[nargs] = to_float(args[nargs], lvalue_type(a), pt);
             } else if (is_i64_type(at)) {
                 arg_kind[nargs] = 2;
                 if (iu < abi_nint)
@@ -3650,12 +3687,22 @@ lower_expr(struct cc_node *n)
                the 64-bit call form; an ILP32 pointer (rv / ColdFire / MIPS) is
                a plain call. */
             i64ret = (CC_PTR_SIZE == 8);
+        int callee_variadic = callee_type && callee_type->kind == TY_FUNC &&
+                              callee_type->is_variadic;
+        /* a plain (non-float, non-i64, non-struct) call returns void when the
+           callee's return type is void; the WASM backend must drop a discarded
+           value return but must not expect one from a void call (an unprototyped
+           callee defaults to int, hence a result). */
+        int callee_void = callee_type && callee_type->kind == TY_FUNC &&
+                          callee_type->base && callee_type->base->kind == TY_VOID;
         if (is_indirect) {
             int op = fret ? IR_FCALLI : i64ret ? IR_CALLI64 : IR_CALLI;
             ins = emit(op);
             ins->dst = new_temp();
             ins->a = fptr;
             ins->nargs = nargs;
+            ins->call_variadic = callee_variadic;
+            ins->call_void = callee_void;
             if (fret)
                 ins->imm = fwidth(callee_type->base);   /* single vs double */
         } else {
@@ -3664,6 +3711,8 @@ lower_expr(struct cc_node *n)
             ins->dst = new_temp();
             ins->sym = arena_strdup(lower_arena, n->a->name);
             ins->nargs = nargs;
+            ins->call_variadic = callee_variadic;
+            ins->call_void = callee_void;
             if (fret)
                 ins->imm = fwidth(callee_type->base);   /* single vs double */
         }
@@ -4594,7 +4643,7 @@ lower_function(struct cc_node *fndef)
         int sz = cc_type_size(p->type);
         int pcls[4], neb = abi_agg(p->type, pcls);
         int mem_ptr = 0;
-#if defined(CC_ARM64) || defined(CC_RISCV)
+#if defined(CC_ARM64) || defined(CC_RISCV) || defined(CC_WASM)
         mem_ptr = (neb < 0);            /* a pointer to a caller copy */
 #endif
         int palign = cc_type_align(p->type);
@@ -4669,9 +4718,9 @@ lower_function(struct cc_node *fndef)
 
     /* copy each by-reference (memory-class) struct parameter from its pointer
        into the local copy, before the body runs.  The incoming pointer is 8
-       bytes on LP64 (IR_LDL64), 4 bytes on RISC-V ilp32 (IR_LDL). */
+       bytes on LP64 (IR_LDL64), 4 bytes on the ilp32 targets (IR_LDL). */
     for (int m = 0; m < nmemparam; m++) {
-#ifdef CC_RISCV
+#if defined(CC_RISCV) || defined(CC_WASM)
         struct ir_insn *ld = emit(IR_LDL);
 #else
         struct ir_insn *ld = emit(IR_LDL64);
@@ -4707,6 +4756,12 @@ lower_function(struct cc_node *fndef)
             ins = emit(IR_RETV64);
             ins->a = p;
 #endif
+        } else if (cur_fn_ret_type && cur_fn_ret_type->kind == TY_VOID) {
+            /* a void function falls off its end with a value-less return, not a
+               return 0: the IR_RETV(0) a value function needs would give the
+               function an int result, which a strict callee signature (WASM)
+               then mismatches against the void prototype at every call site. */
+            emit(IR_RET);
         } else if (cur_fn_returns_i64) {
             int z = lower_const64(0);
             ins = emit(IR_RETV64);

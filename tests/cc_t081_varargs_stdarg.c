@@ -88,6 +88,12 @@ main(void)
     if (dsum10(3, 1.5, 2.5, 3.0) != 70)
         return 3;
 
+    /* float varargs: each float is promoted to double by the default
+       argument promotions, so va_arg(..., double) reads it correctly
+       (1.5 + 2.5 + 2.0 = 6.0 -> 60) */
+    if (dsum10(3, 1.5f, 2.5f, 2.0f) != 60)
+        return 6;
+
     /* pointer varargs */
     if (lastfirst(2, "xx", "hello") != 'h')
         return 4;

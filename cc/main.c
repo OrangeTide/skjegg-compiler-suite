@@ -78,6 +78,8 @@ main(int argc, char **argv)
     cpp_define(pp, "__skj_arm64__", "1");
 #elif defined(X86_BITS) && X86_BITS == 64
     cpp_define(pp, "__skj_x86_64__", "1");
+#elif defined(CC_WASM)
+    cpp_define(pp, "__skj_wasm__", "1");
 #endif
 #if SKJ_LP64
     cpp_define(pp, "__skj_lp64__", "1");
@@ -243,6 +245,21 @@ main(int argc, char **argv)
     } else {
         out = stdout;
     }
+#ifdef CC_WASM
+    /* The WASM backend emits WAT text by default, a complete binary module for a
+       .wasm output, and a relocatable object for a .o output.  The format rides
+       a backend flag rather than a wider target_emit signature. */
+    {
+        extern int wasm_output_binary;
+        const char *dot = outpath ? strrchr(outpath, '.') : NULL;
+        if (dot && strcmp(dot, ".wasm") == 0)
+            wasm_output_binary = 1;
+        else if (dot && strcmp(dot, ".o") == 0)
+            wasm_output_binary = 2;
+        else
+            wasm_output_binary = 0;
+    }
+#endif
     target_emit(out, prog);
     if (out != stdout)
         fclose(out);

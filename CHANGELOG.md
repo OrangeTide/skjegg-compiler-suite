@@ -6,6 +6,53 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.59.0
+
+#### Added
+- A WASM backend, the sixth code generator. It lowers the full C feature set to
+  a WebAssembly module: the integer core, a control-flow structurer that
+  reconstructs WASM's structured `block`/`loop`/`if` from the IR's arbitrary
+  branches (with a `br_table` dispatch loop for an irreducible graph), direct
+  and indirect calls, floating point and native 64-bit integer operations,
+  globals in linear memory, variadic calls through a fixed-plus-buffer ABI, and
+  struct-by-value passing and return. `skj-cc-wasm` emits a WAT text module or a
+  binary module.
+- An in-tree WASM object format and static linker, `skj-ld-wasm`. The backend
+  emits a relocatable object (data and function-pointer relocations, an
+  indirect-call table, extern data and function symbols), and the linker merges
+  objects, resolves the memory-address and table relocations, and synthesizes
+  the WASI runtime for an entry link: the three `wasi_snapshot_preview1`
+  imports, a `_start`, the `write`/`read`/`exit`/`sbrk` seam over them, and the
+  exit-time finalizer that flushes the stdio buffers and runs the `atexit`
+  handlers. An object may declare its own WASI imports through the
+  `__wasi_<field>` naming convention, which the linker carries through to real
+  imports.
+- A WASI runtime for the in-tree libc. A file, directory, and stat shim
+  (`runtime/wasi_file.c`) maps the libc's `open`/`close`/`lseek`, directory
+  reads, `stat`, and path operations onto WASI preview1 over its capability
+  based preopen model, so `stdio.c`, `stat.c`, `dirent.c`, and `fileops.c` link
+  and run under `wasmtime`. Coroutines and threads stay out: WASM cannot switch
+  stacks without the Asyncify transform.
+- The C compiler corpus runs on WASM. `check-cc-wasm` compiles each
+  `tests/cc_*.c` with `skj-cc-wasm`, links it against the synthesized runtime,
+  runs it under `wasmtime`, and compares the exit code against the same fixtures
+  the cross-target suites use; 105 of 112 pass. New lanes `check-wasm`,
+  `check-wasm-obj`, `check-wasm-ld`, `check-wasm-exec`, and `check-libc-wasm`
+  cover the backend, the object format, the linker, a complete program, and the
+  libc, with the stream tests feeding stdin and diffing stdout. A `wasm` CI job
+  runs all six lanes.
+
+#### Fixed
+- A heap overflow in `skj-ld-wasm`: the global data-symbol map was sized by the
+  function count but filled with data symbols, so an object with many static
+  initializers corrupted the heap and aborted the link.
+- Two unsound cases in scalar register promotion (new in 0.58.0). A slot read
+  before its first store carries an entry value a register does not, which
+  miscompiled the managed-reference release idiom; such slots are now excluded.
+  A malformed module could also carry a slotted load or store with no temp
+  operand, which promotion turned into an out-of-range move; a store source and
+  a load destination must now be real temps.
+
 ### 0.58.0
 
 #### Added

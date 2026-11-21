@@ -35,7 +35,7 @@
    is compiled by the target's own C compiler, so its pointer width is that
    compiler's data model. */
 #if defined(X86_BITS) || defined(CC_ARM64) || defined(CC_RISCV) \
-    || defined(CC_M68K) || defined(CC_MIPS)
+    || defined(CC_M68K) || defined(CC_MIPS) || defined(CC_WASM)
 #  define SKJ_HAVE_ISA_SELECTOR 1
 #else
 #  define SKJ_HAVE_ISA_SELECTOR 0
@@ -83,8 +83,9 @@
 #if defined(CC_ARM64) && !SKJ_LP64
 #  error "arm64 target must be LP64"
 #endif
-#if (defined(CC_RISCV) || defined(CC_M68K) || defined(CC_MIPS)) && SKJ_LP64
-#  error "RV32/ColdFire/MIPS target must be ILP32, not LP64"
+#if (defined(CC_RISCV) || defined(CC_M68K) || defined(CC_MIPS) \
+     || defined(CC_WASM)) && SKJ_LP64
+#  error "RV32/ColdFire/MIPS/WASM32 target must be ILP32, not LP64"
 #endif
 
 /* For freestanding glue/runtime with no ISA selector the width must match the
@@ -147,6 +148,8 @@
 #    define SKJ_KPM_ARCH "mips"
 #  elif defined(CC_M68K)
 #    define SKJ_KPM_ARCH "cf"
+#  elif defined(CC_WASM)
+#    define SKJ_KPM_ARCH "wasm"
 #  elif SKJ_LP64
 #    define SKJ_KPM_ARCH "arm64"   /* an LP64 kobold tool with no X86_BITS is the arm64 backend */
 #  else

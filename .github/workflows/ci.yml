@@ -315,3 +315,45 @@ jobs:
           path: riscv-arch-test
       - name: Conformance suite
         run: make check-archtest ARCHTEST="$GITHUB_WORKSPACE/riscv-arch-test/riscv-test-suite"
+
+  # The WASM backend end to end: the six WASM lanes, which never ran in CI.
+  # check-wasm compiles the self-test and diffs the binary module against
+  # wat2wasm; check-wasm-obj links a skj object with wasm-ld; check-wasm-ld and
+  # check-wasm-exec drive the in-tree skj-ld-wasm; check-libc-wasm links the
+  # WASI libc and runs the stdin/stdout stream tests; check-cc-wasm runs the C
+  # compiler corpus.  None need a cross toolchain or qemu, only the three WASM
+  # tools: wat2wasm (apt wabt), wasm-ld (apt lld), and wasmtime (pinned release
+  # download, since it is not an apt package).  The lanes skip cleanly when a
+  # tool is absent, so an explicit presence check turns a broken install into a
+  # hard failure rather than a vacuous pass.
+  wasm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # Pin wasmtime to the version the lanes are developed against, the way
+      # the runner image and zig are pinned.  WASI proc_exit caps the exit code
+      # below 126 and the preopen/--dir behavior is version-sensitive, so a
+      # deliberate bump beats tracking the latest release.
+      WASMTIME_VERSION: v42.0.1
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install wabt and lld
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wabt lld
+      - name: Install wasmtime
+        run: |
+          dir="wasmtime-${WASMTIME_VERSION}-x86_64-linux"
+          curl -sSfL "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/${dir}.tar.xz" \
+            | tar xJ
+          echo "$GITHUB_WORKSPACE/$dir" >> "$GITHUB_PATH"
+      - name: Verify the WASM tools are present
+        run: |
+          for t in wat2wasm wasm-ld wasmtime; do
+            command -v "$t" >/dev/null || { echo "missing $t"; exit 1; }
+          done
+          wasmtime --version
+      - name: WASM backend lanes
+        run: |
+          make check-wasm check-wasm-obj check-wasm-ld check-wasm-exec \
+               check-libc-wasm check-cc-wasm

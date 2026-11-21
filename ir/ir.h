@@ -287,6 +287,24 @@ struct ir_insn {
                            the first word of a by-value struct with 8-aligned
                            members).  Only the MIPS backend reads it, to start
                            such a struct on an even word; 0 means word alignment. */
+    int sym_is_data;    /* on an IR_LEA/IR_LEA64: the symbol names a data object
+                           (not a function).  A backend that must declare an
+                           undefined symbol's kind in its object format (WASM)
+                           reads it to classify an external symbol; the ELF
+                           backends resolve the kind at link time and ignore it. */
+    int call_variadic;  /* on a call op (IR_CALL/IR_CALLI/IR_FCALL/IR_CALL64/...):
+                           the callee is a variadic function.  WASM reads it to
+                           use the fixed-plus-buffer varargs ABI (a trailing
+                           hidden pointer argument); the stack-ABI backends place
+                           unnamed arguments by the per-ARG vararg flag and ignore
+                           it. */
+    int call_void;      /* on an IR_CALL/IR_CALLI: the callee returns void, so the
+                           call pushes no result.  WASM needs this because its call
+                           must match the callee's exact signature: a value return
+                           that the caller discards still leaves a result that must
+                           be dropped, which it cannot tell from an unused temp.
+                           The stack-ABI backends ignore an unused result and this
+                           flag. */
     struct ir_insn *next;
 };
 
