@@ -443,6 +443,14 @@ When the `N_CALL` handler encounters a call to an extern name, it falls
 through to the existing generic path: emit `IR_ARG` for each argument,
 emit `IR_CALL` with the link name as the symbol.
 
+The low-level `write(fd, buf, len)` builtin is the one exception. It maps
+to the raw C `write(int, char *, int)`, whose buffer parameter is a plain
+`char *`, not a `moo_str *`. A `str` passed as the buffer therefore decays
+to its data pointer (`str->data`): the `N_CALL` handler loads the data
+field before emitting the arguments, so `write` sees the bytes, not the
+`{len,data}` header. Declared externs taking a `str` still receive the
+`moo_str *` unchanged, matching the host convention above.
+
 ### Host Implementation
 
 The host provides C functions matching the declared signatures, following
@@ -630,6 +638,47 @@ to the native host compiler.
 Each `.moo` test is compiled to m68k assembly by `build/mooc`, assembled
 and linked with the bare-metal runtime (`runtime/start.S`, `str.c`,
 `list.c`, and a host stub), then executed under `qemu-m68k`.
+
+## WebAssembly target
+
+`skj-mooc-wasm` is the MooScript front end built against the shared WASM
+backend (`-DCC_WASM`, reusing `backend/wasm_emit.c`). The front end emits only
+the generic 32-bit IR core, so no front-end change was needed beyond selecting
+the output format by the `-o` extension (a `.wasm` module, a `.o` relocatable
+object, or WAT text).
+
+The model is object-plus-link, like the BASIC and Pascal WASM targets:
+`skj-mooc-wasm -o foo.o` emits a relocatable object, and `skj-ld-wasm` links it
+with the moo runtime (`str.c`, `list.c`, and a host: `host_stub.c`, or
+`toy_host.c` plus `va_wasm.c` for the toy host) over the synthesized WASI
+runtime. The runtime's `__moo_arena_alloc`/`__moo_arena_reset` bump arena,
+provided natively by `runtime/start.S`, comes from `runtime/arena_wasm.c` (over
+`__libc_sbrk`) here. A program's entry is the verb named `main`; the
+synthesized `_start` calls it and exits with its return, so the module runs as
+a plain WASI command. The `check-mooc-wasm` lane runs the corpus under
+`wasmtime`.
+
+Several lowering details the stack ABI backends did not need but a typed
+backend does, all fixed unconditionally in `moo/lower.c` (the soft-float stack
+backends ignore the extra information):
+
+- A `float` parameter is marked as a float class so the backend types it `f64`,
+  not `i64`.
+- A runtime call to a void helper (`__moo_tofloat`, `__moo_verb_call`,
+  `__moo_prop_set`, `__moo_obj_move`, `__moo_obj_recycle`) is marked `call_void`
+  so the caller does not consume a result the callee never pushes.
+- Unboxing a `prop` to a typed value (`var s: str = obj.name`) compares the
+  prop's tag against the expected one; that constant is materialized before the
+  compare is emitted, so the compare does not read a yet-undefined operand (the
+  WASM backend emits instructions in order, so a use before its def is a bug).
+- The host verb call (`obj:verb(args)`, including `tell`) is a variadic call:
+  the four fixed arguments are named and the verb's own arguments are flagged
+  unnamed, so the backend marshals them through the varargs buffer the host's
+  `va_arg` reads. `host_stub.c`'s `__moo_verb_call` is variadic too, matching
+  `toy_host.c` and this call ABI.
+
+With these, the WASM lane runs the full corpus, including the toy-host object
+and room tests (`moo_toy_*`).
 
 ## Verb Dispatch at Runtime
 

@@ -69,8 +69,10 @@ __moo_obj_contents(const char *obj)
     return l;
 }
 
+/* Variadic to match toy_host and the moo verb-call ABI: a verb's arguments are
+   passed as varargs after the four fixed parameters.  The stub ignores them. */
 void
-__moo_verb_call(const char *obj, struct moo_str *verb, int argc, int typemask)
+__moo_verb_call(const char *obj, struct moo_str *verb, int argc, int typemask, ...)
 {
 }
 

@@ -6,6 +6,38 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.61.0
+
+#### Added
+- MooScript targets WebAssembly (`skj-mooc-wasm`), the last front end to do so.
+  With this, **every** front end (C, BASIC, Pascal, TinScheme, MooScript)
+  targets WebAssembly. The port reuses the shared WASM backend and follows the
+  object-plus-link model: the compiler emits a relocatable `.o`, and
+  `skj-ld-wasm` links the MooScript runtime (`str`, `list`, and a host) over the
+  synthesized WASI runtime. The new `check-mooc-wasm` lane runs the full corpus
+  under `wasmtime` (20 programs plus the compile-only `moo_room`), including the
+  toy-host object and room tests, and joins the `wasm` CI job. The motivating use
+  case is a browser-based MooScript playground.
+
+#### Fixed
+- The low-level `write(fd, buf, len)` builtin now passes a string's data pointer
+  as the buffer. A MooScript `str` is a `moo_str *` (`{len, data}`), and the raw
+  C `write` the builtin maps to takes a plain `char *`, so passing a string
+  literal wrote the header bytes instead of the text. Declared externs taking a
+  `str` still receive the `moo_str *` unchanged.
+- A `float` parameter was not marked float-class, so the WASM backend typed it
+  `i64` rather than `f64`. The soft-float stack backends ignore the class arrays,
+  so this only affected the WASM lane (`moo_floats`).
+- Void MooScript runtime helpers (`__moo_tofloat`, `__moo_verb_call`,
+  `__moo_prop_set`, `__moo_obj_move`, `__moo_obj_recycle`) were called as if they
+  returned `i32`, leaving the caller's `local.set` underflowing across the WASM
+  object boundary. They are now marked `call_void`.
+- The typed property-unbox lowering materialised its tag-check constant after the
+  compare that used it, a use-before-def the stack backends tolerate but WASM
+  rejects, so an unbox always failed. The constant is now emitted first. The verb
+  call to `__moo_verb_call` also now flows its arguments through the variadic WASM
+  ABI (the helper is variadic past its four fixed parameters).
+
 ### 0.60.1
 
 #### Fixed

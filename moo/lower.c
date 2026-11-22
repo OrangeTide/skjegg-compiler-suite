@@ -364,6 +364,25 @@ emit_bnz(int t, int lab)
     ins->label = lab;
 }
 
+/* Runtime helpers that return void (they act by side effect or through an
+   out-pointer).  A stack-ABI backend ignores a discarded call result, but the
+   WASM backend must match the callee's real signature across the object
+   boundary: a void callee called as if it returned i32 leaves the caller's
+   local.set with nothing on the stack.  So the call is marked call_void. */
+static int
+rtcall_is_void(const char *name)
+{
+    static const char *const voids[] = {
+        "__moo_tofloat", "__moo_verb_call", "__moo_prop_set",
+        "__moo_obj_move", "__moo_obj_recycle",
+    };
+    size_t i;
+    for (i = 0; i < sizeof(voids) / sizeof(voids[0]); i++)
+        if (strcmp(name, voids[i]) == 0)
+            return 1;
+    return 0;
+}
+
 static int
 emit_rtcall(const char *name, int argc, int *argv)
 {
@@ -378,6 +397,7 @@ emit_rtcall(const char *name, int argc, int *argv)
     ins->dst = new_temp();
     ins->sym = arena_strdup(lower_arena, name);
     ins->nargs = argc;
+    ins->call_void = rtcall_is_void(name);
     return ins->dst;
 }
 
@@ -475,7 +495,7 @@ static int
 emit_typed_unbox(struct val v, int target_type)
 {
     struct ir_insn *ins;
-    int tag, expected, lok, off, addr;
+    int tag, expected, expected_t, lok, off, addr;
 
     if (v.type != T_TPROP)
         return v.temp;
@@ -490,10 +510,14 @@ emit_typed_unbox(struct val v, int target_type)
     tag = ins->dst;
 
     lok = new_label();
+    expected_t = lower_const(expected);     /* materialize the operand first:
+       emitting the compare and only then lowering its operand would place the
+       constant's defining instruction after the compare that uses it, which the
+       WASM backend emits verbatim as a use-before-def (the compare reads 0). */
     ins = emit(IR_CMPEQ);
     ins->dst = new_temp();
     ins->a = tag;
-    ins->b = lower_const(expected);
+    ins->b = expected_t;
     emit_bnz(ins->dst, lok);
 
     {
@@ -1032,6 +1056,25 @@ lower_expr(struct node *n)
             };
         }
 
+        if (n->a->kind == N_NAME &&
+            strcmp(n->a->name, "write") == 0 && nargs == 3 &&
+            vargs[1].type == T_TSTR) {
+            /* write(fd, buf, len): the raw C extern takes a char*
+               buffer.  A moo str is a moo_str* {len,data}, so pass
+               its data pointer, not the header. */
+            int off = lower_const(4);
+            int addr;
+            ins = emit(IR_ADD);
+            ins->dst = new_temp();
+            ins->a = args[1];
+            ins->b = off;
+            addr = ins->dst;
+            ins = emit(IR_LW);
+            ins->dst = new_temp();
+            ins->a = addr;
+            args[1] = ins->dst;
+        }
+
         for (int i = 0; i < nargs; i++) {
             ins = emit(vargs[i].type == T_TFLOAT ?
                    IR_FARG : IR_ARG);
@@ -1240,7 +1283,30 @@ lower_expr(struct node *n)
             callargs[3] = lower_const(typemask);
             for (i = 0; i < argc; i++)
                 callargs[4 + i] = args[i];
-            emit_rtcall("__moo_verb_call", 4 + argc, callargs);
+
+            /* __moo_verb_call is variadic: the four fixed arguments (obj, verb,
+               argc, typemask) are named, the verb's own arguments are unnamed.
+               The stack backends pass them all the same way, but the WASM
+               backend marshals unnamed arguments through a varargs buffer that
+               the host's va_arg reads, so each one past the fixed four is
+               flagged a vararg and the call is flagged variadic.  The result is
+               discarded (the host returns void). */
+            {
+                struct ir_insn *vc;
+                for (i = 0; i < 4 + argc; i++) {
+                    vc = emit(IR_ARG);
+                    vc->a = callargs[i];
+                    vc->imm = i;
+                    if (i >= 4)
+                        vc->vararg = 1;
+                }
+                vc = emit(IR_CALL);
+                vc->dst = new_temp();
+                vc->sym = arena_strdup(lower_arena, "__moo_verb_call");
+                vc->nargs = 4 + argc;
+                vc->call_void = 1;
+                vc->call_variadic = 1;
+            }
         }
         return (struct val){ lower_const(0), T_TINT };
     }
@@ -2111,6 +2177,27 @@ lower_function(struct node *fn_ast)
         nparams++;
     }
     fn->nparams = nparams;
+
+    /* Thread float parameter classes to the backend.  A float parameter is a
+       double; the WASM backend types it f64 (and the register psABI selectors
+       pass it in a float register) from param_class.  The soft-float stack
+       backends (ColdFire) ignore these arrays, so setting them is harmless
+       there; moo simply never set them before it targeted WASM. */
+    {
+        int any_float = 0, pi;
+        struct node *p;
+        for (p = fn_ast->a; p; p = p->next)
+            if (p->type && p->type->kind == T_TFLOAT)
+                any_float = 1;
+        if (any_float && nparams > 0) {
+            fn->param_class = arena_alloc(lower_arena, nparams * sizeof(int));
+            fn->param_fw = arena_alloc(lower_arena, nparams * sizeof(signed char));
+            for (p = fn_ast->a, pi = 0; p; p = p->next, pi++) {
+                fn->param_class[pi] = (p->type && p->type->kind == T_TFLOAT);
+                fn->param_fw[pi] = 0;   /* a moo float is always a double */
+            }
+        }
+    }
 
     nd = count_defers_in(fn_ast->b);
     use_defer = (nd > 0);

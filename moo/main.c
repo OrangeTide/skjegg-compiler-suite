@@ -450,6 +450,11 @@ main(int argc, char **argv)
             out = stdout;
         }
 
+#ifdef CC_WASM
+        /* Match the other WASM drivers: WAT text by default, a complete binary
+           module for a .wasm output, a relocatable object for a .o output. */
+        wasm_set_output_format(outfile);
+#endif
         target_emit(out, prog);
 
         if (outfile)

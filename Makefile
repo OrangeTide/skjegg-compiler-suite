@@ -572,6 +572,20 @@ check-sc-wasm: build/skj-sc-wasm | build
 	 OUTDIR="$(CURDIR)/build/scheme-wasm" EXCLUDE="$(SC_WASM_EXCLUDE)" \
 	 sh tests/run-scheme-wasm-tests.sh
 
+## check-mooc-wasm: the MooScript corpus on WASM.  Each tests/moo_*.moo is
+## compiled by skj-mooc-wasm to an object, linked by skj-ld-wasm against the moo
+## runtime (str/list/host_stub, or toy_host+va for the moo_toy_* tests) over the
+## synthesized WASI runtime, and run under wasmtime; the exit code is the value
+## the main verb returns (default 0).  moo_room has no main verb and is
+## compile-only.  Skips cleanly when wasmtime is absent.
+MOO_WASM_EXCLUDE :=
+PHONY += check-mooc-wasm
+check-mooc-wasm: build/skj-mooc-wasm build/skj-cc-wasm build/skj-ld-wasm | build
+	@MOOCBIN="$(CURDIR)/build/skj-mooc-wasm" CCBIN="$(CURDIR)/build/skj-cc-wasm" \
+	 LD="$(CURDIR)/build/skj-ld-wasm" WASMTIME="$(WASMTIME)" \
+	 OUTDIR="$(CURDIR)/build/moo-wasm" EXCLUDE="$(MOO_WASM_EXCLUDE)" \
+	 sh tests/run-moo-wasm-tests.sh
+
 ## skjcc: the cross driver.  One command runs the per-target cc -> as -> ld
 ## pipeline and links the crt + runtime helpers from <libdir>/<target>/.  Lib
 ## dir resolution: the SKJ_CC_LIB env var wins; else, for a relocated install,
@@ -3288,7 +3302,7 @@ build/version.h: FORCE | build
 # bootstrap that starts from a kpcom seed reaches them without `make all` first.
 VERSIONED := $(TOOLS) build/skj-sc-x86-64 \
              build/skj-pc-x86-64 build/skj-pc-arm64 build/skj-cc-wasm build/skj-bc-wasm \
-             build/skj-pc-wasm build/skj-sc-wasm
+             build/skj-pc-wasm build/skj-sc-wasm build/skj-mooc-wasm
 $(VERSIONED): build/version.h
 
 ## Verify version.mk and the git tag agree before cutting a release.
@@ -5255,10 +5269,18 @@ audit-rv32-mutants: $(RV32_AUDIT_GUESTS)
 		-n $(MUTANTS) -m $(MUTANT_RIG)
 
 ## MooScript compiler
-MOO_SRC := moo/lex.c moo/parse.c moo/typecheck.c moo/lower.c moo/main.c $(IR_SRC) $(BE_CF)
+MOO_FE       := moo/lex.c moo/parse.c moo/typecheck.c moo/lower.c moo/main.c
+MOO_SRC      := $(MOO_FE) $(IR_SRC) $(BE_CF)
+MOO_WASM_SRC := $(MOO_FE) $(IR_SRC) $(BE_WASM)
 
 build/skj-mooc: $(MOO_SRC) moo/moo.h ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Imoo -Iir -o $@ $(MOO_SRC)
+
+## MooScript to WebAssembly (the sixth backend, like skj-sc-wasm): the front end
+## emits only the generic 32-bit IR core, so it reuses $(BE_WASM) unchanged.  The
+## output format (WAT text / .wasm module / .o object) follows the -o extension.
+build/skj-mooc-wasm: $(MOO_WASM_SRC) moo/moo.h ir/ir.h ir/target.h | build
+	$(CC) $(CFLAGS) -DCC_WASM -Imoo -Iir -Ibackend -Iwasm -o $@ $(MOO_WASM_SRC)
 
 ## Excelsior compiler (reader + resolver + type checker + IR lowering,
 ## ColdFire backend). Lowering covers the integer / bool core so far.

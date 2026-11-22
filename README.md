@@ -91,13 +91,15 @@ that lane runs under a wasmtime built with `-W stack-switching=y`
 AArch64, MIPS, and WebAssembly.  It lowers the full C
 feature set and runs under a WASI runtime; the in-tree libc links there
 too, minus the coroutine and thread layer, which WASM cannot express
-without the Asyncify transform.  BASIC (`skj-bc-wasm`) and Pascal
-(`skj-pc-wasm`) target WebAssembly as well, each linking its runtime over the
-synthesized WASI runtime; only MooScript is still backend-specific (ColdFire).
-Pascal builds for ColdFire, x86-64, AArch64,
+without the Asyncify transform.  BASIC (`skj-bc-wasm`), Pascal
+(`skj-pc-wasm`), and MooScript (`skj-mooc-wasm`) target WebAssembly as well,
+each linking its runtime over the synthesized WASI runtime, so every front end
+now targets WebAssembly.  The MooScript WASM lane runs the full corpus,
+including the toy-host object and room tests.  Pascal builds for ColdFire, x86-64, AArch64,
 MIPS, and WebAssembly, and its Kobold dialect (via `skj-kpc` and the Kobold
 JIT) also targets RISC-V.  The Pascal WASM lane runs the integer corpus; reals
-wait on a freestanding float formatter.  MooScript is ColdFire only.  The genuine 32-bit ISAs
+wait on a freestanding float formatter.  MooScript otherwise builds for
+ColdFire.  The genuine 32-bit ISAs
 (ColdFire, RISC-V RV32, MIPS) are ILP32; x86-64 and AArch64 are LP64,
 the pointer-width axis living in `ir/target.h`.
 
