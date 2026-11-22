@@ -175,6 +175,13 @@ main(int argc, char **argv)
             out = stdout;
         }
 
+#ifdef CC_WASM
+        /* The WASM backend emits WAT text by default, a complete binary module
+           for a .wasm output, and a relocatable object for a .o output.  The
+           format rides a backend flag, matching cc/main.c. */
+        wasm_set_output_format(outfile);
+#endif
+
         target_emit(out, prog);
 
         if (outfile)

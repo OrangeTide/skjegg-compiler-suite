@@ -271,6 +271,10 @@ static int lambda_serial;
 static int lower_expr(val_t expr, int tail);
 static int closure_fn(int t_closure);
 static int emit_closure(int fn_temp, int *free_vals, int nfree);
+#ifdef CC_WASM
+static void find_free(val_t expr, val_t params, char **fv, int *nfv, int max_fv);
+static struct gc_heap *lower_heap;
+#endif
 
 /****************************************************************
  * Boolean conversion: IR cmp result (0/1) -> Scheme boolean
@@ -725,10 +729,112 @@ lower_call(val_t form, int tail)
     }
 }
 
+#ifdef CC_WASM
+/* Lift a reset body into its own function, a thunk the continuation runs.  The
+   WasmFX lowering needs a bare funcref for cont.new, so the body must capture no
+   locals (find_free turns up nothing but globals).  Returns the thunk's name;
+   the lifted list compiles it in pass 4 like any lambda. */
+static const char *
+lift_reset_thunk(val_t body_expr)
+{
+    static int thunk_serial;
+    struct lifted *l;
+    char *fv[16];
+    int nfv = 0;
+    val_t params, body;
+
+    /* (lambda (__resetarg) body_expr): the dummy param is the continuation's
+       first-resume value, which a reset body ignores. */
+    params = gc_cons(lower_heap, gc_symbol(lower_heap, "__resetarg"), VAL_NIL);
+    body = gc_cons(lower_heap, body_expr, VAL_NIL);
+
+    find_free(body, params, fv, &nfv, 16);
+    if (nfv > 0)
+        die("lower: a reset body that captures a local is not supported on WASM yet");
+
+    l = arena_alloc(lower_arena, sizeof(*l));
+    snprintf(l->name, sizeof(l->name), "__reset_thunk_%d", thunk_serial++);
+    l->params = params;
+    l->body = body;
+    l->free_vars = NULL;
+    l->nfree = 0;
+    l->next = NULL;
+    if (!lifted_head)
+        lifted_head = l;
+    else
+        lifted_tail->next = l;
+    lifted_tail = l;
+    return arena_strdup(lower_arena, l->name);
+}
+#endif
+
 static int
 lower_reset(val_t args)
 {
     struct ir_insn *ins;
+#ifdef CC_WASM
+    /* WasmFX lowering: run the lifted body thunk as a continuation under a
+       $shift handler.  IR_MARK yields 0 (body returned, its value stored to the
+       shadow slot) or the nonzero captured-continuation index; the handler is
+       called with that index on the shift path.  See the backend and
+       doc/internals/wasm-continuations.md. */
+    const char *thunk;
+    int vslot, tidx, tresult, lelse, lend;
+
+    if (IS_NIL(args) || IS_NIL(gc_cdr(args)))
+        die("lower: (reset body handler) requires two arguments");
+
+    thunk = lift_reset_thunk(gc_car(args));
+    vslot = alloc_slot(VWORD);          /* the body's normal-return value */
+    tresult = new_temp();
+    lelse = new_label();
+    lend = new_label();
+
+    ins = emit(IR_MARK);
+    ins->dst = new_temp();
+    ins->sym = arena_strdup(lower_arena, thunk);
+    ins->slot = vslot;
+    tidx = ins->dst;
+
+    ins = emit(IR_BNZ);
+    ins->a = tidx;
+    ins->label = lelse;
+
+    /* normal: the body returned without a shift; read its value from the slot */
+    ins = emit(IR_LDL);
+    ins->dst = tresult;
+    ins->slot = vslot;
+    ins = emit(IR_JMP);
+    ins->label = lend;
+
+    /* shift fired: call the handler with the continuation index */
+    ins = emit(IR_LABEL);
+    ins->label = lelse;
+    {
+        int tf, t_fn, tcall;
+
+        tf = lower_expr(gc_car(gc_cdr(args)), 0);
+        t_fn = closure_fn(tf);
+        ins = emit(IR_ARG); ins->a = tf;   ins->imm = 0;
+        ins = emit(IR_ARG); ins->a = tidx; ins->imm = 1;
+        ins = emit(IR_CALLI);
+        ins->dst = new_temp();
+        ins->a = t_fn;
+        ins->nargs = 2;
+        tcall = ins->dst;
+        ins = emit(IR_MOV);
+        ins->dst = tresult;
+        ins->a = tcall;
+    }
+
+    ins = emit(IR_LABEL);
+    ins->label = lend;
+
+    ins = emit(IR_CONT_UNWIND);
+    ins->slot = vslot;
+
+    return tresult;
+#else
     val_t body_expr, handler_expr;
     int slot, tbuf, tbody, lelse, lend;
     int tresult;
@@ -800,6 +906,7 @@ lower_reset(val_t args)
     ins->slot = slot;
 
     return tresult;
+#endif
 }
 
 static int
@@ -826,7 +933,15 @@ lower_resume(val_t args)
     ins = emit(IR_RESUME);
     ins->a = tbuf;
     ins->b = tval;
+#ifdef CC_WASM
+    /* On WASM a resume is a structured call that returns the continuation's
+       completion value, so it has a usable result.  (Natively resume is a
+       non-local transfer that never returns here, so the result is unused.) */
+    ins->dst = new_temp();
+    return ins->dst;
+#else
     return new_temp();
+#endif
 }
 
 /****************************************************************
@@ -1510,6 +1625,9 @@ scm_lower(struct arena *a, struct gc_heap *h, val_t program)
     val_t cur;
 
     lower_arena = a;
+#ifdef CC_WASM
+    lower_heap = h;
+#endif
     prog = arena_zalloc(lower_arena, sizeof(*prog));
     cur_prog = prog;
     ngsyms = 0;

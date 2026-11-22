@@ -6,6 +6,12 @@ and dynamic arrays, and the common procedural extensions, but without the Delphi
 and Object Pascal object model (no classes, objects, interfaces, or RTTI). This
 document records what is and is not supported.
 
+Per-backend variants cover ColdFire, x86-64 (`skj-pc-x86-64`), AArch64
+(`skj-pc-arm64`), MIPS, and WebAssembly (`skj-pc-wasm`, which emits a WASI
+module or a relocatable WASM object and links with `skj-ld-wasm`). The WASM
+lane runs the integer corpus; real-number output waits on a freestanding float
+formatter in the runtime.
+
 ## Types
 
 | Type | Status |

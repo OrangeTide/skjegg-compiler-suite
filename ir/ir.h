@@ -236,6 +236,16 @@ enum ir_op {
        spills it at 8 bytes.  Appended last so existing opcode numbers are
        undisturbed. */
     IR_MOV64,
+
+    /* Unconditional fault: abort execution with no value and no successor, a
+       block terminator.  A front end emits it for a language-level run-time
+       error that must stop the program (a failed Pascal {$R+} range or {$Q+}
+       overflow check).  On a hardware target a fault is normally an exit with
+       the 128+SIGABRT code, so only the WASM backend lowers IR_TRAP, to the
+       `unreachable` instruction (wasmtime reports that trap as exit 134, the
+       same code); the stack backends keep using an explicit exit call.
+       Appended last so existing opcode numbers are undisturbed. */
+    IR_TRAP,
 };
 
 /****************************************************************
@@ -442,6 +452,12 @@ void regalloc(struct ir_func *fn);
  ****************************************************************/
 
 void target_emit(FILE *out, struct ir_program *prog);
+
+/* WASM backend only: pick the output format from the -o path's extension
+   (.wasm binary module, .o relocatable object, else WAT text).  A driver built
+   for the WASM target calls this before target_emit instead of setting the
+   backend's format flag itself, so the extension rule lives in one place. */
+void wasm_set_output_format(const char *outpath);
 
 /* The overflow-trap policy of an AOT target_emit.  0 (the default) is the hardware
    policy the C compiler wants: a divide relies on the CPU fault and a checked

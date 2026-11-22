@@ -3,7 +3,10 @@
 Skjegg's BASIC is a fully structured BASIC dialect compiled statically to native
 code through the shared IR, the same path the other front ends take (`lex.c`,
 `parse.c`, `lower.c`, `main.c`). The compiler is `skj-bc`; source files use the
-`.bas` extension.
+`.bas` extension. Per-backend variants cover the native targets (`skj-bc-rv`,
+`skj-bc-mips`, `skj-bc-x86-64`, `skj-bc-arm64`) and WebAssembly (`skj-bc-wasm`,
+which emits a WASI module or a relocatable WASM object and links with
+`skj-ld-wasm`).
 
 The language is imported from BASIDE (a structured-BASIC dialect aimed at simple
 games). Skjegg takes the core language only: the four value types, declarations,

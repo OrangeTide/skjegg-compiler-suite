@@ -340,8 +340,11 @@ and reaching the other front ends, needs more than code generation:
   registers and swaps the stack pointer), and `libc/threads.c` is a cooperative
   scheduler over it. WASM MVP cannot express this: the call stack is not in
   linear memory and cannot be switched. There is no WASI import for it, so it is
-  not a syscall seam to synthesize; it needs the Asyncify post-link transform (or
-  the stack-switching proposal, unshipped in stable runtimes). Deferred.
+  not a syscall seam to synthesize; it needs the stack-switching proposal (which
+  the pinned wasmtime now runs behind `-W stack-switching=y`) or the Asyncify
+  post-link transform. The TinScheme `shift`/`reset` continuations take the
+  stack-switching route; see `wasm-continuations.md`. The libc coroutine and
+  thread layer could follow the same path but is still deferred.
 - **Variadic calls.** A WASM function signature is fixed, so a variadic call
   cannot pass a varying operand list. The backend uses the fixed-plus-buffer
   convention: a variadic function takes one hidden trailing `i32` parameter, the

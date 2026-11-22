@@ -35,7 +35,7 @@ Binutils-free assemblers, linkers, and archive tool:
 | `skj-as-mips`, `skj-ld-mips` | MIPS I assembler + linker (ELF and PlayStation PS-EXE) | Working |
 | `skj-as-x86-64`, `skj-ld-x86-64` | x86-64 assembler + linker (ELF64)  | Working |
 | `skj-as-aarch64`, `skj-ld-aarch64` | AArch64 assembler + linker (ELF64 and Mach-O) | Working |
-| `skj-ld-wasm`            | WebAssembly object linker (`skj-cc-wasm` emits the objects; links a WASI module) | Working |
+| `skj-ld-wasm`            | WebAssembly object linker (the WASM compilers emit the objects; links a WASI module) | Working |
 | `skj-ar`                 | `ar(1)` archive tool (any ELF target)     | Working |
 
 Runner, sandbox, and debugging:
@@ -82,15 +82,22 @@ backend means writing a regalloc + emitter pair and a
 `runtime/start_*.S`.
 
 Not every front end targets every backend.  TinScheme runs on
-every native backend.  The C compiler runs on ColdFire, RISC-V, x86-64,
-AArch64, MIPS, and WebAssembly (the WASM target currently has the C front
-end only; the other front ends are backend-agnostic and need only their
-runtime wired up.  It lowers the full C
+every native backend and on WebAssembly (`skj-sc-wasm`), the full corpus
+including the delimited-continuation tests.  Where the native backends
+implement `shift`/`reset` by copying a native stack segment, which WASM cannot
+express, the WASM lane lowers them to the WasmFX stack-switching proposal, so
+that lane runs under a wasmtime built with `-W stack-switching=y`
+(see `doc/internals/wasm-continuations.md`).  The C compiler runs on ColdFire, RISC-V, x86-64,
+AArch64, MIPS, and WebAssembly.  It lowers the full C
 feature set and runs under a WASI runtime; the in-tree libc links there
 too, minus the coroutine and thread layer, which WASM cannot express
-without the Asyncify transform).  Pascal builds for ColdFire, x86-64, AArch64, and
-MIPS, and its Kobold dialect (via `skj-kpc` and the Kobold JIT) also
-targets RISC-V.  MooScript is ColdFire only.  The genuine 32-bit ISAs
+without the Asyncify transform.  BASIC (`skj-bc-wasm`) and Pascal
+(`skj-pc-wasm`) target WebAssembly as well, each linking its runtime over the
+synthesized WASI runtime; only MooScript is still backend-specific (ColdFire).
+Pascal builds for ColdFire, x86-64, AArch64,
+MIPS, and WebAssembly, and its Kobold dialect (via `skj-kpc` and the Kobold
+JIT) also targets RISC-V.  The Pascal WASM lane runs the integer corpus; reals
+wait on a freestanding float formatter.  MooScript is ColdFire only.  The genuine 32-bit ISAs
 (ColdFire, RISC-V RV32, MIPS) are ILP32; x86-64 and AArch64 are LP64,
 the pointer-width axis living in `ir/target.h`.
 
@@ -229,6 +236,8 @@ make check-cpp    # C preprocessor tests
 make check-libc   # C standard library tests across every target
 make check-jit    # in-process JIT (skj-jit) tests
 make check-cc-wasm # C compiler corpus on WebAssembly, run under wasmtime
+make check-bc-wasm # BASIC corpus on WebAssembly, run under wasmtime
+make check-pc-wasm # Pascal corpus on WebAssembly, run under wasmtime
 make check-emu    # skj-run emulator and sandbox tests
 make check-rvas   # RV32 assembler/linker golden-master vs GNU as
 make check-all    # the whole qemu matrix across every backend

@@ -1232,6 +1232,33 @@ emit_call(const char *name, int *args, int nargs)
     ins->dst = new_temp();
     ins->sym = arena_strdup(lower_arena,name);
     ins->nargs = nargs;
+    /* emit_call is the void/discarded call: a procedure, exit/halt, or a void
+       runtime helper (the write and set and string-release seams), including the
+       void call that delivers a compound function result through its sret
+       pointer.  The dst temp is never read.  Mark the call void so a strictly
+       typed backend (WASM) infers a void signature for an external helper rather
+       than an i32-returning import that would clash with its void definition in
+       pascal_rt.o.  On register backends the flag only drops an unused result. */
+    ins->call_void = 1;
+}
+
+/* Emit a Pascal run-time fault: a failed {$R+} range check or {$Q+} overflow
+   check that must stop the program.  A real Pascal runtime raises SIGABRT, so
+   on a hardware target this exits with 128+SIGABRT (134).  WASI's proc_exit
+   rejects a code >=126, so on WASM the fault is a genuine WASM trap instead
+   (IR_TRAP lowers to `unreachable`), which wasmtime reports as exit 134, the
+   same code.  IR_TRAP is a block terminator; the caller places a label after
+   it for the non-faulting path to continue from. */
+static void
+emit_rt_abort(void)
+{
+#ifdef CC_WASM
+    emit(IR_TRAP);
+#else
+    int abort_args[1];
+    abort_args[0] = lower_const(134);
+    emit_call("exit", abort_args, 1);
+#endif
 }
 
 static int
@@ -1759,7 +1786,7 @@ lower_lvalue_addr(struct node *n)
         if (n->op) {
             int lo = lower_const(td->lo_bound);
             int hi = lower_const(td->hi_bound);
-            int cmp, labort, lok, abort_args[1];
+            int cmp, labort, lok;
             labort = new_label();
             lok = new_label();
             cmp = new_temp();
@@ -1776,8 +1803,7 @@ lower_lvalue_addr(struct node *n)
             emit_bnz(cmp, labort);
             emit_jmp(lok);
             emit_label(labort);
-            abort_args[0] = lower_const(134);
-            emit_call("exit", abort_args, 1);
+            emit_rt_abort();
             emit_label(lok);
         }
         if (td->lo_bound != 0) {
@@ -3003,7 +3029,7 @@ lower_expr(struct node *n)
         if (n->ival && (op == IR_ADD || op == IR_SUB ||
                         op == IR_MUL)) {
             int result, t1, t2, t3, zero, cmp;
-            int labort, lok, abort_args[1];
+            int labort, lok;
             result = ins->dst;
             labort = new_label();
             lok = new_label();
@@ -3064,8 +3090,7 @@ lower_expr(struct node *n)
                 emit_label(lnomul);
                 emit_jmp(lok);
                 emit_label(labort);
-                abort_args[0] = lower_const(134);
-                emit_call("exit", abort_args, 1);
+                emit_rt_abort();
                 emit_label(lok);
                 return result;
             }
@@ -3078,8 +3103,7 @@ lower_expr(struct node *n)
             emit_bnz(cmp, labort);
             emit_jmp(lok);
             emit_label(labort);
-            abort_args[0] = lower_const(134);
-            emit_call("exit", abort_args, 1);
+            emit_rt_abort();
             emit_label(lok);
             return result;
         }
@@ -4460,7 +4484,11 @@ lower_call(struct node *n)
         fargs[0] = addr;
         fargs[1] = val;
         fargs[2] = count;
-        emit_call("memset", fargs, 3);
+        /* memset returns its destination (void *), so it must be called as a
+           value-returning function and the result discarded, not as a void
+           call: a strictly typed backend (WASM) would otherwise import it as
+           void and clash with its i32-returning definition in pascal_rt.o. */
+        emit_call_ret("memset", fargs, 3);
         return 0;
     }
 
@@ -4506,7 +4534,9 @@ lower_call(struct node *n)
         fargs[0] = dst;
         fargs[1] = src;
         fargs[2] = count;
-        emit_call("memmove", fargs, 3);
+        /* memmove returns its destination (void *); discard the value result
+           rather than emitting a void call (see fillchar/memset above). */
+        emit_call_ret("memmove", fargs, 3);
         return 0;
     }
 

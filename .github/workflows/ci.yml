@@ -316,12 +316,14 @@ jobs:
       - name: Conformance suite
         run: make check-archtest ARCHTEST="$GITHUB_WORKSPACE/riscv-arch-test/riscv-test-suite"
 
-  # The WASM backend end to end: the six WASM lanes, which never ran in CI.
+  # The WASM backend end to end: the eight WASM lanes, which never ran in CI.
   # check-wasm compiles the self-test and diffs the binary module against
   # wat2wasm; check-wasm-obj links a skj object with wasm-ld; check-wasm-ld and
   # check-wasm-exec drive the in-tree skj-ld-wasm; check-libc-wasm links the
   # WASI libc and runs the stdin/stdout stream tests; check-cc-wasm runs the C
-  # compiler corpus.  None need a cross toolchain or qemu, only the three WASM
+  # compiler corpus, check-bc-wasm the BASIC corpus, check-pc-wasm the Pascal
+  # corpus and check-sc-wasm the TinScheme corpus.  None need a cross toolchain
+  # or qemu, only the three WASM
   # tools: wat2wasm (apt wabt), wasm-ld (apt lld), and wasmtime (pinned release
   # download, since it is not an apt package).  The lanes skip cleanly when a
   # tool is absent, so an explicit presence check turns a broken install into a
@@ -356,4 +358,5 @@ jobs:
       - name: WASM backend lanes
         run: |
           make check-wasm check-wasm-obj check-wasm-ld check-wasm-exec \
-               check-libc-wasm check-cc-wasm
+               check-libc-wasm check-cc-wasm check-bc-wasm check-pc-wasm \
+               check-sc-wasm

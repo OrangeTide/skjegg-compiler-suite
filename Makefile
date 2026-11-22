@@ -522,6 +522,56 @@ check-cc-wasm: build/skj-cc-wasm build/skj-ld-wasm | build
 	 WASMTIME="$(WASMTIME)" OUTDIR="$(CURDIR)/build/cc-wasm" \
 	 EXCLUDE="$(CC_WASM_EXCLUDE)" sh tests/run-cc-wasm-tests.sh
 
+## check-bc-wasm: the BASIC corpus on WASM.  Each tests/basic_t*.bas is compiled
+## by skj-bc-wasm to a relocatable object, linked by skj-ld-wasm against the
+## BASIC runtime (basic_rt.o) and the bump arena (arena_wasm.o, the WASM stand-in
+## for the per-crt arena the native targets carry), run under wasmtime, and its
+## stdout compared against the .expected fixture (the same corpus the native
+## per-backend BASIC lanes run).  WAIT spins on the monotonic clock here, since
+## WASI preview1 has no simple relative sleep, so TIME and WAIT stay consistent.
+## Skips cleanly when wasmtime is absent.
+PHONY += check-bc-wasm
+check-bc-wasm: build/skj-bc-wasm build/skj-cc-wasm build/skj-ld-wasm | build
+	@BCBIN="$(CURDIR)/build/skj-bc-wasm" CCBIN="$(CURDIR)/build/skj-cc-wasm" \
+	 LD="$(CURDIR)/build/skj-ld-wasm" WASMTIME="$(WASMTIME)" \
+	 OUTDIR="$(CURDIR)/build/basic-wasm" sh tests/run-basic-wasm-tests.sh
+
+## check-pc-wasm: the Pascal corpus on WASM.  Each tests/pascal_t*.pas is
+## compiled by skj-pc-wasm to a relocatable object, linked by skj-ld-wasm against
+## the freestanding Pascal runtime (pascal_rt.o, built by skj-cc-wasm; its
+## managed-string arena is the runtime's own static bump arena, so no separate
+## arena object is needed), run under wasmtime, and its stdout and exit code
+## compared against the fixtures.  The real-number and host-I/O tests are skipped
+## as on ColdFire (the freestanding float formatter is a placeholder).  A failed
+## {$R+} range or {$Q+} overflow check lowers to a WASM trap, which wasmtime
+## reports as exit 134, matching the native SIGABRT code, so t071/t073 run.
+## Skips cleanly when wasmtime is absent.
+PC_WASM_EXCLUDE :=
+PHONY += check-pc-wasm
+check-pc-wasm: build/skj-pc-wasm build/skj-cc-wasm build/skj-ld-wasm | build
+	@PCBIN="$(CURDIR)/build/skj-pc-wasm" CCBIN="$(CURDIR)/build/skj-cc-wasm" \
+	 LD="$(CURDIR)/build/skj-ld-wasm" WASMTIME="$(WASMTIME)" \
+	 OUTDIR="$(CURDIR)/build/pascal-wasm" EXCLUDE="$(PC_WASM_EXCLUDE)" \
+	 sh tests/run-pascal-wasm-tests.sh
+
+## check-sc-wasm: the TinScheme corpus on WASM.  Each tests/scm_*.scm is compiled
+## by skj-sc-wasm to a complete module (the WASM backend synthesizes the WASI
+## runtime, so there is no separate link step).  The lane invokes the exported
+## main and checks its returned value, the untagged top-level result, against
+## .exitcode (default 0); see the runner header for why it does not use the WASI
+## exit code.  Delimited continuations (shift/reset) lower to the WasmFX
+## stack-switching proposal (doc/internals/wasm-continuations.md), run under
+## wasmtime with -W stack-switching=y.  scm_shift (one reset/shift/resume) and the
+## looping reclamation tests (scm_reset_heap, scm_reset_reclaim) all pass; a reset
+## extent reclaims the $conts table to its mark-time top at IR_CONT_UNWIND, so a
+## program that resets in a loop stays bounded.  Skips cleanly when wasmtime is absent.
+SC_WASM_EXCLUDE :=
+PHONY += check-sc-wasm
+check-sc-wasm: build/skj-sc-wasm | build
+	@SCBIN="$(CURDIR)/build/skj-sc-wasm" WASMTIME="$(WASMTIME)" \
+	 OUTDIR="$(CURDIR)/build/scheme-wasm" EXCLUDE="$(SC_WASM_EXCLUDE)" \
+	 sh tests/run-scheme-wasm-tests.sh
+
 ## skjcc: the cross driver.  One command runs the per-target cc -> as -> ld
 ## pipeline and links the crt + runtime helpers from <libdir>/<target>/.  Lib
 ## dir resolution: the SKJ_CC_LIB env var wins; else, for a relocated install,
@@ -3237,7 +3287,8 @@ build/version.h: FORCE | build
 # build/skj-kpc-rv, -cf, and -arm64 are built from build/skj-pc-x86-64, so a
 # bootstrap that starts from a kpcom seed reaches them without `make all` first.
 VERSIONED := $(TOOLS) build/skj-sc-x86-64 \
-             build/skj-pc-x86-64 build/skj-pc-arm64 build/skj-cc-wasm
+             build/skj-pc-x86-64 build/skj-pc-arm64 build/skj-cc-wasm build/skj-bc-wasm \
+             build/skj-pc-wasm build/skj-sc-wasm
 $(VERSIONED): build/version.h
 
 ## Verify version.mk and the git tag agree before cutting a release.
@@ -4720,8 +4771,13 @@ sc_src_rv     := $(SC_FE) $(BE_RV)
 sc_src_mips   := $(SC_FE) $(BE_MIPS)
 sc_src_arm64  := $(SC_FE) $(BE_A64)
 sc_src_x86-64 := $(SC_FE) $(BE_X64)
+## The WebAssembly TinScheme compiler (skj-sc-wasm).  Like the other WASM front
+## ends it links the WASM backend (BE_WASM); CC_WASM makes target.h derive ILP32
+## little-endian.
+sc_src_wasm   := $(SC_FE) $(BE_WASM)
 sc_def_arm64  := -DSKJ_LP64=1
 sc_def_x86-64 := -DX86_BITS=64 -DSKJ_LP64=1
+sc_def_wasm   := -DCC_WASM -Ibackend -Iwasm
 
 build/skj-sc: $(SC_SRC) scheme/scheme.h scheme/gc.h ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -Ischeme -Iir -o $@ $(SC_SRC)
@@ -5260,6 +5316,7 @@ BASIC_MIPS_SRC := $(BASIC_FE) $(BE_MIPS)
 ## builds already do. target.h derives SKJ_LP64 from X86_BITS==64 / CC_ARM64.
 BASIC_X64_SRC  := $(BASIC_FE) $(BE_X64_SEL)
 BASIC_A64_SRC  := $(BASIC_FE) $(BE_A64_SEL)
+BASIC_WASM_SRC := $(BASIC_FE) $(BE_WASM)
 
 build/skj-bc: $(BASIC_SRC) basic/basic.h ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -DSKJ_BIG_ENDIAN=1 -Ibasic -Iir -o $@ $(BASIC_SRC)
@@ -5286,6 +5343,16 @@ build/skj-bc-x86-64: $(BASIC_X64_SRC) basic/basic.h ir/ir.h ir/target.h | build
 build/skj-bc-arm64: $(BASIC_A64_SRC) basic/basic.h ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) -DCC_ARM64 -DSKJ_LP64=1 -Ibasic -Iir -Ibackend -o $@ $(BASIC_A64_SRC)
 
+## The WebAssembly BASIC compiler (skj-bc-wasm).  The front end is backend-
+## agnostic; this links the WASM backend (BE_WASM) in place of a register
+## emitter.  CC_WASM makes target.h derive ILP32 little-endian, the WASM data
+## model.  A BASIC program emits a relocatable WASM object that skj-ld-wasm links
+## with basic_rt.c (compiled by skj-cc-wasm) over the synthesized WASI runtime;
+## basic_rt.c is freestanding C that writes through the `write` seam, so no arch
+## syscall stub is needed.
+build/skj-bc-wasm: $(BASIC_WASM_SRC) basic/basic.h ir/ir.h ir/target.h | build
+	$(CC) $(CFLAGS) -DCC_WASM -Ibasic -Iir -Ibackend -Iwasm -o $@ $(BASIC_WASM_SRC)
+
 ## ---- Native host Pascal compilers (x86-64, aarch64) ----
 ## The front end is backend-agnostic; each host target is a separate binary
 ## linked with that target's shared selector, mirroring skj-cc.  -DSKJ_LP64
@@ -5301,6 +5368,13 @@ pc_flags_arm64  := -DSKJ_LP64=1 -Ipascal -Iir -Ibackend
 ## ILP32, the counterpart of skj-cc-mips-sf. It shares the MIPS backend.
 pc_src_mips   := $(PC_FE) $(IR_SRC) $(BE_MIPS)
 pc_flags_mips := -DMIPS_SOFTFLOAT -Ipascal -Iir -Ibackend
+## The WebAssembly Pascal compiler (skj-pc-wasm).  Like the other WASM front
+## ends it links the WASM backend (BE_WASM); CC_WASM makes target.h derive ILP32
+## little-endian.  Pascal's aggregate ABI is already the MEMORY-class form WASM
+## needs (hidden sret pointer, value records passed by address), so no ABI work
+## is target-specific here.
+pc_src_wasm   := $(PC_FE) $(IR_SRC) $(BE_WASM)
+pc_flags_wasm := -DCC_WASM -Ipascal -Iir -Ibackend -Iwasm
 
 build/skj-pc-%: $$(pc_src_$$*) pascal/pascal.h ir/ir.h ir/target.h $(wildcard backend/*.h) | build
 	$(CC) $(CFLAGS) $(pc_flags_$*) -o $@ $(pc_src_$*)

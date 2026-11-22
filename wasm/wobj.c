@@ -102,6 +102,11 @@ parse_imports(struct wobj *o, struct cur *c)
             o->funcimport_name[o->nfuncimports++] = field;
             break;
         case 0x01:                      /* table */
+            /* the only table an object imports is env.__indirect_function_table,
+               present exactly when the object has a call_indirect.  The linker
+               must emit table 0 for that call_indirect even if no function
+               address is taken (no elem slots), so record the import. */
+            o->imports_table = 1;
             rd_byte(c);                 /* elem type */
             skip_limits(c);
             free(field);

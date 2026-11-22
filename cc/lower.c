@@ -2859,6 +2859,15 @@ lower_expr(struct cc_node *n)
             val = widen_to_i64(val, lvalue_type(n->b));
         else if (is_bool_type(t))
             val = to_bool(val, lvalue_type(n->b));
+        else if (is_float_type(t) && !is_aggregate(t))
+            /* An int (or narrower float) assigned through a non-local float
+               lvalue, e.g. *p = 5, arr[i] = 5, s.f = 5, or a static float:
+               convert to the target float type.  The local-variable fast path
+               above already does this; emit_store assumes a float value, so the
+               conversion must happen here too.  Without it the backend stores a
+               raw integer as a float (a stale SSE register on x86, an invalid
+               i32-into-f64 store on WASM). */
+            val = to_float(val, lvalue_type(n->b), t);
         emit_store(addr, val, t);
         return val;
     }

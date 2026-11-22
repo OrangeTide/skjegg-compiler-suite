@@ -1528,6 +1528,12 @@ emit_call(const char *name, int *args, int nargs)
     ins->dst = new_temp();
     ins->sym = arena_strdup(lower_arena, name);
     ins->nargs = nargs;
+    /* These are statement-position calls (PRINT seams, PROC calls, exit): the
+       callee returns no value and the dst temp is never read.  Marking the call
+       void keeps a strictly typed backend (WASM) from declaring the seam as a
+       value-returning import, which would clash with its void definition in the
+       runtime.  On register backends the flag only drops an unused result. */
+    ins->call_void = 1;
 }
 
 /* Lower a PROC or FN call. Each argument is coerced to its parameter's type

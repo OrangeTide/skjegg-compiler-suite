@@ -91,6 +91,12 @@ main(int argc, char **argv)
     } else {
         out = stdout;
     }
+#ifdef CC_WASM
+    /* The WASM backend emits WAT text by default, a complete binary module for a
+       .wasm output, and a relocatable object for a .o output, matching the other
+       WASM drivers. */
+    wasm_set_output_format(outpath);
+#endif
     target_emit(out, prog);
     if (out != stdout)
         fclose(out);

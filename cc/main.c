@@ -249,16 +249,7 @@ main(int argc, char **argv)
     /* The WASM backend emits WAT text by default, a complete binary module for a
        .wasm output, and a relocatable object for a .o output.  The format rides
        a backend flag rather than a wider target_emit signature. */
-    {
-        extern int wasm_output_binary;
-        const char *dot = outpath ? strrchr(outpath, '.') : NULL;
-        if (dot && strcmp(dot, ".wasm") == 0)
-            wasm_output_binary = 1;
-        else if (dot && strcmp(dot, ".o") == 0)
-            wasm_output_binary = 2;
-        else
-            wasm_output_binary = 0;
-    }
+    wasm_set_output_format(outpath);
 #endif
     target_emit(out, prog);
     if (out != stdout)

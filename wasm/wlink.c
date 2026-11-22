@@ -711,15 +711,25 @@ wlink(struct wobj **objs, int nobj, const char **exports, int nexports,
     wbuf_section(&mod, 3, &sec);
     wbuf_free(&sec);
 
-    /* Table (4): the indirect function table, sized to hold every slot */
-    if (g_ntslots > 0) {
-        wbuf_init(&sec);
-        wbuf_uleb(&sec, 1);             /* one table */
-        wbuf_byte(&sec, 0x70);          /* funcref */
-        wbuf_byte(&sec, 0x00);          /* limits: min only */
-        wbuf_uleb(&sec, (uint64_t)(g_ntslots + 1));
-        wbuf_section(&mod, 4, &sec);
-        wbuf_free(&sec);
+    /* Table (4): the indirect function table, sized to hold every slot (slot 0
+       is the reserved null entry).  Emit it when a function address is taken
+       (g_ntslots > 0) or when any object merely contains a call_indirect: that
+       instruction references table 0, so table 0 must exist even with no slots
+       to place, e.g. a dead-but-linked helper like __pascal_arr_release. */
+    {
+        int need_table = g_ntslots > 0;
+        for (o = 0; o < nobj && !need_table; o++)
+            if (objs[o]->imports_table)
+                need_table = 1;
+        if (need_table) {
+            wbuf_init(&sec);
+            wbuf_uleb(&sec, 1);             /* one table */
+            wbuf_byte(&sec, 0x70);          /* funcref */
+            wbuf_byte(&sec, 0x00);          /* limits: min only */
+            wbuf_uleb(&sec, (uint64_t)(g_ntslots + 1));
+            wbuf_section(&mod, 4, &sec);
+            wbuf_free(&sec);
+        }
     }
 
     /* Memory (5) */

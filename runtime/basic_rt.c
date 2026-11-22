@@ -1713,6 +1713,22 @@ __basic_tand_bits(double deg)
 
 extern int getrandom(void *buf, int len, unsigned flags);
 
+#if defined(__skj_wasm__)
+/* WASM has no syscall-seam crt: getrandom, the clock, and WAIT reach the host
+   through WASI preview1 imports instead.  The backend turns an external named
+   __wasi_<field> into an import of wasi_snapshot_preview1.<field>, and
+   skj-ld-wasm carries it through to a real import.  getrandom is defined here
+   over random_get; the clock and WAIT branches are inline below. */
+extern int __wasi_random_get(void *buf, int len);
+
+int
+getrandom(void *buf, int len, unsigned flags)
+{
+    (void)flags;
+    return __wasi_random_get(buf, len) == 0 ? len : -1;
+}
+#endif
+
 struct brt_timespec {
     int sec;
     int nsec;
@@ -1761,6 +1777,18 @@ basic_clock_gettime64(int clk_id, struct brt_timespec64 *ts)
        timespec, which is exactly brt_timespec64 here, so call it through the
        shared seam directly. */
     return clock_gettime(clk_id, ts);
+#elif defined(__skj_wasm__)
+    {
+        /* WASI clock_time_get returns nanoseconds in a u64; the Linux
+           CLOCK_MONOTONIC id (1) is the WASI monotonic id (1). */
+        extern int __wasi_clock_time_get(int id, unsigned long long precision,
+                                         unsigned long long *out);
+        unsigned long long ns = 0;
+        int rc = __wasi_clock_time_get(clk_id, 1ULL, &ns);
+        ts->sec = (long long)(ns / 1000000000ULL);
+        ts->nsec = (long long)(ns % 1000000000ULL);
+        return rc;
+    }
 #else
     register long d0 __asm__("d0") = 403;       /* __NR_clock_gettime64 */
     register long d1 __asm__("d1") = clk_id;
@@ -1898,6 +1926,30 @@ __basic_wait(int ms)
         req.sec = ms / 1000;
         req.nsec = (long long)(ms % 1000) * 1000000;
         nanosleep(&req, 0);
+    }
+#elif defined(__skj_wasm__)
+    /* WASI preview1 has no simple relative sleep, only poll_oneoff with a clock
+       subscription. Spin on the monotonic clock, which basic_clock_gettime64
+       already reads through clock_time_get, until the requested span elapses.
+       A busy-wait suits the short pacing delays the corpus uses and keeps WAIT
+       and TIME consistent without adding an import. WASM has a native i64, so
+       the 64-bit arithmetic needs no runtime helper. */
+    {
+        struct brt_timespec64 start, now;
+        long long elapsed_ms;
+
+        start.sec = 0;
+        start.nsec = 0;
+        basic_clock_gettime64(1, &start);       /* CLOCK_MONOTONIC */
+        for (;;) {
+            now.sec = 0;
+            now.nsec = 0;
+            basic_clock_gettime64(1, &now);
+            elapsed_ms = (now.sec - start.sec) * 1000
+                       + (now.nsec - start.nsec) / 1000000;
+            if (elapsed_ms >= ms)
+                break;
+        }
     }
 #else
     {

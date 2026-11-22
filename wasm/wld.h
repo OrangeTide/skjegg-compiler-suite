@@ -81,6 +81,8 @@ struct wobj {
     int             ndrelocs;
 
     int             data_base;      /* assigned by the linker: this object's data base */
+    int             imports_table;  /* object imports env.__indirect_function_table
+                                       (it contains a call_indirect) */
 };
 
 /* WASM linking relocation types (the subset the linker applies) */

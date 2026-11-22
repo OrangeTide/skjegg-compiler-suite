@@ -6,6 +6,54 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.60.0
+
+#### Added
+- Three more front ends target WebAssembly: BASIC (`skj-bc-wasm`), Pascal
+  (`skj-pc-wasm`), and TinScheme (`skj-sc-wasm`). Each reuses the shared WASM
+  backend and links its runtime over the synthesized WASI runtime. With the C
+  compiler already on WASM, every front end now targets WebAssembly except
+  MooScript. New lanes `check-bc-wasm` (31 tests), `check-pc-wasm` (237), and
+  `check-sc-wasm` (7) run each corpus under `wasmtime`, all three in the `wasm`
+  CI job.
+- Delimited continuations (`shift`/`reset`/`resume`) on WebAssembly for
+  TinScheme, lowered to the WasmFX stack-switching proposal. The native backends
+  implement these by copying a segment of the native call stack, which WASM
+  cannot address, so the WASM lane maps a `reset` body to a continuation created
+  with `cont.new`, a `shift` to a `suspend` on a control tag, and a `resume` to
+  resuming the captured remainder. Captured continuations are opaque references
+  held in a `$conts` table and bridged to TinScheme's `i32` values by their
+  table index; each reset extent reclaims the table to its mark-time top, so a
+  program that resets in a loop stays bounded. The lane runs under a wasmtime
+  built with `-W stack-switching=y`. See `doc/internals/wasm-continuations.md`.
+- An `IR_TRAP` opcode: a no-value terminator that aborts the program, which the
+  WASM backend lowers to the `unreachable` instruction. The Pascal front end
+  routes its range-check (`{$R+}`) and overflow-check (`{$Q+}`) aborts through it
+  on WASM, so a failed check reports exit 134 (the native 128+SIGABRT code),
+  which the WASI `proc_exit` seam cannot carry as an exit code. The stack
+  backends keep `exit(134)`.
+
+#### Changed
+- The WASM output-format selection, text or binary module or relocatable object
+  chosen by the output file's extension, is shared across every front-end driver
+  rather than duplicated in each.
+
+#### Fixed
+- The WASM linker (`skj-ld-wasm`) now emits the indirect-function table whenever
+  an object imports it, not only when a function address is taken. A module that
+  makes a `call_indirect` but assigns no table slot (a TinScheme closure call,
+  an indirect tail call, a dead-but-linked helper) linked to a table that did
+  not exist and trapped with "table index out of bounds"; the table is now
+  emitted sized to the slot count plus one, so the zero-slot case is a valid
+  one-entry table.
+- A `skj-cc` miscompile on every backend: an integer assigned through a
+  non-local floating-point lvalue (a pointer store, an array element, a struct
+  field, or a static variable) was stored without converting to the floating
+  point type first, so the stored bits were the integer rather than its float
+  value. This wrote a stale SSE register on x86 and an invalid `i32`-into-`f64`
+  store that the WASM validator rejects. The local-variable path already
+  converted; the general lvalue path now does too.
+
 ### 0.59.1
 
 #### Changed

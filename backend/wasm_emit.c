@@ -265,6 +265,32 @@ static int *g_itype_typeidx;        /* [g_nitypes] indirect sig -> type index */
 #define WASM_SP_GLOBAL 0
 static int module_funcidx(const char *name);
 
+/* Delimited continuations via the WasmFX stack-switching proposal (binary
+   complete-module path only; see doc/internals/wasm-continuations.md).  Set up
+   when a program uses shift/reset (IR_MARK/IR_CAPTURE/IR_RESUME). */
+static int  g_uses_cont;             /* program uses shift/reset */
+/* A reset body thunk is a lifted lambda, so its type carries the hidden closure
+   self pointer: (i32 self, i32 arg)->i32.  cont.new builds a continuation of
+   that 2-param type (g_cont2).  After the body suspends via the $shift tag
+   (()->i32), the remainder continuation takes just the resumed i32 and yields
+   the extent result: a 1-param type (g_cont1), what the handler and resume use. */
+static int  g_ft1_tidx;              /* (i32)->i32: the remainder's function type */
+static int  g_ft2_tidx;              /* (i32 i32)->i32: the thunk's function type */
+static int  g_tag_tidx;              /* ()->i32: the $shift tag's type */
+static int  g_cont1_tidx;            /* cont g_ft1: the remainder continuation */
+static int  g_cont2_tidx;            /* cont g_ft2: the fresh continuation (cont.new) */
+static const char **g_thunks;        /* reset body thunk names, for elem declare */
+static int  g_nthunks;
+#define WASM_CONTS_TOP_GLOBAL 1       /* $conts_top: global index 1 (after $sp) */
+#define WASM_CONTS_TABLE      1       /* $conts: table index 1 (after the funcref table) */
+#define WASM_SHIFT_TAG        0       /* the one control tag */
+#define WASM_CONTS_SIZE       4096    /* $conts capacity; reclaimed per reset extent */
+/* per-function, set in prepare_function for a function that contains IR_MARK */
+static int  g_fn_has_mark;
+static int  g_cont_kref_local;        /* a (ref null $ct) scratch local */
+static int  g_cont_vtmp_local;        /* an i32 scratch local */
+static int  g_cont_savedtop_local;    /* an i32 holding the mark-time $conts_top */
+
 /* Whether a program defining main gets the synthesized WASI runtime (the seam
    and _start).  The complete-module path synthesizes it; the relocatable-object
    path does not (the linker will, a later phase), so main is just a function. */
@@ -337,6 +363,17 @@ compute_result(struct ir_func *fn, enum wtype *out)
             *out = (i->a >= 0 && i->a < fn->ntemps && isf32[i->a]) ? WT_F32 : WT_F64;
             return 1;
         }
+        case IR_TAILCALL:
+        case IR_TAILCALLI:
+            /* A function whose only exit is a tail call returns whatever the
+               callee returns; its own WASM result type must match, or the
+               call_indirect at the tail (and every direct caller) mismatches.
+               The sole producer of tail calls is the Scheme front end, whose
+               values are the uniform ILP32 tagged word, so the result is i32.
+               A function that also has an explicit value return is caught by
+               the cases above, which precede any tail call in layout order. */
+            *out = WT_I32;
+            return 1;
         default:
             break;
         }
@@ -496,16 +533,20 @@ collect_calls(struct ir_program *prog)
 {
     struct ir_func *fn;
     struct arena *ar;
-    int ndef = 0, ncall = 0, k;
+    int ndef = 0, ncall = 0, nlea = 0, k;
 
     for (fn = prog->funcs; fn; fn = fn->next) {
         struct ir_insn *in;
         ndef++;
-        for (in = fn->head; in; in = in->next)
+        for (in = fn->head; in; in = in->next) {
             if (in->op == IR_CALL || in->op == IR_CALLI || in->op == IR_FCALL ||
                 in->op == IR_FCALLI || in->op == IR_CALL64 || in->op == IR_CALLI64 ||
                 in->op == IR_TAILCALL || in->op == IR_TAILCALLI)
                 ncall++;
+            /* an addressed function may become an external (collect_ext_funcs) */
+            else if (in->op == IR_LEA && in->sym && !in->sym_is_data)
+                nlea++;
+        }
     }
     if (!prog->funcs)
         return;
@@ -514,7 +555,9 @@ collect_calls(struct ir_program *prog)
     g_nsigs = ndef;
     /* +4 slack for the synthesized seam functions (write/read/_exit/exit) */
     g_sigs = arena_alloc(ar, (size_t)(ndef + 4) * sizeof(*g_sigs));
-    g_ext = arena_alloc(ar, (size_t)(ncall > 0 ? ncall : 1) * sizeof(*g_ext));
+    /* g_ext holds call-target externals plus any addressed-only external
+       functions collect_ext_funcs discovers, so size it for both */
+    g_ext = arena_alloc(ar, (size_t)(ncall + nlea > 0 ? ncall + nlea : 1) * sizeof(*g_ext));
     g_itypes = arena_alloc(ar, (size_t)(ncall > 0 ? ncall : 1) * sizeof(*g_itypes));
     g_next = 0;
     g_nitypes = 0;
@@ -1061,6 +1104,141 @@ w_sp_set(struct wsink *s)
     }
 }
 
+/* --- WasmFX delimited-continuation primitives (binary module path) --- */
+
+/* a reference type to a continuation type: 0x63 (ref null $ct) or 0x64
+   (ref $ct), then the type index as a heaptype */
+static void
+w_cont_reftype(struct wbuf *b, int nullable, int conttype)
+{
+    wbuf_byte(b, nullable ? 0x63 : 0x64);
+    wbuf_sleb(b, conttype);
+}
+
+static void
+w_block_i32(struct wsink *s)
+{
+    if (s->kind == WS_TEXT)
+        fprintf(s->out, "\t\tblock (result i32)\n");
+    else {
+        wbuf_byte(s->code, 0x02);
+        wbuf_byte(s->code, 0x7F);
+    }
+}
+
+/* block whose result is the remainder continuation (ref $ct1) the shift
+   handler receives */
+static void
+w_block_remcont(struct wsink *s)
+{
+    if (s->kind == WS_TEXT)
+        fprintf(s->out, "\t\tblock (result (ref $ct1))\n");
+    else {
+        wbuf_byte(s->code, 0x02);
+        w_cont_reftype(s->code, 0, g_cont1_tidx);
+    }
+}
+
+static void
+w_global_get(struct wsink *s, int idx)
+{
+    if (s->kind == WS_TEXT)
+        fprintf(s->out, "\t\tglobal.get %d\n", idx);
+    else {
+        wbuf_byte(s->code, 0x23);
+        wbuf_uleb(s->code, (uint64_t)idx);
+    }
+}
+
+static void
+w_global_set(struct wsink *s, int idx)
+{
+    if (s->kind == WS_TEXT)
+        fprintf(s->out, "\t\tglobal.set %d\n", idx);
+    else {
+        wbuf_byte(s->code, 0x24);
+        wbuf_uleb(s->code, (uint64_t)idx);
+    }
+}
+
+static void
+w_table_get(struct wsink *s, int table)
+{
+    if (s->kind == WS_TEXT)
+        fprintf(s->out, "\t\ttable.get %d\n", table);
+    else {
+        wbuf_byte(s->code, 0x25);
+        wbuf_uleb(s->code, (uint64_t)table);
+    }
+}
+
+static void
+w_table_set(struct wsink *s, int table)
+{
+    if (s->kind == WS_TEXT)
+        fprintf(s->out, "\t\ttable.set %d\n", table);
+    else {
+        wbuf_byte(s->code, 0x26);
+        wbuf_uleb(s->code, (uint64_t)table);
+    }
+}
+
+static void
+w_ref_func(struct wsink *s, const char *name)
+{
+    if (s->kind == WS_TEXT)
+        fprintf(s->out, "\t\tref.func %s\n", name);
+    else {
+        wbuf_byte(s->code, 0xD2);
+        wbuf_uleb(s->code, (uint64_t)module_funcidx(name));
+    }
+}
+
+static void
+w_cont_new(struct wsink *s, int conttype)
+{
+    if (s->kind == WS_TEXT)
+        fprintf(s->out, "\t\tcont.new %d\n", conttype);
+    else {
+        wbuf_byte(s->code, 0xE0);
+        wbuf_uleb(s->code, (uint64_t)conttype);
+    }
+}
+
+static void
+w_suspend(struct wsink *s)
+{
+    if (s->kind == WS_TEXT)
+        fprintf(s->out, "\t\tsuspend $shift\n");
+    else {
+        wbuf_byte(s->code, 0xE2);
+        wbuf_uleb(s->code, WASM_SHIFT_TAG);
+    }
+}
+
+/* resume the continuation on the stack (of type `conttype`).  With handler != 0,
+   install a single on-label handler for the $shift tag branching to `label` (a
+   relative block depth); otherwise the resume takes no handlers. */
+static void
+w_resume(struct wsink *s, int conttype, int handler, int label)
+{
+    if (s->kind == WS_TEXT) {
+        if (handler)
+            fprintf(s->out, "\t\tresume %d (on $shift %d)\n", conttype, label);
+        else
+            fprintf(s->out, "\t\tresume %d\n", conttype);
+    } else {
+        wbuf_byte(s->code, 0xE3);
+        wbuf_uleb(s->code, (uint64_t)conttype);
+        wbuf_uleb(s->code, (uint64_t)(handler ? 1 : 0));
+        if (handler) {
+            wbuf_byte(s->code, 0x00);        /* on-label handler variant */
+            wbuf_uleb(s->code, WASM_SHIFT_TAG);
+            wbuf_uleb(s->code, (uint64_t)label);
+        }
+    }
+}
+
 /* a call to a function by name.  Binary resolves the name to a function index
    (a FUNCTION_INDEX_LEB relocation will replace the concrete index in the
    relocatable-object phase). */
@@ -1417,6 +1595,14 @@ static void
 emit_insn(struct wsink *s, struct ir_func *fn, struct ir_insn *i)
 {
     (void)fn;
+    /* The WasmFX module declarations (cont types, $shift tag, $conts table) are
+       emitted only on the binary complete-module path, so a program that uses
+       delimited continuations must be built to a .wasm module, not WAT text or a
+       relocatable object. */
+    if (s->kind != WS_BIN &&
+        (i->op == IR_MARK || i->op == IR_CAPTURE ||
+         i->op == IR_RESUME || i->op == IR_CONT_UNWIND))
+        die("wasm: delimited continuations require a .wasm (binary module) output");
     switch (i->op) {
     case IR_FUNC:
     case IR_ENDF:
@@ -1709,6 +1895,67 @@ emit_insn(struct wsink *s, struct ir_func *fn, struct ir_insn *i)
     case IR_CALL2: case IR_CALLI2:
         unsupported("failable calls");
         break;
+
+    /* --- delimited continuations, lowered to WasmFX stack switching --- */
+    case IR_MARK: {
+        /* (reset body handler): run the lambda-lifted body thunk (i->sym) as a
+           continuation under a handler for the $shift tag.  Produce i->dst = 0
+           when the body returns normally (its value is stored to the i->slot
+           shadow slot for the caller to read), or the nonzero $conts index of
+           the captured continuation when the body suspended via shift.  See
+           doc/internals/wasm-continuations.md. */
+        w_global_get(s, WASM_CONTS_TOP_GLOBAL);  /* save the mark-time top so */
+        w_local_set(s, g_cont_savedtop_local);   /* IR_CONT_UNWIND can reclaim */
+        w_block_i32(s);                         /* $merge (result i32): the dst */
+        w_block_remcont(s);                     /* $on_shift (result (ref $ct1)) */
+        w_const_i32(s, 0);                      /* the thunk's hidden closure self */
+        w_const_i32(s, 0);                      /* the thunk's dummy initial arg */
+        w_ref_func(s, i->sym);
+        w_cont_new(s, g_cont2_tidx);
+        w_resume(s, g_cont2_tidx, 1, 0);         /* on $shift -> $on_shift (depth 0) */
+        /* normal completion: the body's i32 value is on the stack */
+        w_local_set(s, g_cont_vtmp_local);
+        push_slot_addr(s, i->slot);
+        w_local_get(s, g_cont_vtmp_local);
+        w_mem(s, WI_I32_STORE, 0);               /* slot = body value */
+        w_const_i32(s, 0);                       /* dst = 0 (normal) */
+        w_br(s, 1);                              /* br $merge */
+        w_end(s);                                /* end $on_shift */
+        /* shift path: the remainder continuation (ref $ct) is on the stack */
+        w_local_set(s, g_cont_kref_local);
+        w_global_get(s, WASM_CONTS_TOP_GLOBAL);  /* idx: the dst (nonzero) */
+        w_global_get(s, WASM_CONTS_TOP_GLOBAL);  /* idx: the table slot */
+        w_local_get(s, g_cont_kref_local);
+        w_table_set(s, WASM_CONTS_TABLE);        /* conts[idx] = continuation */
+        w_global_get(s, WASM_CONTS_TOP_GLOBAL);
+        w_const_i32(s, 1);
+        w_op(s, WI_I32_ADD);
+        w_global_set(s, WASM_CONTS_TOP_GLOBAL);  /* conts_top++ */
+        w_end(s);                                /* end $merge: i32 (dst) on stack */
+        set_temp(s, i->dst);
+        break;
+    }
+    case IR_CAPTURE:                             /* (shift): suspend to the handler */
+        w_suspend(s);                            /* -> the resumed-with value */
+        set_temp(s, i->dst);
+        break;
+    case IR_RESUME:                              /* (resume k val): resume conts[k] */
+        push_temp(s, i->b);                      /* val -> the shift's result */
+        push_temp(s, i->a);                      /* k   -> the conts index */
+        w_table_get(s, WASM_CONTS_TABLE);        /* the remainder continuation */
+        w_resume(s, g_cont1_tidx, 0, 0);         /* no handler: a re-shift traps */
+        set_temp(s, i->dst);
+        break;
+    case IR_CONT_UNWIND:
+        /* The reset extent is closing: every continuation captured within it is
+           dead (resumed to completion or dropped).  Restore $conts_top to the
+           mark-time value IR_MARK saved, reclaiming those table slots.  This
+           gives the table stack discipline, so a program that resets in a loop
+           (scm_reset_heap, scm_reset_reclaim) does not grow it without bound. */
+        w_local_get(s, g_cont_savedtop_local);
+        w_global_set(s, WASM_CONTS_TOP_GLOBAL);
+        break;
+
     default:
         unsupported("opcode");
         break;
@@ -1755,7 +2002,7 @@ is_term_op(int op)
     case IR_JMP: case IR_BZ: case IR_BNZ:
     case IR_RET: case IR_RETV: case IR_RETV64: case IR_FRETV:
     case IR_TAILCALL: case IR_TAILCALLI: case IR_IJMP: case IR_IJMP64:
-    case IR_RETV2: case IR_RETV_AGG:
+    case IR_RETV2: case IR_RETV_AGG: case IR_TRAP:
         return 1;
     default:
         return 0;
@@ -2106,6 +2353,31 @@ emit_tailcall(struct wsink *s, struct ir_insn *t)
     narg = 0;
 }
 
+/* An indirect tail call (IR_TAILCALLI): the indirect counterpart of
+   emit_tailcall.  There is no indirect tail-call instruction in the baseline
+   ISA, so it lowers the same way, a call_indirect whose result (if any) is
+   returned straight out of this function.  The call-type index mirrors the one
+   collect_calls registered: the parameter signature from the pending args and
+   the result arity from this function's own return (compute_result), so the
+   type is already interned. */
+static void
+emit_tailcalli(struct wsink *s, struct ir_func *fn, struct ir_insn *t)
+{
+    struct callsig sig;
+    int k, ti;
+
+    pending_call_sig(&sig, t->call_variadic);
+    sig.has_result = compute_result(fn, &sig.result);
+    ti = add_itype(&sig);
+    emit_sp_restore(s);
+    for (k = 0; k < narg; k++)
+        push_temp(s, arg_temps[k]);
+    push_temp(s, t->a);                 /* the function pointer: a table slot */
+    w_call_indirect(s, ti);
+    w_op(s, WI_RETURN);
+    narg = 0;
+}
+
 /* emit a block's straight-line body and then its terminator */
 static void
 emit_block_body(struct wsink *s, struct ir_func *fn, int b)
@@ -2155,6 +2427,12 @@ emit_block_body(struct wsink *s, struct ir_func *fn, int b)
         break;
     case IR_TAILCALL:
         emit_tailcall(s, t);
+        break;
+    case IR_TAILCALLI:
+        emit_tailcalli(s, fn, t);
+        break;
+    case IR_TRAP:
+        w_op(s, WI_UNREACHABLE);
         break;
     default:
         unsupported("terminator");
@@ -2254,6 +2532,12 @@ emit_dispatch_block(struct wsink *s, struct ir_func *fn, int b, int loopdepth)
         break;
     case IR_TAILCALL:
         emit_tailcall(s, t);
+        break;
+    case IR_TAILCALLI:
+        emit_tailcalli(s, fn, t);
+        break;
+    case IR_TRAP:
+        w_op(s, WI_UNREACHABLE);
         break;
     default:
         unsupported("terminator");
@@ -2379,6 +2663,15 @@ func_result(struct ir_func *fn, enum wtype *out)
         case IR_FRETV:
             *out = (i->a >= 0 && i->a < ntemps) ? temp_type[i->a] : WT_F64;
             return 1;
+        case IR_TAILCALL:
+        case IR_TAILCALLI:
+            /* Same reasoning as compute_result: a function whose only exit is a
+               tail call returns the callee's result, the uniform i32 word of the
+               Scheme front end (the sole tail-call producer).  This declared
+               type must match the call_indirect emit_tailcalli builds from
+               compute_result, and the result every direct caller expects. */
+            *out = WT_I32;
+            return 1;
         default:
             break;
         }
@@ -2418,6 +2711,26 @@ prepare_function(struct ir_func *fn)
     g_has_result = func_result(fn, &g_result);
     if (irreducible)
         disp_local = g_nwparams + ntemps;       /* one more local for dispatch */
+
+    /* A function containing IR_MARK (a reset) needs three scratch locals past
+       the temps (and the dispatch local): a (ref null $ct) for the captured
+       continuation, an i32 to reorder the body-value store, and an i32 holding
+       the mark-time $conts_top so IR_CONT_UNWIND can reclaim the table. */
+    g_fn_has_mark = 0;
+    {
+        struct ir_insn *in;
+        for (in = fn->head; in; in = in->next)
+            if (in->op == IR_MARK) {
+                g_fn_has_mark = 1;
+                break;
+            }
+    }
+    if (g_fn_has_mark) {
+        int base = g_nwparams + ntemps + (irreducible ? 1 : 0);
+        g_cont_kref_local = base;
+        g_cont_vtmp_local = base + 1;
+        g_cont_savedtop_local = base + 2;
+    }
     return irreducible;
 }
 
@@ -2617,6 +2930,23 @@ regalloc(struct ir_func *fn)
     (void)fn;
 }
 
+/* Pick the output format from the -o path's extension: a .wasm file is a
+   complete binary module, a .o file a relocatable object, anything else (or
+   stdout) WAT text.  The front-end drivers call this in place of poking
+   wasm_output_binary directly, so the extension rule is not copied per driver. */
+void
+wasm_set_output_format(const char *outpath)
+{
+    const char *dot = outpath ? strrchr(outpath, '.') : NULL;
+
+    if (dot && strcmp(dot, ".wasm") == 0)
+        wasm_output_binary = WASM_FMT_MODULE;
+    else if (dot && strcmp(dot, ".o") == 0)
+        wasm_output_binary = WASM_FMT_OBJECT;
+    else
+        wasm_output_binary = WASM_FMT_TEXT;
+}
+
 void
 target_emit(FILE *out, struct ir_program *prog)
 {
@@ -2780,6 +3110,31 @@ build_module_plan(struct ir_program *prog)
         g_ndef++;
     g_nimports = g_next + (g_has_main && g_synth_runtime ? 3 : 0);
 
+    /* Detect delimited-continuation use and collect the reset body thunks
+       (IR_MARK carries the thunk name), so the module can declare the cont
+       type, the $shift tag, the $conts table, and elem-declare the thunks. */
+    g_uses_cont = 0;
+    g_nthunks = 0;
+    g_thunks = NULL;
+    {
+        struct ir_insn *in;
+        int nmark = 0;
+        for (fn = prog->funcs; fn; fn = fn->next)
+            for (in = fn->head; in; in = in->next)
+                if (in->op == IR_MARK)
+                    nmark++;
+                else if (in->op == IR_CAPTURE || in->op == IR_RESUME)
+                    g_uses_cont = 1;
+        if (nmark > 0) {
+            g_uses_cont = 1;
+            g_thunks = malloc((size_t)nmark * sizeof(*g_thunks));
+            for (fn = prog->funcs; fn; fn = fn->next)
+                for (in = fn->head; in; in = in->next)
+                    if (in->op == IR_MARK && in->sym)
+                        g_thunks[g_nthunks++] = in->sym;
+        }
+    }
+
     maxtypes = g_next + 3 + g_nsigs + 1 + g_nitypes + 1;
     g_types = malloc((size_t)maxtypes * sizeof(*g_types));
     g_ntypes = 0;
@@ -2836,6 +3191,22 @@ build_module_plan(struct ir_program *prog)
         ft = ft_from_sig(&g_itypes[k]);
         g_itype_typeidx[k] = add_type(&ft);
     }
+
+    /* continuation types: the (i32)->i32 function type a continuation runs, the
+       ()->i32 type of the $shift tag, and the cont type itself (appended to the
+       type section after every function type, so its index is g_ntypes). */
+    if (g_uses_cont) {
+        struct functype f1, f2, tft;
+        f1.np = 1; f1.p[0] = WT_I32; f1.nr = 1; f1.r = WT_I32;
+        g_ft1_tidx = add_type(&f1);                     /* (i32)->i32 */
+        f2.np = 2; f2.p[0] = f2.p[1] = WT_I32; f2.nr = 1; f2.r = WT_I32;
+        g_ft2_tidx = add_type(&f2);                     /* (i32 i32)->i32 */
+        tft.np = 0; tft.nr = 1; tft.r = WT_I32;
+        g_tag_tidx = add_type(&tft);                    /* ()->i32 */
+        /* the two cont types are written after every function type */
+        g_cont1_tidx = g_ntypes;
+        g_cont2_tidx = g_ntypes + 1;
+    }
 }
 
 static void
@@ -2876,6 +3247,9 @@ emit_locals_binary(struct wbuf *b, int irreducible)
         i = j;
     }
 
+    if (g_fn_has_mark)
+        nentries += 2;          /* two groups: the (ref null $ct) and a 2-wide i32 run */
+
     wbuf_uleb(b, (uint64_t)nentries);
     for (i = 0; i < total; ) {
         enum wtype t = local_type(i);
@@ -2885,6 +3259,10 @@ emit_locals_binary(struct wbuf *b, int irreducible)
         wbuf_uleb(b, (uint64_t)(j - i));
         wbuf_byte(b, wt_byte(t));
         i = j;
+    }
+    if (g_fn_has_mark) {
+        wbuf_uleb(b, 1); w_cont_reftype(b, 1, g_cont1_tidx);  /* kref: (ref null $ct1) */
+        wbuf_uleb(b, 2); wbuf_byte(b, 0x7F);                  /* vtmp, saved-top: i32 */
     }
 }
 
@@ -2961,11 +3339,18 @@ emit_module_binary(FILE *out, struct ir_program *prog)
     wbuf_byte(&mod, 0x73); wbuf_byte(&mod, 0x6D);   /* \0asm */
     wbuf_u32(&mod, 1);                               /* version 1 */
 
-    /* Type section (1) */
+    /* Type section (1).  When the program uses continuations, two extra types,
+       the remainder cont (g_cont1 = cont g_ft1) and the fresh cont (g_cont2 =
+       cont g_ft2), follow all the function types; their indices are g_ntypes and
+       g_ntypes+1.  Each cont type is the form 0x5D plus its function type. */
     wbuf_init(&sec);
-    wbuf_uleb(&sec, (uint64_t)g_ntypes);
+    wbuf_uleb(&sec, (uint64_t)(g_ntypes + (g_uses_cont ? 2 : 0)));
     for (k = 0; k < g_ntypes; k++)
         functype_write(&sec, &g_types[k]);
+    if (g_uses_cont) {
+        wbuf_byte(&sec, 0x5D); wbuf_sleb(&sec, g_ft1_tidx);
+        wbuf_byte(&sec, 0x5D); wbuf_sleb(&sec, g_ft2_tidx);
+    }
     wbuf_section(&mod, 1, &sec);
     wbuf_free(&sec);
 
@@ -3003,13 +3388,22 @@ emit_module_binary(FILE *out, struct ir_program *prog)
     wbuf_section(&mod, 3, &sec);
     wbuf_free(&sec);
 
-    /* Table section (4): the funcref table for indirect calls */
-    if (g_nsigs > 0) {
+    /* Table section (4): the funcref table (0) for indirect calls, then, when
+       the program uses continuations, the $conts table (1) holding captured
+       continuation references that scheme carries by i32 index. */
+    if (g_nsigs > 0 || g_uses_cont) {
+        if (g_uses_cont && g_nsigs == 0)
+            die("wasm: continuations need the funcref table (table 0)");
         wbuf_init(&sec);
-        wbuf_uleb(&sec, 1);
+        wbuf_uleb(&sec, (uint64_t)(1 + (g_uses_cont ? 1 : 0)));
         wbuf_byte(&sec, 0x70);                       /* funcref */
         wbuf_byte(&sec, 0x00);                       /* limits: min only */
         wbuf_uleb(&sec, (uint64_t)g_nsigs);
+        if (g_uses_cont) {
+            w_cont_reftype(&sec, 1, g_cont1_tidx);   /* (ref null $ct1) */
+            wbuf_byte(&sec, 0x00);                   /* limits: min only */
+            wbuf_uleb(&sec, WASM_CONTS_SIZE);
+        }
         wbuf_section(&mod, 4, &sec);
         wbuf_free(&sec);
     }
@@ -3022,12 +3416,31 @@ emit_module_binary(FILE *out, struct ir_program *prog)
     wbuf_section(&mod, 5, &sec);
     wbuf_free(&sec);
 
-    /* Global section (6): the shadow-stack pointer $sp */
+    /* Tag section (13): the one $shift control tag, ()->i32.  It is ordered
+       after memory and before global. */
+    if (g_uses_cont) {
+        wbuf_init(&sec);
+        wbuf_uleb(&sec, 1);
+        wbuf_byte(&sec, 0x00);                        /* attribute: control/exception */
+        wbuf_uleb(&sec, (uint64_t)g_tag_tidx);
+        wbuf_section(&mod, 13, &sec);
+        wbuf_free(&sec);
+    }
+
+    /* Global section (6): the shadow-stack pointer $sp (0), then, for
+       continuations, $conts_top (1), the $conts bump pointer.  It starts at 1
+       so a captured continuation's index is always nonzero (index 0 is the
+       "body returned normally" sentinel IR_MARK yields). */
     wbuf_init(&sec);
-    wbuf_uleb(&sec, 1);
+    wbuf_uleb(&sec, (uint64_t)(1 + (g_uses_cont ? 1 : 0)));
     wbuf_byte(&sec, 0x7F);                            /* i32 */
     wbuf_byte(&sec, 0x01);                            /* mutable */
     wbuf_byte(&sec, 0x41); wbuf_sleb(&sec, g_stack_top); wbuf_byte(&sec, 0x0B);
+    if (g_uses_cont) {
+        wbuf_byte(&sec, 0x7F);                        /* i32 */
+        wbuf_byte(&sec, 0x01);                        /* mutable */
+        wbuf_byte(&sec, 0x41); wbuf_sleb(&sec, 1); wbuf_byte(&sec, 0x0B);
+    }
     wbuf_section(&mod, 6, &sec);
     wbuf_free(&sec);
 
@@ -3060,16 +3473,25 @@ emit_module_binary(FILE *out, struct ir_program *prog)
     wbuf_section(&mod, 7, &sec);
     wbuf_free(&sec);
 
-    /* Element section (9): every defined function into the table, in g_sigs
-       order, at table offset 0 */
+    /* Element section (9): every defined function into the funcref table, in
+       g_sigs order at offset 0.  When the program uses continuations, a second,
+       declarative segment lists the reset body thunks so ref.func may take their
+       address (a ref.func operand must be declared). */
     if (g_nsigs > 0) {
         wbuf_init(&sec);
-        wbuf_uleb(&sec, 1);                           /* one segment */
+        wbuf_uleb(&sec, (uint64_t)(1 + (g_nthunks > 0 ? 1 : 0)));
         wbuf_byte(&sec, 0x00);                        /* active, table 0, funcref */
         wbuf_byte(&sec, 0x41); wbuf_sleb(&sec, 0); wbuf_byte(&sec, 0x0B);
         wbuf_uleb(&sec, (uint64_t)g_nsigs);
         for (k = 0; k < g_nsigs; k++)
             wbuf_uleb(&sec, (uint64_t)(g_nimports + k));
+        if (g_nthunks > 0) {
+            wbuf_byte(&sec, 0x03);                    /* declarative, func indices */
+            wbuf_byte(&sec, 0x00);                    /* elemkind: funcref */
+            wbuf_uleb(&sec, (uint64_t)g_nthunks);
+            for (k = 0; k < g_nthunks; k++)
+                wbuf_uleb(&sec, (uint64_t)module_funcidx(g_thunks[k]));
+        }
         wbuf_section(&mod, 9, &sec);
         wbuf_free(&sec);
     }
@@ -3258,6 +3680,33 @@ collect_extdata(struct ir_program *prog)
                 global_addr(in->sym) < 0 && !lookup_sig(in->sym) &&
                 extdata_index_of(in->sym) == 0)
                 g_extdata[g_nextdata++] = in->sym;
+}
+
+/* collect the external functions whose address is taken but which are never
+   called in this object: an IR_LEA of a function symbol this object neither
+   defines (lookup_sig) nor lays out as a global, and that no call already
+   registered as an external.  A called external already has an entry with its
+   real signature; this adds the addressed-only ones so they get an undefined
+   function symbol, an env import, and a table slot (via collect_table_funcs).
+   The real signature lives with the definition in another object, so the
+   placeholder import type here is the empty signature: the linker binds the
+   symbol by name and never emits this object's env import. */
+static void
+collect_ext_funcs(struct ir_program *prog)
+{
+    struct ir_func *fn;
+    struct ir_insn *in;
+
+    for (fn = prog->funcs; fn; fn = fn->next)
+        for (in = fn->head; in; in = in->next)
+            if (in->op == IR_LEA && in->sym && !in->sym_is_data &&
+                global_addr(in->sym) < 0 && !lookup_sig(in->sym) &&
+                !lookup_ext(in->sym)) {
+                struct callsig esig;
+                esig.nparams = 0;
+                esig.has_result = 0;
+                add_external(prog, in->sym, &esig);
+            }
 }
 
 static int
@@ -3524,6 +3973,7 @@ emit_module_object(FILE *out, struct ir_program *prog)
                 "(.wasm) for now");
 
     drc.v = NULL; drc.n = 0; drc.cap = 0;
+    collect_ext_funcs(prog);
     build_module_plan(prog);
     build_object_data(prog);
     collect_table_funcs(prog);

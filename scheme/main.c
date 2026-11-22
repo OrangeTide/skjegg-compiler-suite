@@ -106,6 +106,11 @@ main(int argc, char **argv)
         out = fopen(outpath ? outpath : "a.out.s", "w");
         if (!out)
             die("cannot open output file");
+#ifdef CC_WASM
+        /* Match the other WASM drivers: WAT text by default, a complete binary
+           module for a .wasm output, a relocatable object for a .o output. */
+        wasm_set_output_format(outpath);
+#endif
         target_emit(out, ir);
         if (out != stdout)
             fclose(out);
