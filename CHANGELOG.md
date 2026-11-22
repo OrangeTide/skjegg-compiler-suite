@@ -6,6 +6,17 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.60.1
+
+#### Fixed
+- `skj-as-aarch64` now accepts a symbol spelled like a condition code (`eq`,
+  `ne`, `lt`, and the rest), so a program with a function named after one
+  assembles. The operand was parsed as a condition before the branch-target
+  fallback, so `bl eq` failed with "branch/adr operand is not a symbol". The
+  parser now keeps the name as a symbol alongside the condition, the way it
+  already does for register-spelled symbols, and promotes it to a plain symbol
+  when a `@PAGE`/`@PAGEOFF` reloc suffix follows.
+
 ### 0.60.0
 
 #### Added

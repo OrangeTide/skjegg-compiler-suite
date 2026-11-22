@@ -278,12 +278,25 @@ parse_operand(struct a64_asm *a, struct a64_operand *op)
                 op->disp = parse_hash_imm(l);
             return;
         }
-        /* condition code (cset) */
+        /* condition code (cset, csel, b.cond...).  Condition mnemonics are not
+           reserved either: a symbol may be spelled like one, e.g. a C function
+           named `eq` or `ne`.  As with registers above, keep the name in op->sym
+           so a branch/adr encoder (`bl eq`) recovers it as a symbol; the
+           condition-consuming encoders read op->cond and ignore op->sym. */
         cc = a64_cond(l->tok.str);
         if (cc >= 0) {
+            const char *name = arena_strdup(&a->arena, l->tok.str);
+            lex_next(l);
+            if (l->tok.type == T_AT) {          /* `eq@PAGE`: really a symbol */
+                op->kind = AO_SYM;
+                op->is_sym = 1;
+                op->sym = name;
+                parse_reloc_suffix(a, op);
+                return;
+            }
             op->kind = AO_COND;
             op->cond = cc;
-            lex_next(l);
+            op->sym = name;                     /* for a branch/adr target */
             return;
         }
         /* otherwise a branch-target symbol or numeric local reference */
