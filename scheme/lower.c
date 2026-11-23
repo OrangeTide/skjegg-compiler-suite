@@ -269,6 +269,7 @@ static int lambda_serial;
  ****************************************************************/
 
 static int lower_expr(val_t expr, int tail);
+static void finish_slots(struct ir_func *fn);
 static int closure_fn(int t_closure);
 static int emit_closure(int fn_temp, int *free_vals, int nfree);
 #ifdef CC_WASM
@@ -1357,6 +1358,644 @@ lower_list(val_t args)
 }
 
 /****************************************************************
+ * Output: display / newline / write-string
+ *
+ * TinScheme writes through the `write(fd, buf, len)` runtime seam (fd 1 =
+ * stdout), which maps to WASI fd_write on WASM and to the start.S seam
+ * natively.  A string literal is written directly from a rodata byte global.
+ * Any other value goes through the emitted __scm_display helper, which inspects
+ * the runtime tag and formats a fixnum, boolean, or nil.  The runtime has no
+ * link step (scheme emits a complete module on WASM), so the formatter is
+ * emitted as IR, not a C/asm runtime routine.
+ ****************************************************************/
+
+static int g_str_serial;
+static int g_display_used;
+
+/* Interned quoted symbols: one rodata object per distinct name, so quoting the
+   same symbol twice yields the same address and eq? identity holds. */
+#define MAX_QSYMS 256
+static struct { char *name; char *gname; } g_qsyms[MAX_QSYMS];
+static int g_nqsyms;
+
+static int
+is_string(val_t v)
+{
+    return IS_PTR(v) && PTR(v)->type == OBJ_STRING;
+}
+
+/* a rodata byte global holding `len` bytes of `s`; returns its symbol name */
+static const char *
+new_bytes_global(const char *s, int len)
+{
+    struct ir_global *g;
+    char buf[32];
+    char *data;
+
+    if (len < 1)
+        len = 1;
+    snprintf(buf, sizeof(buf), "__scm_str_%d", g_str_serial++);
+    g = arena_zalloc(lower_arena, sizeof(*g));
+    g->name = arena_strdup(lower_arena, buf);
+    g->base_type = IR_I8;
+    g->arr_size = len;
+    g->is_rodata = 1;
+    data = arena_alloc(lower_arena, len);
+    memcpy(data, s, len);
+    g->init_string = data;
+    g->init_strlen = len;
+    g->next = cur_prog->globals;
+    cur_prog->globals = g;
+    return g->name;
+}
+
+/* write(1, buf, len): a 3-arg call to the runtime write seam */
+static void
+emit_write3(int t_buf, int t_len)
+{
+    struct ir_insn *ins;
+    int t_fd = lower_const(1);
+
+    ins = emit(IR_ARG); ins->a = t_fd;  ins->imm = 0;
+    ins = emit(IR_ARG); ins->a = t_buf; ins->imm = 1;
+    ins = emit(IR_ARG); ins->a = t_len; ins->imm = 2;
+    ins = emit(IR_CALL);
+    ins->dst = new_temp();
+    ins->sym = arena_strdup(lower_arena, "write");
+    ins->nargs = 3;
+}
+
+/* write a fixed byte string to stdout */
+static void
+emit_write_literal(const char *s, int len)
+{
+    const char *name = new_bytes_global(s, len);
+    struct ir_insn *ins;
+    int t_addr, t_len;
+
+    ins = emit(IR_VLEA);
+    ins->dst = new_temp();
+    ins->sym = arena_strdup(lower_arena, name);
+    t_addr = ins->dst;
+    t_len = lower_const(len);
+    emit_write3(t_addr, t_len);
+}
+
+static int
+lower_display(val_t args)
+{
+    val_t a = gc_car(args);
+    struct ir_insn *ins;
+
+    if (is_string(a)) {
+        struct gc_string *str = (struct gc_string *)PTR(a);
+        emit_write_literal(str->data, str->len);
+    } else {
+        int tv = lower_expr(a, 0);
+
+        g_display_used = 1;
+        ins = emit(IR_ARG);
+        ins->a = tv;
+        ins->imm = 0;
+        ins = emit(IR_CALL);
+        ins->dst = new_temp();
+        ins->sym = arena_strdup(lower_arena, "__scm_display");
+        ins->nargs = 1;
+    }
+    return lower_const((long)VAL_NIL);
+}
+
+static int
+lower_newline(void)
+{
+    emit_write_literal("\n", 1);
+    return lower_const((long)VAL_NIL);
+}
+
+static int
+lower_write_string(val_t args)
+{
+    val_t a = gc_car(args);
+    struct gc_string *str;
+
+    if (!is_string(a))
+        die("lower: write-string expects a string literal");
+    str = (struct gc_string *)PTR(a);
+    emit_write_literal(str->data, str->len);
+    return lower_const((long)VAL_NIL);
+}
+
+/* local IR builder shorthands for the display helper */
+static int
+eb(int op, int a, int b)
+{
+    struct ir_insn *x = emit(op);
+    x->dst = new_temp();
+    x->a = a;
+    x->b = b;
+    return x->dst;
+}
+
+static int
+eldl(int slot)
+{
+    struct ir_insn *x = emit(IR_LDL);
+    x->dst = new_temp();
+    x->slot = slot;
+    return x->dst;
+}
+
+static void
+estl(int slot, int t)
+{
+    struct ir_insn *x = emit(IR_STL);
+    x->a = t;
+    x->slot = slot;
+}
+
+static void
+ebnz(int t, int lab)
+{
+    struct ir_insn *x = emit(IR_BNZ);
+    x->a = t;
+    x->label = lab;
+}
+
+static int
+evlea(const char *name)
+{
+    struct ir_insn *x = emit(IR_VLEA);
+    x->dst = new_temp();
+    x->sym = arena_strdup(lower_arena, name);
+    return x->dst;
+}
+
+/* Emit __scm_display(v): format a tagged value to stdout.
+ *   fixnum -> signed decimal (untag >>2, sign, digit loop into __scm_numbuf)
+ *   nil/#f/#t -> the literal "()"/"#f"/"#t"
+ *   any heap pointer -> "#<obj>" (generic pair/string display is future work)
+ * Built as a standalone IR function (one value param in slot 0, no env),
+ * called as __scm_display(v). */
+static struct ir_func *
+build_display_helper(void)
+{
+    struct ir_func *fn;
+    struct ir_insn *ins;
+    int slot_v, slot_i;
+    int Lfix, Lnil, Lf, Lt, Lobj, Lend, Lneg, Lpos, Lzero, Lloop, Ldone;
+    int v, t3, c1, c0, c2, c6, cmp, raw, neg, i, i2, v2, rem, quo, dch;
+    int base, addr, startp, len, cur, isz, cont;
+    struct ir_global *g;
+
+    /* the decimal digit buffer */
+    g = arena_zalloc(lower_arena, sizeof(*g));
+    g->name = arena_strdup(lower_arena, "__scm_numbuf");
+    g->base_type = IR_I8;
+    g->arr_size = 24;
+    g->next = cur_prog->globals;
+    cur_prog->globals = g;
+
+    fn = ir_new_func(lower_arena, "__scm_display");
+    cur_fn = fn;
+    nlsyms = 0;
+    nslots = 0;
+    add_lsym("__v");            /* param slot 0: the tagged value */
+    fn->nparams = 1;
+    slot_v = alloc_slot(4);     /* untagged working integer */
+    slot_i = alloc_slot(4);     /* digit buffer index */
+
+    ins = emit(IR_FUNC);
+    ins->sym = arena_strdup(lower_arena, "__scm_display");
+    ins->nargs = 1;
+
+    Lfix = new_label(); Lnil = new_label(); Lf = new_label();
+    Lt = new_label(); Lobj = new_label(); Lend = new_label();
+    Lneg = new_label(); Lpos = new_label(); Lzero = new_label();
+    Lloop = new_label(); Ldone = new_label();
+
+    /* v = param (value word in slot 0) */
+    ins = emit(IR_VLDL); ins->dst = new_temp(); ins->slot = 0;
+    v = ins->dst;
+
+    /* dispatch on tag */
+    c1 = lower_const(1); c0 = lower_const(0);
+    c2 = lower_const(2); c6 = lower_const(6);
+    t3 = eb(IR_AND, v, lower_const(3));
+    cmp = eb(IR_CMPEQ, t3, c1); ebnz(cmp, Lfix);
+    cmp = eb(IR_CMPEQ, v, c0);  ebnz(cmp, Lnil);
+    cmp = eb(IR_CMPEQ, v, c2);  ebnz(cmp, Lf);
+    cmp = eb(IR_CMPEQ, v, c6);  ebnz(cmp, Lt);
+    emit_jmp(Lobj);
+
+    /* fixnum: untag, handle sign, print digits */
+    emit_label(Lfix);
+    raw = eb(IR_SHRS, v, lower_const(2));
+    estl(slot_v, raw);
+    cmp = eb(IR_CMPLTS, raw, lower_const(0));
+    ebnz(cmp, Lneg);
+    emit_jmp(Lpos);
+    emit_label(Lneg);
+    emit_write_literal("-", 1);
+    neg = eb(IR_SUB, lower_const(0), raw);
+    estl(slot_v, neg);
+    emit_jmp(Lpos);
+    emit_label(Lpos);
+    cur = eldl(slot_v);
+    isz = eb(IR_CMPEQ, cur, lower_const(0));
+    ebnz(isz, Lzero);
+    estl(slot_i, lower_const(24));
+    emit_jmp(Lloop);
+
+    emit_label(Lzero);
+    dch = lower_const('0');
+    base = evlea("__scm_numbuf");
+    { struct ir_insn *x = emit(IR_SB); x->a = base; x->b = dch; }
+    { int t_one = lower_const(1); emit_write3(base, t_one); }
+    emit_jmp(Lend);
+
+    emit_label(Lloop);
+    i = eldl(slot_i);
+    i2 = eb(IR_SUB, i, lower_const(1));
+    estl(slot_i, i2);
+    v2 = eldl(slot_v);
+    rem = eb(IR_MODS, v2, lower_const(10));
+    quo = eb(IR_DIVS, v2, lower_const(10));
+    estl(slot_v, quo);
+    dch = eb(IR_ADD, rem, lower_const('0'));
+    base = evlea("__scm_numbuf");
+    addr = eb(IR_ADD, base, i2);
+    { struct ir_insn *x = emit(IR_SB); x->a = addr; x->b = dch; }
+    cont = eb(IR_CMPEQ, quo, lower_const(0));
+    ebnz(cont, Ldone);
+    emit_jmp(Lloop);
+
+    emit_label(Ldone);
+    i = eldl(slot_i);
+    base = evlea("__scm_numbuf");
+    startp = eb(IR_ADD, base, i);
+    len = eb(IR_SUB, lower_const(24), i);
+    emit_write3(startp, len);
+    emit_jmp(Lend);
+
+    emit_label(Lnil); emit_write_literal("()", 2); emit_jmp(Lend);
+    emit_label(Lf);   emit_write_literal("#f", 2); emit_jmp(Lend);
+    emit_label(Lt);   emit_write_literal("#t", 2); emit_jmp(Lend);
+    emit_label(Lobj); emit_write_literal("#<obj>", 6); emit_jmp(Lend);
+
+    emit_label(Lend);
+    ins = emit(IR_RETV);
+    ins->a = lower_const((long)VAL_NIL);
+    emit(IR_ENDF);
+    finish_slots(fn);
+    return fn;
+}
+
+/****************************************************************
+ * Binding and control special forms
+ *
+ * let/let* bind local slots (reusing the lsym table, so an inner lambda
+ * captures a let variable the same way it captures a parameter); cond/when/
+ * unless/and/or/not desugar onto if-style branching and the #f-only falsiness
+ * rule.  None need any runtime support.
+ ****************************************************************/
+
+static int evldl(int slot)
+{
+    struct ir_insn *x = emit(IR_VLDL);
+    x->dst = new_temp();
+    x->slot = slot;
+    return x->dst;
+}
+
+static void evstl(int slot, int t)
+{
+    struct ir_insn *x = emit(IR_VSTL);
+    x->a = t;
+    x->slot = slot;
+}
+
+/* lower a sequence of body forms (an implicit begin); returns the last value */
+static int
+lower_body(val_t body, int tail)
+{
+    int t = lower_const((long)VAL_NIL);
+    val_t cur;
+
+    for (cur = body; !IS_NIL(cur); cur = gc_cdr(cur)) {
+        int last = IS_NIL(gc_cdr(cur));
+        t = lower_expr(gc_car(cur), last ? tail : 0);
+    }
+    return t;
+}
+
+static int
+lower_let(val_t rest, int star)
+{
+    val_t binds = gc_car(rest);
+    val_t body = gc_cdr(rest);
+    int saved = nlsyms;
+    int tmp[64], slot[64], n = 0;
+    val_t b;
+    int result, i;
+
+    if (!star) {
+        /* parallel: evaluate every init in the outer scope first */
+        for (b = binds; !IS_NIL(b); b = gc_cdr(b)) {
+            val_t pair = gc_car(b);
+            if (n >= 64)
+                die("lower: too many let bindings");
+            tmp[n++] = lower_expr(gc_car(gc_cdr(pair)), 0);
+        }
+        n = 0;
+        for (b = binds; !IS_NIL(b); b = gc_cdr(b)) {
+            val_t pair = gc_car(b);
+            add_lsym(sym_name(gc_car(pair)));
+            slot[n] = lsyms[nlsyms - 1].slot;
+            evstl(slot[n], tmp[n]);
+            n++;
+        }
+    } else {
+        /* sequential: each init sees the earlier bindings */
+        for (b = binds; !IS_NIL(b); b = gc_cdr(b)) {
+            val_t pair = gc_car(b);
+            int t = lower_expr(gc_car(gc_cdr(pair)), 0);
+            add_lsym(sym_name(gc_car(pair)));
+            evstl(lsyms[nlsyms - 1].slot, t);
+        }
+    }
+    (void)slot; (void)i;
+
+    result = lower_body(body, 0);
+    nlsyms = saved;             /* pop the let scope */
+    return result;
+}
+
+static int
+lower_not(val_t rest)
+{
+    int t = lower_expr(gc_car(rest), 0);
+    /* #t when the operand was #f (only #f is false) */
+    return bool_from_cmp(eb(IR_CMPEQ, t, lower_const((long)VAL_FALSE)));
+}
+
+/* and: () -> #t; else the first #f, or the last value.
+ * or:  () -> #f; else the first non-#f, or the last value. */
+static int
+lower_and_or(val_t rest, int is_or)
+{
+    int rslot = alloc_slot(VWORD);
+    int lend = new_label();
+    val_t cur;
+
+    if (IS_NIL(rest)) {
+        evstl(rslot, lower_const((long)(is_or ? VAL_FALSE : VAL_TRUE)));
+        return evldl(rslot);
+    }
+    for (cur = rest; !IS_NIL(cur); cur = gc_cdr(cur)) {
+        int last = IS_NIL(gc_cdr(cur));
+        int t = lower_expr(gc_car(cur), 0);
+        evstl(rslot, t);
+        if (!last) {
+            int isfalse = eb(IR_CMPEQ, t, lower_const((long)VAL_FALSE));
+
+            if (is_or) {
+                /* stop at the first non-#f: fall through on #f, jump on true */
+                int lnext = new_label();
+                ebnz(isfalse, lnext);
+                emit_jmp(lend);
+                emit_label(lnext);
+            } else {
+                /* stop at the first #f */
+                ebnz(isfalse, lend);
+            }
+        }
+    }
+    emit_label(lend);
+    return evldl(rslot);
+}
+
+static int
+lower_cond(val_t rest)
+{
+    int rslot = alloc_slot(VWORD);
+    int lend = new_label();
+    val_t cur;
+
+    evstl(rslot, lower_const((long)VAL_NIL));    /* no clause matched */
+    for (cur = rest; !IS_NIL(cur); cur = gc_cdr(cur)) {
+        val_t clause = gc_car(cur);
+        val_t test = gc_car(clause);
+        val_t body = gc_cdr(clause);
+        int lnext = new_label();
+
+        if (is_sym(test, "else")) {
+            evstl(rslot, lower_body(body, 0));
+            emit_jmp(lend);
+            break;
+        }
+        {
+            int t = lower_expr(test, 0);
+            int isfalse = eb(IR_CMPEQ, t, lower_const((long)VAL_FALSE));
+
+            ebnz(isfalse, lnext);
+            /* a (test) clause with no body yields the test value */
+            evstl(rslot, IS_NIL(body) ? t : lower_body(body, 0));
+            emit_jmp(lend);
+        }
+        emit_label(lnext);
+    }
+    emit_label(lend);
+    return evldl(rslot);
+}
+
+static int
+lower_when(val_t rest, int unless)
+{
+    int rslot = alloc_slot(VWORD);
+    int lend = new_label();
+    int lbody = new_label();
+    int t = lower_expr(gc_car(rest), 0);
+    int isfalse;
+
+    evstl(rslot, lower_const((long)VAL_NIL));
+    isfalse = eb(IR_CMPEQ, t, lower_const((long)VAL_FALSE));
+    /* when: run body unless #f; unless: run body only when #f */
+    if (!unless) {
+        ebnz(isfalse, lend);
+    } else {
+        ebnz(isfalse, lbody);
+        emit_jmp(lend);
+    }
+    emit_label(lbody);
+    evstl(rslot, lower_body(gc_cdr(rest), 0));
+    emit_label(lend);
+    return evldl(rslot);
+}
+
+/****************************************************************
+ * Numeric primitives
+ *
+ * Fixnums are tagged (n<<2 | 1), so a division-family op untags its operands,
+ * computes, and retags.  Everything here is branchless so no value crosses a
+ * basic-block boundary (the IR keeps temps single-block; cross-block values go
+ * through slots).  quotient/remainder truncate toward zero (IR_DIVS/IR_MODS);
+ * modulo floors (its result takes the divisor's sign).
+ ****************************************************************/
+
+static int
+scm_untag(int t)
+{
+    return eb(IR_SHRS, t, lower_const(2));
+}
+
+/* Every emitting subexpression below is its own statement: a call with two
+   side-effecting arguments would emit the two in an order C leaves unspecified,
+   so host gcc and skj-cc-wasm (which disagree on argument evaluation order)
+   would produce equivalent but byte-different modules and fail the self-host
+   byte-identity check.  Sequencing the emits pins the order. */
+
+static int
+scm_retag(int r)
+{
+    int shl = eb(IR_SHL, r, lower_const(2));
+    int one = lower_const(1);
+    return eb(IR_OR, shl, one);
+}
+
+static int
+lower_divop(val_t rest, int op)
+{
+    int ra = scm_untag(lower_expr(gc_car(rest), 0));
+    int rb = scm_untag(lower_expr(gc_car(gc_cdr(rest)), 0));
+    return scm_retag(eb(op, ra, rb));
+}
+
+static int
+lower_modulo(val_t rest)
+{
+    int ra = scm_untag(lower_expr(gc_car(rest), 0));
+    int rb = scm_untag(lower_expr(gc_car(gc_cdr(rest)), 0));
+    int r = eb(IR_MODS, ra, rb);
+    /* adjust toward the divisor's sign: when r != 0 and sign(r) != sign(b),
+       add b.  Branchless: mask = -(adjust) is all-ones, else zero. */
+    int xr = eb(IR_XOR, r, rb);
+    int signdiff = eb(IR_CMPLTS, xr, lower_const(0));
+    int iszero = eb(IR_CMPEQ, r, lower_const(0));
+    int nonzero = eb(IR_XOR, iszero, lower_const(1));
+    int adjust = eb(IR_AND, signdiff, nonzero);
+    int mask = eb(IR_SUB, lower_const(0), adjust);     /* -adjust: all-ones or 0 */
+    int addend = eb(IR_AND, rb, mask);
+    return scm_retag(eb(IR_ADD, r, addend));
+}
+
+static int
+lower_abs(val_t rest)
+{
+    int raw = scm_untag(lower_expr(gc_car(rest), 0));
+    /* branchless: (x ^ (x>>31)) - (x>>31) */
+    int sign = eb(IR_SHRS, raw, lower_const(31));
+    int flip = eb(IR_XOR, raw, sign);
+    return scm_retag(eb(IR_SUB, flip, sign));
+}
+
+static int
+lower_minmax(val_t rest, int is_max)
+{
+    /* tagged fixnums keep fixnum order under a signed compare, so no untag is
+       needed.  Branchless select: sel = (a^b) & -(a<b). */
+    int a = lower_expr(gc_car(rest), 0);
+    int b = lower_expr(gc_car(gc_cdr(rest)), 0);
+    int lt = eb(IR_CMPLTS, a, b);
+    int mask = eb(IR_SUB, lower_const(0), lt);          /* -(a<b) */
+    int axb = eb(IR_XOR, a, b);
+    int sel = eb(IR_AND, axb, mask);
+    /* a<b: min=a, max=b; else min=b, max=a */
+    return is_max ? eb(IR_XOR, a, sel) : eb(IR_XOR, b, sel);
+}
+
+/****************************************************************
+ * Quoted data
+ *
+ * A quoted datum becomes runtime construction: immediates (fixnum, nil, #t/#f)
+ * are their own machine word; a quoted symbol is an interned rodata object so
+ * eq? identity holds; a quoted pair/list is built with runtime cons cells.
+ ****************************************************************/
+
+/* an interned symbol object: [type byte OBJ_SYMBOL][name][NUL], word-aligned so
+   its address carries the heap-pointer tag (low 2 bits zero).  Returns the
+   global's symbol name. */
+static const char *
+intern_symbol(const char *name)
+{
+    struct ir_global *g;
+    char buf[32];
+    char *data;
+    int nl = (int)strlen(name);
+    int i;
+
+    for (i = 0; i < g_nqsyms; i++)
+        if (strcmp(g_qsyms[i].name, name) == 0)
+            return g_qsyms[i].gname;
+    if (g_nqsyms >= MAX_QSYMS)
+        die("lower: too many quoted symbols");
+
+    snprintf(buf, sizeof(buf), "__scm_sym_%d", g_nqsyms);
+    g = arena_zalloc(lower_arena, sizeof(*g));
+    g->name = arena_strdup(lower_arena, buf);
+    g->base_type = IR_I8;
+    g->arr_size = 1 + nl + 1;
+    g->align = VWORD;
+    g->is_rodata = 1;
+    data = arena_alloc(lower_arena, g->arr_size);
+    data[0] = (char)OBJ_SYMBOL;
+    memcpy(data + 1, name, nl);
+    data[1 + nl] = '\0';
+    g->init_string = data;
+    g->init_strlen = g->arr_size;
+    g->next = cur_prog->globals;
+    cur_prog->globals = g;
+
+    g_qsyms[g_nqsyms].name = arena_strdup(lower_arena, name);
+    g_qsyms[g_nqsyms].gname = g->name;
+    g_nqsyms++;
+    return g->name;
+}
+
+static int
+lower_quote_symbol(const char *name)
+{
+    const char *g = intern_symbol(name);
+    struct ir_insn *ins = emit(IR_VLEA);
+    ins->dst = new_temp();
+    ins->sym = arena_strdup(lower_arena, g);
+    return ins->dst;
+}
+
+static int
+lower_quote_datum(val_t v)
+{
+    if (IS_FIX(v) || IS_NIL(v) || IS_IMM(v))
+        return lower_const((long)v);
+    if (is_symbol(v))
+        return lower_quote_symbol(sym_name(v));
+    if (is_pair(v)) {
+        int ca = lower_quote_datum(gc_car(v));
+        int cd = lower_quote_datum(gc_cdr(v));
+        return emit_cons(ca, cd);
+    }
+    die("lower: cannot quote this datum");
+    return 0;
+}
+
+static int
+lower_eq(val_t args)
+{
+    int a = lower_expr(gc_car(args), 0);
+    int b = lower_expr(gc_car(gc_cdr(args)), 0);
+    return bool_from_cmp(eb(IR_CMPEQ, a, b));
+}
+
+/****************************************************************
  * Expression lowering
  ****************************************************************/
 
@@ -1456,8 +2095,7 @@ lower_expr(val_t expr, int tail)
             return t;
         }
         if (is_sym(head, "quote"))
-            die("lower: quoted expressions not yet "
-                "supported in codegen");
+            return lower_quote_datum(gc_car(rest));
 
         if (is_sym(head, "reset"))
             return lower_reset(rest);
@@ -1482,6 +2120,46 @@ lower_expr(val_t expr, int tail)
             return lower_set_cdr(rest);
         if (is_sym(head, "list"))
             return lower_list(rest);
+
+        if (is_sym(head, "display"))
+            return lower_display(rest);
+        if (is_sym(head, "newline"))
+            return lower_newline();
+        if (is_sym(head, "write-string"))
+            return lower_write_string(rest);
+
+        if (is_sym(head, "let"))
+            return lower_let(rest, 0);
+        if (is_sym(head, "let*"))
+            return lower_let(rest, 1);
+        if (is_sym(head, "cond"))
+            return lower_cond(rest);
+        if (is_sym(head, "when"))
+            return lower_when(rest, 0);
+        if (is_sym(head, "unless"))
+            return lower_when(rest, 1);
+        if (is_sym(head, "and"))
+            return lower_and_or(rest, 0);
+        if (is_sym(head, "or"))
+            return lower_and_or(rest, 1);
+        if (is_sym(head, "not"))
+            return lower_not(rest);
+
+        if (is_sym(head, "quotient"))
+            return lower_divop(rest, IR_DIVS);
+        if (is_sym(head, "remainder"))
+            return lower_divop(rest, IR_MODS);
+        if (is_sym(head, "modulo"))
+            return lower_modulo(rest);
+        if (is_sym(head, "abs"))
+            return lower_abs(rest);
+        if (is_sym(head, "min"))
+            return lower_minmax(rest, 0);
+        if (is_sym(head, "max"))
+            return lower_minmax(rest, 1);
+
+        if (is_sym(head, "eq?"))
+            return lower_eq(rest);
 
         return lower_call(expr, tail);
     }
@@ -1631,6 +2309,9 @@ scm_lower(struct arena *a, struct gc_heap *h, val_t program)
     prog = arena_zalloc(lower_arena, sizeof(*prog));
     cur_prog = prog;
     ngsyms = 0;
+    g_display_used = 0;
+    g_str_serial = 0;
+    g_nqsyms = 0;
     lifted_head = NULL;
     lifted_tail = NULL;
     lambda_serial = 0;
@@ -1854,6 +2535,14 @@ scm_lower(struct arena *a, struct gc_heap *h, val_t program)
     free(gsyms);
     gsyms = NULL;
     ngsyms = gsym_cap = 0;
+
+    /* emit the display helper last, after every body (including lifted
+     * lambdas) has had a chance to reference it */
+    if (g_display_used) {
+        struct ir_func *fn = build_display_helper();
+        *ftail = fn;
+        ftail = &fn->next;
+    }
 
     free(lsyms);
     lsyms = NULL;

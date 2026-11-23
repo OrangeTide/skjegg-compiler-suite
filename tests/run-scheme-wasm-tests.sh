@@ -71,6 +71,33 @@ for src in "$HERE"/scm_*.scm; do
     fi
     in=/dev/null
     [ -f "$HERE/$name.input" ] && in="$HERE/$name.input"
+
+    # A test with a .expected file asserts stdout: run the module as a plain
+    # WASI command (so fd_write output is the program's stdout, not wasmtime's
+    # printed invoke result) and diff.  The exit code is main's untagged result,
+    # checked against .exitcode (default 0).
+    if [ -f "$HERE/$name.expected" ]; then
+        set +e
+        "$WASMTIME" run \
+            -W stack-switching=y -W function-references=y -W gc=y -W exceptions=y \
+            "$wasm" <"$in" >"$out" 2>/dev/null
+        rc=$?
+        set -e
+        exp_rc=0
+        [ -f "$HERE/$name.exitcode" ] && exp_rc=$(cat "$HERE/$name.exitcode")
+        if [ "$rc" != "$exp_rc" ]; then
+            printf 'FAIL  %s (exit %s, want %s)\n' "$name" "$rc" "$exp_rc"
+            fail=$((fail + 1)); continue
+        fi
+        if ! diff -u "$HERE/$name.expected" "$out"; then
+            printf 'FAIL  %s (stdout mismatch)\n' "$name"
+            fail=$((fail + 1)); continue
+        fi
+        printf 'PASS  %s (stdout)\n' "$name"
+        pass=$((pass + 1))
+        continue
+    fi
+
     # Invoke main and read its returned value (see the header comment).  The
     # proposal flags enable WasmFX stack switching and its prerequisites; they
     # are inert for a program that does not use continuations.

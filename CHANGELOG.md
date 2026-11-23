@@ -6,6 +6,34 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.63.0
+
+#### Added
+- TinScheme prints to stdout. `display` writes a fixnum (formatted in decimal),
+  a boolean, nil, or a string literal; `newline` and `write-string` round out
+  the output forms. Until now a program could only communicate through its exit
+  code. The number formatter and the string output path are emitted as shared
+  IR, so they work identically on every native backend and on the link-free WASM
+  module.
+- Binding and control forms: `let`, `let*`, `cond` (with `else`), `when`,
+  `unless`, `and`, `or`, and `not`.
+- Numeric primitives: `quotient` and `remainder` (truncating toward zero),
+  `modulo` (flooring, result takes the divisor's sign), `abs`, `min`, and `max`.
+  Each is lowered branchlessly over the tagged fixnum representation.
+- Quoted data. `(quote datum)` and the `'` reader syntax now lower in codegen
+  instead of erroring: immediate data becomes a constant, a quoted pair or list
+  builds runtime cons cells, and a quoted symbol becomes an interned object (one
+  per distinct name, so every occurrence shares one identity). The companion
+  `eq?` tests identity, which is value equality for immediates and object
+  identity for symbols and pairs.
+- A TinScheme language reference (`doc/languages/tinscheme.md`) covering the
+  value model, every supported form, and the intentional omissions.
+
+#### Fixed
+- The TinScheme WASM test lane now asserts real stdout. A test with a
+  `.expected` file runs its module as a plain WASI command and diffs the output,
+  rather than only reading the top-level value through `--invoke main`.
+
 ### 0.62.0
 
 #### Added

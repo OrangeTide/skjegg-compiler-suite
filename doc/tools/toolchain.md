@@ -46,7 +46,7 @@ the soft-float PlayStation configuration where it applies).
 | C | `skj-cc` (and `-rv`, `-x86-64`, `-arm64`, `-mips`, `-mips-sf`) | `doc/languages/c.md` |
 | Pascal | `skj-pc` | `doc/languages/pascal.md` |
 | Kobold Pascal | `skj-kpc` (and per-target variants) | `doc/languages/kobold/` |
-| TinScheme | `skj-sc` (and per-target variants) | front end under `scheme/` |
+| TinScheme | `skj-sc` (and per-target variants) | `doc/languages/tinscheme.md` |
 | MooScript | `skj-mooc` | front end under `moo/` |
 
 C and Pascal have full language references in `doc/languages/`.
@@ -220,8 +220,9 @@ verifies the tag exists, sits at HEAD, and the tree is clean.
 
 ## Where to go next
 
-- A language: `doc/languages/c.md`, `doc/languages/pascal.md`, or the
-  Kobold Pascal set under `doc/languages/kobold/`.
+- A language: `doc/languages/c.md`, `doc/languages/pascal.md`,
+  `doc/languages/tinscheme.md`, or the Kobold Pascal set under
+  `doc/languages/kobold/`.
 - The tools: `doc/tools/emulator.md`, `doc/tools/debugger.md`,
   `doc/tools/jit.md`, `doc/tools/libc.md`, and `doc/tools/mips.md`.
 - The internals: `doc/internals/ir.md`,

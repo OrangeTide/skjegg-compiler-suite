@@ -182,7 +182,7 @@ emu/         emulator cores (ColdFire, RV32, MIPS), the KVM/HVF hypervisor, and 
 jit/         in-process JIT byte sinks and arena (doc/tools/jit.md)
 libc/        shared C standard library (doc/tools/libc.md)
 runtime/     target runtimes (start_*.S per target, pascal_rt.c, str.c, list.c, 64-bit helpers)
-scheme/      TinScheme front end (Scheme subset with GC; doc/internals/closures.md)
+scheme/      TinScheme front end (Scheme subset with GC; doc/languages/tinscheme.md)
 moo/         MooScript front end
 pascal/      Pascal front end (doc/languages/pascal.md)
 cc/          C front end (uses the cpp library)
