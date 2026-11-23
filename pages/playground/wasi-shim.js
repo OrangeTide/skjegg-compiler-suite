@@ -211,6 +211,35 @@
             path_rename: function () { return ENOSYS; },
             path_unlink_file: function () { return ENOSYS; },
 
+            // fill a buffer with random bytes (BASIC's RNG runtime calls this).
+            random_get: function (bufPtr, bufLen) {
+                var m = u8().subarray(bufPtr, bufPtr + bufLen);
+                var c = (typeof crypto !== "undefined" && crypto.getRandomValues)
+                    ? crypto : (typeof self !== "undefined" ? self.crypto : null);
+                if (c && c.getRandomValues) {
+                    // getRandomValues caps at 65536 bytes per call
+                    for (var off = 0; off < m.length; off += 65536)
+                        c.getRandomValues(m.subarray(off, Math.min(off + 65536, m.length)));
+                } else {
+                    for (var i = 0; i < m.length; i++) m[i] = (Math.random() * 256) | 0;
+                }
+                return ESUCCESS;
+            },
+
+            // benign time/env stubs: present so a program that references them
+            // links and runs; none of the playground samples depend on real values.
+            clock_time_get: function (id, precision, timePtr) {
+                var ns = BigInt(Math.round(Date.now() * 1e6));
+                dv().setBigUint64(timePtr, ns, true);
+                return ESUCCESS;
+            },
+            environ_sizes_get: function (countPtr, bufSizePtr) {
+                dv().setUint32(countPtr, 0, true);
+                dv().setUint32(bufSizePtr, 0, true);
+                return ESUCCESS;
+            },
+            environ_get: function () { return ESUCCESS; },
+
             proc_exit: function (code) {
                 exitCode = code; exited = true;
                 throw new WasiExit(code);

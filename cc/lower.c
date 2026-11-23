@@ -3360,8 +3360,22 @@ lower_expr(struct cc_node *n)
                     callee_type = callee_type->base;
             } else {
                 struct global *gl = find_global(n->a->name);
-                if (gl)
+                if (gl) {
                     callee_type = gl->type;
+                    /* A file-scope function-POINTER variable
+                       (int (*fp)(...)) is an indirect call through the stored
+                       pointer; only a real function symbol is a direct call.
+                       Without this the variable's own name was emitted as the
+                       direct call target, which the linker reports as an
+                       undefined function (it is a data object, not a function).
+                       The local-variable branch above already does this; the
+                       global branch omitted it. */
+                    if (gl->type && gl->type->kind == TY_PTR) {
+                        is_indirect = 1;
+                        fptr = lower_expr(n->a);
+                        callee_type = gl->type->base;
+                    }
+                }
             }
         } else {
             is_indirect = 1;
@@ -4839,6 +4853,12 @@ lower_global_decl(struct cc_node *gn)
 
     struct ir_global *g = arena_zalloc(lower_arena, sizeof *g);
     g->name = arena_strdup(lower_arena, gn->name);
+    /* A file-scope `static` object has internal linkage: it must not be
+       exported, so two translation units may each define one of the same name
+       (e.g. a `static int in_defer;` in two files).  Without this the emitters
+       marked it .globl and the symbols collided at link time; only skjegg
+       compiling multi-TU code with a shared static name exercised it. */
+    g->is_local = gn->is_static;
     g->is_rodata = type_is_readonly(t);
 
     if (wants_image(t, gn->a)) {

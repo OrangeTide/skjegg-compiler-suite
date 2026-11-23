@@ -6,6 +6,27 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.64.0
+
+#### Added
+- The browser playground is now multi-language: it compiles and runs TinScheme,
+  Pascal, BASIC, and MooScript, each with skjegg's own compiler self-hosted to
+  WebAssembly. TinScheme emits a complete module; the other three emit a
+  relocatable object that the self-hosted `skj-ld.wasm` links against the
+  language runtime in the browser, so the whole compile, link, and run pipeline
+  is client side. A new `check-playground-selfhost` lane drives that pipeline on
+  the host, and the playground is published to GitHub Pages alongside the manual
+  (at `/playground/`).
+
+#### Fixed
+- A file-scope `static` object was emitted with external linkage on every
+  backend, so two translation units defining one of the same name collided at
+  link time. It now has internal linkage. This only affected code that skjegg
+  itself compiles across multiple translation units.
+- A call through a file-scope function-pointer variable was lowered as a direct
+  call to a function named after the variable, which does not exist, so the link
+  failed. It is now an indirect call through the stored pointer.
+
 ### 0.63.0
 
 #### Added

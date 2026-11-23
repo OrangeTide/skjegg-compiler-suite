@@ -5,6 +5,22 @@ on:
     branches: [main]
     paths:
       - 'doc/**'
+      - 'pages/**'
+      - 'Makefile'
+      - 'version.mk'
+      # the playground embeds the self-hosted compilers, so a change to any
+      # front end, backend, the WASM linker, or the runtime/libc it links
+      # should redeploy it (main advances once per release, so this is
+      # per-release, not per-commit).
+      - 'scheme/**'
+      - 'basic/**'
+      - 'pascal/**'
+      - 'moo/**'
+      - 'ir/**'
+      - 'backend/**'
+      - 'wasm/**'
+      - 'libc/**'
+      - 'runtime/**'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -46,6 +62,17 @@ jobs:
 
       - name: Build the manual (HTML + PDF)
         run: make -C doc all
+
+      - name: Build the browser playground
+        # Builds the self-hosted compiler wasms and the runtime objects, then
+        # stages them with the page into build/playground/.  Needs only the
+        # C compiler and make (no wasmtime: this only builds, it does not run).
+        run: make playground
+
+      - name: Stage the playground into the manual
+        run: |
+          mkdir -p build/manual/playground
+          cp -r build/playground/. build/manual/playground/
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

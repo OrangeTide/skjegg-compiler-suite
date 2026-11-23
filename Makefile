@@ -586,15 +586,46 @@ check-selfhost-wasm: build/wasm-selfhost/skj-sc.wasm build/skj-sc-wasm | build
 	 OUTDIR="$(CURDIR)/build/selfhost-wasm" \
 	 sh tests/run-selfhost-wasm-tests.sh
 
-## playground: assemble the browser playground.  Build the self-hosted
-## skj-sc.wasm and drop it next to the page, which fetches it at load time.  The
-## binary is a build artifact (gitignored); serve this directory over http
-## (file:// cannot fetch the module or spawn the workers).
+## The language runtime objects the browser links against (built once with the
+## native skj-cc-wasm; the build rules are below, near the self-host compiler
+## rules).  Defined here, before the two targets that list it as a prerequisite,
+## because a prerequisite list is expanded as make reads the target's line: if
+## this sat after those targets it would expand empty and the objects would not
+## be built on a clean checkout.
+PLAYGROUND_RT := build/wasm-selfhost/rt/pascal_rt.o build/wasm-selfhost/rt/basic_rt.o \
+    build/wasm-selfhost/rt/arena_wasm.o build/wasm-selfhost/rt/str.o \
+    build/wasm-selfhost/rt/list.o build/wasm-selfhost/rt/host_stub.o
+
+## check-playground-selfhost: prove the browser playground pipeline on the host.
+## For each language the self-hosted compiler wasm compiles a sample, the
+## self-hosted skj-ld.wasm links it against the language runtime, and the module
+## runs under wasmtime with its stdout/exit checked.  Same wasms, argv and memfs
+## hand-off the browser workers use, so a pass here is the end-to-end proof.
+## Skips cleanly when wasmtime is absent.
+PHONY += check-playground-selfhost
+check-playground-selfhost: build/wasm-selfhost/skj-sc.wasm build/wasm-selfhost/skj-bc.wasm \
+    build/wasm-selfhost/skj-pc.wasm build/wasm-selfhost/skj-mooc.wasm \
+    build/wasm-selfhost/skj-ld.wasm $(PLAYGROUND_RT) | build
+	@SELFHOST_DIR="$(CURDIR)/build/wasm-selfhost" WASMTIME="$(WASMTIME)" \
+	 OUTDIR="$(CURDIR)/build/playground-selfhost" \
+	 sh tests/run-playground-selfhost.sh
+
+## playground: assemble the multi-language browser playground into
+## build/playground/.  Builds every self-hosted compiler wasm (skj-sc/bc/pc/mooc)
+## plus the self-hosted linker (skj-ld) and the language runtime objects, then
+## stages them next to the page files.  Serve the directory over http (file://
+## cannot fetch the modules or spawn the workers).
+PLAYGROUND_WASMS := build/wasm-selfhost/skj-sc.wasm build/wasm-selfhost/skj-bc.wasm \
+    build/wasm-selfhost/skj-pc.wasm build/wasm-selfhost/skj-mooc.wasm \
+    build/wasm-selfhost/skj-ld.wasm
 PHONY += playground
-playground: build/wasm-selfhost/skj-sc.wasm
-	cp build/wasm-selfhost/skj-sc.wasm pages/playground/skj-sc.wasm
-	@echo "playground ready: serve pages/playground over http, e.g."
-	@echo "    (cd pages/playground && python3 -m http.server 8080)"
+playground: $(PLAYGROUND_WASMS) $(PLAYGROUND_RT)
+	@mkdir -p build/playground/rt
+	cp pages/playground/index.html pages/playground/*.js build/playground/
+	cp $(PLAYGROUND_WASMS) build/playground/
+	cp $(PLAYGROUND_RT) build/playground/rt/
+	@echo "playground ready at build/playground/; serve over http, e.g."
+	@echo "    (cd build/playground && python3 -m http.server 8080)"
 	@echo "then open http://localhost:8080/"
 
 ## check-mooc-wasm: the MooScript corpus on WASM.  Each tests/moo_*.moo is
@@ -5444,6 +5475,46 @@ pc_flags_wasm := -DCC_WASM -Ipascal -Iir -Ibackend -Iwasm
 
 build/skj-pc-%: $$(pc_src_$$*) pascal/pascal.h ir/ir.h ir/target.h $(wildcard backend/*.h) | build
 	$(CC) $(CFLAGS) $(pc_flags_$*) -o $@ $(pc_src_$*)
+
+## The other self-hosted WebAssembly compilers for the browser playground.
+## skjegg's own skj-cc-wasm + skj-ld-wasm build each front end's C sources into a
+## <tool>.wasm that compiles its language in the browser (the same way skj-sc is
+## built above).  Unlike TinScheme, these four emit a relocatable WASM object, so
+## the browser links it against the language runtime with the self-hosted
+## skj-ld.wasm.  The C compiler is not here yet: a WASM float codegen bug blocks
+## its self-host.  Defined here, after every front end's source list exists.
+##   $(1) = tool basename (bc/pc/mooc/ld)   $(2) = source list   $(3) = -Idir
+selfhost_cflags := -DCC_WASM -Ibuild -Iir -Ibackend -Iwasm -Iinclude -Ilibc -Iruntime
+selfhost_bc_srcs   := $(BASIC_FE) $(BE_WASM) $(WASM_LIBC_SRCS)
+selfhost_pc_srcs   := $(PC_FE) $(IR_SRC) $(BE_WASM) $(WASM_LIBC_SRCS)
+selfhost_mooc_srcs := $(MOO_FE) $(IR_SRC) $(BE_WASM) $(WASM_LIBC_SRCS)
+selfhost_ld_srcs   := $(WLD_SRC) $(WASM_LIBC_SRCS)
+
+define SELFHOST_WASM_RULE
+build/wasm-selfhost/skj-$(1).wasm: build/skj-cc-wasm build/skj-ld-wasm build/version.h $(2) | build
+	@mkdir -p build/wasm-selfhost/obj-$(1)
+	@rm -f build/wasm-selfhost/obj-$(1)/*.o
+	@for s in $(2); do \
+	    o=build/wasm-selfhost/obj-$(1)/$$$$(echo $$$$s | tr / _ | sed 's/\.c$$$$/.o/'); \
+	    ./build/skj-cc-wasm $(selfhost_cflags) $(3) -c -o $$$$o $$$$s || exit 1; \
+	done
+	./build/skj-ld-wasm -o $$@ build/wasm-selfhost/obj-$(1)/*.o
+endef
+$(eval $(call SELFHOST_WASM_RULE,bc,$(selfhost_bc_srcs),-Ibasic))
+$(eval $(call SELFHOST_WASM_RULE,pc,$(selfhost_pc_srcs),-Ipascal))
+$(eval $(call SELFHOST_WASM_RULE,mooc,$(selfhost_mooc_srcs),-Imoo))
+$(eval $(call SELFHOST_WASM_RULE,ld,$(selfhost_ld_srcs),-Iwasm))
+
+## The language runtime objects the browser links against are built by the rules
+## below; the PLAYGROUND_RT list that names them is defined up near the
+## check-playground-selfhost / playground targets so it is non-empty where those
+## targets reference it (a prerequisite list is expanded as its line is read).
+build/wasm-selfhost/rt/basic_rt.o: runtime/basic_rt.c build/skj-cc-wasm | build
+	@mkdir -p build/wasm-selfhost/rt
+	./build/skj-cc-wasm -DSKJ_LIBC_FLOAT -c -o $@ $<
+build/wasm-selfhost/rt/%.o: runtime/%.c build/skj-cc-wasm | build
+	@mkdir -p build/wasm-selfhost/rt
+	./build/skj-cc-wasm -c -o $@ $<
 
 ## Host Pascal runtime (native libc): x86-64 built by the host cc, aarch64 by
 ## the cross cc for running under qemu.

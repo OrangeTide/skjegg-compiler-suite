@@ -114,6 +114,12 @@ cat <<'HEAD'
     its tools, and its internals. The source of truth for every page is the
     Markdown in the project's <code>doc/</code> tree.
   </p>
+  <p class="lede">
+    Try the languages in your browser: the
+    <a href="playground/">playground</a> compiles and runs TinScheme,
+    Pascal, BASIC, and MooScript entirely client side, using skjegg's own
+    compilers built to WebAssembly.
+  </p>
 HEAD
 
 printf '\n  <h2>Languages</h2>\n  <ul>\n'

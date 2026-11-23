@@ -25,12 +25,13 @@
     display: flex; flex-direction: column;
   }
   header {
-    display: flex; align-items: center; gap: 12px;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
   }
   header h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: .2px; }
   header h1 .dim { color: var(--dim); font-weight: 400; }
   header .spacer { flex: 1; }
+  label.sel { font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 6px; }
   select, button {
     font-family: var(--sans); font-size: 13px; color: var(--fg);
     background: var(--panel2); border: 1px solid var(--border);
@@ -79,16 +80,21 @@
 </head>
 <body>
 <header>
-  <h1>skjegg <span class="dim">playground &middot; TinScheme &rarr; WebAssembly</span></h1>
+  <h1>skjegg <span class="dim">playground</span></h1>
+  <label class="sel">language
+    <select id="language" title="Pick a language"></select>
+  </label>
   <div class="spacer"></div>
-  <select id="samples" title="Load a sample"></select>
+  <label class="sel">sample
+    <select id="samples" title="Load a sample"></select>
+  </label>
   <button id="compileBtn" class="primary" disabled>Compile</button>
   <button id="runBtn" disabled>Run</button>
-  <button id="clearBtn">Clear</button>
+  <button id="clearBtn">Clear console</button>
 </header>
 <main>
   <section class="pane editor-pane">
-    <div class="pane-head">source.scm</div>
+    <div class="pane-head" id="srcLabel">source</div>
     <div class="editor-wrap">
       <div class="gutter" id="gutter">1</div>
       <textarea id="editor" spellcheck="false" autocomplete="off"
@@ -100,18 +106,93 @@
     <pre id="console"></pre>
   </section>
 </main>
-<footer id="status">loading the self-hosted compiler&hellip;</footer>
+<footer id="status">loading the self-hosted compilers&hellip;</footer>
 
 <script>
 (function () {
   "use strict";
 
-  var SAMPLES = {
-    "Factorial": "; factorial, printed as the program's exit value\n(define (fact n)\n  (if (= n 0) 1 (* n (fact (- n 1)))))\n(fact 6)\n",
-    "Fibonacci": "(define (fib n)\n  (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))\n(fib 10)\n",
-    "Closures": "(define (adder n) (lambda (x) (+ x n)))\n(define add5 (adder 5))\n(add5 37)\n",
-    "shift/reset": "; delimited continuations (needs a WasmFX-capable engine to run)\n(+ 1 (reset (* 2 (shift k (k (k 10))))))\n"
+  // Each language: the self-hosted compiler wasm, whether the compiler emits a
+  // complete module (TinScheme) or a relocatable object that the browser then
+  // links against runtime objects, and a few sample programs.
+  var LANGS = {
+    scheme: {
+      label: "TinScheme", ext: "scm", compiler: "skj-sc.wasm", tool: "skj-sc",
+      link: false, runtime: [],
+      note: "A TinScheme program prints with display/newline; its final value " +
+            "is also the exit code.",
+      samples: {
+        "Hello": '(display "Hello from TinScheme!") (newline)\n',
+        "Factorial": "; print 6! and return it as the exit code\n" +
+          "(define (fact n)\n  (if (= n 0) 1 (* n (fact (- n 1)))))\n" +
+          '(display "6! = ") (display (fact 6)) (newline)\n(fact 6)\n',
+        "Fibonacci": "(define (fib n)\n  (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))\n" +
+          "(define (loop i)\n  (when (< i 10)\n" +
+          '    (display "fib(") (display i) (display ") = ") (display (fib i)) (newline)\n' +
+          "    (loop (+ i 1))))\n(loop 0)\n",
+        "Lists & quote": "; quoted data, list traversal, symbol identity\n" +
+          "(define (sum lst)\n  (if (null? lst) 0 (+ (car lst) (sum (cdr lst)))))\n" +
+          '(display "sum = ") (display (sum (quote (1 2 3 4 5)))) (newline)\n' +
+          '(display (if (eq? (quote red) (quote red)) "same" "diff")) (newline)\n'
+      }
+    },
+    pascal: {
+      label: "Pascal", ext: "pas", compiler: "skj-pc.wasm", tool: "skj-pc",
+      link: true,
+      runtime: [{ url: "rt/pascal_rt.o", name: "pascal_rt.o" }],
+      note: "",
+      samples: {
+        "Hello": "program hello;\nbegin\n  writeln('Hello from Pascal!');\nend.\n",
+        "Factorial": "program fact;\nvar i, f: integer;\nbegin\n  f := 1;\n" +
+          "  for i := 1 to 6 do\n  begin\n    f := f * i;\n" +
+          "    writeln(i, '! = ', f);\n  end;\nend.\n",
+        "FizzBuzz": "program fizzbuzz;\nvar i: integer;\nbegin\n" +
+          "  for i := 1 to 15 do\n  begin\n" +
+          "    if (i mod 15) = 0 then writeln('FizzBuzz')\n" +
+          "    else if (i mod 3) = 0 then writeln('Fizz')\n" +
+          "    else if (i mod 5) = 0 then writeln('Buzz')\n" +
+          "    else writeln(i);\n  end;\nend.\n"
+      }
+    },
+    basic: {
+      label: "BASIC", ext: "bas", compiler: "skj-bc.wasm", tool: "skj-bc",
+      link: true,
+      runtime: [
+        { url: "rt/basic_rt.o", name: "basic_rt.o" },
+        { url: "rt/arena_wasm.o", name: "arena_wasm.o" }
+      ],
+      note: "",
+      samples: {
+        "Hello": 'PRINT "Hello from BASIC!"\n',
+        "Squares": 'DIM i AS INT\nFOR i = 1 TO 8\n  PRINT i; " squared is "; i * i\nNEXT\n',
+        "FizzBuzz": "DIM i AS INT\nFOR i = 1 TO 15\n" +
+          '  IF i MOD 15 = 0 THEN\n    PRINT "FizzBuzz"\n' +
+          '  ELSEIF i MOD 3 = 0 THEN\n    PRINT "Fizz"\n' +
+          '  ELSEIF i MOD 5 = 0 THEN\n    PRINT "Buzz"\n' +
+          "  ELSE\n    PRINT i\n  ENDIF\nNEXT\n"
+      }
+    },
+    moo: {
+      label: "MooScript", ext: "moo", compiler: "skj-mooc.wasm", tool: "skj-mooc",
+      link: true,
+      runtime: [
+        { url: "rt/str.o", name: "str.o" },
+        { url: "rt/list.o", name: "list.o" },
+        { url: "rt/host_stub.o", name: "host_stub.o" },
+        { url: "rt/arena_wasm.o", name: "arena_wasm.o" }
+      ],
+      note: "A MooScript program reports its result as the exit code (watch the " +
+            "'exited with code' line).",
+      samples: {
+        "Arithmetic": "verb add(a: int, b: int)\n\treturn a + b;\nendverb\n\n" +
+          "verb main()\n\tvar x: int = 5;\n\tvar y: int = 10;\n" +
+          "\treturn add(x, y);\nendverb\n",
+        "Max": "verb max(a: int, b: int)\n\tif (a > b)\n\t\treturn a;\n\tendif\n" +
+          "\treturn b;\nendverb\n\nverb main()\n\treturn max(42, 17);\nendverb\n"
+      }
+    }
   };
+  var LANG_ORDER = ["scheme", "pascal", "basic", "moo"];
 
   var ed = document.getElementById("editor");
   var gutter = document.getElementById("gutter");
@@ -121,9 +202,17 @@
   var runBtn = document.getElementById("runBtn");
   var clearBtn = document.getElementById("clearBtn");
   var samples = document.getElementById("samples");
+  var langSel = document.getElementById("language");
+  var srcLabel = document.getElementById("srcLabel");
 
-  var lastModule = null;      // ArrayBuffer of the last successful compile
-  var compiler = null, runner = null, compilerReady = false;
+  var curLang = "scheme";
+  var lastModule = null;      // ArrayBuffer of the last runnable module
+  var compilerReady = false;
+  var busy = false;
+
+  var compiler = new Worker("compiler-worker.js");
+  var linker = new Worker("link-worker.js");
+  var runner = new Worker("run-worker.js");
 
   // ---- editor gutter ----
   function syncGutter() {
@@ -133,7 +222,7 @@
     gutter.scrollTop = ed.scrollTop;
   }
   ed.addEventListener("input", function () {
-    syncGutter(); persist(); lastModule = null; runBtn.disabled = true;
+    syncGutter(); persist(); invalidate();
   });
   ed.addEventListener("scroll", function () { gutter.scrollTop = ed.scrollTop; });
   ed.addEventListener("keydown", function (e) {
@@ -155,43 +244,76 @@
     out.scrollTop = out.scrollHeight;
   }
 
-  // ---- persistence ----
+  // ---- persistence (per language) ----
   function persist() {
-    try { localStorage.setItem("skjegg-playground", ed.value); } catch (e) {}
+    try { localStorage.setItem("skjegg-pg-" + curLang, ed.value); } catch (e) {}
   }
-  function restore() {
+  function restore(lang) {
     try {
-      var v = localStorage.getItem("skjegg-playground");
-      if (v != null) { ed.value = v; return true; }
+      var v = localStorage.getItem("skjegg-pg-" + lang);
+      if (v != null) return v;
     } catch (e) {}
-    return false;
+    return null;
+  }
+
+  function invalidate() { lastModule = null; runBtn.disabled = true; }
+
+  function setBusy(b) {
+    busy = b;
+    compileBtn.disabled = b || !compilerReady;
+    runBtn.disabled = b || !lastModule;
+    samples.disabled = b;
+    langSel.disabled = b;
   }
 
   // ---- workers ----
-  compiler = new Worker("compiler-worker.js");
   compiler.onmessage = function (ev) {
     var m = ev.data;
     if (m.type === "ready") {
       compilerReady = true; compileBtn.disabled = false;
       status.textContent = "ready - edit, then Compile";
-    } else if (m.type === "load-error") {
-      status.textContent = "compiler failed to load: " + m.message;
-      log("Could not load skj-sc.wasm. Build it with `make playground` and serve this\n" +
-          "directory over http (file:// cannot fetch the module or spawn workers).\n" +
-          m.message, "log-err");
     } else if (m.type === "compiled") {
-      lastModule = m.wasm;
       if (m.stderr) log(m.stderr, "log-info");
-      log("Compiled " + m.wasm.byteLength + " bytes of WebAssembly.", "log-ok");
-      runBtn.disabled = false; status.textContent = "compiled - press Run";
-      setBusy(false);
+      if (m.link) {
+        // relocatable object: link it against the runtime next
+        var lang = LANGS[curLang];
+        log("Compiled " + m.bytes.byteLength + " bytes; linking…", "log-info");
+        status.textContent = "linking…";
+        log("$ skj-ld -o out.wasm out.o " +
+            lang.runtime.map(function (r) { return r.name; }).join(" "), "log-info");
+        linker.postMessage({
+          type: "link", linkerUrl: "skj-ld.wasm", toolName: "skj-ld",
+          objBytes: m.bytes, objName: "out.o", outName: "out.wasm",
+          runtime: lang.runtime
+        }, [m.bytes]);
+      } else {
+        finishBuild(m.bytes);
+      }
     } else if (m.type === "error") {
       log(m.stderr || "compile failed", "log-err");
       status.textContent = "compile error"; setBusy(false);
     }
   };
 
-  runner = new Worker("run-worker.js");
+  linker.onmessage = function (ev) {
+    var m = ev.data;
+    if (m.type === "linked") {
+      if (m.stderr) log(m.stderr, "log-info");
+      finishBuild(m.bytes);
+    } else if (m.type === "error") {
+      log(m.stderr || "link failed", "log-err");
+      status.textContent = "link error"; setBusy(false);
+    }
+  };
+
+  function finishBuild(bytes) {
+    lastModule = bytes;
+    log("Built " + bytes.byteLength + " bytes of WebAssembly.", "log-ok");
+    runBtn.disabled = false;
+    status.textContent = "built - press Run";
+    setBusy(false);
+  }
+
   runner.onmessage = function (ev) {
     var m = ev.data;
     if (m.type === "done") {
@@ -208,22 +330,23 @@
     }
   };
 
-  function setBusy(b) {
-    compileBtn.disabled = b || !compilerReady;
-    runBtn.disabled = b || !lastModule;
-    samples.disabled = b;
-  }
-
+  // ---- actions ----
   compileBtn.addEventListener("click", function () {
-    if (!compilerReady) return;
-    setBusy(true); runBtn.disabled = true;
+    if (!compilerReady || busy) return;
+    var lang = LANGS[curLang];
+    setBusy(true); invalidate();
     status.textContent = "compiling…";
-    log("$ skj-sc -o out.wasm source.scm", "log-info");
-    compiler.postMessage({ type: "compile", source: ed.value });
+    log("$ " + lang.tool + " -o " + (lang.link ? "out.o" : "out.wasm") +
+        " source." + lang.ext, "log-info");
+    compiler.postMessage({
+      type: "compile", compilerUrl: lang.compiler, toolName: lang.tool,
+      srcName: "source." + lang.ext, source: ed.value,
+      outName: lang.link ? "out.o" : "out.wasm", link: lang.link
+    });
   });
 
   runBtn.addEventListener("click", function () {
-    if (!lastModule) return;
+    if (!lastModule || busy) return;
     setBusy(true);
     status.textContent = "running…";
     log("$ ./out.wasm", "log-info");
@@ -233,25 +356,66 @@
 
   clearBtn.addEventListener("click", function () { out.textContent = ""; });
 
-  // ---- samples ----
-  Object.keys(SAMPLES).forEach(function (name, i) {
+  // ---- language + samples ----
+  function populateSamples() {
+    var lang = LANGS[curLang];
+    samples.innerHTML = "";
+    Object.keys(lang.samples).forEach(function (name) {
+      var o = document.createElement("option");
+      o.value = name; o.textContent = name; samples.appendChild(o);
+    });
+  }
+
+  function loadLang(lang, seedSample) {
+    curLang = lang;
+    var L = LANGS[lang];
+    srcLabel.textContent = "source." + L.ext;
+    populateSamples();
+    var saved = restore(lang);
+    if (saved != null && !seedSample) {
+      ed.value = saved;
+    } else {
+      var first = Object.keys(L.samples)[0];
+      ed.value = L.samples[first];
+      samples.value = first;
+    }
+    syncGutter(); invalidate();
+    if (L.note) log("[" + L.label + "] " + L.note, "log-info");
+  }
+
+  LANG_ORDER.forEach(function (id) {
     var o = document.createElement("option");
-    o.value = name; o.textContent = name; samples.appendChild(o);
+    o.value = id; o.textContent = LANGS[id].label; langSel.appendChild(o);
+  });
+  langSel.addEventListener("change", function () {
+    persist();
+    loadLang(langSel.value, false);
   });
   samples.addEventListener("change", function () {
-    var name = samples.value;
-    if (SAMPLES[name]) {
-      ed.value = SAMPLES[name]; syncGutter(); persist();
-      lastModule = null; runBtn.disabled = true;
+    var name = samples.value, L = LANGS[curLang];
+    if (L.samples[name]) {
+      ed.value = L.samples[name]; syncGutter(); persist(); invalidate();
     }
   });
 
   // ---- init ----
-  if (!restore()) ed.value = SAMPLES["Factorial"];
-  syncGutter();
-  log("skjegg playground. The TinScheme compiler itself runs here as a\n" +
-      "WebAssembly module, built by skjegg's own tools. Compile turns the\n" +
-      "source into a .wasm executable; Run executes it and prints its output.", "log-info");
+  compiler.onerror = function (e) {
+    status.textContent = "worker error";
+    log("Worker failed: " + (e.message || e) + "\nServe this directory over " +
+        "http (file:// cannot spawn workers or fetch the modules).", "log-err");
+  };
+  // The workers signal nothing on start; mark ready once the page is wired, and
+  // let the first compile lazily fetch its compiler wasm.
+  compilerReady = true;
+  compileBtn.disabled = false;
+  status.textContent = "ready - pick a language, edit, then Compile";
+
+  langSel.value = "scheme";
+  loadLang("scheme", false);
+  log("skjegg playground. Each compiler here is skjegg compiling itself to " +
+      "WebAssembly: pick a language, press Compile to turn the source into a " +
+      ".wasm executable (BASIC, Pascal and MooScript are then linked against " +
+      "their runtime), and Run to execute it.", "log-info");
 })();
 </script>
 </body>
