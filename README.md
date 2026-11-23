@@ -56,6 +56,14 @@ or a relocatable WASM object directly (no separate assembler), and
 `skj-ld-wasm` links the objects into a module that runs under a WASM runtime
 such as `wasmtime`.
 
+The WASM target self-hosts: `skj-cc-wasm` and `skj-ld-wasm` build the
+TinScheme compiler's own sources into a `skj-sc.wasm` that compiles `.scm`
+to a `.wasm` module with no external toolchain (`make check-selfhost-wasm`
+proves its output matches the native cross compiler byte for byte).  That
+module powers a browser playground (`make playground`, then serve
+`pages/playground` over http) that compiles a source file to a WebAssembly
+executable and runs it in a console, entirely client side.
+
 ## Architecture
 
 ```

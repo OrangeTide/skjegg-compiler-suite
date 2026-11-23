@@ -323,7 +323,9 @@ jobs:
   # WASI libc and runs the stdin/stdout stream tests; check-cc-wasm runs the C
   # compiler corpus, check-bc-wasm the BASIC corpus, check-pc-wasm the Pascal
   # corpus, check-sc-wasm the TinScheme corpus and check-mooc-wasm the MooScript
-  # corpus.  None need a cross toolchain
+  # corpus; check-selfhost-wasm builds the TinScheme compiler itself as a WASM
+  # module with skjegg's own tools and proves its output matches the native
+  # cross compiler byte for byte.  None need a cross toolchain
   # or qemu, only the three WASM
   # tools: wat2wasm (apt wabt), wasm-ld (apt lld), and wasmtime (pinned release
   # download, since it is not an apt package).  The lanes skip cleanly when a
@@ -360,4 +362,4 @@ jobs:
         run: |
           make check-wasm check-wasm-obj check-wasm-ld check-wasm-exec \
                check-libc-wasm check-cc-wasm check-bc-wasm check-pc-wasm \
-               check-sc-wasm check-mooc-wasm
+               check-sc-wasm check-mooc-wasm check-selfhost-wasm

@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>skjegg playground</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel2: #1e222b;
+    --border: #2a2f3a;
+    --fg: #d7dce5;
+    --dim: #8b93a3;
+    --accent: #5ab0f2;
+    --green: #5fd38d;
+    --red: #f27a7a;
+    --mono: 'IBM Plex Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg); font-family: var(--sans);
+    display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: .2px; }
+  header h1 .dim { color: var(--dim); font-weight: 400; }
+  header .spacer { flex: 1; }
+  select, button {
+    font-family: var(--sans); font-size: 13px; color: var(--fg);
+    background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 12px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: #1d3650; border-color: #2d5273; color: #cfe6ff; }
+  button.primary:hover:not(:disabled) { border-color: var(--accent); }
+  main { flex: 1; display: flex; min-height: 0; }
+  .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .editor-pane { flex: 1.3; border-right: 1px solid var(--border); }
+  .console-pane { flex: 1; }
+  .pane-head {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .8px;
+    color: var(--dim); padding: 8px 14px; background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .editor-wrap { flex: 1; display: flex; overflow: hidden; background: #0c0e12; }
+  .gutter {
+    padding: 12px 8px 12px 14px; text-align: right; color: #4a5160;
+    font-family: var(--mono); font-size: 13px; line-height: 1.55;
+    user-select: none; background: #0c0e12; white-space: pre; overflow: hidden;
+  }
+  #editor {
+    flex: 1; resize: none; border: 0; outline: 0; padding: 12px 14px;
+    background: #0c0e12; color: var(--fg); font-family: var(--mono);
+    font-size: 13px; line-height: 1.55; tab-size: 2; white-space: pre; overflow: auto;
+  }
+  #console {
+    flex: 1; margin: 0; padding: 12px 16px; overflow: auto;
+    font-family: var(--mono); font-size: 13px; line-height: 1.5;
+    white-space: pre-wrap; word-break: break-word; background: #0c0e12;
+  }
+  .log-info { color: var(--dim); }
+  .log-ok { color: var(--green); }
+  .log-err { color: var(--red); }
+  .log-out { color: var(--fg); }
+  footer {
+    padding: 6px 16px; font-size: 12px; color: var(--dim);
+    background: var(--panel); border-top: 1px solid var(--border);
+  }
+  @media (max-width: 720px) { main { flex-direction: column; }
+    .editor-pane { border-right: 0; border-bottom: 1px solid var(--border); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>skjegg <span class="dim">playground &middot; TinScheme &rarr; WebAssembly</span></h1>
+  <div class="spacer"></div>
+  <select id="samples" title="Load a sample"></select>
+  <button id="compileBtn" class="primary" disabled>Compile</button>
+  <button id="runBtn" disabled>Run</button>
+  <button id="clearBtn">Clear</button>
+</header>
+<main>
+  <section class="pane editor-pane">
+    <div class="pane-head">source.scm</div>
+    <div class="editor-wrap">
+      <div class="gutter" id="gutter">1</div>
+      <textarea id="editor" spellcheck="false" autocomplete="off"
+                autocapitalize="off" autocorrect="off" wrap="off"></textarea>
+    </div>
+  </section>
+  <section class="pane console-pane">
+    <div class="pane-head">console</div>
+    <pre id="console"></pre>
+  </section>
+</main>
+<footer id="status">loading the self-hosted compiler&hellip;</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var SAMPLES = {
+    "Factorial": "; factorial, printed as the program's exit value\n(define (fact n)\n  (if (= n 0) 1 (* n (fact (- n 1)))))\n(fact 6)\n",
+    "Fibonacci": "(define (fib n)\n  (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))\n(fib 10)\n",
+    "Closures": "(define (adder n) (lambda (x) (+ x n)))\n(define add5 (adder 5))\n(add5 37)\n",
+    "shift/reset": "; delimited continuations (needs a WasmFX-capable engine to run)\n(+ 1 (reset (* 2 (shift k (k (k 10))))))\n"
+  };
+
+  var ed = document.getElementById("editor");
+  var gutter = document.getElementById("gutter");
+  var out = document.getElementById("console");
+  var status = document.getElementById("status");
+  var compileBtn = document.getElementById("compileBtn");
+  var runBtn = document.getElementById("runBtn");
+  var clearBtn = document.getElementById("clearBtn");
+  var samples = document.getElementById("samples");
+
+  var lastModule = null;      // ArrayBuffer of the last successful compile
+  var compiler = null, runner = null, compilerReady = false;
+
+  // ---- editor gutter ----
+  function syncGutter() {
+    var n = ed.value.split("\n").length, s = "";
+    for (var i = 1; i <= n; i++) s += i + "\n";
+    gutter.textContent = s;
+    gutter.scrollTop = ed.scrollTop;
+  }
+  ed.addEventListener("input", function () {
+    syncGutter(); persist(); lastModule = null; runBtn.disabled = true;
+  });
+  ed.addEventListener("scroll", function () { gutter.scrollTop = ed.scrollTop; });
+  ed.addEventListener("keydown", function (e) {
+    if (e.key === "Tab") {       // insert two spaces, no focus loss
+      e.preventDefault();
+      var s = ed.selectionStart, en = ed.selectionEnd;
+      ed.value = ed.value.slice(0, s) + "  " + ed.value.slice(en);
+      ed.selectionStart = ed.selectionEnd = s + 2;
+      syncGutter(); persist();
+    }
+  });
+
+  // ---- console ----
+  function log(text, cls) {
+    var span = document.createElement("span");
+    span.className = cls || "log-out";
+    span.textContent = text + (text.endsWith("\n") ? "" : "\n");
+    out.appendChild(span);
+    out.scrollTop = out.scrollHeight;
+  }
+
+  // ---- persistence ----
+  function persist() {
+    try { localStorage.setItem("skjegg-playground", ed.value); } catch (e) {}
+  }
+  function restore() {
+    try {
+      var v = localStorage.getItem("skjegg-playground");
+      if (v != null) { ed.value = v; return true; }
+    } catch (e) {}
+    return false;
+  }
+
+  // ---- workers ----
+  compiler = new Worker("compiler-worker.js");
+  compiler.onmessage = function (ev) {
+    var m = ev.data;
+    if (m.type === "ready") {
+      compilerReady = true; compileBtn.disabled = false;
+      status.textContent = "ready - edit, then Compile";
+    } else if (m.type === "load-error") {
+      status.textContent = "compiler failed to load: " + m.message;
+      log("Could not load skj-sc.wasm. Build it with `make playground` and serve this\n" +
+          "directory over http (file:// cannot fetch the module or spawn workers).\n" +
+          m.message, "log-err");
+    } else if (m.type === "compiled") {
+      lastModule = m.wasm;
+      if (m.stderr) log(m.stderr, "log-info");
+      log("Compiled " + m.wasm.byteLength + " bytes of WebAssembly.", "log-ok");
+      runBtn.disabled = false; status.textContent = "compiled - press Run";
+      setBusy(false);
+    } else if (m.type === "error") {
+      log(m.stderr || "compile failed", "log-err");
+      status.textContent = "compile error"; setBusy(false);
+    }
+  };
+
+  runner = new Worker("run-worker.js");
+  runner.onmessage = function (ev) {
+    var m = ev.data;
+    if (m.type === "done") {
+      if (m.stdout) log(m.stdout, "log-out");
+      if (m.stderr) log(m.stderr, "log-info");
+      log("Program exited with code " + m.code + ".", "log-ok");
+      status.textContent = "done"; setBusy(false);
+    } else if (m.type === "run-error") {
+      log("Could not run the module: " + m.message, "log-err");
+      if (/stack|tag|instantiate/i.test(m.message))
+        log("This program may use delimited continuations, which need a\n" +
+            "WasmFX-capable engine; it still compiled correctly.", "log-info");
+      status.textContent = "run error"; setBusy(false);
+    }
+  };
+
+  function setBusy(b) {
+    compileBtn.disabled = b || !compilerReady;
+    runBtn.disabled = b || !lastModule;
+    samples.disabled = b;
+  }
+
+  compileBtn.addEventListener("click", function () {
+    if (!compilerReady) return;
+    setBusy(true); runBtn.disabled = true;
+    status.textContent = "compiling…";
+    log("$ skj-sc -o out.wasm source.scm", "log-info");
+    compiler.postMessage({ type: "compile", source: ed.value });
+  });
+
+  runBtn.addEventListener("click", function () {
+    if (!lastModule) return;
+    setBusy(true);
+    status.textContent = "running…";
+    log("$ ./out.wasm", "log-info");
+    // copy the buffer so the worker transfer does not consume lastModule
+    runner.postMessage({ type: "run", wasm: lastModule.slice(0) });
+  });
+
+  clearBtn.addEventListener("click", function () { out.textContent = ""; });
+
+  // ---- samples ----
+  Object.keys(SAMPLES).forEach(function (name, i) {
+    var o = document.createElement("option");
+    o.value = name; o.textContent = name; samples.appendChild(o);
+  });
+  samples.addEventListener("change", function () {
+    var name = samples.value;
+    if (SAMPLES[name]) {
+      ed.value = SAMPLES[name]; syncGutter(); persist();
+      lastModule = null; runBtn.disabled = true;
+    }
+  });
+
+  // ---- init ----
+  if (!restore()) ed.value = SAMPLES["Factorial"];
+  syncGutter();
+  log("skjegg playground. The TinScheme compiler itself runs here as a\n" +
+      "WebAssembly module, built by skjegg's own tools. Compile turns the\n" +
+      "source into a .wasm executable; Run executes it and prints its output.", "log-info");
+})();
+</script>
+</body>
+</html>

@@ -149,6 +149,21 @@ static const char *const SEAM_NAMES[NSEAM] = {
 /* the break global sits just past __stack_pointer (global 0) */
 #define BRK_GLOBAL 1
 
+/* When main takes (argc, argv), _start fills argv from WASI args_get into the
+   low scratch below WLD_DATA_BASE (1024).  The seam read/write scratch uses
+   8..16, so these sit clear of it: argc and the total buffer size are written
+   by args_sizes_get, then args_get writes the pointer array and the bytes.  A
+   command line never approaches a kilobyte here, so the fixed layout is ample. */
+#define ARGV_ARGC_ADDR    32    /* args_sizes_get writes argc here        */
+#define ARGV_BUFSIZE_ADDR 36    /* ... and the total arg-byte size here   */
+#define ARGV_PTRS_ADDR    64    /* args_get writes the char* array here   */
+#define ARGV_STRS_ADDR   256    /* ... and the argument bytes here        */
+
+/* the two WASI argv imports take output function indices 3 and 4, right after
+   the fixed fd_write/fd_read/proc_exit seam imports (0/1/2) */
+#define WASI_ARGS_SIZES_GET 3
+#define WASI_ARGS_GET       4
+
 static int g_synth;                 /* synthesizing the runtime this link */
 static int g_prog_end;              /* first output index past the program funcs */
 static int g_seam_outidx[NSEAM];    /* output index of each seam, or -1 */
@@ -388,8 +403,19 @@ seam_start_body(struct wbuf *code, int main_idx, int main_np, int main_nr,
     struct wbuf b;
     wbuf_init(&b);
     if (main_np >= 2) {
-        ib_const(&b, 0);
-        ib_const(&b, 0);
+        /* argc/argv from WASI: args_sizes_get(&argc, &bufsize) then
+           args_get(ptrs, strs), both results dropped (the buffers are sized
+           for any command line a tool receives here), then push (argc, argv). */
+        ib_const(&b, ARGV_ARGC_ADDR);
+        ib_const(&b, ARGV_BUFSIZE_ADDR);
+        ib_call(&b, WASI_ARGS_SIZES_GET);
+        wbuf_byte(&b, 0x1A);                /* drop */
+        ib_const(&b, ARGV_PTRS_ADDR);
+        ib_const(&b, ARGV_STRS_ADDR);
+        ib_call(&b, WASI_ARGS_GET);
+        wbuf_byte(&b, 0x1A);                /* drop */
+        ib_const(&b, ARGV_ARGC_ADDR); ib_load(&b);     /* argc */
+        ib_const(&b, ARGV_PTRS_ADDR);                  /* argv */
     }
     ib_call(&b, main_idx);
     if (!main_nr)
@@ -414,14 +440,45 @@ wlink(struct wobj **objs, int nobj, const char **exports, int nexports,
     int fini_idx = -1;
     int maxfi = 0;
     int main_np = 0, main_nr = 0, out_nfuncs, heap_base, nglobals;
+    int want_argv = 0;
     int rw_tidx = 0, pe_tidx = 0, fw_tidx = 0, vv_tidx = 0, si_tidx = 0;
+    int ag_tidx = 0;
     struct wbuf mod, sec, code;
     FILE *out;
 
     /* a link with an entry synthesizes the WASI runtime: three preview1 imports
        occupy the low function indices, and main must be present */
     g_synth = entry;
-    nfixed = g_synth ? 3 : 0;            /* fd_write / fd_read / proc_exit */
+
+    /* find the defined main's arity up front: when it takes (argc, argv) the
+       runtime imports two more WASI functions (args_sizes_get/args_get) just
+       past the fixed seam imports, so their count must be known before the
+       output function indices are assigned.  Reads only the object symbol and
+       type tables, independent of the index numbering computed below. */
+    if (g_synth) {
+        for (o = 0; o < nobj; o++) {
+            struct wobj *ob = objs[o];
+            int done = 0;
+            for (k = 0; k < ob->nsyms; k++) {
+                struct wsymbol *s = &ob->syms[k];
+                struct wtype *t;
+                if (s->kind != WASM_SYMTAB_FUNCTION ||
+                    (s->flags & WASM_SYM_UNDEFINED) ||
+                    strcmp(s->name, "main") != 0)
+                    continue;
+                t = &ob->types[ob->func_type[s->index - ob->nfuncimports]];
+                main_np = t->np;
+                main_nr = t->nr;
+                done = 1;
+                break;
+            }
+            if (done)
+                break;
+        }
+        want_argv = main_np >= 2;
+    }
+
+    nfixed = g_synth ? (want_argv ? 5 : 3) : 0;  /* fd_write/read/proc_exit [+args] */
     for (k = 0; k < NSEAM; k++)
         g_seam_outidx[k] = -1;
     g_nseam = 0;
@@ -500,28 +557,12 @@ wlink(struct wobj **objs, int nobj, const char **exports, int nexports,
         }
     }
 
-    /* locate main and its signature for the synthesized _start */
+    /* locate main's output index for the synthesized _start (its arity was
+       already read above to size the imports) */
     if (g_synth) {
-        int found = 0;
         main_idx = gfunc_find("main");
         if (main_idx < 0)
             die("no main: an entry link needs a defined main (or pass --no-entry)");
-        for (o = 0; o < nobj && !found; o++) {
-            struct wobj *ob = objs[o];
-            for (k = 0; k < ob->nsyms; k++) {
-                struct wsymbol *s = &ob->syms[k];
-                struct wtype *t;
-                if (s->kind != WASM_SYMTAB_FUNCTION || (s->flags & WASM_SYM_UNDEFINED))
-                    continue;
-                if (strcmp(s->name, "main") != 0)
-                    continue;
-                t = &ob->types[ob->func_type[s->index - ob->nfuncimports]];
-                main_np = t->np;
-                main_nr = t->nr;
-                found = 1;
-                break;
-            }
-        }
         /* a hosted libc defines __libc_fini (atexit handlers + stream flush);
            _start runs it before proc_exit.  A freestanding link omits fini.c,
            gfunc_find returns -1, and _start exits straight away. */
@@ -636,6 +677,8 @@ wlink(struct wobj **objs, int nobj, const char **exports, int nexports,
         fw_tidx = otype_sig(4, 1);      /* fd_write / fd_read */
         pe_tidx = otype_sig(1, 0);      /* proc_exit, _exit, exit */
         vv_tidx = otype_sig(0, 0);      /* _start */
+        if (want_argv)
+            ag_tidx = otype_sig(2, 1);  /* args_sizes_get / args_get */
         if (g_seam_outidx[0] >= 0 || g_seam_outidx[1] >= 0)
             rw_tidx = otype_sig(3, 1);  /* write / read */
         if (g_seam_outidx[SEAM_SBRK] >= 0)
@@ -680,6 +723,19 @@ wlink(struct wobj **objs, int nobj, const char **exports, int nexports,
                 wbuf_name(&sec, wi[k].field);
                 wbuf_byte(&sec, 0x00);      /* function import */
                 wbuf_uleb(&sec, (uint64_t)(wi[k].tidx_is_fw ? fw_tidx : pe_tidx));
+            }
+            /* args_sizes_get / args_get at indices 3 and 4 when main wants argv,
+               so _start can fill (argc, argv) from WASI */
+            if (want_argv) {
+                static const char *const an[2] = {
+                    "args_sizes_get", "args_get",
+                };
+                for (k = 0; k < 2; k++) {
+                    wbuf_name(&sec, "wasi_snapshot_preview1");
+                    wbuf_name(&sec, an[k]);
+                    wbuf_byte(&sec, 0x00);  /* function import */
+                    wbuf_uleb(&sec, (uint64_t)ag_tidx);
+                }
             }
         }
         for (k = 0; k < g_nowasi; k++) {

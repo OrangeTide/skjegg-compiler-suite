@@ -6,6 +6,33 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.62.0
+
+#### Added
+- The WebAssembly target self-hosts. `skj-cc-wasm` and `skj-ld-wasm` build the
+  TinScheme compiler's own C sources (front end, shared IR, WASM backend, and
+  the WASI libc) into a single `skj-sc.wasm` that compiles `.scm` to a `.wasm`
+  module under any WASI host, with no external toolchain. The new
+  `check-selfhost-wasm` lane runs that module under `wasmtime` to compile each
+  `tests/scm_*.scm` and requires the output to be byte-identical to the native
+  cross compiler (7 of 7, including the `shift`/`reset` continuation programs);
+  it joins the `wasm` CI job.
+- A browser playground over that self-hosted compiler (`pages/playground`, built
+  with `make playground`). A dependency-free page compiles a source file to a
+  WebAssembly executable and runs it in a console, entirely client side: it loads
+  `skj-sc.wasm` in a Web Worker driven by a small WASI preview1 shim with an
+  in-memory filesystem, then runs the produced module in a second worker. The MVP
+  covers TinScheme and a text console.
+- WASI argv in the linker's synthesized `_start`. When a linked entry module's
+  `main` takes `(argc, argv)`, the runtime now imports `args_sizes_get` and
+  `args_get` and fills argv from WASI before calling `main`. This is what lets a
+  CLI tool built as a WASM module see its command line. A `main` that takes no
+  arguments is byte-identical to before, so every existing WASM program is
+  unchanged.
+- `setjmp`/`longjmp` in the WASM libc, covering the toolchain's one use (the
+  fatal-error unwind, which runs its cleanup before jumping and then terminates).
+  A resumable `setjmp` would need the stack-switching seam and is out of scope.
+
 ### 0.61.0
 
 #### Added

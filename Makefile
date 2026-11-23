@@ -462,7 +462,7 @@ WASM_LIBC_SRCS := libc/string.c libc/ctype.c libc/stdlib.c libc/printf.c \
     libc/numfmt.c libc/stdio_core.c libc/stdio.c libc/assert.c libc/malloc.c \
     libc/errno.c libc/strerror.c libc/rand.c runtime/rng.c libc/strtod.c \
     libc/scanf.c libc/memstream.c libc/getenv.c libc/fini.c libc/time.c \
-    libc/stat.c libc/dirent.c libc/fileops.c \
+    libc/stat.c libc/dirent.c libc/fileops.c libc/setjmp.c \
     runtime/va_wasm.c runtime/wasi_file.c
 WASM_LIBC_TESTS := libc_phase_a libc_phase_b libc_phase_c libc_phase_e \
     libc_phase_f libc_phase_g libc_phase_h wasm_fileio
@@ -571,6 +571,31 @@ check-sc-wasm: build/skj-sc-wasm | build
 	@SCBIN="$(CURDIR)/build/skj-sc-wasm" WASMTIME="$(WASMTIME)" \
 	 OUTDIR="$(CURDIR)/build/scheme-wasm" EXCLUDE="$(SC_WASM_EXCLUDE)" \
 	 sh tests/run-scheme-wasm-tests.sh
+
+## check-selfhost-wasm: prove the TinScheme compiler is self-hosting on WASM.
+## The skj-sc.wasm built entirely by skjegg's own tools (skj-cc-wasm +
+## skj-ld-wasm) runs under wasmtime to compile each tests/scm_*.scm; its output
+## must be byte-identical to the native cross compiler skj-sc-wasm's.  Byte
+## equality is the self-host proof: the native compiler's output is already
+## run-checked by check-sc-wasm, so an identical module runs identically.  Skips
+## cleanly when wasmtime is absent.
+PHONY += check-selfhost-wasm
+check-selfhost-wasm: build/wasm-selfhost/skj-sc.wasm build/skj-sc-wasm | build
+	@SC_SELFHOST="$(CURDIR)/build/wasm-selfhost/skj-sc.wasm" \
+	 SC_NATIVE="$(CURDIR)/build/skj-sc-wasm" WASMTIME="$(WASMTIME)" \
+	 OUTDIR="$(CURDIR)/build/selfhost-wasm" \
+	 sh tests/run-selfhost-wasm-tests.sh
+
+## playground: assemble the browser playground.  Build the self-hosted
+## skj-sc.wasm and drop it next to the page, which fetches it at load time.  The
+## binary is a build artifact (gitignored); serve this directory over http
+## (file:// cannot fetch the module or spawn the workers).
+PHONY += playground
+playground: build/wasm-selfhost/skj-sc.wasm
+	cp build/wasm-selfhost/skj-sc.wasm pages/playground/skj-sc.wasm
+	@echo "playground ready: serve pages/playground over http, e.g."
+	@echo "    (cd pages/playground && python3 -m http.server 8080)"
+	@echo "then open http://localhost:8080/"
 
 ## check-mooc-wasm: the MooScript corpus on WASM.  Each tests/moo_*.moo is
 ## compiled by skj-mooc-wasm to an object, linked by skj-ld-wasm against the moo
@@ -4798,6 +4823,25 @@ build/skj-sc: $(SC_SRC) scheme/scheme.h scheme/gc.h ir/ir.h ir/target.h | build
 
 build/skj-sc-%: $$(sc_src_$$*) scheme/scheme.h scheme/gc.h ir/ir.h ir/target.h | build
 	$(CC) $(CFLAGS) $(sc_def_$*) -Ischeme -Iir -o $@ $(sc_src_$*)
+
+## The self-hosted WebAssembly TinScheme compiler.  skjegg's own skj-cc-wasm
+## compiles the compiler's C sources (front end + IR + WASM backend + WASM libc)
+## and skj-ld-wasm links them, producing a skj-sc.wasm that compiles .scm to a
+## .wasm module under any WASI host (and in the browser playground).  No external
+## toolchain: this is skjegg compiling itself to WebAssembly.
+selfhost_sc_srcs   := $(SC_FE) $(BE_WASM) $(WASM_LIBC_SRCS)
+selfhost_sc_cflags := -DCC_WASM -Ibuild -Ischeme -Iir -Ibackend -Iwasm \
+    -Iinclude -Ilibc -Iruntime
+
+build/wasm-selfhost/skj-sc.wasm: build/skj-cc-wasm build/skj-ld-wasm build/version.h \
+    $(selfhost_sc_srcs) scheme/scheme.h scheme/gc.h ir/ir.h ir/target.h | build
+	@mkdir -p build/wasm-selfhost/obj
+	@rm -f build/wasm-selfhost/obj/*.o
+	@for s in $(selfhost_sc_srcs); do \
+	    o=build/wasm-selfhost/obj/$$(echo $$s | tr / _ | sed 's/\.c$$/.o/'); \
+	    ./build/skj-cc-wasm $(selfhost_sc_cflags) -c -o $$o $$s || exit 1; \
+	done
+	./build/skj-ld-wasm -o $@ build/wasm-selfhost/obj/*.o
 
 ## TinScheme codegen tests (.scm -> .s via skj-sc)
 build/scm_%.s: tests/scm_%.scm build/skj-sc | build
