@@ -38,6 +38,14 @@ self.onmessage = function (ev) {
     var stderr = "";
     Promise.resolve(getModule(msg.compilerUrl)).then(function (mod) {
         var files = {};
+        // Bundle files (e.g. C headers) are seeded into the memfs first so the
+        // compiler can open them (#include <stdio.h> with -Iinclude); the source
+        // overwrites any same-named entry.
+        if (msg.memfs) {
+            for (var k in msg.memfs)
+                if (Object.prototype.hasOwnProperty.call(msg.memfs, k))
+                    files[k] = msg.memfs[k];
+        }
         files[msg.srcName] = msg.source;
         var argv = [msg.toolName]
             .concat(msg.args || [])

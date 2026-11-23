@@ -98,6 +98,12 @@ main(int argc, char **argv)
 
     if (out != stdout)
         fclose(out);
-    util_cleanup_run();
-    return rc < 0 ? 1 : 0;
+    /* A diagnosed error (a missing #include, a bad directive) fails the run,
+       not only a hard rc < 0, so a broken include is never reported as success.
+       Read the count before cleanup frees p. */
+    {
+        int cpperrs = cpp_error_count(p);
+        util_cleanup_run();
+        return (rc < 0 || cpperrs > 0) ? 1 : 0;
+    }
 }

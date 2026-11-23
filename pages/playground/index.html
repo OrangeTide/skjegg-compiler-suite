@@ -56,11 +56,28 @@
     font-family: var(--mono); font-size: 13px; line-height: 1.55;
     user-select: none; background: #0c0e12; white-space: pre; overflow: hidden;
   }
-  #editor {
-    flex: 1; resize: none; border: 0; outline: 0; padding: 12px 14px;
-    background: #0c0e12; color: var(--fg); font-family: var(--mono);
-    font-size: 13px; line-height: 1.55; tab-size: 2; white-space: pre; overflow: auto;
+  /* The editor is a transparent textarea layered over a highlighted <pre>; both
+     share identical metrics so the caret sits exactly on the colored text. */
+  .code-layer { position: relative; flex: 1; overflow: hidden; }
+  #hl, #editor {
+    margin: 0; padding: 12px 14px; border: 0;
+    font-family: var(--mono); font-size: 13px; line-height: 1.55;
+    tab-size: 2; white-space: pre; letter-spacing: 0;
   }
+  #hl {
+    position: absolute; inset: 0; overflow: hidden; pointer-events: none;
+    color: var(--fg); background: #0c0e12; z-index: 0;
+  }
+  #editor {
+    position: absolute; inset: 0; resize: none; outline: 0; overflow: auto;
+    background: transparent; color: transparent; caret-color: var(--fg); z-index: 1;
+  }
+  #editor[readonly] { caret-color: transparent; }
+  .tok-com { color: var(--dim); font-style: italic; }
+  .tok-str { color: #c3e88d; }
+  .tok-num { color: #f78c6c; }
+  .tok-kw  { color: #82aaff; }
+  .tok-pre { color: #c792ea; }
   #console {
     flex: 1; margin: 0; padding: 12px 16px; overflow: auto;
     font-family: var(--mono); font-size: 13px; line-height: 1.5;
@@ -88,6 +105,9 @@
   <label class="sel">sample
     <select id="samples" title="Load a sample"></select>
   </label>
+  <label class="sel" id="bundleLabel" style="display:none">files
+    <select id="bundle" title="View a bundled file (read-only)"></select>
+  </label>
   <button id="compileBtn" class="primary" disabled>Compile</button>
   <button id="runBtn" disabled>Run</button>
   <button id="clearBtn">Clear console</button>
@@ -97,8 +117,11 @@
     <div class="pane-head" id="srcLabel">source</div>
     <div class="editor-wrap">
       <div class="gutter" id="gutter">1</div>
-      <textarea id="editor" spellcheck="false" autocomplete="off"
-                autocapitalize="off" autocorrect="off" wrap="off"></textarea>
+      <div class="code-layer">
+        <pre id="hl" aria-hidden="true"></pre>
+        <textarea id="editor" spellcheck="false" autocomplete="off"
+                  autocapitalize="off" autocorrect="off" wrap="off"></textarea>
+      </div>
     </div>
   </section>
   <section class="pane console-pane">
@@ -108,6 +131,7 @@
 </main>
 <footer id="status">loading the self-hosted compilers&hellip;</footer>
 
+<script src="highlight.js"></script>
 <script>
 (function () {
   "use strict";
@@ -190,11 +214,39 @@
         "Max": "verb max(a: int, b: int)\n\tif (a > b)\n\t\treturn a;\n\tendif\n" +
           "\treturn b;\nendverb\n\nverb main()\n\treturn max(42, 17);\nendverb\n"
       }
+    },
+    c: {
+      label: "C", ext: "c", compiler: "skj-cc.wasm", tool: "skj-cc",
+      link: true,
+      args: ["-Iinclude", "-DSKJ_LIBC_FLOAT"],
+      bundle: "bundle/c.json",
+      // the full WASM libc, shipped as one gzipped ar archive the link worker
+      // unpacks (printf reaches stdout through it)
+      archive: "rt/c.a.gz",
+      runtime: [],
+      note: "C compiles to a WebAssembly object, linked against the bundled libc " +
+            "(printf and friends reach the console). The headers come from the " +
+            "file bundle; pick one in the 'files' menu to view it read-only.",
+      samples: {
+        "Hello": '#include <stdio.h>\n\nint main(void) {\n' +
+          '    printf("Hello from C!\\n");\n    return 0;\n}\n',
+        "Factorial": '#include <stdio.h>\n\nint main(void) {\n' +
+          "    long f = 1;\n    for (int i = 1; i <= 6; i++) {\n" +
+          "        f *= i;\n" + '        printf("%d! = %ld\\n", i, f);\n' +
+          "    }\n    return 0;\n}\n",
+        "FizzBuzz": '#include <stdio.h>\n\nint main(void) {\n' +
+          "    for (int i = 1; i <= 15; i++) {\n" +
+          '        if (i % 15 == 0) printf("FizzBuzz\\n");\n' +
+          '        else if (i % 3 == 0) printf("Fizz\\n");\n' +
+          '        else if (i % 5 == 0) printf("Buzz\\n");\n' +
+          '        else printf("%d\\n", i);\n    }\n    return 0;\n}\n'
+      }
     }
   };
-  var LANG_ORDER = ["scheme", "pascal", "basic", "moo"];
+  var LANG_ORDER = ["scheme", "pascal", "basic", "moo", "c"];
 
   var ed = document.getElementById("editor");
+  var hl = document.getElementById("hl");
   var gutter = document.getElementById("gutter");
   var out = document.getElementById("console");
   var status = document.getElementById("status");
@@ -202,6 +254,8 @@
   var runBtn = document.getElementById("runBtn");
   var clearBtn = document.getElementById("clearBtn");
   var samples = document.getElementById("samples");
+  var bundleSel = document.getElementById("bundle");
+  var bundleLabel = document.getElementById("bundleLabel");
   var langSel = document.getElementById("language");
   var srcLabel = document.getElementById("srcLabel");
 
@@ -209,29 +263,47 @@
   var lastModule = null;      // ArrayBuffer of the last runnable module
   var compilerReady = false;
   var busy = false;
+  var bundleCache = {};       // url -> { map: {path:content}, files: [{path,...}] }
+  var curBundle = null;       // the loaded bundle for curLang (or null)
+  var viewing = false;        // showing a bundled file read-only
+  var savedSource = null;     // the user's source while viewing a file
 
   var compiler = new Worker("compiler-worker.js");
   var linker = new Worker("link-worker.js");
   var runner = new Worker("run-worker.js");
 
-  // ---- editor gutter ----
+  // ---- editor gutter + syntax highlight overlay ----
+  function renderHighlight() {
+    var html = (self.SkjHighlight && self.SkjHighlight.langs[curLang])
+             ? self.SkjHighlight.highlight(ed.value, curLang)
+             : ed.value.replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                       .replace(/>/g, "&gt;");
+    // a trailing newline needs a final rendered line to match the textarea
+    hl.innerHTML = html + (ed.value.endsWith("\n") ? "\n" : "");
+    hl.scrollTop = ed.scrollTop; hl.scrollLeft = ed.scrollLeft;
+  }
   function syncGutter() {
     var n = ed.value.split("\n").length, s = "";
     for (var i = 1; i <= n; i++) s += i + "\n";
     gutter.textContent = s;
     gutter.scrollTop = ed.scrollTop;
   }
+  function refreshEditor() { syncGutter(); renderHighlight(); }
   ed.addEventListener("input", function () {
-    syncGutter(); persist(); invalidate();
+    if (viewing) return;             // a viewed file is read-only
+    refreshEditor(); persist(); invalidate();
   });
-  ed.addEventListener("scroll", function () { gutter.scrollTop = ed.scrollTop; });
+  ed.addEventListener("scroll", function () {
+    gutter.scrollTop = ed.scrollTop;
+    hl.scrollTop = ed.scrollTop; hl.scrollLeft = ed.scrollLeft;
+  });
   ed.addEventListener("keydown", function (e) {
-    if (e.key === "Tab") {       // insert two spaces, no focus loss
+    if (e.key === "Tab" && !viewing) {       // insert two spaces, no focus loss
       e.preventDefault();
       var s = ed.selectionStart, en = ed.selectionEnd;
       ed.value = ed.value.slice(0, s) + "  " + ed.value.slice(en);
       ed.selectionStart = ed.selectionEnd = s + 2;
-      syncGutter(); persist();
+      refreshEditor(); persist();
     }
   });
 
@@ -260,10 +332,28 @@
 
   function setBusy(b) {
     busy = b;
-    compileBtn.disabled = b || !compilerReady;
+    compileBtn.disabled = b || !compilerReady || viewing;
     runBtn.disabled = b || !lastModule;
     samples.disabled = b;
+    bundleSel.disabled = b;
     langSel.disabled = b;
+  }
+
+  // ---- file bundles (headers the compiler reads, viewable in the editor) ----
+  function ensureBundle(lang) {
+    if (!lang.bundle) return Promise.resolve(null);
+    if (bundleCache[lang.bundle]) return Promise.resolve(bundleCache[lang.bundle]);
+    return fetch(lang.bundle).then(function (r) {
+      if (!r.ok) throw new Error(lang.bundle + ": HTTP " + r.status);
+      return r.json();
+    }).then(function (j) {
+      var map = {}, files = j.files || [];
+      files.forEach(function (f) { map[f.path] = f.content; });
+      var entry = { map: map,
+                    files: files.filter(function (f) { return f.editor; }) };
+      bundleCache[lang.bundle] = entry;
+      return entry;
+    });
   }
 
   // ---- workers ----
@@ -279,12 +369,14 @@
         var lang = LANGS[curLang];
         log("Compiled " + m.bytes.byteLength + " bytes; linking…", "log-info");
         status.textContent = "linking…";
-        log("$ skj-ld -o out.wasm out.o " +
-            lang.runtime.map(function (r) { return r.name; }).join(" "), "log-info");
+        log("$ skj-ld -o out.wasm out.o " + (lang.archive
+              ? lang.archive.replace(/^.*\//, "").replace(/\.gz$/, "") + " (archive)"
+              : lang.runtime.map(function (r) { return r.name; }).join(" ")),
+            "log-info");
         linker.postMessage({
           type: "link", linkerUrl: "skj-ld.wasm", toolName: "skj-ld",
           objBytes: m.bytes, objName: "out.o", outName: "out.wasm",
-          runtime: lang.runtime
+          runtime: lang.runtime, archive: lang.archive || null
         }, [m.bytes]);
       } else {
         finishBuild(m.bytes);
@@ -332,16 +424,24 @@
 
   // ---- actions ----
   compileBtn.addEventListener("click", function () {
-    if (!compilerReady || busy) return;
+    if (!compilerReady || busy || viewing) return;
     var lang = LANGS[curLang];
     setBusy(true); invalidate();
-    status.textContent = "compiling…";
-    log("$ " + lang.tool + " -o " + (lang.link ? "out.o" : "out.wasm") +
-        " source." + lang.ext, "log-info");
-    compiler.postMessage({
-      type: "compile", compilerUrl: lang.compiler, toolName: lang.tool,
-      srcName: "source." + lang.ext, source: ed.value,
-      outName: lang.link ? "out.o" : "out.wasm", link: lang.link
+    status.textContent = lang.bundle ? "loading files…" : "compiling…";
+    ensureBundle(lang).then(function (bundle) {
+      status.textContent = "compiling…";
+      var argstr = (lang.args || []).join(" ");
+      log("$ " + lang.tool + (argstr ? " " + argstr : "") + " -o " +
+          (lang.link ? "out.o" : "out.wasm") + " source." + lang.ext, "log-info");
+      compiler.postMessage({
+        type: "compile", compilerUrl: lang.compiler, toolName: lang.tool,
+        args: lang.args || [], memfs: bundle ? bundle.map : null,
+        srcName: "source." + lang.ext, source: ed.value,
+        outName: lang.link ? "out.o" : "out.wasm", link: lang.link
+      });
+    }).catch(function (e) {
+      log("Could not load the file bundle: " + String(e), "log-err");
+      status.textContent = "bundle error"; setBusy(false);
     });
   });
 
@@ -366,7 +466,43 @@
     });
   }
 
+  // ---- bundled-file viewer (read-only) ----
+  function exitView() {
+    if (!viewing) return;
+    viewing = false; ed.readOnly = false;
+    if (savedSource != null) ed.value = savedSource;
+    savedSource = null;
+    srcLabel.textContent = "source." + LANGS[curLang].ext;
+    refreshEditor();
+    compileBtn.disabled = busy || !compilerReady;
+    status.textContent = "ready";
+  }
+  function populateBundleMenu(entry) {
+    bundleSel.innerHTML = "";
+    var src = document.createElement("option");
+    src.value = ""; src.textContent = "(your source)"; bundleSel.appendChild(src);
+    (entry ? entry.files : []).forEach(function (f) {
+      var o = document.createElement("option");
+      o.value = f.path; o.textContent = f.path; bundleSel.appendChild(o);
+    });
+    bundleLabel.style.display = (entry && entry.files.length) ? "" : "none";
+  }
+  bundleSel.addEventListener("change", function () {
+    var p = bundleSel.value;
+    if (!p) { exitView(); return; }
+    if (!curBundle || !(p in curBundle.map)) return;
+    if (!viewing) savedSource = ed.value;
+    viewing = true;
+    ed.value = curBundle.map[p];
+    ed.readOnly = true;
+    srcLabel.textContent = p + " (read-only)";
+    refreshEditor();
+    runBtn.disabled = true; compileBtn.disabled = true;
+    status.textContent = "viewing a bundled file (read-only)";
+  });
+
   function loadLang(lang, seedSample) {
+    exitView();
     curLang = lang;
     var L = LANGS[lang];
     srcLabel.textContent = "source." + L.ext;
@@ -379,7 +515,16 @@
       ed.value = L.samples[first];
       samples.value = first;
     }
-    syncGutter(); invalidate();
+    refreshEditor(); invalidate();
+    // load the file bundle (if any) for both the compiler memfs and the viewer
+    curBundle = null;
+    bundleSel.value = "";
+    populateBundleMenu(null);
+    if (L.bundle) {
+      ensureBundle(L).then(function (entry) {
+        if (curLang === lang) { curBundle = entry; populateBundleMenu(entry); }
+      }).catch(function () { /* surfaced on compile */ });
+    }
     if (L.note) log("[" + L.label + "] " + L.note, "log-info");
   }
 
@@ -388,13 +533,15 @@
     o.value = id; o.textContent = LANGS[id].label; langSel.appendChild(o);
   });
   langSel.addEventListener("change", function () {
+    exitView();          // restore the real source before persisting it
     persist();
     loadLang(langSel.value, false);
   });
   samples.addEventListener("change", function () {
     var name = samples.value, L = LANGS[curLang];
     if (L.samples[name]) {
-      ed.value = L.samples[name]; syncGutter(); persist(); invalidate();
+      exitView();
+      ed.value = L.samples[name]; refreshEditor(); persist(); invalidate();
     }
   });
 
@@ -414,7 +561,7 @@
   loadLang("scheme", false);
   log("skjegg playground. Each compiler here is skjegg compiling itself to " +
       "WebAssembly: pick a language, press Compile to turn the source into a " +
-      ".wasm executable (BASIC, Pascal and MooScript are then linked against " +
+      ".wasm executable (C, BASIC, Pascal and MooScript are then linked against " +
       "their runtime), and Run to execute it.", "log-info");
 })();
 </script>

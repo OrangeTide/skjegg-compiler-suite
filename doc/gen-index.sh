@@ -116,9 +116,9 @@ cat <<'HEAD'
   </p>
   <p class="lede">
     Try the languages in your browser: the
-    <a href="playground/">playground</a> compiles and runs TinScheme,
-    Pascal, BASIC, and MooScript entirely client side, using skjegg's own
-    compilers built to WebAssembly.
+    <a href="playground/">playground</a> compiles and runs C, TinScheme,
+    Pascal, BASIC, and MooScript entirely client side, with syntax
+    highlighting, using skjegg's own compilers built to WebAssembly.
   </p>
 HEAD
 

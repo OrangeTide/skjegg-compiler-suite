@@ -6,6 +6,35 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.65.0
+
+#### Added
+- The browser playground compiles and runs C as a fifth language, beside
+  TinScheme, Pascal, BASIC, and MooScript. `skj-cc` self-hosts to `skj-cc.wasm`;
+  a C program compiles to a relocatable object that the self-hosted
+  `skj-ld.wasm` links against the full WASM libc in the browser, so `printf` and
+  friends reach the console. The libc ships as one gzipped `ar` archive the link
+  worker unpacks, one compressed download instead of many object fetches.
+- A file-bundle mechanism for the playground: a language can ship files (a JSON
+  of path, content, and editor flags) that the compiler worker seeds into its
+  in-memory filesystem, so the compiler can `#include` them, and that the editor
+  can open read-only. C's bundle is the libc headers.
+- Syntax highlighting in the playground editor for all five languages.
+
+#### Fixed
+- `skj-cc`: a comparison or logical operator applied to floating or 64-bit
+  operands (`fval != 0.0`, `a && b`, `!x`) was typed as the operand type instead
+  of `int`, so a `_Bool` or `int` context mis-stored the result. On the WASM and
+  LP64 targets this produced an invalid module; on every backend it was a latent
+  mistyping. The result type is now always `int`.
+- `skj-cc`: a `long long` assigned or initialized into a 32-bit integer object
+  was not narrowed to 32 bits, which the WASM and LP64 backends reject as an
+  invalid module (the 32-bit pair-register backends dropped the high word
+  implicitly). The store now truncates first.
+- `skj-cc` and `skj-cpp`: a diagnosed preprocessor error, such as a missing
+  `#include`, now fails the run. The tools printed the error but exited 0 with a
+  silently-incomplete result.
+
 ### 0.64.0
 
 #### Added

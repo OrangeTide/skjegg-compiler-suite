@@ -210,8 +210,16 @@ main(int argc, char **argv)
         }
     }
     ppbuf[pplen] = '\0';
-    cpp_free(pp);
-    util_cleanup_pop();
+    {
+        /* A diagnosed preprocessor error (a missing #include, a bad directive)
+           must fail the compile; otherwise cc would parse the incomplete stream
+           and emit a silently-wrong object. */
+        int cpperrs = cpp_error_count(pp);
+        cpp_free(pp);
+        util_cleanup_pop();
+        if (cpperrs > 0)
+            die("%d preprocessor error%s", cpperrs, cpperrs == 1 ? "" : "s");
+    }
 
     if (preprocess_only) {
         out = outpath ? fopen(outpath, "w") : stdout;

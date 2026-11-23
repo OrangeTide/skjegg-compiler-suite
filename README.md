@@ -62,10 +62,12 @@ to a `.wasm` module with no external toolchain (`make check-selfhost-wasm`
 proves its output matches the native cross compiler byte for byte).  The
 same self-hosting powers a multi-language browser playground (`make
 playground`, then serve `build/playground` over http) that compiles and runs
-TinScheme, Pascal, BASIC, and MooScript in a console, entirely client side:
-each language's compiler is skjegg built to WebAssembly, and for the
-object+link languages the self-hosted `skj-ld.wasm` links the result against
-the language runtime, all in the browser.
+C, TinScheme, Pascal, BASIC, and MooScript in a console, entirely client side,
+with syntax highlighting: each language's compiler is skjegg built to
+WebAssembly, and for the object+link languages the self-hosted `skj-ld.wasm`
+links the result against the language runtime, all in the browser.  C resolves
+its headers from a file bundle the page seeds into the compiler's in-memory
+filesystem.
 
 ## Architecture
 

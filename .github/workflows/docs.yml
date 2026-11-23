@@ -65,8 +65,9 @@ jobs:
 
       - name: Build the browser playground
         # Builds the self-hosted compiler wasms and the runtime objects, then
-        # stages them with the page into build/playground/.  Needs only the
-        # C compiler and make (no wasmtime: this only builds, it does not run).
+        # stages them with the page into build/playground/.  Needs a C compiler,
+        # make, and node (for the C header bundle); node is preinstalled on the
+        # runner.  No wasmtime: this only builds, it does not run.
         run: make playground
 
       - name: Stage the playground into the manual

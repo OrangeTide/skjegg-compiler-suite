@@ -1862,23 +1862,35 @@ lvalue_type(struct cc_node *n)
         return n->type ? n->type
                        : cc_type_array(lower_arena, cc_type_char(), n->slen + 1);
     case ND_UNOP:
+        /* logical negation yields int whatever the operand type; the other
+           unary ops (-, ~, +) keep the operand's type.  Without the int here
+           `!x` on a 64-bit operand was typed i64, so a context wanting i64 (a
+           return, an i64 initializer) skipped the widen while the compare
+           produced i32, an invalid-module type mismatch on the WASM target. */
+        if (n->op == TOK_BANG)
+            return cc_type_int();
         return lvalue_type(n->a);
     case ND_BINOP: {
         struct cc_type *lt = lvalue_type(n->a);
         struct cc_type *rt = lvalue_type(n->b);
+        /* a comparison or a logical connective yields int whatever the operand
+           types, floats included (the same i64-operand widen gap as `!` above).
+           This must precede the float-operand check below: a float comparison
+           (fval != 0.0) is an int result, not a double, so typing it double
+           made a bool/int context store an i32 through an f64 path. */
+        switch (n->op) {
+        case TOK_EQ: case TOK_NE:
+        case TOK_LT: case TOK_LE: case TOK_GT: case TOK_GE:
+        case TOK_ANDAND: case TOK_OROR:
+            return cc_type_int();
+        default:
+            break;
+        }
         if (is_float_type(lt) || is_float_type(rt)) {
             static struct cc_type ty_double = { .kind = TY_DOUBLE };
             static struct cc_type ty_float  = { .kind = TY_FLOAT };
             return is_double_type(lt) || is_double_type(rt)
                    ? &ty_double : &ty_float;
-        }
-        /* a comparison yields int whatever the operand types */
-        switch (n->op) {
-        case TOK_EQ: case TOK_NE:
-        case TOK_LT: case TOK_LE: case TOK_GT: case TOK_GE:
-            return cc_type_int();
-        default:
-            break;
         }
         /* pointer arithmetic keeps the pointer type (ptr +/- int, and the
            prior result for ptr - ptr) */
@@ -2197,6 +2209,24 @@ narrow_to(int val, struct cc_type *to)
         return emit_and_const(val, (int)(((unsigned)1 << w) - 1u));
     val = emit_shift(IR_SHL, val, 32 - w);
     return emit_shift(IR_SHRS, val, 32 - w);
+}
+
+/* Convert an integer `val` of type `from` for storage through a non-float,
+   non-i64 integer lvalue `to`.  An i64 source is first truncated to 32 bits:
+   the pair-register backends drop the high word implicitly on a 32-bit store,
+   but the WASM and LP64 backends keep an i64 temp distinct, so the narrow must
+   be explicit (the same IR_TRUNC64 the ND_CAST path uses).  Then narrow_to
+   handles any sub-32-bit target width. */
+static int
+narrow_store_int(int val, struct cc_type *from, struct cc_type *to)
+{
+    if (is_i64_type(from)) {
+        struct ir_insn *ins = emit(IR_TRUNC64);
+        ins->dst = new_temp();
+        ins->a = val;
+        val = ins->dst;
+    }
+    return narrow_to(val, to);
 }
 
 /* Convert a scalar `val` of type `from` to _Bool: 1 if it compares unequal to
@@ -2844,6 +2874,9 @@ lower_expr(struct cc_node *n)
                     op = IR_STL;
                     if (is_bool_type(lc->type))
                         val = to_bool(val, lvalue_type(n->b));
+                    else
+                        val = narrow_store_int(val, lvalue_type(n->b),
+                                               lc->type);
                 }
                 ins = emit(op);
                 ins->a = val;
@@ -2859,6 +2892,8 @@ lower_expr(struct cc_node *n)
             val = widen_to_i64(val, lvalue_type(n->b));
         else if (is_bool_type(t))
             val = to_bool(val, lvalue_type(n->b));
+        else if (!is_float_type(t) && !is_aggregate(t))
+            val = narrow_store_int(val, lvalue_type(n->b), t);
         else if (is_float_type(t) && !is_aggregate(t))
             /* An int (or narrower float) assigned through a non-local float
                lvalue, e.g. *p = 5, arr[i] = 5, s.f = 5, or a static float:
@@ -4178,6 +4213,8 @@ lower_local_decl(struct cc_node *n)
             op = IR_STL;
             if (is_bool_type(t))
                 val = to_bool(val, lvalue_type(n->a));
+            else
+                val = narrow_store_int(val, lvalue_type(n->a), t);
         }
         struct ir_insn *ins = emit(op);
         ins->a = val;

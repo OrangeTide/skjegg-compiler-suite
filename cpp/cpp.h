@@ -33,4 +33,9 @@ const char *cpp_get_filename(struct cpp *p);
 int         cpp_get_emit_line(struct cpp *p);
 const char *cpp_get_emit_file(struct cpp *p);
 
+/* The number of errors reported so far (missing include, bad directive, ...).
+   A driver checks this after processing so a diagnosed error fails the run
+   instead of emitting a silently-incomplete result. */
+int         cpp_error_count(const struct cpp *p);
+
 #endif /* CPP_H */

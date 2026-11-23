@@ -21,6 +21,12 @@ cpp_error(struct cpp *p, const char *fmt, ...)
     p->errors++;
 }
 
+int
+cpp_error_count(const struct cpp *p)
+{
+    return p->errors;
+}
+
 static void
 file_push(struct cpp *p, const char *path, char *buf)
 {

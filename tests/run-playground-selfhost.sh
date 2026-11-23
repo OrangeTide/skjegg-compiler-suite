@@ -44,24 +44,34 @@ fail=0
 # compile+link+run one language.
 #   $1 lang   $2 compiler wasm   $3 source file   $4 runtime objects ("" = none)
 #   $5 expected stdout (exact)   $6 expected exit code
+#   $7 extra compiler args ("" = none; C passes -Iinclude)
+#   $8 host header dir to stage as the memfs include/ dir ("" = none)
 check_lang() {
     lang=$1; comp=$2; src=$3; rtobjs=$4; want_out=$5; want_rc=$6
+    cflags=${7:-}; incdir=${8:-}
     d="$OUTDIR/$lang"
     mkdir -p "$d"
     cp "$SELFHOST_DIR/$comp" "$d/"
     cp "$src" "$d/in.src"
     [ -z "$rtobjs" ] || cp $rtobjs "$d/"
+    # C resolves <stdio.h>/<stdarg.h> from the staged include/ tree the same way
+    # the browser seeds them into the worker memfs; -Iinclude points the
+    # self-hosted cc at it (the self-host build bakes in no default include dir).
+    if [ -n "$incdir" ]; then
+        rm -rf "$d/include"
+        cp -R "$incdir" "$d/include"
+    fi
 
     if [ -z "$rtobjs" ]; then
         # TinScheme: the compiler emits a complete module directly.
         if ! ( cd "$d" && "$WASMTIME" run --dir=.::. "$comp" \
-                 -o prog.wasm in.src ) 2>"$d/compile.err"; then
+                 $cflags -o prog.wasm in.src ) 2>"$d/compile.err"; then
             printf 'FAIL  %s (compile): %s\n' "$lang" "$(head -1 "$d/compile.err")"
             fail=$((fail + 1)); return
         fi
     else
         if ! ( cd "$d" && "$WASMTIME" run --dir=.::. "$comp" \
-                 -o out.o in.src ) 2>"$d/compile.err"; then
+                 $cflags -o out.o in.src ) 2>"$d/compile.err"; then
             printf 'FAIL  %s (compile): %s\n' "$lang" "$(head -1 "$d/compile.err")"
             fail=$((fail + 1)); return
         fi
@@ -125,6 +135,15 @@ verb main()
 endverb
 EOF
 
+cat > "$S/hello.c" <<'EOF'
+#include <stdio.h>
+int main(void) {
+    for (int i = 1; i <= 3; i++)
+        printf("c %d\n", i);
+    return 0;
+}
+EOF
+
 check_lang scheme skj-sc.wasm   "$S/hello.scm" "" \
     "$(printf 'scheme 42')" 0
 check_lang pascal skj-pc.wasm   "$S/hello.pas" "$RT/pascal_rt.o" \
@@ -134,6 +153,14 @@ check_lang basic  skj-bc.wasm   "$S/hello.bas" "$RT/basic_rt.o $RT/arena_wasm.o"
 check_lang moo    skj-mooc.wasm "$S/hello.moo" \
     "$RT/str.o $RT/list.o $RT/host_stub.o $RT/arena_wasm.o" \
     "" 42
+# The C guest links against the full WASM libc (rt/c/*.o) so printf reaches
+# stdout; the synthesized crt provides fd_write/_start.  Expand the glob into a
+# single space-joined argument so it lands in check_lang's rtobjs slot.  The
+# headers come from the staged include/ tree (-Iinclude), the host counterpart of
+# the file bundle the browser seeds into the worker memfs.
+c_rt=$(echo "$RT"/c/*.o)
+check_lang c      skj-cc.wasm   "$S/hello.c" "$c_rt" \
+    "$(printf 'c 1\nc 2\nc 3')" 0 "-Iinclude" "$ROOT/include"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

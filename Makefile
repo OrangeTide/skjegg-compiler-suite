@@ -311,6 +311,9 @@ build/skj-cc-%: $$(cc_src_$$*) cc/cc.h cpp/cpp.h cpp/internal.h ir/ir.h ir/targe
 ## is absent, the way the HV tier skips off an unsupported host.
 WAT2WASM ?= wat2wasm
 WASMTIME ?= wasmtime
+## node runs the playground bundle generator (gen-bundle.js).  Overridable so a
+## PATH with a shadowing entry (e.g. an emsdk `node` directory) can point past it.
+NODE ?= node
 PHONY += check-wasm
 check-wasm: build/skj-cc-wasm | build
 	@if ! command -v $(WAT2WASM) >/dev/null 2>&1 || ! command -v $(WASMTIME) >/dev/null 2>&1; then \
@@ -596,6 +599,12 @@ PLAYGROUND_RT := build/wasm-selfhost/rt/pascal_rt.o build/wasm-selfhost/rt/basic
     build/wasm-selfhost/rt/arena_wasm.o build/wasm-selfhost/rt/str.o \
     build/wasm-selfhost/rt/list.o build/wasm-selfhost/rt/host_stub.o
 
+## The C guest's runtime objects (the full WASM libc, built with -DSKJ_LIBC_FLOAT
+## by the rt/c/ rules far below).  Derived from WASM_LIBC_SRCS so it tracks that
+## list.  Defined here, before check-playground-selfhost / playground name it, so
+## the prerequisite list does not expand empty on a clean checkout.
+CC_PLAYGROUND_RT := $(patsubst %.c,build/wasm-selfhost/rt/c/%.o,$(notdir $(WASM_LIBC_SRCS)))
+
 ## check-playground-selfhost: prove the browser playground pipeline on the host.
 ## For each language the self-hosted compiler wasm compiles a sample, the
 ## self-hosted skj-ld.wasm links it against the language runtime, and the module
@@ -605,7 +614,8 @@ PLAYGROUND_RT := build/wasm-selfhost/rt/pascal_rt.o build/wasm-selfhost/rt/basic
 PHONY += check-playground-selfhost
 check-playground-selfhost: build/wasm-selfhost/skj-sc.wasm build/wasm-selfhost/skj-bc.wasm \
     build/wasm-selfhost/skj-pc.wasm build/wasm-selfhost/skj-mooc.wasm \
-    build/wasm-selfhost/skj-ld.wasm $(PLAYGROUND_RT) | build
+    build/wasm-selfhost/skj-cc.wasm build/wasm-selfhost/skj-ld.wasm \
+    $(PLAYGROUND_RT) $(CC_PLAYGROUND_RT) | build
 	@SELFHOST_DIR="$(CURDIR)/build/wasm-selfhost" WASMTIME="$(WASMTIME)" \
 	 OUTDIR="$(CURDIR)/build/playground-selfhost" \
 	 sh tests/run-playground-selfhost.sh
@@ -617,15 +627,24 @@ check-playground-selfhost: build/wasm-selfhost/skj-sc.wasm build/wasm-selfhost/s
 ## cannot fetch the modules or spawn the workers).
 PLAYGROUND_WASMS := build/wasm-selfhost/skj-sc.wasm build/wasm-selfhost/skj-bc.wasm \
     build/wasm-selfhost/skj-pc.wasm build/wasm-selfhost/skj-mooc.wasm \
-    build/wasm-selfhost/skj-ld.wasm
+    build/wasm-selfhost/skj-cc.wasm build/wasm-selfhost/skj-ld.wasm
 PHONY += playground
-playground: $(PLAYGROUND_WASMS) $(PLAYGROUND_RT)
-	@mkdir -p build/playground/rt
+playground: $(PLAYGROUND_WASMS) $(PLAYGROUND_RT) $(CC_PLAYGROUND_RT) build/skj-ar
+	@mkdir -p build/playground/rt build/playground/bundle
 	cp pages/playground/index.html pages/playground/*.js build/playground/
 	cp $(PLAYGROUND_WASMS) build/playground/
 	cp $(PLAYGROUND_RT) build/playground/rt/
+	# The C runtime (the full WASM libc) ships as one gzipped ar archive the link
+	# worker unpacks in the browser: one fetch, compressed, instead of ~25 loose
+	# objects.  skj-ld.wasm does not read archives, so the worker splits it.
+	./build/skj-ar rcs build/playground/rt/c.a $(CC_PLAYGROUND_RT)
+	gzip -9 -c build/playground/rt/c.a > build/playground/rt/c.a.gz
+	rm -f build/playground/rt/c.a
+	# The C language bundle: the libc headers, seeded into the compiler worker's
+	# memfs so #include <stdio.h> resolves (the browser counterpart of -Iinclude).
+	$(NODE) pages/playground/gen-bundle.js build/playground/bundle/c.json include include
 	@echo "playground ready at build/playground/; serve over http, e.g."
-	@echo "    (cd build/playground && python3 -m http.server 8080)"
+	@echo "    (cd build/playground && $(NODE) serve.js 8080)"
 	@echo "then open http://localhost:8080/"
 
 ## check-mooc-wasm: the MooScript corpus on WASM.  Each tests/moo_*.moo is
@@ -5485,6 +5504,7 @@ build/skj-pc-%: $$(pc_src_$$*) pascal/pascal.h ir/ir.h ir/target.h $(wildcard ba
 ## its self-host.  Defined here, after every front end's source list exists.
 ##   $(1) = tool basename (bc/pc/mooc/ld)   $(2) = source list   $(3) = -Idir
 selfhost_cflags := -DCC_WASM -Ibuild -Iir -Ibackend -Iwasm -Iinclude -Ilibc -Iruntime
+selfhost_cc_srcs   := $(CC_FE) $(CC_CPP) $(IR_SRC) $(BE_WASM) $(WASM_LIBC_SRCS)
 selfhost_bc_srcs   := $(BASIC_FE) $(BE_WASM) $(WASM_LIBC_SRCS)
 selfhost_pc_srcs   := $(PC_FE) $(IR_SRC) $(BE_WASM) $(WASM_LIBC_SRCS)
 selfhost_mooc_srcs := $(MOO_FE) $(IR_SRC) $(BE_WASM) $(WASM_LIBC_SRCS)
@@ -5500,6 +5520,7 @@ build/wasm-selfhost/skj-$(1).wasm: build/skj-cc-wasm build/skj-ld-wasm build/ver
 	done
 	./build/skj-ld-wasm -o $$@ build/wasm-selfhost/obj-$(1)/*.o
 endef
+$(eval $(call SELFHOST_WASM_RULE,cc,$(selfhost_cc_srcs),-Icc -Icpp))
 $(eval $(call SELFHOST_WASM_RULE,bc,$(selfhost_bc_srcs),-Ibasic))
 $(eval $(call SELFHOST_WASM_RULE,pc,$(selfhost_pc_srcs),-Ipascal))
 $(eval $(call SELFHOST_WASM_RULE,mooc,$(selfhost_mooc_srcs),-Imoo))
@@ -5515,6 +5536,22 @@ build/wasm-selfhost/rt/basic_rt.o: runtime/basic_rt.c build/skj-cc-wasm | build
 build/wasm-selfhost/rt/%.o: runtime/%.c build/skj-cc-wasm | build
 	@mkdir -p build/wasm-selfhost/rt
 	./build/skj-cc-wasm -c -o $@ $<
+
+## The C guest program links against the full WASM libc (the same source set
+## check-libc-wasm builds), compiled for the target with -DSKJ_LIBC_FLOAT into
+## rt/c/.  printf reaches stdout through stdio, which pulls in the file layer, so
+## a reduced set does not link; the object list is derived from WASM_LIBC_SRCS so
+## it stays in step with that one list.  Two pattern rules cover the libc/ and
+## runtime/ sources (every basename in WASM_LIBC_SRCS is unique).  The
+## CC_PLAYGROUND_RT list itself is defined up beside PLAYGROUND_RT, before the
+## targets that name it as a prerequisite (a prerequisite list is expanded as its
+## line is read, so a definition down here would expand empty there).
+build/wasm-selfhost/rt/c/%.o: libc/%.c build/skj-cc-wasm | build
+	@mkdir -p build/wasm-selfhost/rt/c
+	./build/skj-cc-wasm -DSKJ_LIBC_FLOAT -Iinclude -Ilibc -Iruntime -c -o $@ $<
+build/wasm-selfhost/rt/c/%.o: runtime/%.c build/skj-cc-wasm | build
+	@mkdir -p build/wasm-selfhost/rt/c
+	./build/skj-cc-wasm -DSKJ_LIBC_FLOAT -Iinclude -Ilibc -Iruntime -c -o $@ $<
 
 ## Host Pascal runtime (native libc): x86-64 built by the host cc, aarch64 by
 ## the cross cc for running under qemu.
