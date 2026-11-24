@@ -153,13 +153,13 @@ check_lang basic  skj-bc.wasm   "$S/hello.bas" "$RT/basic_rt.o $RT/arena_wasm.o"
 check_lang moo    skj-mooc.wasm "$S/hello.moo" \
     "$RT/str.o $RT/list.o $RT/host_stub.o $RT/arena_wasm.o" \
     "" 42
-# The C guest links against the full WASM libc (rt/c/*.o) so printf reaches
-# stdout; the synthesized crt provides fd_write/_start.  Expand the glob into a
-# single space-joined argument so it lands in check_lang's rtobjs slot.  The
-# headers come from the staged include/ tree (-Iinclude), the host counterpart of
-# the file bundle the browser seeds into the worker memfs.
-c_rt=$(echo "$RT"/c/*.o)
-check_lang c      skj-cc.wasm   "$S/hello.c" "$c_rt" \
+# The C guest links against the full WASM libc, shipped as one archive (rt/c.a,
+# the host counterpart of the browser's rt/c.a.gz), so printf reaches stdout; the
+# synthesized crt provides fd_write/_start.  skj-ld.wasm pulls only the members
+# the program references, exactly as in the browser.  The headers come from the
+# staged include/ tree (-Iinclude), the host counterpart of the file bundle the
+# browser seeds into the worker memfs.
+check_lang c      skj-cc.wasm   "$S/hello.c" "$RT/c.a" \
     "$(printf 'c 1\nc 2\nc 3')" 0 "-Iinclude" "$ROOT/include"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

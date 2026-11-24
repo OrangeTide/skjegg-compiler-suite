@@ -23,10 +23,12 @@ the produced bytes back.
   then runs `skj-ld.wasm` to link that object against the language's runtime
   objects (precompiled once and served as assets) into a complete module, which
   the run worker executes. C links against the full WASM libc, shipped as one
-  gzipped `ar` archive (`rt/c.a.gz`) that the link worker fetches once, gunzips
-  with the platform `DecompressionStream`, and splits into its member objects
-  (`skj-ld.wasm` does not read archives itself). So `printf` and friends reach
-  the console, in one compressed download instead of ~25 object fetches.
+  gzipped `ar` archive (`rt/c.a.gz`) that the link worker fetches once and
+  gunzips with the platform `DecompressionStream`, then hands whole to
+  `skj-ld.wasm`, which reads the archive and pulls only the members the program
+  references. So `printf` and friends reach the console, in one compressed
+  download instead of ~25 object fetches, and the module carries only the libc
+  actually used rather than every object.
 
 So the pipeline is compile, then for the object+link languages link, then run,
 all client side with skjegg's own tools.

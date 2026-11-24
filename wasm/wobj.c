@@ -290,26 +290,19 @@ parse_custom(struct wobj *o, struct cur *c, size_t paylen)
     free(name);
 }
 
+/* Parse a relocatable object already in memory.  `raw` must be a heap buffer
+   the object takes ownership of (it is kept as o->raw); `path` is borrowed for
+   diagnostics.  This is the shared parse used both by wobj_read, which reads a
+   file, and by the archive reader, which hands over a copied member. */
 struct wobj *
-wobj_read(const char *path)
+wobj_parse(const char *path, unsigned char *raw, size_t rawlen)
 {
     struct wobj *o = xcalloc(1, sizeof(*o));
-    FILE *f;
-    long n;
     struct cur c;
 
     o->path = path;
-    f = fopen(path, "rb");
-    if (!f)
-        die("cannot open %s", path);
-    if (fseek(f, 0, SEEK_END) != 0 || (n = ftell(f)) < 0)
-        die("cannot read %s", path);
-    rewind(f);
-    o->raw = xmalloc((size_t)n);
-    if (fread(o->raw, 1, (size_t)n, f) != (size_t)n)
-        die("read failed on %s", path);
-    fclose(f);
-    o->rawlen = (size_t)n;
+    o->raw = raw;
+    o->rawlen = rawlen;
 
     c.p = o->raw;
     c.n = o->rawlen;
@@ -334,4 +327,24 @@ wobj_read(const char *path)
         c.off = payend;
     }
     return o;
+}
+
+struct wobj *
+wobj_read(const char *path)
+{
+    FILE *f;
+    long n;
+    unsigned char *raw;
+
+    f = fopen(path, "rb");
+    if (!f)
+        die("cannot open %s", path);
+    if (fseek(f, 0, SEEK_END) != 0 || (n = ftell(f)) < 0)
+        die("cannot read %s", path);
+    rewind(f);
+    raw = xmalloc((size_t)n);
+    if (fread(raw, 1, (size_t)n, f) != (size_t)n)
+        die("read failed on %s", path);
+    fclose(f);
+    return wobj_parse(path, raw, (size_t)n);
 }

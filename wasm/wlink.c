@@ -71,7 +71,7 @@ gfunc_find(const char *name)
     return -1;
 }
 
-#define WASM_SYM_BINDING_LOCAL 0x02
+/* WASM_SYM_BINDING_LOCAL comes from wld.h */
 
 /* ---- the global map of non-local defined data symbols ---- */
 

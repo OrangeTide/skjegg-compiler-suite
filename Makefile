@@ -366,7 +366,7 @@ test-wasm-enc: build/wasm-enc-test
 ## skj-ld-wasm: the in-tree WebAssembly linker.  It reads the relocatable
 ## objects skj-cc-wasm emits, resolves symbols, renumbers and relocates them, and
 ## writes a complete module, so the toolchain links WASM without wasm-ld.
-WLD_SRC := wasm/wld_main.c wasm/wobj.c wasm/wlink.c wasm/enc.c ir/util.c ir/arena.c
+WLD_SRC := wasm/wld_main.c wasm/wobj.c wasm/warchive.c wasm/wlink.c wasm/enc.c ir/util.c ir/arena.c
 build/skj-ld-wasm: $(WLD_SRC) wasm/wld.h wasm/enc.h ir/util.h | build
 	$(CC) $(CFLAGS) -Iwasm -Iir -o $@ $(WLD_SRC)
 
@@ -601,21 +601,64 @@ PLAYGROUND_RT := build/wasm-selfhost/rt/pascal_rt.o build/wasm-selfhost/rt/basic
 
 ## The C guest's runtime objects (the full WASM libc, built with -DSKJ_LIBC_FLOAT
 ## by the rt/c/ rules far below).  Derived from WASM_LIBC_SRCS so it tracks that
-## list.  Defined here, before check-playground-selfhost / playground name it, so
-## the prerequisite list does not expand empty on a clean checkout.
+## list.  Defined here, before check-wasm-ld-archive / check-playground-selfhost
+## / playground name it, so the prerequisite list does not expand empty on a
+## clean checkout (a prerequisite list expands as make reads the target's line).
 CC_PLAYGROUND_RT := $(patsubst %.c,build/wasm-selfhost/rt/c/%.o,$(notdir $(WASM_LIBC_SRCS)))
+
+## The C runtime packed into one archive, the way the playground ships it
+## (rt/c.a.gz).  The browser hands this whole archive to skj-ld.wasm, which
+## pulls only the members a program references, so the host proof links against
+## the archive, not the loose objects.
+build/wasm-selfhost/rt/c.a: $(CC_PLAYGROUND_RT) build/skj-ar | build
+	./build/skj-ar rcs $@ $(CC_PLAYGROUND_RT)
+
+## check-wasm-ld-archive: prove skj-ld-wasm pulls only the needed members of a
+## WASM .a archive.  skj-ar packs the full WASM C runtime (every libc object)
+## into one archive; a C program that uses printf/malloc/strlen is linked
+## against it, and the linker pulls just the members those calls reach (and
+## their transitive references).  Checked two ways: the program prints the right
+## line, and its archive-linked module is strictly smaller than one linked
+## against every member, so the dead members were dropped.  Lives here, after
+## CC_PLAYGROUND_RT, so its prerequisite list is non-empty on a clean checkout.
+## Skips cleanly when wasmtime is absent.
+PHONY += check-wasm-ld-archive
+check-wasm-ld-archive: build/skj-cc-wasm build/skj-ld-wasm build/skj-ar $(CC_PLAYGROUND_RT) | build
+	@if ! command -v $(WASMTIME) >/dev/null 2>&1; then \
+	    echo "check-wasm-ld-archive: wasmtime not found, skipping"; \
+	else \
+	    set -e; \
+	    ./build/skj-ar rcs build/wasm_ld_rt.a $(CC_PLAYGROUND_RT); \
+	    ./build/skj-cc-wasm -DSKJ_LIBC_FLOAT -Iinclude -c \
+	        -o build/wasm_ld_archive.o tests/wasm_ld_archive.c; \
+	    ./build/skj-ld-wasm -o build/wasm_ld_archive.wasm \
+	        build/wasm_ld_archive.o build/wasm_ld_rt.a; \
+	    ./build/skj-ld-wasm -o build/wasm_ld_whole.wasm \
+	        build/wasm_ld_archive.o $(CC_PLAYGROUND_RT); \
+	    if out=$$($(WASMTIME) run build/wasm_ld_archive.wasm 2>/dev/null); then rc=0; else rc=$$?; fi; \
+	    if [ "$$out" != "archive 42" ]; then \
+	        echo "check-wasm-ld-archive: FAIL (stdout '$$out')"; exit 1; fi; \
+	    if [ "$$rc" != "0" ]; then \
+	        echo "check-wasm-ld-archive: FAIL (exit $$rc)"; exit 1; fi; \
+	    as=$$(wc -c < build/wasm_ld_archive.wasm); \
+	    ws=$$(wc -c < build/wasm_ld_whole.wasm); \
+	    if [ "$$as" -ge "$$ws" ]; then \
+	        echo "check-wasm-ld-archive: FAIL (no dead-strip: pull $$as >= whole $$ws)"; exit 1; fi; \
+	    echo "check-wasm-ld-archive: PASS (pull $$as < whole $$ws bytes)"; \
+	fi
 
 ## check-playground-selfhost: prove the browser playground pipeline on the host.
 ## For each language the self-hosted compiler wasm compiles a sample, the
 ## self-hosted skj-ld.wasm links it against the language runtime, and the module
 ## runs under wasmtime with its stdout/exit checked.  Same wasms, argv and memfs
-## hand-off the browser workers use, so a pass here is the end-to-end proof.
-## Skips cleanly when wasmtime is absent.
+## hand-off the browser workers use, so a pass here is the end-to-end proof; C
+## links against the whole c.a archive and the linker dead-strips, exactly as in
+## the browser.  Skips cleanly when wasmtime is absent.
 PHONY += check-playground-selfhost
 check-playground-selfhost: build/wasm-selfhost/skj-sc.wasm build/wasm-selfhost/skj-bc.wasm \
     build/wasm-selfhost/skj-pc.wasm build/wasm-selfhost/skj-mooc.wasm \
     build/wasm-selfhost/skj-cc.wasm build/wasm-selfhost/skj-ld.wasm \
-    $(PLAYGROUND_RT) $(CC_PLAYGROUND_RT) | build
+    $(PLAYGROUND_RT) build/wasm-selfhost/rt/c.a | build
 	@SELFHOST_DIR="$(CURDIR)/build/wasm-selfhost" WASMTIME="$(WASMTIME)" \
 	 OUTDIR="$(CURDIR)/build/playground-selfhost" \
 	 sh tests/run-playground-selfhost.sh
@@ -4590,11 +4633,14 @@ check-san-pc: build/san/skj-pc
 	@echo "== check-san: Pascal front end (skj-pc, compile-only) =="
 	@$(SAN_RUNENV) sh tests/run-compile-san.sh "$(CURDIR)/build/san/skj-pc" pascal $(PAS_TESTS)
 
+## The members mix ELF32 (start.o, big-endian m68k) and a WASM object
+## (arena_wasm.o) so both symbol-index paths, the ELF symtab parse and the
+## WASM "linking" custom section parse, run under the sanitizers in one create.
 PHONY += check-san-ar
-check-san-ar: build/san/skj-ar build/start.o build/half.o
+check-san-ar: build/san/skj-ar build/start.o build/half.o build/wasm-selfhost/rt/arena_wasm.o
 	@echo "== check-san: archive tool (skj-ar) =="
 	@$(SAN_RUNENV) AR="$(CURDIR)/build/san/skj-ar" sh tests/run-ar-san.sh \
-	   build/start.o build/half.o
+	   build/start.o build/half.o build/wasm-selfhost/rt/arena_wasm.o
 
 ## The Kobold behavioral corpora (the hosted corpus and the multi-unit set)
 ## through the ASan+UBSan skj-kp-jit, run in JIT mode so the sanitized driver

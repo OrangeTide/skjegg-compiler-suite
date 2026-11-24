@@ -96,6 +96,7 @@ struct wobj {
 #define R_WASM_GLOBAL_INDEX_LEB   7
 
 /* symbol flags */
+#define WASM_SYM_BINDING_LOCAL 0x02
 #define WASM_SYM_UNDEFINED     0x10
 #define WASM_SYM_EXPLICIT_NAME 0x40
 
@@ -109,6 +110,30 @@ struct wobj {
 #define WLD_STACK_BYTES (1 << 20)
 
 struct wobj *wobj_read(const char *path);
+
+/* Parse an object already in memory; `raw` is a heap buffer the object keeps,
+   `path` is borrowed for diagnostics.  Used by wobj_read and the archive
+   reader. */
+struct wobj *wobj_parse(const char *path, unsigned char *raw, size_t rawlen);
+
+/* A growable vector of parsed objects.  The driver seeds it with the explicit
+   object inputs, then archive reads append the members they pull. */
+struct wobjvec {
+    struct wobj **objs;
+    int           n;
+    int           cap;
+};
+void wobjvec_push(struct wobjvec *v, struct wobj *o);
+
+/* True if `path` names an ar archive (its magic is "!<arch>\n"). */
+int warchive_is_archive(const char *path);
+
+/* Pull from the archive at `path` every member that defines a symbol some
+   object already in `v` references but nothing defines, appending each pulled
+   member to `v` and iterating until the set is stable (a pulled member can
+   reference further members).  Uses the GNU/SysV symbol index that skj-ar
+   writes.  Returns the number of members pulled. */
+int warchive_read(struct wobjvec *v, const char *path);
 
 /* link the objects into a complete module written to `outpath`; exports lists
    the extra function names to export.  When `entry` is set the linker

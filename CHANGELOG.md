@@ -6,6 +6,22 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.66.0
+
+#### Added
+- `skj-ar` indexes WASM object members, so one archive tool serves WASM
+  archives as it already does ELF32 and ELF64. It detects a member's `\0asm`
+  magic and walks its `linking` custom section symbol table, writing the same
+  GNU/SysV index for the defined, non-local symbols.
+- `skj-ld-wasm` reads `ar` archives and pulls only the members that resolve a
+  referenced, still-undefined symbol, to a fixpoint, so a WASM link dead-strips
+  to the code a program actually calls. The self-hosted `skj-ld.wasm` does the
+  same.
+- The browser playground hands the C runtime archive (`rt/c.a.gz`) straight to
+  `skj-ld.wasm` instead of splitting it into members in JavaScript; a C module
+  then carries only the libc it calls (a hello program drops from about 136 KB
+  to about 80 KB).
+
 ### 0.65.0
 
 #### Added

@@ -221,7 +221,8 @@
       args: ["-Iinclude", "-DSKJ_LIBC_FLOAT"],
       bundle: "bundle/c.json",
       // the full WASM libc, shipped as one gzipped ar archive the link worker
-      // unpacks (printf reaches stdout through it)
+      // gunzips and hands whole to skj-ld.wasm, which pulls the needed members
+      // (printf reaches stdout through it)
       archive: "rt/c.a.gz",
       runtime: [],
       note: "C compiles to a WebAssembly object, linked against the bundled libc " +

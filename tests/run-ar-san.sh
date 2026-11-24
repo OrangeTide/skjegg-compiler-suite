@@ -1,13 +1,15 @@
 #!/bin/sh
 # run-ar-san.sh - sanitizer probe for skj-ar over its real operations.
 #
-# skj-ar is target-neutral: it parses each member's ELF32 symbol table
-# (either endianness) for the index and copies member bytes verbatim. The
-# probe exercises the three operations the tool implements (create with a
-# symbol index, list, extract) over real object files passed on the command
-# line, so the ELF32 parse, the GNU string table, and the symbol-index build
-# all run under the sanitizers. A nonzero exit is a failure; the extracted
-# members are compared byte-for-byte against their inputs.
+# skj-ar is target-neutral: it parses each member's ELF32/ELF64 symbol table
+# (either endianness), or a WASM object's "linking" custom section symbol
+# table, for the index, and copies member bytes verbatim. The probe exercises
+# the three operations the tool implements (create with a symbol index, list,
+# extract) over real object files passed on the command line, so the object
+# parses, the GNU string table, and the symbol-index build all run under the
+# sanitizers. Passing both ELF and WASM members covers both symbol-index paths.
+# A nonzero exit is a failure; the extracted members are compared byte-for-byte
+# against their inputs.
 #
 # Usage: run-ar-san.sh <object>...
 #   AR  the sanitized skj-ar binary (default build/skj-ar)

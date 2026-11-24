@@ -319,7 +319,9 @@ jobs:
   # The WASM backend end to end: the eight WASM lanes, which never ran in CI.
   # check-wasm compiles the self-test and diffs the binary module against
   # wat2wasm; check-wasm-obj links a skj object with wasm-ld; check-wasm-ld and
-  # check-wasm-exec drive the in-tree skj-ld-wasm; check-libc-wasm links the
+  # check-wasm-exec drive the in-tree skj-ld-wasm, and check-wasm-ld-archive
+  # proves it pulls only the needed members of a skj-ar WASM archive (and so
+  # dead-strips the module); check-libc-wasm links the
   # WASI libc and runs the stdin/stdout stream tests; check-cc-wasm runs the C
   # compiler corpus, check-bc-wasm the BASIC corpus, check-pc-wasm the Pascal
   # corpus, check-sc-wasm the TinScheme corpus and check-mooc-wasm the MooScript
@@ -363,6 +365,7 @@ jobs:
       - name: WASM backend lanes
         run: |
           make check-wasm check-wasm-obj check-wasm-ld check-wasm-exec \
+               check-wasm-ld-archive \
                check-libc-wasm check-cc-wasm check-bc-wasm check-pc-wasm \
                check-sc-wasm check-mooc-wasm check-selfhost-wasm \
                check-playground-selfhost

@@ -35,8 +35,8 @@ Binutils-free assemblers, linkers, and archive tool:
 | `skj-as-mips`, `skj-ld-mips` | MIPS I assembler + linker (ELF and PlayStation PS-EXE) | Working |
 | `skj-as-x86-64`, `skj-ld-x86-64` | x86-64 assembler + linker (ELF64)  | Working |
 | `skj-as-aarch64`, `skj-ld-aarch64` | AArch64 assembler + linker (ELF64 and Mach-O) | Working |
-| `skj-ld-wasm`            | WebAssembly object linker (the WASM compilers emit the objects; links a WASI module) | Working |
-| `skj-ar`                 | `ar(1)` archive tool (any ELF target)     | Working |
+| `skj-ld-wasm`            | WebAssembly object linker (the WASM compilers emit the objects; links a WASI module, pulling needed members from `.a` archives) | Working |
+| `skj-ar`                 | `ar(1)` archive tool (any ELF or WASM target) | Working |
 
 Runner, sandbox, and debugging:
 
@@ -350,7 +350,7 @@ The axes expand to these tokens, which may also be passed directly.
 | `as-mips`, `ld-mips` | MIPS assembler and linker (ld-mips writes PS-EXE) |
 | `as-x86-64`, `ld-x86-64` | x86-64 ELF64 assembler and linker          |
 | `as-aarch64`, `ld-arm64` | AArch64 ELF64 assembler and linker         |
-| `ar`       | target-neutral `ar(1)` archive tool                      |
+| `ar`       | target-neutral `ar(1)` archive tool (ELF and WASM)       |
 | `addr2line`| offline DWARF symbolizer (backtrace address to file:line) |
 | `cpp`      | C preprocessor (library + standalone tool)               |
 | `emu-cf`, `emu-rv`, `emu-mips` | the ColdFire, RV32, and MIPS emulator cores |

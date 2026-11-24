@@ -4,10 +4,11 @@
  * members, and extracts them.  The symbol index is what a linker uses to pull
  * only the members that resolve an undefined symbol, so skj-ar writes one for
  * every create (the "s" of "ar rcs"); skj-ld, skj-ld-rv, and skj-ld-mips read
- * it.  The tool is generic over the object machine and byte order: it parses
- * the ELF32 symbol table of each member (either endianness) to list the
- * defined global symbols, and copies member bytes verbatim, so one skj-ar
- * serves every target.
+ * it.  The tool is generic over the object format, machine, and byte order: it
+ * parses the ELF32 or ELF64 symbol table of each member (either endianness),
+ * or, for a WASM object, the symbol table in its "linking" custom section, to
+ * list the defined global symbols, and copies member bytes verbatim, so one
+ * skj-ar serves every target.
  *
  * Supported: create/replace (r, q, and the c/s/u/v/D modifiers, which build
  * the whole archive from the listed members with a fresh symbol index), list
@@ -156,6 +157,166 @@ elf_each_defined_global(const struct elf_view *e,
 }
 
 /****************************************************************
+ * WASM symbol reading (the "linking" custom section symbol table)
+ ****************************************************************/
+
+/* A relocatable WASM object keeps its symbols in a "linking" custom section,
+ * not in a WASM-level export list, so the archiver reads that section the same
+ * way it reads an ELF symtab.  These flags and kinds are a self-contained copy
+ * of the WASM linking ABI (the one skjegg's own backend emits); the archiver
+ * does not link against the WASM linker library, matching how its ELF walk is
+ * independent of ld/elf_read.c.  Names in this section are length-prefixed, not
+ * NUL-terminated, so a defined symbol's name is copied into the arena. */
+#define WASM_SYM_UNDEFINED      0x10
+#define WASM_SYM_EXPLICIT_NAME  0x40
+#define WASM_SYM_BINDING_LOCAL  0x02
+#define WASM_SYMTAB_DATA        1
+
+struct wasm_cur {
+    const uint8_t *p;
+    size_t len;
+    size_t off;
+    int bad;                    /* set on any truncation; the walk then stops */
+};
+
+/* True when this member is a WASM object (magic plus a version word). */
+static int
+wasm_is_object(const uint8_t *buf, size_t len)
+{
+    return len >= 8 && memcmp(buf, "\0asm", 4) == 0;
+}
+
+static uint64_t
+wasm_uleb(struct wasm_cur *c)
+{
+    uint64_t v = 0;
+    int shift = 0;
+    for (;;) {
+        if (c->off >= c->len || shift > 63) {
+            c->bad = 1;
+            return 0;
+        }
+        uint8_t b = c->p[c->off++];
+        v |= (uint64_t)(b & 0x7f) << shift;
+        if (!(b & 0x80))
+            break;
+        shift += 7;
+    }
+    return v;
+}
+
+/* Copy a length-prefixed name into the arena as a NUL-terminated string, or
+ * return NULL on truncation.  skip=1 reads and discards the name instead. */
+static const char *
+wasm_name(struct wasm_cur *c, struct arena *a, int skip)
+{
+    uint64_t len = wasm_uleb(c);
+    const char *name;
+    if (c->bad || c->off + len > c->len) {
+        c->bad = 1;
+        return NULL;
+    }
+    if (skip) {
+        c->off += (size_t)len;
+        return NULL;
+    }
+    char *s = arena_alloc(a, (size_t)len + 1);
+    memcpy(s, c->p + c->off, (size_t)len);
+    s[len] = '\0';
+    name = s;
+    c->off += (size_t)len;
+    return name;
+}
+
+/* Walk one linking-section symbol table, calling cb(name, ctx) for each
+ * defined, non-local symbol (exactly the externally resolvable ones a linker
+ * pulls a member for). */
+static void
+wasm_walk_symtab(struct wasm_cur *c, struct arena *a,
+                 void (*cb)(const char *, void *), void *ctx)
+{
+    uint64_t n = wasm_uleb(c), i;
+    for (i = 0; i < n && !c->bad; i++) {
+        if (c->off >= c->len) {
+            c->bad = 1;
+            return;
+        }
+        uint8_t kind = c->p[c->off++];
+        uint64_t flags = wasm_uleb(c);
+        int defined = !(flags & WASM_SYM_UNDEFINED);
+        int local = (flags & WASM_SYM_BINDING_LOCAL) != 0;
+        const char *name = NULL;
+
+        if (kind == WASM_SYMTAB_DATA) {
+            name = wasm_name(c, a, !defined || local);
+            if (defined) {
+                wasm_uleb(c);           /* segment index */
+                wasm_uleb(c);           /* offset */
+                wasm_uleb(c);           /* size */
+            }
+        } else {                        /* function or global */
+            wasm_uleb(c);               /* element index */
+            /* A name is inline when the symbol is defined or carries an
+             * explicit name; an undefined import without one takes its name
+             * from the import section, which the armap never needs. */
+            if (defined || (flags & WASM_SYM_EXPLICIT_NAME))
+                name = wasm_name(c, a, !defined || local);
+        }
+        if (defined && !local && name)
+            cb(name, ctx);
+    }
+}
+
+/* Parse the "linking" custom section, dispatching to the symbol-table
+ * subsection (subid 8, WASM_SYMBOL_TABLE) and skipping the rest. */
+static void
+wasm_walk_linking(struct wasm_cur *c, size_t end, struct arena *a,
+                  void (*cb)(const char *, void *), void *ctx)
+{
+    wasm_uleb(c);                       /* metadata version */
+    while (c->off < end && !c->bad) {
+        if (c->off >= c->len) {
+            c->bad = 1;
+            return;
+        }
+        uint8_t subid = c->p[c->off++];
+        uint64_t sublen = wasm_uleb(c);
+        size_t subend = c->off + (size_t)sublen;
+        if (c->bad || subend > end || subend > c->len) {
+            c->bad = 1;
+            return;
+        }
+        if (subid == 8)                 /* WASM_SYMBOL_TABLE */
+            wasm_walk_symtab(c, a, cb, ctx);
+        c->off = subend;                /* skip anything not consumed */
+    }
+}
+
+/* Call cb(name, ctx) for each defined global symbol of a WASM object member:
+ * the symbols in its "linking" custom section that are defined and not local.
+ * On any malformed structure the walk stops rather than aborting, so a bad
+ * member simply contributes no symbols. */
+static void
+wasm_each_defined_global(const uint8_t *buf, size_t len, struct arena *a,
+                         void (*cb)(const char *, void *), void *ctx)
+{
+    struct wasm_cur c = { buf, len, 8, 0 };     /* skip magic + version */
+    while (c.off < c.len && !c.bad) {
+        uint8_t id = c.p[c.off++];
+        uint64_t paylen = wasm_uleb(&c);
+        size_t payend = c.off + (size_t)paylen;
+        if (c.bad || payend > c.len)
+            return;
+        if (id == 0) {                  /* custom section */
+            const char *secname = wasm_name(&c, a, 0);
+            if (!c.bad && secname && strcmp(secname, "linking") == 0)
+                wasm_walk_linking(&c, payend, a, cb, ctx);
+        }
+        c.off = payend;                 /* next section, consumed or not */
+    }
+}
+
+/****************************************************************
  * Members and symbols
  ****************************************************************/
 
@@ -292,6 +453,9 @@ create_archive(struct arena *a, const char *path, int nin, const char **in)
         cur_member = i;
         if (elf_open(&e, members[i].data, (size_t)members[i].size))
             elf_each_defined_global(&e, add_symbol, NULL);
+        else if (wasm_is_object(members[i].data, (size_t)members[i].size))
+            wasm_each_defined_global(members[i].data, (size_t)members[i].size,
+                                     a, add_symbol, NULL);
     }
 
     /* the "//" long-name table, for basenames that do not fit the 16-byte
