@@ -1,0 +1,7 @@
+0 10 11 20 21
+low=0 high=21
+d=11
+succ=12
+Fri>Thu
+loop 20
+loop 21

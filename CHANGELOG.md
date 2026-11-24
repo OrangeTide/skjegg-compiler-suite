@@ -6,6 +6,46 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.67.0
+
+A broad expansion of the Pascal front end (`skj-pc`) toward general-purpose
+FPC-procedural Pascal, validated on the x86-64 host suite under the ASan+LSan
+leak gate and on the ColdFire corpus under qemu-m68k.
+
+#### Added
+- Pointers: anonymous pointer types (`^T`), postfix dereference `p^` that chains
+  with `.f` and `[i]`, `New`/`Dispose`, `nil`, and pointer equality at pointer
+  width. A pointer is an unmanaged machine-word value, loaded and stored raw.
+- File I/O: text files, typed files (`file of T`), and untyped files (`file`),
+  each a runtime-owned control block the front end stores inline and passes by
+  address. `Assign`/`Reset`/`Rewrite`/`Append`/`Close`; `Read`/`Write`/`ReadLn`/
+  `WriteLn` redirected to a file; `Eof(f)`/`Eoln(f)`; `SeekEof`/`SeekEoln`
+  (bare and file forms); `Erase`/`Rename`. Typed files add the ISO buffer
+  variable `f^` with `Seek`/`FilePos`/`FileSize`/`Get`/`Put`; untyped files add
+  `BlockRead`/`BlockWrite`. `{$I+}`/`{$I-}` selects trap-versus-`IOResult`. The
+  freestanding build reaches files through the raw open/read/write/lseek
+  syscalls.
+- The `@` address-of operator on a variable, field or element.
+- `Read` parses reals from the standard input, a text file, or a `file of real`.
+- `Random`, `Random(n)`, and `Randomize` over a reproducible xorshift32
+  generator (a fixed default seed, so a program that never calls `Randomize`
+  runs the same sequence on every target).
+- Explicit enumerated-type ordinals: `type Day = (Mon, Tue = 10, Wed, ...)`. An
+  unnamed member continues from the previous value plus one, explicit values
+  must ascend, and the type's ordinal range spans its lowest and highest member
+  so `ord`/`low`/`high`/`succ`/`pred`, comparison, `for` loops and `array[E]`
+  indexing all see the real values.
+- Output formatting: `Write(x:width)` right-justifies integers, strings and
+  chars; `Write(r:width:decimals)` prints reals in fixed or scientific form.
+- `for x in a` over a static array (desugared to a counted loop, so `break` and
+  `continue` work), `case` on a string selector, and the transcendentals
+  `sin`/`cos`/`ln`/`exp`/`arctan` plus the `pi` constant.
+
+#### Fixed
+- `doc/languages/pascal.md` lagged the implementation, so `real`, `trunc`/
+  `round`, `paramstr`, `high`/`low` and more were wrongly marked unimplemented.
+  The reference now matches what `skj-pc` accepts.
+
 ### 0.66.0
 
 #### Added

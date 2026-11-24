@@ -549,7 +549,14 @@ check-bc-wasm: build/skj-bc-wasm build/skj-cc-wasm build/skj-ld-wasm | build
 ## {$R+} range or {$Q+} overflow check lowers to a WASM trap, which wasmtime
 ## reports as exit 134, matching the native SIGABRT code, so t071/t073 run.
 ## Skips cleanly when wasmtime is absent.
-PC_WASM_EXCLUDE :=
+##
+## The named-file tests are excluded: the minimal crt the lane links provides
+## only read/write/exit, so the Pascal runtime's low-level file calls are
+## failing stubs on WASM (file I/O needs WASI preopens the lane does not grant).
+## Console I/O, which maps to the WASI fd_read/fd_write the crt synthesizes,
+## still runs the whole rest of the corpus.
+PC_WASM_EXCLUDE := pascal_t242_textfile pascal_t243_untyped \
+                   pascal_t244_typedfile pascal_t252_append
 PHONY += check-pc-wasm
 check-pc-wasm: build/skj-pc-wasm build/skj-cc-wasm build/skj-ld-wasm | build
 	@PCBIN="$(CURDIR)/build/skj-pc-wasm" CCBIN="$(CURDIR)/build/skj-cc-wasm" \

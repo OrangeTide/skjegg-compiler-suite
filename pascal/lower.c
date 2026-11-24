@@ -63,6 +63,11 @@ new_label(void)
    struct pstr. */
 #define PSTR_HDR 16
 
+/* Bytes reserved inline for a file variable.  The runtime (pascal_rt.c) owns
+   the layout of its struct pfile; this only has to be >= sizeof that struct.
+   The front end never inspects the block, it only passes its address. */
+#define PFILE_SZ 512
+
 /* Per-temp flag: set when a temp holds a pointer / full-width address, so a
    call passes it as IR_ARG64 under LP64.  Temp ids restart at 0 per function,
    so the table is cleared at each function's entry. */
@@ -562,6 +567,9 @@ struct type_def {
     int is_scalar;              /* a built-in or aliased ordinal/scalar type */
     int is_ordinal;             /* an enum or subrange with lo_bound..hi_bound */
     int is_i64;                 /* a 64-bit scalar (Int64 / QWord) */
+    int is_pointer;             /* `^T`: a pointer to elem_type_name */
+    int is_file;                /* `text`/`file`: a runtime-owned file block */
+    int is_untyped;             /* `file`: an untyped file (blockread/write) */
     char *alias_of;             /* `type X = Y;`: resolve X through Y */
 };
 
@@ -591,6 +599,42 @@ is_i64_type_name(const char *name)
         return 1;
     if (t->alias_of)
         return is_i64_type_name(t->alias_of);
+    return 0;
+}
+
+/* Is a type name a pointer type (`^T`)?  Resolves alias chains. */
+static int
+is_pointer_type_name(const char *name)
+{
+    struct type_def *t;
+
+    if (!name)
+        return 0;
+    t = find_type(name);
+    if (!t)
+        return 0;
+    if (t->is_pointer)
+        return 1;
+    if (t->alias_of)
+        return is_pointer_type_name(t->alias_of);
+    return 0;
+}
+
+/* Is a type name a file (`text` or `file [of T]`)?  Resolves alias chains. */
+static int
+is_file_type_name(const char *name)
+{
+    struct type_def *t;
+
+    if (!name)
+        return 0;
+    t = find_type(name);
+    if (!t)
+        return 0;
+    if (t->is_file)
+        return 1;
+    if (t->alias_of)
+        return is_file_type_name(t->alias_of);
     return 0;
 }
 
@@ -832,6 +876,47 @@ register_type(struct node *td)
         return;
     }
 
+    if (td->op == 8) {
+        /* `^T`: a pointer, a single machine-word scalar holding an address.
+           The pointee type name is kept in elem_type_name. */
+        t->is_pointer = 1;
+        t->is_scalar = 1;
+        t->elem_type_name = td->sval;
+        t->total_size = PC_PTR_BYTES;
+        return;
+    }
+
+    if (td->op == 9) {
+        /* `text`: a text file.  Storage is a fixed inline file-control block
+           the runtime owns; the front end only ever passes its address. */
+        t->is_file = 1;
+        t->total_size = PFILE_SZ;
+        return;
+    }
+
+    if (td->op == 10) {
+        /* `file of T`: a typed file.  Same inline file-control block, plus the
+           component type/size so read/write/seek move whole components.  A
+           managed component (string/dynarray) would write heap pointers to the
+           file, so it is rejected. */
+        if (type_has_managed(td->sval))
+            die("lower:%d: 'file of %s' has a managed (string) component",
+                td->line, td->sval ? td->sval : "?");
+        t->is_file = 1;
+        t->elem_type_name = td->sval;
+        t->elem_size = type_bytes(td->sval);
+        t->total_size = PFILE_SZ;
+        return;
+    }
+
+    if (td->op == 11) {
+        /* `file`: an untyped file, read and written in fixed-size blocks. */
+        t->is_file = 1;
+        t->is_untyped = 1;
+        t->total_size = PFILE_SZ;
+        return;
+    }
+
     if (td->op == 4) {
         /* `type X = Y;` type alias (Y is a named type). */
         t->is_scalar = 1;
@@ -878,13 +963,14 @@ register_type(struct node *td)
     }
 
     if (td->op == 7) {
-        /* `type X = (a, b, c, ...);` enumeration: an ordinal scalar whose
-           values are 0..count-1.  The literals themselves are registered as
-           integer constants by the const section. */
+        /* `type X = (a, b, c, ...);` enumeration: an ordinal scalar spanning
+           the lowest (ival) to the highest (slen) member ordinal.  Without
+           explicit values this is 0..count-1.  The literals themselves are
+           registered as integer constants by the const section. */
         t->is_scalar = 1;
         t->is_ordinal = 1;
-        t->lo_bound = 0;
-        t->hi_bound = (int)td->ival - 1;
+        t->lo_bound = (int)td->ival;
+        t->hi_bound = td->slen;
         t->total_size = 4;
         return;
     }
@@ -1479,9 +1565,10 @@ load_sym(struct sym *s)
             return emit_strobj_literal(s->const_str, s->const_slen);
         return lower_const(s->const_val);
     }
-    /* A string value is a pointer; load it, following the var-param and global
-       indirections, and flag the result as a pointer. */
-    if (is_str) {
+    /* A string value or a typed pointer is a machine-word pointer; load it,
+       following the var-param and global indirections, and flag the result as
+       a pointer. */
+    if (is_str || is_pointer_type_name(s->type_name)) {
         if (s->is_local) {
             if (s->is_var_param)
                 return emit_load_ptr_at(emit_load_ptr(s->slot));
@@ -1562,6 +1649,20 @@ store_sym(struct sym *s, int val, int str_owned)
     int i64 = is_i64_type_name(s->type_name);
     int ffw = float_fw_of_name(s->type_name);
 
+    /* A typed pointer is an unmanaged machine-word value; store it raw at
+       pointer width (8 bytes under LP64), following the same indirections. */
+    if (is_pointer_type_name(s->type_name)) {
+        if (s->is_local) {
+            if (s->is_var_param)
+                emit_store_ptr_at(emit_load_ptr(s->slot), val);
+            else
+                emit_store_ptr(s->slot, val);
+        } else {
+            emit_store_ptr_at(emit_lea_sym(s->name), val);
+        }
+        return;
+    }
+
     /* A string assignment shares the value by reference count: retain a
        borrowed source, move an owned one, and release the previous value.  It
        follows the var-param and global indirections like any pointer slot. */
@@ -1641,6 +1742,14 @@ with_field_addr(const char *name)
 static const char *
 lvalue_type_name(struct node *n)
 {
+    if (n->kind == N_DEREF) {
+        /* p^ has the pointee type; f^ has a typed file's component type */
+        const char *ptn = lvalue_type_name(n->a);
+        struct type_def *td = ptn ? resolve_type(ptn) : NULL;
+        if (td && (td->is_pointer || td->is_file))
+            return td->elem_type_name;
+        return NULL;
+    }
     if (n->kind == N_NAME) {
         struct sym *s;
         /* the enclosing function's name denotes its result variable; this
@@ -1688,6 +1797,19 @@ lower_lvalue_addr(struct node *n)
 {
     struct ir_insn *ins;
 
+    if (n->kind == N_DEREF) {
+        /* p^ is the pointer value held in p; f^ is a typed file's buffer, whose
+           address the runtime hands back from the file-control block. */
+        const char *ptn = lvalue_type_name(n->a);
+        struct type_def *td = ptn ? resolve_type(ptn) : NULL;
+        if (td && td->is_file) {
+            int fa = lower_lvalue_addr(n->a);
+            return emit_call_retptr("__pascal_fbuf", &fa, 1);
+        }
+        if (!td || !td->is_pointer)
+            die("lower:%d: '^' applied to a non-pointer", n->line);
+        return lower_expr(n->a);
+    }
     if (n->kind == N_NAME) {
         struct sym *s;
         /* the enclosing function's name denotes its result variable; this
@@ -2508,12 +2630,19 @@ expr_is_boolean(struct node *n)
         return 1;
     if (n->kind == N_UNOP && n->op == T_NOT)
         return 1;
-    /* boolean-valued builtins: eof (bare or called) and odd(x) */
-    if (n->kind == N_NAME && strcmp(n->name, "eof") == 0 &&
+    /* boolean-valued builtins: eof/eoln/seekeof/seekeoln (bare or called)
+       and odd(x) */
+    if (n->kind == N_NAME &&
+        (strcmp(n->name, "eof") == 0 || strcmp(n->name, "eoln") == 0 ||
+         strcmp(n->name, "seekeof") == 0 ||
+         strcmp(n->name, "seekeoln") == 0) &&
         !find_sym(n->name))
         return 1;
     if (n->kind == N_CALL && n->a && n->a->kind == N_NAME &&
-        (strcmp(n->a->name, "eof") == 0 || strcmp(n->a->name, "odd") == 0))
+        (strcmp(n->a->name, "eof") == 0 || strcmp(n->a->name, "eoln") == 0 ||
+         strcmp(n->a->name, "seekeof") == 0 ||
+         strcmp(n->a->name, "seekeoln") == 0 ||
+         strcmp(n->a->name, "odd") == 0))
         return 1;
     if (n->kind == N_BINOP) {
         if (n->op == T_AND || n->op == T_OR ||
@@ -2621,12 +2750,26 @@ lower_expr(struct node *n)
         struct sym *s;
         if (strcmp(n->name, "eof") == 0)
             return emit_call_ret("__pascal_eof", NULL, 0);
+        if (strcmp(n->name, "eoln") == 0 && !find_sym(n->name))
+            return emit_call_ret("__pascal_eoln", NULL, 0);
+        if (strcmp(n->name, "seekeof") == 0 && !find_sym(n->name))
+            return emit_call_ret("__pascal_seekeof", NULL, 0);
+        if (strcmp(n->name, "seekeoln") == 0 && !find_sym(n->name))
+            return emit_call_ret("__pascal_seekeoln", NULL, 0);
+        if (strcmp(n->name, "ioresult") == 0 && !find_sym(n->name))
+            return emit_call_ret("__pascal_io_result", NULL, 0);
         if (strcmp(n->name, "paramcount") == 0 && !find_sym(n->name))
             return emit_call_ret("__pascal_param_count", NULL, 0);
         /* nil is the null pointer: an empty string/dynamic array handle and the
            null value compared against pointers */
         if (strcmp(n->name, "nil") == 0 && !find_sym(n->name))
             return emit_null_ptr();
+        /* pi: the real constant, unless the program defines its own pi */
+        if (strcmp(n->name, "pi") == 0 && !find_sym(n->name))
+            return lower_real_const(3.14159265358979, 0);
+        /* bare random: a real in [0, 1), unless shadowed by a user symbol */
+        if (strcmp(n->name, "random") == 0 && !find_sym(n->name))
+            return emit_call_retf("__pascal_random_real", NULL, 0, 0);
         /* The enclosing function's own name used as an r-value reads its
            result variable, it is not a recursive call.  This takes priority
            over the function's symbol in the table. */
@@ -2680,13 +2823,15 @@ lower_expr(struct node *n)
     }
 
     case N_DOT:
-    case N_INDEX: {
+    case N_INDEX:
+    case N_DEREF: {
         const char *etname = lvalue_type_name(n);
         const char *ptname;
         struct type_def *ptd;
         int addr, efw;
-        /* A string-typed field or element holds a pointer; load it. */
-        if (is_strlike_type_name(etname))
+        /* A string-typed or pointer-typed field, element or pointee holds a
+           machine-word pointer; load it at pointer width. */
+        if (is_strlike_type_name(etname) || is_pointer_type_name(etname))
             return emit_load_ptr_at(lower_lvalue_addr(n));
         addr = lower_lvalue_addr(n);
         ptname = lvalue_type_name(n->a);
@@ -3003,6 +3148,18 @@ lower_expr(struct node *n)
                 mark_float(ins->dst, w);
             return ins->dst;
         }
+        /* Pointer equality under LP64: both operands are 64-bit addresses
+           (a pointer value or nil), so compare at 64-bit width.  Pointers
+           support only = and <>.  On ILP32 a pointer is 32-bit, so the plain
+           compare below is already correct and this is skipped. */
+        if (PC_LP64_ON && (is_ptr(l) || is_ptr(r)) &&
+            (n->op == T_EQ || n->op == T_NE)) {
+            ins = emit(n->op == T_EQ ? IR_CMP64EQ : IR_CMP64NE);
+            ins->dst = new_temp();
+            ins->a = l;
+            ins->b = r;
+            return ins->dst;
+        }
         /* 64-bit operation if either operand is Int64: promote both and pick
            the 64-bit opcode.  A comparison still yields a 32-bit boolean. */
         if (is_i64(l) || is_i64(r)) {
@@ -3151,6 +3308,20 @@ lower_expr(struct node *n)
         ins->imm = td->total_size;
         return ins->dst;
     }
+
+    case N_ADDR: {
+        /* @x : the address of an l-value, as a pointer-width value.  Only a
+           variable, field, element or dereference has an address. */
+        struct node *t = n->a;
+        if (!t || (t->kind != N_NAME && t->kind != N_DOT &&
+                   t->kind != N_INDEX && t->kind != N_DEREF))
+            die("lower:%d: '@' requires a variable, field or element", n->line);
+        return lower_lvalue_addr(t);
+    }
+
+    case N_FMTARG:
+        die("lower:%d: a ':width' field specifier is only valid in "
+            "write/writeln", n->line);
 
     default:
         die("lower:%d: unhandled expr kind %d", n->line, n->kind);
@@ -3335,9 +3506,75 @@ emit_write_number(int v)
     }
 }
 
+/* Lower a write argument that carries a field-width suffix (N_FMTARG): the
+   value in arg->a, the width in arg->b, and optional decimals in arg->c.  A
+   real with decimals prints in fixed point, a real with width only prints in
+   scientific form, and an integer, string or char right-justifies in the
+   field (width is a minimum). */
+static void
+lower_write_fmt(struct node *arg)
+{
+    struct node *val = arg->a;
+    int width, v;
+
+    /* a string or char value right-justifies via its own width-padded writer;
+       a decimal count is meaningless for either. */
+    if (is_string_type(val) || node_is_string_valued(val)) {
+        int args[2];
+        if (arg->c)
+            die("lower:%d: decimal places apply only to real values", arg->line);
+        args[0] = lower_str_addr(val);
+        args[1] = lower_expr(arg->b);
+        emit_call("__pascal_write_str_w", args, 2);
+        return;
+    }
+    if (is_char_type(val) || is_char_call(val) || expr_is_char_value(val)) {
+        int args[2];
+        if (arg->c)
+            die("lower:%d: decimal places apply only to real values", arg->line);
+        args[0] = lower_expr(val);
+        args[1] = lower_expr(arg->b);
+        emit_call("__pascal_write_char_w", args, 2);
+        return;
+    }
+
+    width = lower_expr(arg->b);
+    v = lower_expr(val);
+
+    if (is_float(v)) {
+        int args[3];
+        args[0] = to_float(v, 0);
+        args[1] = width;
+        if (arg->c) {
+            args[2] = lower_expr(arg->c);
+            emit_call("__pascal_write_real_fixed", args, 3);
+        } else {
+            emit_call("__pascal_write_real_sci", args, 2);
+        }
+        return;
+    }
+
+    if (arg->c)
+        die("lower:%d: decimal places apply only to real values", arg->line);
+
+    {
+        int args[2];
+        args[0] = v;
+        args[1] = width;
+        if (is_i64(v))
+            emit_call("__pascal_write_int64_w", args, 2);
+        else
+            emit_call("__pascal_write_int_w", args, 2);
+    }
+}
+
 static void
 lower_write_arg(struct node *arg)
 {
+    if (arg->kind == N_FMTARG) {
+        lower_write_fmt(arg);
+        return;
+    }
     if (arg->kind == N_STR) {
         write_str_literal(arg->sval, arg->slen);
     } else if (arg->kind == N_NAME && is_string_type(arg)) {
@@ -3397,16 +3634,142 @@ lower_write_arg(struct node *arg)
     }
 }
 
+/* Is this l-value a file variable, field or element? */
+static int
+is_file_lvalue(struct node *n)
+{
+    if (!n)
+        return 0;
+    if (n->kind == N_NAME || n->kind == N_DOT || n->kind == N_INDEX) {
+        const char *tn = lvalue_type_name(n);
+        return tn && is_file_type_name(tn);
+    }
+    return 0;
+}
+
+/* The resolved type_def of a file l-value, or NULL. */
+static struct type_def *
+file_type_def(struct node *n)
+{
+    const char *tn;
+    if (!n || (n->kind != N_NAME && n->kind != N_DOT && n->kind != N_INDEX))
+        return NULL;
+    tn = lvalue_type_name(n);
+    return tn ? resolve_type(tn) : NULL;
+}
+
+/* An untyped file (`file`): block I/O, no component type. */
+static int
+is_untyped_file(struct node *n)
+{
+    struct type_def *t = file_type_def(n);
+    return t && t->is_file && t->is_untyped;
+}
+
+/* A typed file (`file of T`) has a component type; a text file does not. */
+static int
+is_typed_file(struct node *n)
+{
+    struct type_def *t = file_type_def(n);
+    return t && t->is_file && t->elem_type_name != NULL;
+}
+
+/* The component size of a typed file, resolved at the call site: a record's
+   total_size is only final after the whole type section is sized, which is
+   after the file typedef registers, so type_bytes is recomputed here. */
+static int
+file_compsz(struct node *n)
+{
+    struct type_def *t = file_type_def(n);
+    return type_bytes(t->elem_type_name);
+}
+
+/* Is n a simple, directly addressable l-value? */
+static int
+is_simple_lvalue(struct node *v)
+{
+    return v && (v->kind == N_NAME || v->kind == N_DOT ||
+                 v->kind == N_INDEX || v->kind == N_DEREF);
+}
+
+/* The address of a simple l-value (variable, field, element, deref). */
+static int
+simple_lvalue_addr(struct node *v, int line)
+{
+    if (v->kind == N_NAME) {
+        struct sym *s = find_sym(v->name);
+        if (!s)
+            die("lower:%d: undefined '%s'", line, v->name);
+        return addr_sym(s);
+    }
+    return lower_lvalue_addr(v);
+}
+
+/* The address of a component operand for write(f, v) on a typed file.  An
+   l-value is addressed directly; a scalar r-value is materialized into a temp
+   slot so the runtime can copy its bytes into f^. */
+static int
+component_write_addr(struct node *v, const char *comptype, int compsz, int line)
+{
+    struct ir_insn *ins;
+    int slot, addr, val, fw;
+
+    if (is_simple_lvalue(v))
+        return simple_lvalue_addr(v, line);
+    fw = float_fw_of_name(comptype);
+    val = lower_expr(v);
+    slot = alloc_slot(compsz);
+    addr = emit_adl(slot);
+    if (fw >= 0) {
+        val = to_float(val, fw);
+        ins = emit(IR_FSD);
+        ins->imm = fw;
+    } else if (is_i64_type_name(comptype)) {
+        val = to_i64(val);
+        ins = emit(IR_ST64);
+    } else {
+        val = to_i32(val);
+        ins = emit(IR_SW);
+    }
+    ins->a = addr;
+    ins->b = val;
+    return addr;
+}
+
 static void
 lower_write(struct node *n, int newline)
 {
     struct node *arg = n->b;
     int errstream = 0;
+    int filestream = 0;
 
-    /* an optional leading Output/ErrOutput selects the stream (fd 1/2) */
-    if (arg && arg->kind == N_NAME &&
+    /* write(f, ...) to a typed file: each operand is one binary component */
+    if (is_typed_file(arg)) {
+        struct type_def *ft = file_type_def(arg);
+        int compsz = file_compsz(arg);
+        struct node *v;
+        if (newline)
+            die("lower:%d: writeln is not valid for a typed file", n->line);
+        for (v = arg->next; v; v = v->next) {
+            int fargs[2];
+            fargs[0] = lower_lvalue_addr(arg);
+            fargs[1] = component_write_addr(v, ft->elem_type_name,
+                                            compsz, n->line);
+            emit_call("__pascal_fwrite", fargs, 2);
+        }
+        return;
+    }
+
+    /* an optional leading file variable redirects output to that file */
+    if (is_file_lvalue(arg)) {
+        int fa = lower_lvalue_addr(arg);
+        emit_call("__pascal_use_out", &fa, 1);
+        filestream = 1;
+        arg = arg->next;
+    } else if (arg && arg->kind == N_NAME &&
         (strcmp(arg->name, "output") == 0 ||
          strcmp(arg->name, "erroutput") == 0)) {
+        /* an optional leading Output/ErrOutput selects the stream (fd 1/2) */
         if (strcmp(arg->name, "erroutput") == 0) {
             int two = lower_const(2);
             emit_call("__pascal_set_outfd", &two, 1);
@@ -3423,6 +3786,8 @@ lower_write(struct node *n, int newline)
         int one = lower_const(1);
         emit_call("__pascal_set_outfd", &one, 1);
     }
+    if (filestream)
+        emit_call("__pascal_std_out", NULL, 0);
 }
 
 /****************************************************************
@@ -3752,7 +4117,32 @@ lower_call(struct node *n)
         struct node *a;
         int is_readln = (name[4] == 'l');
         int read_str = 0;
-        for (a = n->b; a; a = a->next) {
+        int filestream = 0;
+        a = n->b;
+        /* read(f, ...) from a typed file: each operand is one binary component */
+        if (is_typed_file(a)) {
+            struct node *v;
+            if (is_readln)
+                die("lower:%d: readln is not valid for a typed file", n->line);
+            for (v = a->next; v; v = v->next) {
+                int fargs[2];
+                if (!is_simple_lvalue(v))
+                    die("lower:%d: read of a typed file needs a variable",
+                        n->line);
+                fargs[0] = lower_lvalue_addr(a);
+                fargs[1] = simple_lvalue_addr(v, n->line);
+                emit_call("__pascal_fread", fargs, 2);
+            }
+            return 0;
+        }
+        /* an optional leading file variable reads from that file */
+        if (is_file_lvalue(a)) {
+            int fa = lower_lvalue_addr(a);
+            emit_call("__pascal_use_in", &fa, 1);
+            filestream = 1;
+            a = a->next;
+        }
+        for (; a; a = a->next) {
             int addr = 0;
             if (a->kind == N_NAME) {
                 struct sym *s = find_sym(a->name);
@@ -3772,6 +4162,19 @@ lower_call(struct node *n)
                                          NULL, 0);
                 store_string_lvalue(a, p, 1);
                 read_str = 1;
+            } else if (float_fw_of_name(lvalue_type_name(a)) >= 0) {
+                /* a real variable: parse a double from the stream and store it
+                   at the variable's float width (narrowing to single if so). */
+                int rfw = float_fw_of_name(lvalue_type_name(a));
+                int val = emit_call_retf("__pascal_read_real", NULL, 0, 0);
+                if (a->kind == N_NAME) {
+                    store_sym(find_sym(a->name), val, 0);
+                } else {
+                    struct ir_insn *ins = emit(IR_FSD);
+                    ins->imm = rfw;
+                    ins->a = addr;
+                    ins->b = to_float(val, rfw);
+                }
             } else {
                 const char *rt_fn =
                     is_char_type(a) ?
@@ -3784,12 +4187,177 @@ lower_call(struct node *n)
         }
         if (is_readln && !read_str)
             emit_call("__pascal_readln", NULL, 0);
+        if (filestream)
+            emit_call("__pascal_std_in", NULL, 0);
         return 0;
     }
 
-    /* eof — check for end of input */
-    if (strcmp(name, "eof") == 0)
+    /* file lifecycle: assign/reset/rewrite/append/close(f [, name]) */
+    if (strcmp(name, "assign") == 0 || strcmp(name, "reset") == 0 ||
+        strcmp(name, "rewrite") == 0 || strcmp(name, "append") == 0 ||
+        strcmp(name, "close") == 0) {
+        struct node *fa = n->b;
+        int args[2];
+        if (!is_file_lvalue(fa))
+            die("lower:%d: %s requires a file variable", n->line, name);
+        args[0] = lower_lvalue_addr(fa);
+        if (strcmp(name, "append") == 0) {
+            /* open an existing text file for writing at its end */
+            int chk = lower_const(n->iocheck);
+            if (is_typed_file(fa) || is_untyped_file(fa))
+                die("lower:%d: append requires a text file", n->line);
+            emit_call("__pascal_set_iocheck", &chk, 1);
+            args[0] = lower_lvalue_addr(fa);
+            emit_call("__pascal_append", args, 1);
+        } else if (strcmp(name, "assign") == 0) {
+            if (!fa->next)
+                die("lower:%d: assign requires a file name", n->line);
+            args[1] = lower_str_addr(fa->next);
+            emit_call("__pascal_assign", args, 2);
+        } else if (strcmp(name, "reset") == 0 ||
+                   strcmp(name, "rewrite") == 0) {
+            int is_reset = (name[0] == 'r' && name[2] == 's');
+            int chk = lower_const(n->iocheck);
+            emit_call("__pascal_set_iocheck", &chk, 1);
+            args[0] = lower_lvalue_addr(fa);
+            if (is_typed_file(fa)) {
+                args[1] = lower_const(file_compsz(fa));
+                emit_call(is_reset ? "__pascal_reset_typed"
+                                   : "__pascal_rewrite_typed", args, 2);
+            } else if (is_untyped_file(fa)) {
+                /* optional record size (default 128) */
+                args[1] = fa->next ? to_i32(lower_expr(fa->next))
+                                   : lower_const(128);
+                emit_call(is_reset ? "__pascal_reset_untyped"
+                                   : "__pascal_rewrite_untyped", args, 2);
+            } else {
+                emit_call(is_reset ? "__pascal_reset"
+                                   : "__pascal_rewrite", args, 1);
+            }
+        } else {
+            emit_call("__pascal_close", args, 1);
+        }
+        return 0;
+    }
+
+    /* blockread/blockwrite(f, buf, count [, result]): untyped block transfer */
+    if (strcmp(name, "blockread") == 0 || strcmp(name, "blockwrite") == 0) {
+        struct node *fa = n->b;
+        int args[3], chk, ret;
+        if (!fa || !is_untyped_file(fa) || !fa->next || !fa->next->next)
+            die("lower:%d: %s needs an untyped file, a buffer and a count",
+                n->line, name);
+        chk = lower_const(n->iocheck);
+        emit_call("__pascal_set_iocheck", &chk, 1);
+        args[0] = lower_lvalue_addr(fa);
+        if (!is_simple_lvalue(fa->next))
+            die("lower:%d: %s buffer must be a variable", n->line, name);
+        args[1] = simple_lvalue_addr(fa->next, n->line);
+        args[2] = to_i32(lower_expr(fa->next->next));   /* count */
+        ret = emit_call_ret(name[5] == 'r' ? "__pascal_blockread"
+                                           : "__pascal_blockwrite", args, 3);
+        /* optional 4th operand receives the record count actually transferred */
+        if (fa->next->next->next) {
+            struct node *r = fa->next->next->next;
+            if (!is_simple_lvalue(r))
+                die("lower:%d: %s result must be a variable", n->line, name);
+            if (r->kind == N_NAME) {
+                struct sym *s = find_sym(r->name);
+                if (!s)
+                    die("lower:%d: undefined '%s'", n->line, r->name);
+                store_sym(s, ret, 0);
+            } else {
+                struct ir_insn *si = emit(IR_SW);
+                si->a = lower_lvalue_addr(r);
+                si->b = to_i32(ret);
+            }
+        }
+        return 0;
+    }
+
+    /* erase(f) / rename(f, newname) */
+    if (strcmp(name, "erase") == 0 || strcmp(name, "rename") == 0) {
+        struct node *fa = n->b;
+        int args[2], chk;
+        if (!is_file_lvalue(fa))
+            die("lower:%d: %s requires a file variable", n->line, name);
+        chk = lower_const(n->iocheck);
+        emit_call("__pascal_set_iocheck", &chk, 1);
+        args[0] = lower_lvalue_addr(fa);
+        if (strcmp(name, "erase") == 0) {
+            emit_call("__pascal_erase", args, 1);
+        } else {
+            if (!fa->next)
+                die("lower:%d: rename requires a new name", n->line);
+            args[1] = lower_str_addr(fa->next);
+            emit_call("__pascal_rename", args, 2);
+        }
+        return 0;
+    }
+
+    /* get(f) / put(f): advance or emit the typed file's buffer variable f^ */
+    if (strcmp(name, "get") == 0 || strcmp(name, "put") == 0) {
+        int fa;
+        if (!is_typed_file(n->b))
+            die("lower:%d: %s requires a typed file variable", n->line, name);
+        fa = lower_lvalue_addr(n->b);
+        emit_call(name[0] == 'g' ? "__pascal_fget" : "__pascal_fput", &fa, 1);
+        return 0;
+    }
+
+    /* seek(f, n): position a typed file at component n */
+    if (strcmp(name, "seek") == 0) {
+        int args[2];
+        if (!is_typed_file(n->b) || !n->b->next)
+            die("lower:%d: seek requires a typed file and an index", n->line);
+        args[0] = lower_lvalue_addr(n->b);
+        args[1] = to_i32(lower_expr(n->b->next));       /* component index */
+        emit_call("__pascal_fseek", args, 2);
+        return 0;
+    }
+
+    /* filepos(f) / filesize(f): a typed file's component index / count */
+    if (strcmp(name, "filepos") == 0 || strcmp(name, "filesize") == 0) {
+        int fa;
+        if (!is_typed_file(n->b))
+            die("lower:%d: %s requires a typed file variable", n->line, name);
+        fa = lower_lvalue_addr(n->b);
+        return emit_call_ret(name[4] == 'p' ? "__pascal_ffilepos"
+                                            : "__pascal_ffilesize", &fa, 1);
+    }
+
+    /* eof(f) / eof — end of a file, or of the standard input */
+    if (strcmp(name, "eof") == 0) {
+        if (is_file_lvalue(n->b)) {
+            int fa = lower_lvalue_addr(n->b);
+            return emit_call_ret("__pascal_feof", &fa, 1);
+        }
         return emit_call_ret("__pascal_eof", NULL, 0);
+    }
+    if (strcmp(name, "eoln") == 0) {
+        if (is_file_lvalue(n->b)) {
+            int fa = lower_lvalue_addr(n->b);
+            return emit_call_ret("__pascal_feoln", &fa, 1);
+        }
+        return emit_call_ret("__pascal_eoln", NULL, 0);
+    }
+
+    /* seekeof(f) / seekeof — skip whitespace, then test end of input.
+       seekeoln(f) / seekeoln — skip spaces and tabs, then test end of line. */
+    if (strcmp(name, "seekeof") == 0) {
+        if (is_file_lvalue(n->b)) {
+            int fa = lower_lvalue_addr(n->b);
+            return emit_call_ret("__pascal_fseekeof", &fa, 1);
+        }
+        return emit_call_ret("__pascal_seekeof", NULL, 0);
+    }
+    if (strcmp(name, "seekeoln") == 0) {
+        if (is_file_lvalue(n->b)) {
+            int fa = lower_lvalue_addr(n->b);
+            return emit_call_ret("__pascal_fseekeoln", &fa, 1);
+        }
+        return emit_call_ret("__pascal_seekeoln", NULL, 0);
+    }
 
     /* str(value, s) — integer to string */
     if (strcmp(name, "str") == 0) {
@@ -3886,6 +4454,40 @@ lower_call(struct node *n)
             die("lower:%d: sqrt requires argument", n->line);
         fa[0] = to_float(lower_expr(n->b), 0);
         return emit_call_retf("__pascal_sqrt", fa, 1, 0);
+    }
+
+    /* transcendental reals: each takes one real and returns a real (double) */
+    {
+        static const struct { const char *nm, *fn; } mfns[] = {
+            { "sin",    "__pascal_sin" },
+            { "cos",    "__pascal_cos" },
+            { "ln",     "__pascal_ln" },
+            { "exp",    "__pascal_exp" },
+            { "arctan", "__pascal_arctan" },
+        };
+        int k;
+        for (k = 0; k < 5; k++) {
+            if (strcmp(name, mfns[k].nm) == 0) {
+                int fa[1];
+                if (!n->b)
+                    die("lower:%d: %s requires an argument", n->line, name);
+                fa[0] = to_float(lower_expr(n->b), 0);
+                return emit_call_retf(mfns[k].fn, fa, 1, 0);
+            }
+        }
+    }
+
+    /* random(n) -> integer in [0, n); random() -> real in [0, 1) */
+    if (strcmp(name, "random") == 0) {
+        if (n->b) {
+            int a = to_i32(lower_expr(n->b));
+            return emit_call_ret("__pascal_random", &a, 1);
+        }
+        return emit_call_retf("__pascal_random_real", NULL, 0, 0);
+    }
+    if (strcmp(name, "randomize") == 0) {
+        emit_call("__pascal_randomize", NULL, 0);
+        return 0;
     }
 
     /* chr(x), char(x), byte(x) — mask to 8 bits */
@@ -4369,6 +4971,41 @@ lower_call(struct node *n)
         return ins->dst;
     }
 
+    /* new(p): allocate sizeof(p^) bytes on the heap and store the pointer in p.
+       dispose(p): release the block p points to. */
+    if (strcmp(name, "new") == 0 || strcmp(name, "dispose") == 0) {
+        struct node *tgt = n->b;
+        const char *ptn;
+        struct type_def *ptd;
+
+        if (!tgt || tgt->next)
+            die("lower:%d: %s expects a single pointer variable",
+                n->line, name);
+        ptn = lvalue_type_name(tgt);
+        ptd = ptn ? resolve_type(ptn) : NULL;
+        if (!ptd || !ptd->is_pointer)
+            die("lower:%d: %s expects a pointer variable", n->line, name);
+
+        if (name[0] == 'n') {           /* new */
+            struct type_def *et = ptd->elem_type_name
+                                  ? find_type(ptd->elem_type_name) : NULL;
+            int sz = et ? et->total_size : type_bytes(ptd->elem_type_name);
+            int args[1], ret;
+            args[0] = lower_const(sz);
+            ret = emit_call_retptr("__pascal_new", args, 1);
+            if (tgt->kind == N_NAME && find_sym(tgt->name)) {
+                store_sym(find_sym(tgt->name), ret, 0);
+            } else {
+                emit_store_ptr_at(lower_lvalue_addr(tgt), ret);
+            }
+        } else {                        /* dispose */
+            int args[1];
+            args[0] = lower_expr(tgt);
+            emit_call("__pascal_dispose", args, 1);
+        }
+        return 0;
+    }
+
     /* inc(x)/inc(x,n) and dec(x)/dec(x,n).  The target is an ordinal
        l-value: a plain variable, or a record field or array element. */
     if (strcmp(name, "inc") == 0 || strcmp(name, "dec") == 0) {
@@ -4719,6 +5356,134 @@ lower_stmt(struct node *n)
     release_str_temps_to(mark);
 }
 
+/* Allocate a synthetic AST node from the lowering arena.  Used to desugar
+   constructs (for..in) into existing node kinds the statement lowerer
+   already handles. */
+static struct node *
+mk_node(int kind, int line)
+{
+    struct node *n = arena_zalloc(lower_arena, sizeof(*n));
+    n->kind = kind;
+    n->line = line;
+    return n;
+}
+
+static int forin_ctr;
+
+/* Lower `for x in a do body` by desugaring it into a counted loop over the
+   array's index range.  A hidden integer index runs from the array's lower to
+   upper bound; the loop body becomes `x := a[index]` followed by the original
+   body, and the whole thing is lowered through the ordinary N_FOR path so it
+   honours break and continue.  Only static arrays are iterable this way; a
+   string, dynamic array or set is rejected. */
+static void
+lower_for_in(struct node *n)
+{
+    const char *tn = lvalue_type_name(n->a);
+    struct type_def *td = tn ? find_type(tn) : NULL;
+    struct node *idxref, *idxexpr, *xref, *assign, *body, *lonode, *hinode;
+    struct node *forn;
+    struct sym isym;
+    char namebuf[32];
+    char *iname;
+    int saved;
+
+    if (!td || !td->is_array || td->is_dynarray || td->is_string)
+        die("lower:%d: for..in requires a static array", n->line);
+
+    /* a hidden integer index variable, unique per for..in */
+    snprintf(namebuf, sizeof namebuf, "__forin_%d", forin_ctr++);
+    iname = arena_strdup(lower_arena, namebuf);
+    memset(&isym, 0, sizeof isym);
+    isym.name = iname;
+    isym.is_local = 1;
+    isym.type_name = arena_strdup(lower_arena, "integer");
+    isym.slot = alloc_slot(type_bytes("integer"));
+    saved = nsyms;
+    push_sym(isym);
+
+    idxref = mk_node(N_NAME, n->line);
+    idxref->name = iname;
+
+    idxexpr = mk_node(N_INDEX, n->line);
+    idxexpr->a = n->a;          /* the collection */
+    idxexpr->b = idxref;        /* the hidden index */
+
+    xref = mk_node(N_NAME, n->line);
+    xref->name = n->name;       /* the user's loop variable */
+
+    assign = mk_node(N_ASSIGN, n->line);
+    assign->a = xref;
+    assign->b = idxexpr;
+    assign->next = n->c;        /* body: the assignment, then the loop body */
+
+    body = mk_node(N_COMPOUND, n->line);
+    body->a = assign;
+
+    lonode = mk_node(N_NUM, n->line);
+    lonode->ival = td->lo_bound;
+    hinode = mk_node(N_NUM, n->line);
+    hinode->ival = td->hi_bound;
+
+    forn = mk_node(N_FOR, n->line);
+    forn->name = iname;
+    forn->a = lonode;
+    forn->b = hinode;
+    forn->c = body;
+
+    lower_stmt(forn);
+
+    nsyms = saved;              /* drop the hidden index */
+}
+
+/* Lower a case statement whose selector is a string: compare the selector
+   against each arm's string labels with __pascal_str_compare (the same runtime
+   the `=` operator uses) and branch to the first match.  Ranges are not valid
+   for a string selector.  The selector is evaluated once. */
+static void
+lower_string_case(struct node *n)
+{
+    struct node *arm, *lab;
+    int selp, lend;
+
+    selp = lower_str_addr(n->a);       /* selector pointer, evaluated once */
+    lend = new_label();
+
+    for (arm = n->b; arm; arm = arm->next) {
+        int lbody = new_label();
+        int lnext = new_label();
+
+        for (lab = arm->a; lab; lab = lab->next) {
+            struct ir_insn *ins;
+            int args[2], cmp, zero;
+
+            if (lab->a)
+                die("lower:%d: a range is not valid in a string case",
+                    n->line);
+            if (lab->b->kind != N_STR && !node_is_string_valued(lab->b))
+                die("lower:%d: a string case label must be a string",
+                    n->line);
+            args[0] = selp;
+            args[1] = lower_str_addr(lab->b);
+            cmp = emit_call_ret("__pascal_str_compare", args, 2);
+            zero = lower_const(0);     /* materialize before the compare */
+            ins = emit(IR_CMPEQ);      /* equal when compare returns 0 */
+            ins->dst = new_temp();
+            ins->a = cmp;
+            ins->b = zero;
+            emit_bnz(ins->dst, lbody);
+        }
+        emit_jmp(lnext);
+        emit_label(lbody);
+        lower_stmt(arm->b);
+        emit_jmp(lend);
+        emit_label(lnext);
+    }
+    if (n->c)
+        lower_stmt(n->c);          /* the else arm */
+    emit_label(lend);
+}
+
 static void
 lower_stmt_inner(struct node *n)
 {
@@ -4757,10 +5522,20 @@ lower_stmt_inner(struct node *n)
             return;
         }
 
-        if (n->a->kind == N_DOT || n->a->kind == N_INDEX) {
+        if (n->a->kind == N_DOT || n->a->kind == N_INDEX ||
+            n->a->kind == N_DEREF) {
             const char *tn = lvalue_type_name(n->a);
             if (tn && is_strlike_type_name(tn)) {
                 store_string_lvalue(n->a, lower_str_addr(n->b), str_rvalue_owned(n->b));
+                return;
+            }
+            /* a pointer-typed field, element or pointee stores a machine-word
+               value at pointer width (8 bytes under LP64) */
+            if (tn && is_pointer_type_name(tn)) {
+                int paddr;
+                val = lower_expr(n->b);
+                paddr = lower_lvalue_addr(n->a);
+                emit_store_ptr_at(paddr, val);
                 return;
             }
             {
@@ -4946,6 +5721,11 @@ lower_stmt_inner(struct node *n)
         struct sym *s;
         int cmp_tmp, limit_slot;
 
+        if (n->op == T_IN) {
+            lower_for_in(n);
+            return;
+        }
+
         s = find_sym(n->name);
         if (!s)
             die("lower:%d: undefined for variable '%s'",
@@ -5049,6 +5829,11 @@ lower_stmt_inner(struct node *n)
     case N_CASE: {
         struct node *arm, *lab;
         int sel, sel_slot, lend;
+
+        if (is_string_type(n->a) || node_is_string_valued(n->a)) {
+            lower_string_case(n);
+            return;
+        }
 
         sel = lower_expr(n->a);
         sel_slot = alloc_slot(4);

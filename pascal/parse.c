@@ -64,10 +64,42 @@ new_node(int kind, int line)
 static struct node *parse_expr(void);
 static struct node *parse_simple_expr(void);
 
+/* Parse one call argument, including an optional Pascal field-width suffix.
+   An argument may be followed by ':width' and, for reals, a further
+   ':decimals'.  When a suffix is present the value is wrapped in an N_FMTARG
+   whose a is the value, b the width expression, and c the decimals expression
+   (NULL when absent).  Only write/writeln lowering consumes N_FMTARG; a ':'
+   anywhere else is otherwise a syntax error, so parsing it here is safe. */
+static struct node *
+parse_call_arg(void)
+{
+    struct node *val = parse_expr();
+    struct node *fmt;
+
+    if (cur.kind != T_COLON)
+        return val;
+    fmt = new_node(N_FMTARG, cur.line);
+    fmt->a = val;
+    advance();
+    fmt->b = parse_expr();
+    if (accept(T_COLON))
+        fmt->c = parse_expr();
+    return fmt;
+}
+
 static struct node *
 parse_postfix(struct node *n)
 {
-    while (cur.kind == T_DOT || cur.kind == T_LBRACK) {
+    while (cur.kind == T_DOT || cur.kind == T_LBRACK ||
+           cur.kind == T_CARET) {
+        if (cur.kind == T_CARET) {
+            /* p^ : pointer dereference, a postfix so p^.f and p^[i] chain */
+            struct node *d = new_node(N_DEREF, cur.line);
+            d->a = n;
+            advance();
+            n = d;
+            continue;
+        }
         if (cur.kind == T_DOT) {
             struct node *dot;
             advance();
@@ -143,7 +175,7 @@ parse_factor(void)
             tail = &args;
             if (cur.kind != T_RPAREN) {
                 for (;;) {
-                    struct node *a = parse_expr();
+                    struct node *a = parse_call_arg();
                     *tail = a;
                     tail = &a->next;
                     if (!accept(T_COMMA))
@@ -152,6 +184,7 @@ parse_factor(void)
             }
             expect(T_RPAREN, ")");
             call = new_node(N_CALL, ln);
+            call->iocheck = lex_iochecks;
             call->a = n;
             call->b = args;
             return call;
@@ -168,6 +201,15 @@ parse_factor(void)
         advance();
         n = new_node(N_UNOP, t.line);
         n->op = T_NOT;
+        n->a = parse_factor();
+        return n;
+    }
+    if (t.kind == T_AT) {
+        /* @x : the address of a variable, field, element or dereference,
+           yielding a typed pointer.  The operand is a postfix expression so
+           @a[i] and @r.f take the address of the element/field. */
+        advance();
+        n = new_node(N_ADDR, t.line);
         n->a = parse_factor();
         return n;
     }
@@ -199,6 +241,7 @@ parse_factor(void)
         name->name = arena_strdup(parse_arena,cast_name);
         advance();
         call = new_node(N_CALL, t.line);
+        call->iocheck = lex_iochecks;
         call->a = name;
         call->b = parse_expr();
         expect(T_RPAREN, ")");
@@ -417,6 +460,16 @@ parse_stmt(void)
                 cur.line);
         n->name = cur.sval;
         advance();
+        if (accept(T_IN)) {
+            /* for x in collection do: iterate the elements of an array,
+               binding x to each in turn.  Marked with op T_IN; the counted
+               form leaves op 0. */
+            n->op = T_IN;
+            n->a = parse_expr();
+            expect(T_DO, "do");
+            n->c = parse_stmt();
+            return n;
+        }
         expect(T_ASSIGN, ":=");
         n->a = parse_expr();
         if (accept(T_DOWNTO))
@@ -555,7 +608,7 @@ parse_stmt(void)
             atail = &args;
             if (cur.kind != T_RPAREN) {
                 for (;;) {
-                    struct node *a = parse_expr();
+                    struct node *a = parse_call_arg();
                     *atail = a;
                     atail = &a->next;
                     if (!accept(T_COMMA))
@@ -564,6 +617,7 @@ parse_stmt(void)
             }
             expect(T_RPAREN, ")");
             n = new_node(N_CALL, line);
+            n->iocheck = lex_iochecks;
             n->a = lhs;
             n->b = args;
             return n;
@@ -578,6 +632,7 @@ parse_stmt(void)
         }
         /* bare identifier as procedure call (no parens) */
         n = new_node(N_CALL, line);
+        n->iocheck = lex_iochecks;
         n->a = lhs;
         return n;
     }
@@ -612,11 +667,77 @@ builtin_type_name(int kind)
 static int
 accept_type(char **out_name)
 {
-    const char *btn = builtin_type_name(cur.kind);
+    const char *btn;
+    if (cur.kind == T_CARET) {
+        /* `^T`: an anonymous pointer type.  Synthesize a typedef (op 8) whose
+           sval is the pointee type name, and return its generated name. */
+        char buf[64];
+        char *pointee = NULL;
+        struct node *td;
+        int pline = cur.line;
+        advance();
+        if (!accept_type(&pointee))
+            die("parse:%d: expected a type after '^'", pline);
+        td = new_node(N_TYPEDEF, pline);
+        td->op = 8;
+        td->sval = pointee;
+        snprintf(buf, sizeof(buf), "__ptr_%d", anon_ctr++);
+        td->name = arena_strdup(parse_arena, buf);
+        *anon_ttail = td;
+        anon_ttail = &td->next;
+        if (out_name)
+            *out_name = arena_strdup(parse_arena, buf);
+        return 1;
+    }
+    btn = builtin_type_name(cur.kind);
     if (btn) {
         if (out_name)
             *out_name = (char *)btn;
         advance();
+        return 1;
+    }
+    if (cur.kind == T_IDENT && strcmp(cur.sval, "text") == 0) {
+        /* `text`: a text file.  Synthesize a typedef (op 9) whose storage is a
+           fixed-size file-control block the runtime owns. */
+        char buf[64];
+        struct node *td;
+        int tline = cur.line;
+        advance();
+        td = new_node(N_TYPEDEF, tline);
+        td->op = 9;
+        snprintf(buf, sizeof(buf), "__file_%d", anon_ctr++);
+        td->name = arena_strdup(parse_arena, buf);
+        *anon_ttail = td;
+        anon_ttail = &td->next;
+        if (out_name)
+            *out_name = arena_strdup(parse_arena, buf);
+        return 1;
+    }
+    if (cur.kind == T_IDENT && strcmp(cur.sval, "file") == 0) {
+        /* `file of T`: a typed file (op 10) carrying the component type name.
+           `file` alone: an untyped file (op 11).  Both use the same fixed
+           file-control block for storage. */
+        char buf[64];
+        char *comp = NULL;
+        struct node *td;
+        int fline = cur.line;
+        advance();
+        td = new_node(N_TYPEDEF, fline);
+        if (accept(T_OF)) {
+            if (!accept_type(&comp))
+                die("parse:%d: expected a component type after 'file of'",
+                    fline);
+            td->op = 10;
+            td->sval = comp;
+        } else {
+            td->op = 11;
+        }
+        snprintf(buf, sizeof(buf), "__file_%d", anon_ctr++);
+        td->name = arena_strdup(parse_arena, buf);
+        *anon_ttail = td;
+        anon_ttail = &td->next;
+        if (out_name)
+            *out_name = arena_strdup(parse_arena, buf);
         return 1;
     }
     if (cur.kind == T_IDENT && strcmp(cur.sval, "string") == 0) {
@@ -921,10 +1042,14 @@ parse_type_section(void)
         advance();
         expect(T_EQ, "=");
         if (cur.kind == T_LPAREN) {
-            /* enum type: TypeName = (Id1, Id2, ...).  Each identifier is an
-               integer constant 0, 1, 2, ...; the type itself is registered as
-               an ordinal scalar (op 7) carrying the member count. */
-            long ordinal = 0;
+            /* enum type: TypeName = (Id1, Id2 = N, Id3, ...).  Each identifier
+               is an integer constant: 0, 1, 2, ... by default, or an explicit
+               non-negative ordinal with `= N`, after which the next unnamed
+               member continues from N+1.  Explicit values must ascend.  The
+               type is registered as an ordinal scalar (op 7) whose bounds span
+               the lowest and highest member ordinals (ival = lo, slen = hi). */
+            long ordinal = 0, lo_ord = 0, hi_ord = 0;
+            int have_member = 0;
             struct node *et = new_node(N_TYPEDEF, line);
             et->name = type_name;
             et->op = 7;
@@ -938,16 +1063,34 @@ parse_type_section(void)
                         cur.line);
                 c = new_node(N_CONSTDECL, cur.line);
                 c->name = cur.sval;
-                c->a = new_node(N_NUM, cur.line);
-                c->a->ival = ordinal++;
                 advance();
+                if (accept(T_EQ)) {
+                    long val;
+                    if (cur.kind != T_NUMBER)
+                        die("parse:%d: enum ordinal for '%s' must be an "
+                            "integer constant", cur.line, c->name);
+                    val = cur.nval;
+                    advance();
+                    if (have_member && val <= hi_ord)
+                        die("parse:%d: enum ordinal %ld for '%s' must exceed "
+                            "the previous value %ld",
+                            c->line, val, c->name, hi_ord);
+                    ordinal = val;
+                }
+                if (!have_member)
+                    lo_ord = ordinal;
+                hi_ord = ordinal;
+                have_member = 1;
+                c->a = new_node(N_NUM, c->line);
+                c->a->ival = ordinal++;
                 *tail = c;
                 tail = &c->next;
                 if (!accept(T_COMMA))
                     break;
             }
             expect(T_RPAREN, ")");
-            et->ival = ordinal;         /* member count (cardinality) */
+            et->ival = lo_ord;          /* lowest member ordinal */
+            et->slen = (int)hi_ord;     /* highest member ordinal */
         } else if (cur.kind == T_IDENT &&
                    strcmp(cur.sval, "record") == 0) {
             struct node *td, *fields, **ftail;

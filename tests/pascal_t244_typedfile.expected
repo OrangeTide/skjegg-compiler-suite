@@ -1,0 +1,11 @@
+size=5
+1 100
+2 200
+3 300
+4 400
+5 500
+pos=2
+fbuf=3 300
+next pos=3 fbuf=4
+updated=1 999
+done

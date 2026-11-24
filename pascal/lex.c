@@ -18,6 +18,7 @@
 int lex_align = SKJ_PTR_BYTES;
 int lex_rangechecks;
 int lex_overflowchecks;
+int lex_iochecks = 1;           /* {$I+} default: I/O errors trap */
 
 static struct arena *lex_arena;
 static const char *src_buf;
@@ -216,6 +217,7 @@ lex_init(struct arena *a, const char *src, const char *filename)
     lex_align = SKJ_PTR_BYTES;
     lex_rangechecks = 0;
     lex_overflowchecks = 0;
+    lex_iochecks = 1;
     add_define("CPAS");
 }
 
@@ -333,6 +335,10 @@ skip_ws(void)
                         lex_overflowchecks = 1;
                     else if (strcmp(dir, "Q-") == 0)
                         lex_overflowchecks = 0;
+                    else if (strcmp(dir, "I+") == 0)
+                        lex_iochecks = 1;
+                    else if (strcmp(dir, "I-") == 0)
+                        lex_iochecks = 0;
                 }
                 continue;
             }
@@ -646,6 +652,7 @@ lex_one(void)
     case '/': p++; return make(T_SLASH);
     case '=': p++; return make(T_EQ);
     case '^': p++; return make(T_CARET);
+    case '@': p++; return make(T_AT);
     case ':':
         p++;
         if (*p == '=') { p++; return make(T_ASSIGN); }

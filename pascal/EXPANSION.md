@@ -21,10 +21,15 @@ Scalars and numeric types:
 
 - `Integer`/`LongInt` (32-bit), `Int64`/`QWord` (64-bit), `Boolean`, `Char`.
 - `Real`/`Double` (f64) and `Single` (f32), with `/` always yielding a real, and
-  `trunc`, `round`, `int`, `sqrt`, and the numeric casts.
+  `trunc`, `round`, `int`, `sqrt`, `sin`, `cos`, `ln`, `exp`, `arctan`, `pi`, and
+  the numeric casts.
+- Typed pointers (`^T`), `p^` dereference (chaining with `.f` and `[i]`),
+  `New`/`Dispose`, and `nil`. A pointer is an unmanaged machine-word value.
 - Type aliases (`type X = Y`), subranges (`type X = lo..hi`), and enumerated
   types registered as ordinal types (so `High`/`Low`, `array[TColor] of T`, and
-  `set of E` work). Explicit enum ordinals (`a = 3`) are not implemented.
+  `set of E` work). Explicit enum ordinals (`Tue = 10`) are supported; an
+  unnamed member continues from the previous value, and explicit values must
+  ascend.
 
 Managed types, reference counted in the FPC ansistring style (retain and release
 emitted at assignment and scope exit, copy on write, leak-clean under a live
@@ -58,6 +63,20 @@ these):
   (`KP_VERSION = {$I version.inc}`).
 - `Write`/`WriteLn` stream selection through a leading `Output` or `ErrOutput`
   argument, `Flush` as a no-op, and `ParamStr`/`ParamCount`.
+
+Files and I/O:
+
+- `Text` files, typed files (`file of T`), and untyped `file`, each a
+  runtime-owned control block the front end stores inline and passes by address.
+  `Assign`/`Reset`/`Rewrite`/`Close`, `Read`/`ReadLn`/`Write`/`WriteLn` on a file,
+  `Eof(f)`/`Eoln(f)`, and `Erase`/`Rename`. Typed files add the ISO file-buffer
+  variable `f^` with `Seek`/`FilePos`/`FileSize`/`Get`/`Put`; untyped files add
+  `BlockRead`/`BlockWrite`. A `file of T` with a managed (string/dynarray)
+  component is rejected, since it would write heap pointers. `{$I+}`/`{$I-}`
+  selects whether a failed operation traps or sets `IOResult`.
+- Field-width output: `Write(x:w)` and `Write(r:w:d)` right-justify integers,
+  strings and chars, and print reals in fixed or scientific form.
+- `for x in a do` over a static array, and `case` on a string selector.
 
 FPC-compatible evaluation details the real source depends on: short-circuit
 `and`/`or` (`{$B-}`), right-to-left argument evaluation, bitwise integer `not`,
@@ -103,10 +122,8 @@ The direction is a general-purpose Pascal large enough to compile real programs,
 covering more of the ISO Extended Pascal and Free Pascal procedural core as
 programs need it. Candidate areas, pulled in when a real program calls for them:
 
-- A real `file`/`Text` type and the classic file I/O verbs (today the Kobold
-  build routes I/O through `external cdecl` host imports instead).
 - A broader standard-routine set and wider ordinal and set coverage.
-- Explicit enumerated-type ordinals and richer subrange and variant handling.
+- Richer subrange and variant handling.
 
 Out of scope, by design: the Delphi and Object Pascal object model (classes,
 objects, interfaces, properties on classes, RTTI, exceptions as an object

@@ -35,6 +35,7 @@ enum tok {
     T_PLUS, T_MINUS, T_STAR, T_SLASH,
     T_EQ, T_NE, T_LT, T_LE, T_GT, T_GE,
     T_CARET,
+    T_AT,
     T_AND_THEN, T_OR_ELSE,
 };
 
@@ -56,6 +57,7 @@ struct token lex_peek(void);
 extern int lex_align;
 extern int lex_rangechecks;
 extern int lex_overflowchecks;
+extern int lex_iochecks;
 
 /****************************************************************
  * AST
@@ -74,6 +76,9 @@ enum node_kind {
     N_NAME, N_NUM, N_REAL, N_STR, N_BOOL,
     N_TYPEDEF, N_FIELDDECL,
     N_DOT, N_INDEX,
+    N_DEREF,            /* p^ : pointer dereference */
+    N_ADDR,             /* @x : address-of, yields a pointer */
+    N_FMTARG,           /* write arg with a :width[:decimals] suffix */
     N_INITLIST,
     N_SET, N_SETRANGE,
     N_SIZEOF,
@@ -98,6 +103,7 @@ struct node {
     int is_forward;
     int is_external;
     int downto;
+    int iocheck;        /* N_CALL: {$I±} state at the call site (1 = trap) */
 };
 
 struct node *parse_program(struct arena *a);

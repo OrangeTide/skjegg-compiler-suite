@@ -26,15 +26,16 @@ formatter in the runtime.
 | `record...end` | supported |
 | variant records (tagged, untagged) | supported |
 | `set of T` | supported |
-| enumerated types | partial (constants only, not distinct types) |
-| `real` / floating point | **not implemented** |
-| pointer types (`^T`) | **not implemented** |
-| file types (`file of T`, `text`) | **not implemented** |
-| subrange types (`1..100`) | **not implemented** as standalone declarations |
+| enumerated types (incl. explicit ordinals `Tue = 10`) | supported |
+| `real` / `double` / `single` / floating point | supported |
+| pointer types (`^T`), `new`/`dispose`, `nil` | supported |
+| file types (`text`, `file of T`, untyped `file`) | supported |
+| subrange types (`1..100`) | supported as standalone declarations |
 | procedural types | **not implemented** |
 
-Subrange syntax works in array bounds, set definitions, and case
-ranges, but cannot be used as a standalone type declaration.
+Subrange syntax works in array bounds, set definitions, case ranges,
+and as a standalone type declaration (`type X = lo..hi`), registered as
+an ordinal type.
 
 Enumerated types parse and work, but values are plain integer
 constants; they are not a distinct type for range checking.
@@ -74,8 +75,10 @@ constants; they are not a distinct type for range checking.
 | `if...then...else` | supported |
 | `while...do` | supported |
 | `for...to/downto...do` | supported |
+| `for...in` (static arrays) | supported |
 | `repeat...until` | supported |
 | `case...of...end` (with `else`, ranges) | supported |
+| `case` on a string selector (string labels) | supported |
 | `with...do` (single and multiple records) | supported |
 | `begin...end` | supported |
 | procedure calls | supported |
@@ -104,8 +107,8 @@ constants; they are not a distinct type for range checking.
 | Record field access: `r.field` | yes |
 | String indexing: `s[i]` | yes |
 | Type casts: `chr()`, `ord()`, `integer()`, `char()`, `byte()`, `word()` | yes |
-| Address-of: `@` | **no** |
-| Pointer dereference: `^` | **no** |
+| Address-of: `@x` (variable, field, element) | yes |
+| Pointer dereference: `p^` (chains with `.f`, `[i]`) | yes |
 
 ## Built-in Procedures and Functions
 
@@ -116,12 +119,19 @@ constants; they are not a distinct type for range checking.
 | `write(args...)` | supported (integer, char, boolean, string) |
 | `writeln(args...)` | supported |
 | `write(x:width)`, `write(x:width:decimals)` | supported |
-| `read(vars...)` | supported |
+| `read(vars...)` | supported (integer, char, string, real) |
 | `readln(vars...)` | supported |
-| `eof` | supported |
-| `eoln` | **not implemented** |
-| `assign`, `reset`, `rewrite`, `close` | **not implemented** (no file types) |
-| `ioresult` | **not implemented** |
+| `eof`, `eof(f)` | supported |
+| `eoln`, `eoln(f)` | supported |
+| `seekeof`, `seekeof(f)` | supported |
+| `seekeoln`, `seekeoln(f)` | supported |
+| `assign`, `reset`, `rewrite`, `close` | supported (text, typed, untyped files) |
+| `append` (text file, write at end) | supported |
+| `read(f, ...)`, `write(f, ...)`, `readln(f, ...)`, `writeln(f, ...)` | supported |
+| typed files: `seek`, `filepos`, `filesize`, `get`, `put` | supported |
+| untyped files: `blockread`, `blockwrite` | supported |
+| `erase`, `rename` | supported |
+| `ioresult`, `{$I+}`/`{$I-}` | supported |
 
 ### Arithmetic and Conversion
 
@@ -141,12 +151,13 @@ constants; they are not a distinct type for range checking.
 | `upcase(ch)` | supported |
 | `lowercase(ch)` | supported |
 | `sizeof(T)` | supported |
-| `sqrt(x)` | **not implemented** |
-| `sin(x)`, `cos(x)` | **not implemented** |
-| `trunc(x)`, `round(x)` | **not implemented** |
-| `random(n)`, `randomize` | **not implemented** |
-| `high(T)`, `low(T)` | **not implemented** |
-| `paramcount`, `paramstr(n)` | **not implemented** |
+| `sqrt(x)`, `int(x)` | supported |
+| `sin(x)`, `cos(x)`, `arctan(x)`, `ln(x)`, `exp(x)` | supported |
+| `trunc(x)`, `round(x)` | supported |
+| `pi` | supported |
+| `random(n)` (integer), `random` (real), `randomize` | supported |
+| `high(T)`, `low(T)` | supported (ordinal types/values and arrays) |
+| `paramcount`, `paramstr(n)` | supported |
 
 ### String Operations
 
