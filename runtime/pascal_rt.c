@@ -984,29 +984,12 @@ __pascal_str_from_int64(long long v)
 #include <stdlib.h>            /* exit */
 static int file_unlink(const char *p) { return remove(p); }
 static int file_rename(const char *o, const char *n) { return rename(o, n); }
-#elif defined(__skj_wasm__)
-/* WASM: the minimal crt the Pascal lane links provides only read, write and
-   exit.  Real file I/O needs WASI preopens (runtime/wasi_file.c, a --dir
-   grant) the lane does not set up, so the low-level file calls are
-   link-complete stubs that fail cleanly.  open returning -1 makes reset and
-   rewrite set IOResult rather than trap, and the file-I/O tests are excluded
-   from the WASM lane. */
-extern void exit(int code);
-#define O_RDONLY 0
-#define O_WRONLY 1
-#define O_RDWR   2
-#define O_CREAT  0100
-#define O_TRUNC  01000
-#define O_APPEND 02000
-#define SEEK_SET 0
-#define SEEK_END 2
-#define AT_FDCWD (-100)
-static int  open(const char *p, int f, int m) { (void)p; (void)f; (void)m; return -1; }
-static int  close(int fd) { (void)fd; return 0; }
-static long lseek(int fd, long o, int w) { (void)fd; (void)o; (void)w; return -1; }
-static int  file_unlink(const char *p) { (void)p; return -1; }
-static int  file_rename(const char *o, const char *n) { (void)o; (void)n; return -1; }
 #else
+/* Freestanding tiers get the low-level file calls from a syscall provider:
+   the native targets through start.S Linux syscall wrappers, and WASM through
+   runtime/wasi_file.c (which maps these onto WASI preview1 path_open/fd_seek/...
+   against the dir preopens the host grants with --dir).  The externs are the
+   same; only the provider linked beside pascal_rt.o differs. */
 extern int  open(const char *path, int flags, int mode);
 extern int  close(int fd);
 extern long lseek(int fd, long off, int whence);
@@ -1756,6 +1739,13 @@ __pascal_set_diff(char *dst, char *a, char *b)
         dst[i] = a[i] & ~b[i];
 }
 
+void
+__pascal_set_symdiff(char *dst, char *a, char *b)
+{
+    for (int i = 0; i < 32; i++)
+        dst[i] = a[i] ^ b[i];
+}
+
 int
 __pascal_set_in(int elem, char *s)
 {
@@ -1930,4 +1920,40 @@ memmove(void *dst, const void *src, unsigned int n)
     }
     return dst;
 }
+
+#ifdef __skj_wasm__
+/* The WASM file provider runtime/wasi_file.c calls these three; the native
+   freestanding tiers get them from their own runtime, so define them here only
+   for WASM to satisfy the linked wasi_file.o. */
+void *
+memcpy(void *dst, const void *src, unsigned int n)
+{
+    unsigned char *d = dst;
+    const unsigned char *s = src;
+    while (n--)
+        *d++ = *s++;
+    return dst;
+}
+
+unsigned int
+strlen(const char *s)
+{
+    const char *p = s;
+    while (*p)
+        p++;
+    return (unsigned int)(p - s);
+}
+
+int
+strncmp(const char *a, const char *b, unsigned int n)
+{
+    while (n-- && *a && *a == *b) {
+        a++;
+        b++;
+    }
+    if (n == (unsigned int)-1)
+        return 0;
+    return (unsigned char)*a - (unsigned char)*b;
+}
+#endif
 #endif

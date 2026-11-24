@@ -34,6 +34,7 @@ enum tok {
     T_ASSIGN,
     T_PLUS, T_MINUS, T_STAR, T_SLASH,
     T_EQ, T_NE, T_LT, T_LE, T_GT, T_GE,
+    T_SYMDIFF,                  /* >< set symmetric difference (FPC) */
     T_CARET,
     T_AT,
     T_AND_THEN, T_OR_ELSE,

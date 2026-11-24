@@ -669,6 +669,7 @@ lex_one(void)
     case '>':
         p++;
         if (*p == '=') { p++; return make(T_GE); }
+        if (*p == '<') { p++; return make(T_SYMDIFF); }
         return make(T_GT);
     }
 

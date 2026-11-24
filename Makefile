@@ -550,13 +550,11 @@ check-bc-wasm: build/skj-bc-wasm build/skj-cc-wasm build/skj-ld-wasm | build
 ## reports as exit 134, matching the native SIGABRT code, so t071/t073 run.
 ## Skips cleanly when wasmtime is absent.
 ##
-## The named-file tests are excluded: the minimal crt the lane links provides
-## only read/write/exit, so the Pascal runtime's low-level file calls are
-## failing stubs on WASM (file I/O needs WASI preopens the lane does not grant).
-## Console I/O, which maps to the WASI fd_read/fd_write the crt synthesizes,
-## still runs the whole rest of the corpus.
-PC_WASM_EXCLUDE := pascal_t242_textfile pascal_t243_untyped \
-                   pascal_t244_typedfile pascal_t252_append
+## The named-file tests run here too: the runner links runtime/wasi_file.o beside
+## pascal_rt.o, so the runtime's open/close/lseek/unlinkat/renameat2 map onto WASI
+## preview1, and wasmtime is given a --dir preopen for the sandbox the tests read
+## and write.  Console I/O maps to the WASI fd_read/fd_write the crt synthesizes.
+PC_WASM_EXCLUDE :=
 PHONY += check-pc-wasm
 check-pc-wasm: build/skj-pc-wasm build/skj-cc-wasm build/skj-ld-wasm | build
 	@PCBIN="$(CURDIR)/build/skj-pc-wasm" CCBIN="$(CURDIR)/build/skj-cc-wasm" \
@@ -602,7 +600,8 @@ check-selfhost-wasm: build/wasm-selfhost/skj-sc.wasm build/skj-sc-wasm | build
 ## because a prerequisite list is expanded as make reads the target's line: if
 ## this sat after those targets it would expand empty and the objects would not
 ## be built on a clean checkout.
-PLAYGROUND_RT := build/wasm-selfhost/rt/pascal_rt.o build/wasm-selfhost/rt/basic_rt.o \
+PLAYGROUND_RT := build/wasm-selfhost/rt/pascal_rt.o build/wasm-selfhost/rt/wasi_file.o \
+    build/wasm-selfhost/rt/basic_rt.o \
     build/wasm-selfhost/rt/arena_wasm.o build/wasm-selfhost/rt/str.o \
     build/wasm-selfhost/rt/list.o build/wasm-selfhost/rt/host_stub.o
 

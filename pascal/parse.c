@@ -63,6 +63,8 @@ new_node(int kind, int line)
 
 static struct node *parse_expr(void);
 static struct node *parse_simple_expr(void);
+static void parse_param_list(struct node **out_params);
+static int accept_type(char **out_name);
 
 /* Parse one call argument, including an optional Pascal field-width suffix.
    An argument may be followed by ':width' and, for reals, a further
@@ -327,7 +329,7 @@ parse_simple_expr(void)
 
     lhs = parse_term();
     while (cur.kind == T_PLUS || cur.kind == T_MINUS ||
-           cur.kind == T_OR) {
+           cur.kind == T_OR || cur.kind == T_SYMDIFF) {
         op = cur.kind;
         line = cur.line;
         advance();
@@ -682,6 +684,42 @@ accept_type(char **out_name)
         td->op = 8;
         td->sval = pointee;
         snprintf(buf, sizeof(buf), "__ptr_%d", anon_ctr++);
+        td->name = arena_strdup(parse_arena, buf);
+        *anon_ttail = td;
+        anon_ttail = &td->next;
+        if (out_name)
+            *out_name = arena_strdup(parse_arena, buf);
+        return 1;
+    }
+    if (cur.kind == T_PROCEDURE || cur.kind == T_FUNCTION) {
+        /* A procedural type: `procedure(params)` or `function(params): T`,
+           optionally `cdecl`.  A value of this type is a bare code pointer
+           (pointer-width, no environment), so it is synthesized as an op-12
+           typedef carrying the signature (params in a, return type in sval,
+           cdecl flag in ival).  `function` has a return type; `procedure`
+           leaves sval NULL. */
+        char buf[64];
+        int is_func = (cur.kind == T_FUNCTION);
+        struct node *td;
+        int pline = cur.line;
+        advance();
+        td = new_node(N_TYPEDEF, pline);
+        td->op = 12;
+        if (cur.kind == T_LPAREN)
+            parse_param_list(&td->a);
+        if (is_func) {
+            char *rtname = NULL;
+            expect(T_COLON, ":");
+            if (!accept_type(&rtname))
+                die("parse:%d: expected return type in procedural type",
+                    pline);
+            td->sval = rtname;
+        }
+        if (cur.kind == T_IDENT && strcmp(cur.sval, "cdecl") == 0) {
+            advance();
+            td->ival = 1;
+        }
+        snprintf(buf, sizeof(buf), "__proc_%d", anon_ctr++);
         td->name = arena_strdup(parse_arena, buf);
         *anon_ttail = td;
         anon_ttail = &td->next;

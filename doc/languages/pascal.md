@@ -25,13 +25,13 @@ formatter in the runtime.
 | `array[lo..hi] of T` (1D, 2D) | supported |
 | `record...end` | supported |
 | variant records (tagged, untagged) | supported |
-| `set of T` | supported |
+| `set of T` (`+` `-` `*` `><`, `=` `<>` `<=` `>=`, `in`; element universe 0..255) | supported |
 | enumerated types (incl. explicit ordinals `Tue = 10`) | supported |
 | `real` / `double` / `single` / floating point | supported |
 | pointer types (`^T`), `new`/`dispose`, `nil` | supported |
 | file types (`text`, `file of T`, untyped `file`) | supported |
 | subrange types (`1..100`) | supported as standalone declarations |
-| procedural types | **not implemented** |
+| procedural types (`procedure(...)` / `function(...): T`, `@routine`, indirect call) | supported |
 
 Subrange syntax works in array bounds, set definitions, case ranges,
 and as a standalone type declaration (`type X = lo..hi`), registered as
@@ -65,7 +65,7 @@ constants; they are not a distinct type for range checking.
 | array parameters | supported |
 | record parameters | supported |
 | string parameters | supported |
-| procedural parameters | **not implemented** |
+| procedural parameters | supported |
 
 ## Statements
 
@@ -178,10 +178,10 @@ constants; they are not a distinct type for range checking.
 |------|--------|
 | `fillchar(x, count, val)` | supported |
 | `move(src, dst, count)` | supported |
-| `new(ptr)` | **not implemented** (no pointers) |
-| `dispose(ptr)` | **not implemented** (no pointers) |
-| `getmem(ptr, size)` | **not implemented** |
-| `freemem(ptr)` | **not implemented** |
+| `new(ptr)` | supported |
+| `dispose(ptr)` | supported |
+| `getmem(ptr, size)` | supported |
+| `freemem(ptr [, size])` | supported |
 | `mark`, `release` | **not implemented** |
 
 ## Compiler Directives

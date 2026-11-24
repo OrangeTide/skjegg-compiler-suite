@@ -24,12 +24,23 @@ Scalars and numeric types:
   `trunc`, `round`, `int`, `sqrt`, `sin`, `cos`, `ln`, `exp`, `arctan`, `pi`, and
   the numeric casts.
 - Typed pointers (`^T`), `p^` dereference (chaining with `.f` and `[i]`),
-  `New`/`Dispose`, and `nil`. A pointer is an unmanaged machine-word value.
+  `New`/`Dispose`, `GetMem`/`FreeMem` (an untyped block of an explicit byte
+  size), and `nil`. A pointer is an unmanaged machine-word value.
+- Sets (`set of T`) over the 0..255 element universe (a fixed 256-bit value)
+  with union `+`, difference `-`, intersection `*`, symmetric difference `><`
+  (the FPC operator), `in`, and the relations `=`/`<>`/`<=`/`>=`. A constant set
+  element outside 0..255 is a compile error rather than a silent clamp.
 - Type aliases (`type X = Y`), subranges (`type X = lo..hi`), and enumerated
   types registered as ordinal types (so `High`/`Low`, `array[TColor] of T`, and
   `set of E` work). Explicit enum ordinals (`Tue = 10`) are supported; an
   unnamed member continues from the previous value, and explicit values must
   ascend.
+- Procedural types (`procedure(...)` and `function(...): T`, named or inline,
+  with optional `cdecl`). A value is a bare code pointer taken with `@routine`,
+  held in a pointer-width variable, passed as a parameter, and called through:
+  the call lowers to an indirect call (`IR_CALLI` family). `var` parameters pass
+  through. String and record (`sret`) returns through a value are not yet
+  supported.
 
 Managed types, reference counted in the FPC ansistring style (retain and release
 emitted at assignment and scope exit, copy on write, leak-clean under a live

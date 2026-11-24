@@ -52,6 +52,17 @@ fi
 rt="$OUTDIR/pascal_rt.o"
 "$CCBIN" -c -o "$rt" "$ROOT/runtime/pascal_rt.c"
 
+# The WASM file provider: wasi_file.o maps the runtime's open/close/lseek/
+# unlinkat/renameat2 onto WASI preview1 against the dir preopens granted below.
+wasi="$OUTDIR/wasi_file.o"
+"$CCBIN" -c -o "$wasi" "$ROOT/runtime/wasi_file.c"
+
+# A sandbox the file tests may read and write.  They use relative names under
+# build/, so the preopen maps guest "." to this root and pre-creates build/.
+FSROOT="$OUTDIR/fsroot"
+rm -rf "$FSROOT"
+mkdir -p "$FSROOT/build"
+
 fail=0
 pass=0
 skip=0
@@ -81,14 +92,14 @@ for src in "$HERE"/pascal_t*.pas; do
         printf 'FAIL  %s (compile error)\n' "$name"
         fail=$((fail + 1)); set -e; continue
     fi
-    "$LD" -o "$wasm" "$obj" "$rt" 2>/dev/null
+    "$LD" -o "$wasm" "$obj" "$rt" "$wasi" 2>/dev/null
     if [ $? -ne 0 ]; then
         printf 'FAIL  %s (link error)\n' "$name"
         fail=$((fail + 1)); set -e; continue
     fi
     in=/dev/null
     [ -f "$HERE/$name.input" ] && in="$HERE/$name.input"
-    "$WASMTIME" run "$wasm" <"$in" >"$out" 2>/dev/null
+    "$WASMTIME" run --dir="$FSROOT"::. "$wasm" <"$in" >"$out" 2>/dev/null
     rc=$?
     set -e
 

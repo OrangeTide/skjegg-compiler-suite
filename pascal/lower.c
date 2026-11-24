@@ -570,6 +570,9 @@ struct type_def {
     int is_pointer;             /* `^T`: a pointer to elem_type_name */
     int is_file;                /* `text`/`file`: a runtime-owned file block */
     int is_untyped;             /* `file`: an untyped file (blockread/write) */
+    int is_proc;                /* procedural type: a bare code pointer value */
+    char *ret_type_name;        /* a function type's return type, else NULL */
+    struct node *proc_params;   /* a procedural type's formal parameter list */
     char *alias_of;             /* `type X = Y;`: resolve X through Y */
 };
 
@@ -618,6 +621,15 @@ is_pointer_type_name(const char *name)
     if (t->alias_of)
         return is_pointer_type_name(t->alias_of);
     return 0;
+}
+
+/* Is a type name a procedural type (procedure/function value)?  Resolves
+   alias chains via resolve_type, which follows alias_of. */
+static int
+is_proc_type_name(const char *name)
+{
+    struct type_def *t = name ? resolve_type(name) : NULL;
+    return t && t->is_proc;
 }
 
 /* Is a type name a file (`text` or `file [of T]`)?  Resolves alias chains. */
@@ -803,6 +815,24 @@ bound_resolvable(struct node *n)
     return bound_resolvable(n->a) && bound_resolvable(n->b);
 }
 
+/* A set's element universe is the 256-bit range 0..255 (the runtime stores a
+   set as a fixed 32-byte bitset).  When a set-literal element is a compile-time
+   constant, reject one outside that range at compile time rather than letting
+   the runtime silently clamp it.  A runtime value is still range-checked in the
+   runtime's set primitives. */
+static void
+check_set_elem_range(struct node *e)
+{
+    long v;
+
+    if (!e || !bound_resolvable(e))
+        return;
+    v = const_eval(e);
+    if (v < 0 || v > 255)
+        die("lower:%d: set element %ld is outside the 0..255 set universe",
+            e->line, v);
+}
+
 /* Ensure a canonical heap-string type exists and return its name.  Used for
    string-valued constants, which carry no explicit type name of their own. */
 static const char *
@@ -882,6 +912,22 @@ register_type(struct node *td)
         t->is_pointer = 1;
         t->is_scalar = 1;
         t->elem_type_name = td->sval;
+        t->total_size = PC_PTR_BYTES;
+        return;
+    }
+
+    if (td->op == 12) {
+        /* A procedural type: a value is a bare code pointer, so it is a
+           pointer-width scalar.  is_pointer makes every pointer-width path
+           (slot size, load/store, argument passing) apply; is_proc marks it as
+           a callable so a call through the value lowers to an indirect call and
+           so the pointer-only verbs (New/Dispose/^) can reject it.  The
+           signature (params and return type) drives the indirect call. */
+        t->is_pointer = 1;
+        t->is_proc = 1;
+        t->is_scalar = 1;
+        t->ret_type_name = td->sval;
+        t->proc_params = td->a;
         t->total_size = PC_PTR_BYTES;
         return;
     }
@@ -1406,6 +1452,69 @@ emit_call_retptr(const char *name, int *args, int nargs)
     return r;
 }
 
+/* The indirect-call twins of the emit_call* helpers: the callee is the code
+   pointer in the temp `fptr` (IR_CALLI / IR_CALLI64 / IR_FCALLI with the target
+   in operand a), not a named symbol.  Used to call a procedural value. */
+static void
+emit_calli_void(int fptr, int *args, int nargs)
+{
+    struct ir_insn *ins;
+    emit_args(args, nargs);
+    ins = emit(IR_CALLI);
+    ins->dst = new_temp();
+    ins->a = fptr;
+    ins->nargs = nargs;
+    ins->call_void = 1;
+}
+
+static int
+emit_calli_ret(int fptr, int *args, int nargs)
+{
+    struct ir_insn *ins;
+    emit_args(args, nargs);
+    ins = emit(IR_CALLI);
+    ins->dst = new_temp();
+    ins->a = fptr;
+    ins->nargs = nargs;
+    return ins->dst;
+}
+
+static int
+emit_calli_ret64(int fptr, int *args, int nargs)
+{
+    struct ir_insn *ins;
+    emit_args(args, nargs);
+    ins = emit(IR_CALLI64);
+    ins->dst = new_temp();
+    ins->a = fptr;
+    ins->nargs = nargs;
+    mark_i64(ins->dst);
+    return ins->dst;
+}
+
+static int
+emit_calli_retf(int fptr, int *args, int nargs, int fw)
+{
+    struct ir_insn *ins;
+    emit_args(args, nargs);
+    ins = emit(IR_FCALLI);
+    ins->dst = new_temp();
+    ins->a = fptr;
+    ins->nargs = nargs;
+    ins->imm = fw;
+    mark_float(ins->dst, fw);
+    return ins->dst;
+}
+
+static int
+emit_calli_retptr(int fptr, int *args, int nargs)
+{
+    int r = PC_LP64_ON ? emit_calli_ret64(fptr, args, nargs)
+                       : emit_calli_ret(fptr, args, nargs);
+    mark_ptr(r);
+    return r;
+}
+
 /****************************************************************
  * Owned string temporaries
  *
@@ -1806,7 +1915,7 @@ lower_lvalue_addr(struct node *n)
             int fa = lower_lvalue_addr(n->a);
             return emit_call_retptr("__pascal_fbuf", &fa, 1);
         }
-        if (!td || !td->is_pointer)
+        if (!td || !td->is_pointer || td->is_proc)
             die("lower:%d: '^' applied to a non-pointer", n->line);
         return lower_expr(n->a);
     }
@@ -3026,6 +3135,22 @@ lower_expr(struct node *n)
                 return dst;
             }
         }
+        if (n->op == T_SYMDIFF) {
+            /* a >< b : symmetric difference (FPC), the elements in exactly one
+               of the two sets. */
+            if (!is_set_type(n->a) || !is_set_type(n->b))
+                die("lower:%d: '><' requires two sets", n->line);
+            {
+                int slot, args[3], dst;
+                slot = alloc_slot(32);
+                dst = emit_adl(slot);
+                args[0] = dst;
+                args[1] = lower_set_addr(n->a);
+                args[2] = lower_set_addr(n->b);
+                emit_call("__pascal_set_symdiff", args, 3);
+                return dst;
+            }
+        }
         if (n->op == T_PLUS) {
             int is_str = 0;
             /* a '+' is string concatenation when either operand is a
@@ -3283,6 +3408,8 @@ lower_expr(struct node *n)
         for (e = n->a; e; e = e->next) {
             if (e->kind == N_SETRANGE) {
                 int args[3];
+                check_set_elem_range(e->a);
+                check_set_elem_range(e->b);
                 args[0] = dst;
                 args[1] = lower_expr(e->a);
                 args[2] = lower_expr(e->b);
@@ -3290,6 +3417,7 @@ lower_expr(struct node *n)
                           args, 3);
             } else {
                 int args[2];
+                check_set_elem_range(e);
                 args[0] = dst;
                 args[1] = lower_expr(e);
                 emit_call("__pascal_set_add", args, 2);
@@ -3311,8 +3439,17 @@ lower_expr(struct node *n)
 
     case N_ADDR: {
         /* @x : the address of an l-value, as a pointer-width value.  Only a
-           variable, field, element or dereference has an address. */
+           variable, field, element or dereference has an address.  @routine is
+           special: it yields the routine's code pointer (a procedural value),
+           not the address of a data object. */
         struct node *t = n->a;
+        if (t && t->kind == N_NAME) {
+            struct sym *s = find_sym(t->name);
+            if (s && s->is_func) {
+                const char *irn = s->ir_name ? s->ir_name : s->name;
+                return emit_lea_sym(irn);
+            }
+        }
         if (!t || (t->kind != N_NAME && t->kind != N_DOT &&
                    t->kind != N_INDEX && t->kind != N_DEREF))
             die("lower:%d: '@' requires a variable, field or element", n->line);
@@ -4029,6 +4166,76 @@ resolve_overload(const char *name, struct node *args)
     return NULL;
 }
 
+/* Call through a procedural value: n->a is a proc-typed l-value holding a code
+   pointer, pt its procedural type.  Arguments are coerced against pt's formal
+   list (a var parameter takes an address, a value parameter a widened value),
+   the code pointer is loaded, and the matching indirect call opcode is chosen
+   from pt's return type.  Compound (record) and string returns are not yet
+   supported through a value. */
+static int
+lower_indirect_call(struct node *n, struct type_def *pt)
+{
+    int args[16], nargs = 0;
+    struct node *arg, *param = pt->proc_params;
+    const char *ret = pt->ret_type_name;
+    int fptr, rfw;
+
+    for (arg = n->b; arg; arg = arg->next) {
+        if (nargs >= 16)
+            die("lower:%d: too many arguments in an indirect call", n->line);
+        if (param && param->op == 1) {
+            /* var parameter: pass the argument's address */
+            if (arg->kind == N_NAME) {
+                struct sym *vs = find_sym(arg->name);
+                if (!vs)
+                    die("lower:%d: undefined variable '%s'",
+                        n->line, arg->name);
+                args[nargs] = addr_sym(vs);
+            } else if (arg->kind == N_DOT || arg->kind == N_INDEX ||
+                       arg->kind == N_DEREF) {
+                args[nargs] = lower_lvalue_addr(arg);
+            } else {
+                die("lower:%d: a var parameter needs a variable", n->line);
+            }
+        } else {
+            int av = lower_expr(arg);
+            int pfw = param ? float_fw_of_name(param->sval) : -1;
+            if (param && is_strlike_type_name(param->sval))
+                ;                       /* a string is a pointer, passed as-is */
+            else if (pfw >= 0)
+                av = to_float(av, pfw);
+            else if (param && is_i64_type_name(param->sval))
+                av = to_i64(av);
+            else if (param && param->sval && is_i64(av))
+                av = to_i32(av);
+            else if (param && param->sval && is_float(av))
+                av = float_to_int(av);
+            args[nargs] = av;
+        }
+        nargs++;
+        if (param)
+            param = param->next;
+    }
+
+    fptr = lower_expr(n->a);            /* the code pointer value */
+
+    if (!ret) {
+        emit_calli_void(fptr, args, nargs);
+        return 0;
+    }
+    rfw = float_fw_of_name(ret);
+    if (rfw >= 0)
+        return emit_calli_retf(fptr, args, nargs, rfw);
+    if (is_i64_type_name(ret))
+        return emit_calli_ret64(fptr, args, nargs);
+    if (is_strlike_type_name(ret))
+        die("lower:%d: a string-returning procedural value is not supported",
+            n->line);
+    if (is_pointer_type_name(ret))
+        return emit_calli_retptr(fptr, args, nargs);
+    return emit_calli_ret(fptr, args, nargs);
+}
+
 static int
 lower_call(struct node *n)
 {
@@ -4037,6 +4244,23 @@ lower_call(struct node *n)
     struct node *arg;
     int args[16];
     int nargs;
+
+    /* A call whose callee is a procedural value (a proc-typed variable,
+       parameter, field or element, not a named routine) is an indirect call
+       through the code pointer it holds. */
+    {
+        const char *ctn = NULL;
+        if (n->a->kind == N_NAME) {
+            struct sym *cs = find_sym(n->a->name);
+            if (cs && !cs->is_func)
+                ctn = cs->type_name;
+        } else if (n->a->kind == N_DOT || n->a->kind == N_INDEX ||
+                   n->a->kind == N_DEREF) {
+            ctn = lvalue_type_name(n->a);
+        }
+        if (ctn && is_proc_type_name(ctn))
+            return lower_indirect_call(n, resolve_type(ctn));
+    }
 
     if (n->a->kind != N_NAME)
         die("lower:%d: indirect call not supported", n->line);
@@ -4983,7 +5207,7 @@ lower_call(struct node *n)
                 n->line, name);
         ptn = lvalue_type_name(tgt);
         ptd = ptn ? resolve_type(ptn) : NULL;
-        if (!ptd || !ptd->is_pointer)
+        if (!ptd || !ptd->is_pointer || ptd->is_proc)
             die("lower:%d: %s expects a pointer variable", n->line, name);
 
         if (name[0] == 'n') {           /* new */
@@ -5000,6 +5224,43 @@ lower_call(struct node *n)
             }
         } else {                        /* dispose */
             int args[1];
+            args[0] = lower_expr(tgt);
+            emit_call("__pascal_dispose", args, 1);
+        }
+        return 0;
+    }
+
+    /* getmem(p, size) allocates size untyped bytes into the pointer p;
+       freemem(p [, size]) releases them.  Unlike new/dispose these take an
+       explicit size and do not consult the pointee type, so a pointer to any
+       type (or an untyped pointer) can hold a hand-sized block. */
+    if (strcmp(name, "getmem") == 0 || strcmp(name, "freemem") == 0) {
+        struct node *tgt = n->b;
+        const char *ptn;
+        struct type_def *ptd;
+
+        if (!tgt)
+            die("lower:%d: %s expects a pointer variable", n->line, name);
+        ptn = lvalue_type_name(tgt);
+        ptd = ptn ? resolve_type(ptn) : NULL;
+        if (!ptd || !ptd->is_pointer || ptd->is_proc)
+            die("lower:%d: %s expects a pointer variable", n->line, name);
+
+        if (name[0] == 'g') {           /* getmem(p, size) */
+            int args[1], ret;
+            if (!tgt->next || tgt->next->next)
+                die("lower:%d: getmem expects a pointer and a size", n->line);
+            args[0] = to_i32(lower_expr(tgt->next));
+            ret = emit_call_retptr("__pascal_new", args, 1);
+            if (tgt->kind == N_NAME && find_sym(tgt->name))
+                store_sym(find_sym(tgt->name), ret, 0);
+            else
+                emit_store_ptr_at(lower_lvalue_addr(tgt), ret);
+        } else {                        /* freemem(p) or freemem(p, size) */
+            int args[1];
+            if (tgt->next && tgt->next->next)
+                die("lower:%d: freemem expects a pointer and an optional size",
+                    n->line);
             args[0] = lower_expr(tgt);
             emit_call("__pascal_dispose", args, 1);
         }

@@ -163,7 +163,8 @@
     pascal: {
       label: "Pascal", ext: "pas", compiler: "skj-pc.wasm", tool: "skj-pc",
       link: true,
-      runtime: [{ url: "rt/pascal_rt.o", name: "pascal_rt.o" }],
+      runtime: [{ url: "rt/pascal_rt.o", name: "pascal_rt.o" },
+                { url: "rt/wasi_file.o", name: "wasi_file.o" }],
       note: "",
       samples: {
         "Hello": "program hello;\nbegin\n  writeln('Hello from Pascal!');\nend.\n",
@@ -260,7 +261,8 @@
   var langSel = document.getElementById("language");
   var srcLabel = document.getElementById("srcLabel");
 
-  var curLang = "scheme";
+  var DEFAULT_LANG = "pascal";
+  var curLang = DEFAULT_LANG;
   var lastModule = null;      // ArrayBuffer of the last runnable module
   var compilerReady = false;
   var busy = false;
@@ -536,6 +538,7 @@
   langSel.addEventListener("change", function () {
     exitView();          // restore the real source before persisting it
     persist();
+    try { localStorage.setItem("skjegg-pg-lang", langSel.value); } catch (e) {}
     loadLang(langSel.value, false);
   });
   samples.addEventListener("change", function () {
@@ -558,8 +561,14 @@
   compileBtn.disabled = false;
   status.textContent = "ready - pick a language, edit, then Compile";
 
-  langSel.value = "scheme";
-  loadLang("scheme", false);
+  // Start on the saved language if it is still valid, else the default (Pascal).
+  var startLang = DEFAULT_LANG;
+  try {
+    var savedLang = localStorage.getItem("skjegg-pg-lang");
+    if (savedLang && LANGS[savedLang]) startLang = savedLang;
+  } catch (e) {}
+  langSel.value = startLang;
+  loadLang(startLang, false);
   log("skjegg playground. Each compiler here is skjegg compiling itself to " +
       "WebAssembly: pick a language, press Compile to turn the source into a " +
       ".wasm executable (C, BASIC, Pascal and MooScript are then linked against " +

@@ -6,6 +6,34 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.68.0
+
+A further step in the Pascal front end (`skj-pc`) expansion, plus Pascal file
+I/O on the WASM target and a browser-playground default.
+
+#### Added
+- Procedural types and parameters in Pascal: `procedure(...)` and
+  `function(...): T` types (named or inline, with optional `cdecl`). A value is
+  a bare code pointer taken with `@routine`, held in a pointer-width variable,
+  passed as a parameter, and called through, which lowers to an indirect call.
+  `var` parameters pass through. String- and record-returning procedural values
+  are not yet supported.
+- Pascal set symmetric difference (`a >< b`, the FPC operator for the elements
+  in exactly one of two sets), and the `GetMem(p, size)` / `FreeMem(p [, size])`
+  untyped heap routines. A constant set-literal element outside the 0..255 set
+  universe is now a compile error rather than a silent clamp.
+- Real file I/O for Pascal on the WASM target. The Pascal WASM runtime links
+  `runtime/wasi_file.o`, which maps the runtime's open/close/lseek/unlinkat/
+  renameat2 onto WASI preview1 against the directory preopens the host grants
+  with `--dir`, so the named-file tests run on WASM instead of being excluded.
+- The browser playground defaults to Pascal instead of TinScheme, and remembers
+  the selected language across reloads (editor contents already persisted).
+
+#### Fixed
+- `doc/languages/pascal.md` is corrected where it lagged the implementation: the
+  procedural-type, procedural-parameter and memory-routine rows now reflect what
+  `skj-pc` accepts, and the set row documents the operators and element universe.
+
 ### 0.67.0
 
 A broad expansion of the Pascal front end (`skj-pc`) toward general-purpose

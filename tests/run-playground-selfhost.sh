@@ -146,7 +146,7 @@ EOF
 
 check_lang scheme skj-sc.wasm   "$S/hello.scm" "" \
     "$(printf 'scheme 42')" 0
-check_lang pascal skj-pc.wasm   "$S/hello.pas" "$RT/pascal_rt.o" \
+check_lang pascal skj-pc.wasm   "$S/hello.pas" "$RT/pascal_rt.o $RT/wasi_file.o" \
     "$(printf 'pascal 1\npascal 2\npascal 3')" 0
 check_lang basic  skj-bc.wasm   "$S/hello.bas" "$RT/basic_rt.o $RT/arena_wasm.o" \
     "$(printf 'basic 1\nbasic 2\nbasic 3')" 0
