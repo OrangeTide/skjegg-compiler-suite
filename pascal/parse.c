@@ -2,6 +2,7 @@
 
 #include "pascal.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1436,17 +1437,17 @@ parse_var_section(void)
     return head;
 }
 
-static struct node *
-parse_block(void)
+static void
+parse_decl_sections(int header_only,
+                    struct node **out_consts,
+                    struct node **out_vars,
+                    struct node **out_procs)
 {
-    struct node *n;
     struct node *consts, *vars, *procs;
     struct node **ctail, **vtail, **ptail;
     struct node *saved_anon_types;
     struct node **saved_anon_ttail;
-    int line;
 
-    line = cur.line;
     consts = NULL;
     vars = NULL;
     procs = NULL;
@@ -1526,6 +1527,16 @@ parse_block(void)
                 expect(T_SEMI, ";");
             }
 
+            /* A unit's interface section declares routine headings only; the
+               body lives in the implementation section.  Record the heading
+               (as a forward so lowering skips it) and stop. */
+            if (header_only) {
+                decl->is_forward = 1;
+                *ptail = decl;
+                ptail = &decl->next;
+                continue;
+            }
+
             if (accept(T_FORWARD)) {
                 decl->is_forward = 1;
                 expect(T_SEMI, ";");
@@ -1559,6 +1570,21 @@ parse_block(void)
     anon_types = saved_anon_types;
     anon_ttail = saved_anon_ttail;
 
+    *out_consts = consts;
+    *out_vars = vars;
+    *out_procs = procs;
+}
+
+static struct node *
+parse_block(void)
+{
+    struct node *n;
+    struct node *consts, *vars, *procs;
+    int line;
+
+    line = cur.line;
+    parse_decl_sections(0, &consts, &vars, &procs);
+
     n = new_node(N_BLOCK, line);
     n->a = consts;
     n->b = vars;
@@ -1571,6 +1597,139 @@ parse_block(void)
  * Top level
  ****************************************************************/
 
+/* `uses A, B, C;` : parse the unit import list into a chain of N_NAME nodes,
+   one per used unit, in source order.  `uses` is a contextual keyword (not a
+   reserved word), recognized by spelling at a declaration boundary.  Resolution
+   of each name to a unit file happens later, in lowering. */
+static struct node *
+parse_uses_clause(void)
+{
+    struct node *list = NULL, **tail = &list;
+
+    advance();                  /* consume `uses` */
+    for (;;) {
+        struct node *u;
+        if (cur.kind != T_IDENT)
+            die("parse:%d: expected unit name after 'uses'", cur.line);
+        u = new_node(N_NAME, cur.line);
+        u->name = cur.sval;
+        u->raw_name = cur.raw;
+        *tail = u;
+        tail = &u->next;
+        advance();
+        if (accept(T_COMMA))
+            continue;
+        break;
+    }
+    expect(T_SEMI, ";");
+    return list;
+}
+
+static int
+is_kw_ident(const char *word)
+{
+    return cur.kind == T_IDENT && strcmp(cur.sval, word) == 0;
+}
+
+/* Append chain b to the end of chain a (by ->next) and return the head. */
+static struct node *
+chain_concat(struct node *a, struct node *b)
+{
+    struct node *t;
+
+    if (!a)
+        return b;
+    for (t = a; t->next; t = t->next)
+        ;
+    t->next = b;
+    return a;
+}
+
+/* `unit U; interface [uses ...;] <decls> implementation [uses ...;] <decls>
+   end.`  The interface section's declaration source is captured verbatim (by
+   byte span) into prog->sval so the producer can write it as the unit's `.ppm`
+   interface member; a consumer re-parses that text.  The implementation
+   declarations (routine bodies, private consts/types/vars) plus the interface
+   consts/types/vars are merged into one block that lowers like a program's,
+   minus the main compound. */
+static struct node *
+parse_unit(void)
+{
+    struct node *prog, *block;
+    struct node *iface_consts, *iface_vars, *iface_headers;
+    struct node *impl_consts, *impl_vars, *impl_procs;
+    struct node *iface_uses = NULL, *impl_uses = NULL, *u;
+    int line, niface_uses = 0;
+    int span_start, span_end;
+    const char *src;
+
+    line = cur.line;
+    advance();                  /* consume `unit` */
+    prog = new_node(N_PROGRAM, line);
+    prog->is_unit = 1;
+    if (cur.kind != T_IDENT)
+        die("parse:%d: expected unit name", cur.line);
+    prog->name = cur.sval;
+    advance();
+    expect(T_SEMI, ";");
+
+    if (!is_kw_ident("interface"))
+        die("parse:%d: expected 'interface'", cur.line);
+    advance();
+
+    /* An interface `uses` names units whose declarations this unit's interface
+       may reference.  They are both compiled against here and recorded in the
+       `.ppm` header, since a consumer re-parsing this interface needs them too.
+       The clause itself is not part of the captured span (the header carries
+       it); the span is only the declaration source. */
+    if (is_kw_ident("uses")) {
+        iface_uses = parse_uses_clause();
+        for (u = iface_uses; u; u = u->next)
+            niface_uses++;
+    }
+
+    span_start = cur.off;
+    parse_decl_sections(1, &iface_consts, &iface_vars, &iface_headers);
+    span_end = cur.off;
+
+    src = lex_source();
+    prog->sval = arena_strndup(parse_arena, src + span_start,
+                               (size_t)(span_end - span_start));
+
+    if (!is_kw_ident("implementation"))
+        die("parse:%d: expected 'implementation'", cur.line);
+    advance();
+
+    /* An implementation `uses` is private to the unit's bodies: compiled
+       against here but NOT part of the interface, so it is not in the header. */
+    if (is_kw_ident("uses"))
+        impl_uses = parse_uses_clause();
+
+    parse_decl_sections(0, &impl_consts, &impl_vars, &impl_procs);
+
+    if (cur.kind != T_END)
+        die("parse:%d: expected 'end' (a unit initialization section is not "
+            "yet supported)", cur.line);
+    advance();
+    expect(T_DOT, ".");
+
+    block = new_node(N_BLOCK, line);
+    /* Interface consts/types precede the implementation's so an interface type
+       is registered before a private type that uses it; the interface routine
+       headings are not lowered (bodies come from the implementation). */
+    block->a = chain_concat(iface_consts, impl_consts);
+    block->b = chain_concat(iface_vars, impl_vars);
+    block->c = impl_procs;
+    (void)iface_headers;
+    prog->a = block;
+    /* All of this unit's dependencies are resolved for its own compilation; the
+       interface ones come first so the producer can write just them as the
+       header dep list (prog->ival = how many of prog->c are interface uses). */
+    prog->c = chain_concat(iface_uses, impl_uses);
+    prog->ival = niface_uses;
+    return prog;
+}
+
 struct node *
 parse_program(struct arena *a)
 {
@@ -1579,6 +1738,10 @@ parse_program(struct arena *a)
     int line;
 
     advance();
+
+    if (is_kw_ident("unit"))
+        return parse_unit();
+
     line = cur.line;
     expect(T_PROGRAM, "program");
     prog = new_node(N_PROGRAM, line);
@@ -1587,7 +1750,134 @@ parse_program(struct arena *a)
     prog->name = cur.sval;
     advance();
     expect(T_SEMI, ";");
+
+    /* An optional `uses` clause follows the program heading. */
+    if (is_kw_ident("uses"))
+        prog->c = parse_uses_clause();
+
     prog->a = parse_block();
     expect(T_DOT, ".");
     return prog;
+}
+
+/* Transitive-uses bookkeeping.  A name is "done" once its declarations have
+   been injected (so a shared dependency is injected once), and "visiting" while
+   its interface and that interface's dependencies are being loaded (so a cycle
+   through interface uses is caught rather than looping). */
+#define MAX_UNITS 256
+#define MAX_UDEPS 64
+static char *units_done[MAX_UNITS];
+static int nunits_done;
+static char *units_visiting[MAX_UDEPS];
+static int nunits_visiting;
+
+/* Case-insensitive string compare (Pascal unit names are case-insensitive).
+   Local, not strcasecmp: the self-host libc the WASM build compiles against has
+   no <strings.h>. */
+static int
+ci_streq(const char *a, const char *b)
+{
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b))
+            return 0;
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static int
+unit_name_in(char **set, int n, const char *name)
+{
+    int i;
+    for (i = 0; i < n; i++)
+        if (ci_streq(set[i], name))
+            return 1;
+    return 0;
+}
+
+/* Load one unit's interface, recursively load the units its interface depends
+   on (so an imported type is injected and registered before the unit that
+   references it), then inject this unit's own interface declarations.  The
+   combined declarations accumulate through the *tail pointers in dependency
+   order. */
+static void
+resolve_one_unit(struct arena *a, const char *lname, const char *rawname,
+                 const char *srcdir, const char **updirs, int nupdirs,
+                 struct node ***ctail, struct node ***vtail, struct node ***ptail)
+{
+    char *isrc;
+    char *deps[MAX_UDEPS];
+    int ndeps = 0, i;
+    struct lex_state saved;
+    struct token saved_cur;
+    struct node *c, *v, *p;
+
+    if (unit_name_in(units_done, nunits_done, lname))
+        return;                         /* already injected (shared dependency) */
+    if (unit_name_in(units_visiting, nunits_visiting, lname))
+        die("unit dependency cycle through '%s'", lname);
+
+    isrc = unit_load_interface(a, lname, rawname, srcdir, updirs, nupdirs,
+                               deps, MAX_UDEPS, &ndeps);
+
+    if (nunits_visiting >= MAX_UDEPS)
+        die("unit dependencies nested too deeply at '%s'", lname);
+    units_visiting[nunits_visiting++] = arena_strdup(a, lname);
+
+    /* Dependencies first: the loaded unit's interface may name their types. */
+    for (i = 0; i < ndeps; i++)
+        resolve_one_unit(a, deps[i], deps[i], srcdir, updirs, nupdirs,
+                         ctail, vtail, ptail);
+
+    /* Re-parse this unit's interface text with the lexer pointed at it, then
+       restore the outer lexer and current token.  Routines parse as header-only
+       forwards (no body here), so they register as symbols that link by their
+       plain emitted name against the unit's object. */
+    saved = lex_save();
+    saved_cur = cur;
+    lex_begin(isrc, lname);
+    advance();
+    parse_decl_sections(1, &c, &v, &p);
+    if (cur.kind != T_EOF)
+        die("unit '%s': unexpected token in interface at line %d",
+            lname, cur.line);
+    lex_restore(saved);
+    cur = saved_cur;
+
+    **ctail = c; while (**ctail) *ctail = &(**ctail)->next;
+    **vtail = v; while (**vtail) *vtail = &(**vtail)->next;
+    **ptail = p; while (**ptail) *ptail = &(**ptail)->next;
+
+    nunits_visiting--;                  /* leave the visiting set */
+    if (nunits_done < MAX_UNITS)
+        units_done[nunits_done++] = arena_strdup(a, lname);
+}
+
+void
+parse_resolve_uses(struct arena *a, struct node *prog,
+                   const char *srcdir, const char **updirs, int nupdirs)
+{
+    struct node *u, *block;
+    struct node *all_consts = NULL, **ctail = &all_consts;
+    struct node *all_vars = NULL, **vtail = &all_vars;
+    struct node *all_procs = NULL, **ptail = &all_procs;
+
+    if (!prog || !prog->c)              /* prog->c is the uses list */
+        return;
+    parse_arena = a;
+    nunits_done = 0;
+    nunits_visiting = 0;
+
+    for (u = prog->c; u; u = u->next)
+        resolve_one_unit(a, u->name, u->raw_name, srcdir, updirs, nupdirs,
+                         &ctail, &vtail, &ptail);
+
+    /* Prepend the units' declarations so the program's (or unit's) own
+       declarations may reference them and so an imported type is registered
+       first. */
+    block = prog->a;
+    block->a = chain_concat(all_consts, block->a);
+    block->b = chain_concat(all_vars, block->b);
+    block->c = chain_concat(all_procs, block->c);
 }

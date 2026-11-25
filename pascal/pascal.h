@@ -48,12 +48,32 @@ struct token {
     char *raw;      /* identifier's original-case spelling (for external names) */
     int slen;
     int line;
+    int off;        /* byte offset of the token's first character in the source */
 };
 
 void lex_init(struct arena *a, const char *src, const char *filename);
 void lex_define(const char *name);
 struct token lex_next(void);
 struct token lex_peek(void);
+
+/* The source buffer passed to lex_init, so the parser can capture a verbatim
+   span (a unit's interface section) by byte offset. */
+const char *lex_source(void);
+
+/* Save and restore the whole lexer position so a nested parse (a used unit's
+   interface text) can run over a separate buffer and then resume the main
+   source exactly where it left off. */
+struct lex_state {
+    const char *src_buf;
+    const char *src_file;
+    const char *p;
+    int line;
+    int peeked;
+    struct token peek_tok;
+};
+struct lex_state lex_save(void);
+void lex_restore(struct lex_state s);
+void lex_begin(const char *src, const char *filename);
 
 extern int lex_align;
 extern int lex_rangechecks;
@@ -105,9 +125,36 @@ struct node {
     int is_external;
     int downto;
     int iocheck;        /* N_CALL: {$I±} state at the call site (1 = trap) */
+    int is_unit;        /* N_PROGRAM: this compilation unit is a `unit`, not a
+                           `program` (no main block, routines are exported) */
 };
 
 struct node *parse_program(struct arena *a);
+
+/****************************************************************
+ * Units (uses / unit)
+ ****************************************************************/
+
+/* Load unit `lname`'s interface-section source from `<dir>/<name>.a`, searching
+   srcdir, then each -U dir, then ".".  In each directory the original-case name
+   is tried before the lowercased one.  Returns the interface declaration text
+   (arena-allocated, header line stripped), or dies if the unit is not found or
+   its ABI tag does not match this target.  `lname` is the lowercased unit name,
+   `rawname` its original-case spelling (either may be NULL to skip).  The
+   header's interface-dependency unit names are written into deps[0..maxdeps),
+   their count into *ndeps (original-case, as recorded by the producer). */
+char *unit_load_interface(struct arena *a, const char *lname,
+                          const char *rawname, const char *srcdir,
+                          const char **updirs, int nupdirs,
+                          char **deps, int maxdeps, int *ndeps);
+
+/* Resolve prog's `uses` clause: for each used unit, load its interface source,
+   re-parse it, and inject the declarations into prog's block so the program can
+   reference the unit's consts, types, and routines.  No-op when prog has no
+   `uses` clause.  Must run after parse_program and before lower_program. */
+void parse_resolve_uses(struct arena *a, struct node *prog,
+                        const char *srcdir,
+                        const char **updirs, int nupdirs);
 
 /****************************************************************
  * Lowering

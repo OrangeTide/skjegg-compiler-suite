@@ -3448,7 +3448,7 @@ PHONY += FORCE
 FORCE:
 
 PHONY += check
-check: build/skj-mooc build/skj-pc build/skj-bc $(SCM_TESTS:tests/%.scm=build/%) $(MOO_TESTS:tests/%.moo=build/%) $(MOO_TOY_TESTS:tests/%.moo=build/%) $(PAS_TESTS_NOFLOAT:tests/%.pas=build/%) $(BAS_TESTS_CF:tests/%.bas=build/%) test-basic-bmi test-basic-module test-basic-import test-basic-import-qual test-basic-opaque test-basic-opaque-qual test-basic-external test-basic-handle-types test-basic-example
+check: build/skj-mooc build/skj-pc build/skj-bc $(SCM_TESTS:tests/%.scm=build/%) $(MOO_TESTS:tests/%.moo=build/%) $(MOO_TOY_TESTS:tests/%.moo=build/%) $(PAS_TESTS_NOFLOAT:tests/%.pas=build/%) $(BAS_TESTS_CF:tests/%.bas=build/%) test-basic-bmi test-basic-module test-basic-import test-basic-import-qual test-basic-opaque test-basic-opaque-qual test-basic-external test-basic-handle-types test-basic-example test-pc-units
 	@sh tests/run-tests.sh "$(QEMU)"
 
 ## RISC-V per-test rules: tests/<name>.scm -> build/rv/<name>.s -> .o -> binary
@@ -4530,11 +4530,11 @@ build/san/as-aarch64-fuzz: as/as_fuzz.c $(AS_A64_FUZZ_LIB) as/aarch64.h as/asm_l
 # in, assembly out (discarded), so full ASan applies.  MOO_SRC and PC_SRC are
 # defined later than this rule, so the pascal and moo prerequisites list the
 # sources explicitly (the deferred-definition hazard noted on the san rules).
-build/san/fe-pascal-fuzz: tests/fe_fuzz.c pascal/lex.c pascal/parse.c pascal/lower.c \
+build/san/fe-pascal-fuzz: tests/fe_fuzz.c pascal/lex.c pascal/parse.c pascal/lower.c pascal/unit.c \
                           $(IR_SRC) $(BE_CF) pascal/pascal.h ir/ir.h ir/target.h \
                           tests/fuzz_mutate.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -D_GNU_SOURCE -DFEFUZZ_PASCAL -Ipascal -Iir -Itests -o $@ \
-	    tests/fe_fuzz.c pascal/lex.c pascal/parse.c pascal/lower.c $(IR_SRC) $(BE_CF)
+	    tests/fe_fuzz.c pascal/lex.c pascal/parse.c pascal/lower.c pascal/unit.c $(IR_SRC) $(BE_CF)
 
 build/san/fe-moo-fuzz: tests/fe_fuzz.c moo/lex.c moo/parse.c moo/typecheck.c moo/lower.c \
                        $(IR_SRC) $(BE_CF) moo/moo.h ir/ir.h ir/target.h \
@@ -4573,9 +4573,9 @@ build/san/skj-mooc: moo/lex.c moo/parse.c moo/typecheck.c moo/lower.c moo/main.c
                     $(IR_SRC) $(BE_CF) moo/moo.h ir/ir.h ir/target.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Imoo -Iir -o $@ $(MOO_SRC)
 
-build/san/skj-pc: pascal/lex.c pascal/parse.c pascal/lower.c pascal/main.c \
+build/san/skj-pc: pascal/lex.c pascal/parse.c pascal/lower.c pascal/unit.c pascal/main.c \
                   $(IR_SRC) $(BE_CF) pascal/pascal.h ir/ir.h ir/target.h build/version.h | build build/san
-	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Ipascal -Iir -o $@ $(PC_SRC)
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -DSKJ_KPM_ARCH='"cf"' -Ipascal -Iir -o $@ $(PC_SRC)
 
 build/san/skj-ar: $(AR_SRC) ld/mapfile.h ir/util.h ir/arena.h build/version.h | build build/san
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Ild -Iir -o $@ $(AR_SRC)
@@ -5461,10 +5461,14 @@ $(MOO_TOY_BINS): build/%: build/%.o $(MOO_TOY_RT_OBJS) build/skj-ld
 	./build/skj-ld -o $@ $(MOO_TOY_RT_OBJS) $<
 
 ## Pascal compiler
-PC_SRC := pascal/lex.c pascal/parse.c pascal/lower.c pascal/main.c $(IR_SRC) $(BE_CF)
+PC_SRC := pascal/lex.c pascal/parse.c pascal/lower.c pascal/unit.c pascal/main.c $(IR_SRC) $(BE_CF)
 
+# The ColdFire Pascal tool names no ISA selector (to keep cf_emit.c's CC_M68K
+# float path off, as the BASIC tool does), so target.h cannot derive the unit
+# arch tag; pass it explicitly so a .ppm is tagged "cf", not the bare "ilp32"
+# width fallback (which would wrongly match another selectorless ilp32 tool).
 build/skj-pc: $(PC_SRC) pascal/pascal.h ir/ir.h ir/target.h | build
-	$(CC) $(CFLAGS) -Ipascal -Iir -o $@ $(PC_SRC)
+	$(CC) $(CFLAGS) -DSKJ_KPM_ARCH='"cf"' -Ipascal -Iir -o $@ $(PC_SRC)
 
 ## BASIC compiler (skj-bc): the core of the BASIDE dialect
 ## (doc/languages/basic.md), lowered to the shared IR over the ColdFire backend.
@@ -5527,7 +5531,7 @@ build/skj-bc-wasm: $(BASIC_WASM_SRC) basic/basic.h ir/ir.h ir/target.h | build
 ## tells the front end the target is LP64, so it emits the 64-bit address
 ## opcodes (IR_LEA64, IR_LDL64, IR_LD64, ...) the IR reserves for a 64-bit
 ## pointer.  Keyed by the tool-name suffix and built by one pattern rule.
-PC_FE         := pascal/lex.c pascal/parse.c pascal/lower.c pascal/main.c
+PC_FE         := pascal/lex.c pascal/parse.c pascal/lower.c pascal/unit.c pascal/main.c
 pc_src_x86-64 := $(PC_FE) $(IR_SRC) $(BE_X64_SEL)
 pc_src_arm64  := $(PC_FE) $(IR_SRC) $(BE_A64_SEL)
 pc_flags_x86-64 := -DX86_BITS=64 -DSKJ_LP64=1 -Ipascal -Iir -Ibackend
@@ -5535,7 +5539,9 @@ pc_flags_arm64  := -DSKJ_LP64=1 -Ipascal -Iir -Ibackend
 ## The MIPS Pascal compiler is soft-float (the PlayStation R3051 has no FPU) and
 ## ILP32, the counterpart of skj-cc-mips-sf. It shares the MIPS backend.
 pc_src_mips   := $(PC_FE) $(IR_SRC) $(BE_MIPS)
-pc_flags_mips := -DMIPS_SOFTFLOAT -Ipascal -Iir -Ibackend
+## MIPS_SOFTFLOAT alone does not set CC_MIPS, so target.h cannot derive the unit
+## arch tag; pass it explicitly so a .ppm is tagged "mips", not "ilp32".
+pc_flags_mips := -DMIPS_SOFTFLOAT -DSKJ_KPM_ARCH='"mips"' -Ipascal -Iir -Ibackend
 ## The WebAssembly Pascal compiler (skj-pc-wasm).  Like the other WASM front
 ## ends it links the WASM backend (BE_WASM); CC_WASM makes target.h derive ILP32
 ## little-endian.  Pascal's aggregate ABI is already the MEMORY-class form WASM
@@ -5834,6 +5840,92 @@ test-basic-example: build/basic_example_shapes
 	@qemu-m68k build/basic_example_shapes > build/basic_example_shapes.out; \
 	 diff examples/basic/shapes.expected build/basic_example_shapes.out \
 	    && echo "PASS: basic module example (examples/basic: Geometry + shapes)"
+
+## Pascal units (uses/unit): a leaf unit (pcmathu) exporting a const, a record
+## type, a function and a procedure; a unit (pcgeom) that uses pcmathu in its
+## interface; and a program that uses both (a diamond that pulls pcmathu once).
+## Each unit compiles with --emit-unit to a <name>.a archive carrying its .ppm
+## interface member beside its object, and the linker pulls the needed members
+## by symbol.  The archive basename is the unit's own name, so `uses pcmathu`
+## resolves build/pcmathu.a on the -Ubuild path.  ColdFire (skj-as/skj-ld,
+## qemu-m68k).
+build/pcmathu.ppm: tests/pcunit_mathu.pas build/skj-pc | build
+	./build/skj-pc --emit-unit --meta $@ -o build/pcmathu.s $<
+
+build/pcmathu.o: build/pcmathu.ppm build/skj-as | build
+	./build/skj-as -o $@ build/pcmathu.s
+
+build/pcmathu.a: build/pcmathu.o build/pcmathu.ppm build/skj-ar | build
+	sh tests/pascal-archive.sh build/skj-ar $@ build/pcmathu.ppm build/pcmathu.o
+
+build/pcgeom.ppm: tests/pcunit_geom.pas build/pcmathu.a build/skj-pc | build
+	./build/skj-pc -Ubuild --emit-unit --meta $@ -o build/pcgeom.s $<
+
+build/pcgeom.o: build/pcgeom.ppm build/skj-as | build
+	./build/skj-as -o $@ build/pcgeom.s
+
+build/pcgeom.a: build/pcgeom.o build/pcgeom.ppm build/skj-ar | build
+	sh tests/pascal-archive.sh build/skj-ar $@ build/pcgeom.ppm build/pcgeom.o
+
+build/pcunit_use.s: tests/pcunit_use.pas build/pcgeom.a build/pcmathu.a build/skj-pc | build
+	./build/skj-pc -Ubuild -o $@ $<
+
+build/pcunit_use.o: build/pcunit_use.s build/skj-as | build
+	./build/skj-as -o $@ $<
+
+build/pcunit_use: build/pcunit_use.o build/start.o build/pascal_rt.o build/pcgeom.a build/pcmathu.a build/skj-ld
+	./build/skj-ld -o $@ build/start.o build/pascal_rt.o build/pcunit_use.o build/pcgeom.a build/pcmathu.a
+
+PHONY += test-pc-units
+test-pc-units: build/pcunit_use
+	@grep -qE '\.globl[[:space:]]+addone\b' build/pcmathu.s \
+	   && ! grep -qE '^main:' build/pcmathu.s \
+	   && head -1 build/pcgeom.ppm | grep -qE 'uses:pcmathu' \
+	   || { echo "FAIL: pascal unit producer (exports/no main/.ppm dep)"; exit 1; }
+	@qemu-m68k build/pcunit_use > build/pcunit_use.out; \
+	 diff tests/pcunit_use.expected build/pcunit_use.out \
+	    && echo "PASS: pascal units (uses, transitive dep, diamond, .ppm archive)"
+
+## The same unit fixtures on the LP64 x86-64 target (the arch tag is "x86-64",
+## pointers and the record are 64-bit), proving units are not ILP32-bound.  The
+## unit archives go under build/x86_64 so their basenames stay the unit names
+## for `uses` resolution without colliding with the ColdFire archives in build/.
+## Assembled with the x86-64 assembler and linked with the host cc (the leak
+## gate's path), which pulls the unit members from the skj-ar archive by symbol.
+build/x86_64/pcmathu.ppm: tests/pcunit_mathu.pas build/skj-pc-x86-64 | build/x86_64
+	./build/skj-pc-x86-64 --emit-unit --meta $@ -o build/x86_64/pcmathu.s $<
+
+build/x86_64/pcmathu.o: build/x86_64/pcmathu.ppm $(X64_ASM_DEP) | build/x86_64
+	$(call host_assemble,build/x86_64/pcmathu.s,$@)
+
+build/x86_64/pcmathu.a: build/x86_64/pcmathu.o build/x86_64/pcmathu.ppm build/skj-ar | build/x86_64
+	sh tests/pascal-archive.sh build/skj-ar $@ build/x86_64/pcmathu.ppm build/x86_64/pcmathu.o
+
+build/x86_64/pcgeom.ppm: tests/pcunit_geom.pas build/x86_64/pcmathu.a build/skj-pc-x86-64 | build/x86_64
+	./build/skj-pc-x86-64 -Ubuild/x86_64 --emit-unit --meta $@ -o build/x86_64/pcgeom.s $<
+
+build/x86_64/pcgeom.o: build/x86_64/pcgeom.ppm $(X64_ASM_DEP) | build/x86_64
+	$(call host_assemble,build/x86_64/pcgeom.s,$@)
+
+build/x86_64/pcgeom.a: build/x86_64/pcgeom.o build/x86_64/pcgeom.ppm build/skj-ar | build/x86_64
+	sh tests/pascal-archive.sh build/skj-ar $@ build/x86_64/pcgeom.ppm build/x86_64/pcgeom.o
+
+build/x86_64/pcunit_use.s: tests/pcunit_use.pas build/x86_64/pcgeom.a build/x86_64/pcmathu.a build/skj-pc-x86-64 | build/x86_64
+	./build/skj-pc-x86-64 -Ubuild/x86_64 -o $@ $<
+
+build/x86_64/pcunit_use.o: build/x86_64/pcunit_use.s $(X64_ASM_DEP) | build/x86_64
+	$(call host_assemble,$<,$@)
+
+build/x86_64/pcunit_use: build/x86_64/pcunit_use.o build/x86_64/pcgeom.a build/x86_64/pcmathu.a build/pascal_rt_host.o
+	$(CC) -no-pie build/x86_64/pcunit_use.o build/x86_64/pcgeom.a build/x86_64/pcmathu.a build/pascal_rt_host.o -lm -o $@
+
+PHONY += test-pc-units-x86-64
+test-pc-units-x86-64: build/x86_64/pcunit_use
+	@head -1 build/x86_64/pcmathu.ppm | grep -qE 'pcmathu x86-64' \
+	   || { echo "FAIL: pascal unit x86-64 arch tag"; exit 1; }
+	@$(QEMU_X64) build/x86_64/pcunit_use > build/x86_64/pcunit_use.out; \
+	 diff tests/pcunit_use.expected build/x86_64/pcunit_use.out \
+	    && echo "PASS: pascal units LP64 (x86-64, uses + transitive dep + diamond)"
 
 ## Typed opaque handles are nominal: a handle of one opaque TYPE used where
 ## another is expected is a compile error. Each basic_err_handle_*.bas is a
@@ -10583,6 +10675,7 @@ test-help: $(addprefix build/,$(HELP_TOOLS))
 ## it is the native host-arch (x86-64) JIT, the peer of check-kp-jit.
 PHONY += check-all
 check-all: check check-cc check-cc-x86-64 check-cc-arm64 check-cc-rv check-cpp \
+           test-pc-units-x86-64 \
            test-cc-cf-asm test-cc-rv-asm test-cc-x86-64-asm test-cc-arm64-asm \
            check-rv check-rv-bc check-x86-64 check-x86-64-bc check-arm64 check-arm64-bc \
            check-x86-oracle check-arm64-oracle check-rv-oracle check-jit \

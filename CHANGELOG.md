@@ -6,6 +6,34 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.69.0
+
+Separate compilation for Pascal: a `unit`/`uses` module system for `skj-pc`.
+
+#### Added
+- Pascal units. A `unit` groups declarations behind an `interface`, is compiled
+  on its own with `skj-pc --emit-unit --meta <file>`, and is pulled in by a
+  `uses` clause (in a program, or in another unit's interface or
+  implementation). A compiled unit is a GNU `ar` archive `<name>.a` carrying its
+  native object beside a reserved text member `.ppm`: a one-line header (format
+  version, unit name, target architecture, and interface dependency list)
+  followed by the interface-section source verbatim. A consumer re-parses that
+  source and injects the unit's consts, types, and routine headings, so an
+  exported record lays out identically on both sides. A used routine links by
+  its plain name, so the linker pulls the needed object members from the archive
+  by symbol with no linker change, and the same `.a` also links into a C program
+  as an ordinary cross-language library. Interface `uses` are resolved
+  transitively, with interface-dependency cycle detection and shared-dependency
+  deduplication. The architecture tag binds a unit to one target and a consumer
+  refuses a unit built for a different one. `skj-pc` gains `--emit-unit`,
+  `--meta <file>`, and `-U <dir>` (a unit search directory); `tests/pascal-
+  archive.sh` stages the interface member and archives it with `skj-ar`.
+
+#### Changed
+- The ColdFire and MIPS Pascal tools now pass `-DSKJ_KPM_ARCH` explicitly (`cf`
+  and `mips`), so a unit built by them is tagged with its architecture rather
+  than the bare `ilp32` width string.
+
 ### 0.68.0
 
 A further step in the Pascal front end (`skj-pc`) expansion, plus Pascal file

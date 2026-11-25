@@ -27,6 +27,7 @@ static const char *p;
 static int line;
 static int peeked;
 static struct token peek_tok;
+static int tok_off;             /* byte offset of the token being scanned */
 
 #define MAX_DEFINES 64
 static char *defines[MAX_DEFINES];
@@ -221,6 +222,54 @@ lex_init(struct arena *a, const char *src, const char *filename)
     add_define("CPAS");
 }
 
+const char *
+lex_source(void)
+{
+    return src_buf;
+}
+
+struct lex_state
+lex_save(void)
+{
+    struct lex_state s;
+
+    s.src_buf = src_buf;
+    s.src_file = src_file;
+    s.p = p;
+    s.line = line;
+    s.peeked = peeked;
+    s.peek_tok = peek_tok;
+    return s;
+}
+
+void
+lex_restore(struct lex_state s)
+{
+    src_buf = s.src_buf;
+    src_file = s.src_file;
+    p = s.p;
+    line = s.line;
+    peeked = s.peeked;
+    peek_tok = s.peek_tok;
+}
+
+/* Point the lexer at a fresh buffer (a used unit's interface text) without
+   disturbing the arena, defines, or option state.  The caller saves the outer
+   position first with lex_save and restores it with lex_restore afterward.  A
+   nested parse runs at top level (no open include or $ifdef), so the include
+   and conditional stacks start empty. */
+void
+lex_begin(const char *src, const char *filename)
+{
+    src_buf = src;
+    src_file = filename ? filename : "<unit>";
+    p = src;
+    line = 1;
+    peeked = 0;
+    inc_depth = 0;
+    ifdef_depth = 0;
+}
+
 static void
 skip_ws(void)
 {
@@ -411,8 +460,10 @@ make(int k)
     t.nval = 0;
     t.fval = 0;
     t.sval = NULL;
+    t.raw = NULL;
     t.slen = 0;
     t.line = line;
+    t.off = tok_off;
     return t;
 }
 
@@ -519,6 +570,7 @@ lex_one(void)
                                wraps (defined) instead of overflowing a long */
 
     skip_ws();
+    tok_off = (int)(p - src_buf);
     t = make(T_EOF);
     if (*p == '\0')
         return t;

@@ -52,8 +52,8 @@ constants; they are not a distinct type for range checking.
 | nested procedures (capture-argument passing) | supported |
 | typed constants (scalar, array, matrix, record, set) | supported |
 | `label` | **not implemented** |
-| `uses` / `unit` | **not implemented** |
-| `external` | **not implemented** |
+| `uses` / `unit` | supported (see [Units](#units)) |
+| `external` | supported |
 
 ## Parameters
 
@@ -234,8 +234,17 @@ follows the usual conventions: `{ ... }` is zero or more, `[ ... ]` is optional,
 `|` separates alternatives, and quoted text is literal.
 
 ```ebnf
+compilation   = program | unit ;
+
 program       = "program" ident [ "(" ident { "," ident } ")" ] ";"
-                block "." ;
+                [ uses_clause ] block "." ;
+
+unit          = "unit" ident ";"
+                "interface" [ uses_clause ] { declaration }
+                "implementation" [ uses_clause ] { declaration }
+                "end" "." ;                 (* interface routines are headings *)
+
+uses_clause   = "uses" ident { "," ident } ";" ;
 
 block         = { declaration } compound_stmt ;
 
@@ -301,6 +310,78 @@ set_elem      = expr [ ".." expr ] ;
 literal       = integer | string | char | ident ;         (* ident: const/enum *)
 ```
 
+## Units
+
+A program can be split across units. A unit groups declarations behind an
+interface, is compiled on its own, and is pulled in by `uses`.
+
+```pascal
+unit mathu;
+interface
+const Answer = 42;
+type TPoint = record x, y: integer; end;
+function AddOne(n: integer): integer;
+implementation
+function AddOne(n: integer): integer;
+begin
+  AddOne := n + 1;
+end;
+end.
+```
+
+```pascal
+program useit;
+uses mathu;
+var p: TPoint;
+begin
+  p.x := AddOne(Answer);   { 43 }
+end.
+```
+
+The `interface` section declares what the unit exports (consts, types, `var`s,
+and routine headings); the `implementation` section holds the routine bodies and
+any private declarations. A `uses` clause may appear after the program heading,
+and in both a unit's interface and its implementation. An interface `uses` names
+units whose declarations the interface itself refers to; an implementation
+`uses` is private to the unit's bodies.
+
+### On-disk form
+
+A compiled unit is a GNU `ar` archive named `<unit>.a`. It carries the unit's
+compiled object beside a reserved text member named `.ppm` that holds the
+interface: a one-line header (`skj-pascal-unit`, format version, unit name,
+target architecture, and the interface `uses` list) followed by the
+interface-section source verbatim. A consumer re-parses that source, so a unit's
+exported record is laid out identically in the program that uses it. The arch
+tag binds a unit to one target (its object is native code); a consumer refuses a
+unit built for a different architecture. The reserved member is dot-named so the
+archiver does not index it and a symbol-driven linker never pulls it as code.
+
+A used routine links by its plain name against the unit's object member, so the
+linker resolves a `uses` call with no special support: it pulls the needed
+object members from the archive by symbol, exactly as for any static library.
+The same `<unit>.a` therefore also links into a C program that declares the
+routines, as an ordinary cross-language library.
+
+### Building a unit
+
+```sh
+skj-pc --emit-unit --meta mathu.ppm -o mathu.s mathu.pas
+skj-as -o mathu.o mathu.s
+sh tests/pascal-archive.sh skj-ar mathu.a mathu.ppm mathu.o
+skj-pc -U <dir> -o useit.s useit.pas      # -U adds a unit search directory
+```
+
+`skj-pc` searches for `<unit>.a` in the source file's directory, then each `-U`
+directory, then the current directory. `--emit-unit` requires `--meta <file>`
+for the interface member, and writes the object through the usual `-o`.
+
+### Current limits
+
+Overloaded exported routines, qualified or selective `uses` (`uses U as Q`,
+`uses U (a, b)`), wildcard `uses`, and a unit initialization section are not yet
+supported. A unit ends at `end.` with no initialization block.
+
 ## Summary of Major Gaps
 
 These features are absent from the implementation and would require
@@ -320,5 +401,7 @@ substantial work to add:
    requires file descriptor tracking in the runtime and new built-in
    procedure lowering.
 
-4. **Modules** (`uses`, `unit`) -- requires separate compilation and
-   a symbol import/export mechanism.
+4. **Overloaded exports and qualified/selective `uses`** -- units are
+   supported (see [Units](#units)); still missing are overloaded exported
+   routines, `uses U as Q` / `uses U (a, b)` / wildcard `uses`, and a unit
+   initialization section.

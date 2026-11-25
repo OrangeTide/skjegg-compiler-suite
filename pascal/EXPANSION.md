@@ -41,6 +41,19 @@ Scalars and numeric types:
   the call lowers to an indirect call (`IR_CALLI` family). `var` parameters pass
   through. String and record (`sret`) returns through a value are not yet
   supported.
+- Units (`unit` / `interface` / `implementation` / `uses`). A unit compiles on
+  its own to `<name>.a`, a GNU `ar` archive carrying its object beside a
+  reserved text member `.ppm` (a header line with the format version, unit name,
+  target arch, and interface `uses` list, then the interface-section source
+  verbatim). A `uses` consumer re-parses that source and injects the consts,
+  types, and routine headings, so an exported record is laid out identically on
+  both sides; the arch tag binds a unit to one target and a mismatch is refused.
+  A used routine links by its plain name, so the linker pulls the unit's object
+  member by symbol with no linker change, and the same `.a` links into a C
+  program as an ordinary library. Interface and implementation `uses` are
+  resolved transitively (interface deps recorded in the header), with cycle
+  detection and shared-dependency dedup. Not yet: overloaded exports, qualified
+  or selective `uses`, wildcard `uses`, and a unit initialization section.
 
 Managed types, reference counted in the FPC ansistring style (retain and release
 emitted at assignment and scope exit, copy on write, leak-clean under a live
@@ -126,6 +139,11 @@ and the host-import shims, and checks that it emits byte-identical KPM to the
 reference Kobold front end over the whole behavioral corpus (all 86 modules
 match). The per-target Pascal test suites (`tests/pascal_*.pas`) run on every
 backend, and the x86-64 suite always runs under the ASan plus LSan leak gate.
+`make test-pc-units` (ColdFire, in `make check`) and `test-pc-units-x86-64` (in
+`check-all`) build a leaf unit, a unit that uses it in its interface, and a
+program that uses both, then run the program: a unit exports a const, a record
+type, and routines, with a transitive interface dependency and a diamond that
+injects the shared unit once. The two lanes prove units are not ILP32-bound.
 
 ## Roadmap
 

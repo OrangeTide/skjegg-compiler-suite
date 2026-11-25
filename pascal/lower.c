@@ -6978,8 +6978,10 @@ lower_program(struct arena *a, struct node *ast)
     while (*ftail)
         ftail = &(*ftail)->next;
 
-    /* lower main block as "main" function */
-    {
+    /* lower main block as "main" function.  A unit has no main: its routines
+       are exported (emitted .globl) for a program or another unit to link
+       against, and there is no entry point. */
+    if (!ast->is_unit) {
         struct ir_func *main_fn;
 
         main_fn = ir_new_func(lower_arena, "main");
