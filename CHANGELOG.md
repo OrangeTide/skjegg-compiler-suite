@@ -6,6 +6,29 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.71.0
+
+The `skjcc` driver compiles and links Pascal and Kobold on the general targets,
+not only the PlayStation.
+
+#### Added
+- `skjcc foo.pas` now compiles and links an end-to-end executable on every
+  general target with a Pascal backend: ColdFire, x86-64, arm64, and MIPS. The
+  driver routes a `.pas` source through `skj-pc-<arch>` and links the Pascal
+  runtime (`pascal_rt.o`); the 64-bit targets also link `soft64.o` for the
+  divide family their crt does not carry, while ColdFire and MIPS get it from the
+  crt and the runtime set. RISC-V has no Pascal backend, so a `.pas` source is
+  refused cleanly.
+- `skjcc foo.kp` now compiles and links an end-to-end executable on the two
+  targets with a self-contained freestanding runtime: ColdFire and RISC-V. The
+  driver routes a `.kp` source through `skj-kpc-<arch>` and links the Kobold crt
+  and the no-libc runtime archive (`libkpaot-free.a`). Targets without a
+  freestanding Kobold runtime refuse a `.kp` source cleanly; the PlayStation
+  (`-target ps1`) continues to build Kobold over the PSX SDK runtime.
+- The per-target driver smoke test gained Pascal and Kobold lanes on each
+  supported target, with negative checks that unsupported targets refuse. See
+  `doc/tools/toolchain.md`.
+
 ### 0.70.0
 
 Opt-in linker dead-strip (`--gc-sections`) across all five ELF backends.

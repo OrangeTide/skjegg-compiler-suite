@@ -66,10 +66,33 @@ A compiler driver reads one source file and writes one assembly file:
 skj-cc -o hello.s hello.c
 ```
 
-For C there is also a single driver, `skjcc`, that runs the whole chain
-(preprocess, compile, assemble, link against the freestanding libc) and writes
-an executable. It links the libc archive pull-only, so an object is pulled from
-the archive only when a symbol in it is referenced.
+There is also a single driver, `skjcc`, that runs the whole chain (preprocess,
+compile, assemble, link against the freestanding libc) and writes an executable.
+It links the libc archive pull-only, so an object is pulled from the archive only
+when a symbol in it is referenced.
+
+The driver dispatches on the source file extension: `.c` runs the C chain,
+`.pas` runs the Pascal front end (`skj-pc`), and `.kp` runs the Kobold front end
+(`skj-kpc`).
+
+Pascal works on every general target that has a `skj-pc-<arch>`, which is
+ColdFire, x86-64, arm64, and MIPS. The 64-bit targets carry no 64-bit divide
+helpers in their crt, so the driver links `soft64.o` beside `pascal_rt.o` there;
+ColdFire and MIPS get the divide family from the crt and the runtime. RISC-V has
+no Pascal backend yet, so `skjcc -target riscv foo.pas` is refused cleanly.
+
+Kobold works on the targets with a self-contained freestanding runtime:
+ColdFire and RISC-V. There the driver links the Kobold crt (`kp_crt.o`, distinct
+from the C crt0) and the no-libc runtime archive (`libkpaot-free.a`), with no
+libc. The other general targets have no freestanding Kobold runtime, so a `.kp`
+source is refused on them; the PlayStation (`-target ps1`) builds Kobold over the
+PSX SDK runtime instead.
+
+```sh
+skjcc -target arm64 -o hello hello.pas      # Pascal, end to end
+skjcc -target riscv -o prog prog.kp          # Kobold, end to end
+skjcc -target x86-64 -o app app.c            # C, end to end
+```
 
 The other languages run the stages explicitly: compile to assembly with the
 front end, assemble with `skj-as`, then link with `skj-ld`. The README's "Using

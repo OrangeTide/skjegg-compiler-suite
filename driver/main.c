@@ -50,11 +50,15 @@ struct target {
     const char *libc;           /* libc archive basename, linked unless -ffreestanding */
     const char *inc;            /* extra -I subdir under <libdir>/, or NULL */
     const char *pc;             /* Pascal front end (source -> asm), or NULL */
-    const char *kpc;            /* Kobold front end (source -> KPM), or NULL */
-    const char *kp;             /* Kobold codegen (KPM -> asm), or NULL */
+    const char *kpc;            /* Kobold front end (source -> asm), or NULL */
+    const char *kp_crt0;        /* Kobold-specific crt basename for the
+                                   self-contained freestanding tier, or NULL to
+                                   reuse crt0 (e.g. ps1) */
     const char *kp_units;       /* unit-search subdir under <libdir> for -U, or NULL */
     const char *kp_link[3];     /* extra objects linked into a Kobold program
                                    (basenames under <libdir>/<name>), NULL-term */
+    const char *pas_rt[3];      /* extra objects linked into a Pascal program
+                                   (the Pascal runtime, divide helpers), NULL-term */
 };
 
 /* The table mirrors the check-cc-* Makefile recipes.  crt0/runtime names are
@@ -65,31 +69,45 @@ static const struct target targets[] = {
       "skj-as", { NULL },
       "skj-ld", { NULL },
       "crt0.o", { "half.o", "va_cf.o", NULL }, "libc.a", NULL,
-      NULL, NULL, NULL, NULL, { NULL } },
+      /* Kobold links its own crt (kp_crt.o) and the freestanding runtime
+         (libkpaot-free.a), with no libc, so kp_crt0 is set */
+      "skj-pc", "skj-kpc-cf", "kp_crt.o", NULL, { "libkpaot-free.a", NULL },
+      /* the ColdFire crt already carries the 64-bit divide family, so the
+         Pascal link needs only the runtime */
+      { "pascal_rt.o", NULL } },
     { { "riscv", "rv32", NULL },
       "skj-cc-rv",
       "skj-as-rv", { NULL },
       "skj-ld-rv", { NULL },
       "crt0.o", { "va_rv.o", "soft64_div.o", NULL }, "libc.a", NULL,
-      NULL, NULL, NULL, NULL, { NULL } },
+      /* no skj-pc-rv yet, so no Pascal on RISC-V; Kobold uses its own crt and
+         the freestanding runtime */
+      NULL, "skj-kpc-rv", "kp_crt.o", NULL, { "libkpaot-free.a", NULL }, { NULL } },
     { { "mips", NULL },
       "skj-cc-mips",
       "skj-as-mips", { NULL },
       "skj-ld-mips", { NULL },
       "crt0.o", { "half.o", "va_mips.o", "soft64_div.o", NULL }, "libc.a", NULL,
-      NULL, NULL, NULL, NULL, { NULL } },
+      /* the MIPS runtime already stages soft64_div.o, so Pascal needs only
+         the runtime */
+      "skj-pc-mips", NULL, NULL, NULL, { NULL },
+      { "pascal_rt.o", NULL } },
     { { "x86-64", "x86_64", NULL },
       "skj-cc-x86-64",
       "skj-as-x86-64", { NULL },
       "skj-ld-x86-64", { NULL },
       "crt0.o", { "half.o", "va.o", NULL }, NULL, NULL,
-      NULL, NULL, NULL, NULL, { NULL } },
+      /* the 64-bit crt carries no divide helpers, so the Pascal link adds
+         soft64.o alongside the runtime */
+      "skj-pc-x86-64", NULL, NULL, NULL, { NULL },
+      { "pascal_rt.o", "soft64.o", NULL } },
     { { "arm64", "aarch64", NULL },
       "skj-cc-arm64",
       "skj-as-aarch64", { NULL },
       "skj-ld-arm64", { NULL },
       "crt0.o", { "va.o", NULL }, NULL, NULL,
-      NULL, NULL, NULL, NULL, { NULL } },
+      "skj-pc-arm64", NULL, NULL, NULL, { NULL },
+      { "pascal_rt.o", "soft64.o", NULL } },
     /* The PlayStation (MIPS PS-EXE): soft-float C, the BIOS-TTY crt, and the
        libpsx SDK, linked into a PS-EXE.  There is no libc (the SDK and the
        program provide the environment), so libpsx.a rides the runtime slot and
@@ -100,14 +118,17 @@ static const struct target targets[] = {
       "skj-ld-mips", { "-f", "ps-exe", NULL },
       "start_psx.o", { "libpsx.a", NULL }, NULL, "ps1",
       /* Pascal and Kobold share the ps1 crt (start_psx.o) and runtime
-         (libpsx.a) with C.  Pascal compiles straight to asm; Kobold's front
-         end emits a KPM that the codegen turns into asm, and a Kobold program
-         that `uses psx` resolves the unit from <libdir>/ps1 and links the psx.a
-         binding archive.  psx.a carries each subsystem leaf (gpu, pad, spu, ...)
-         as its own object member, so the linker pulls only the subsystems the
-         program calls rather than the whole binding. */
-      "skj-pc-mips", "skj-kpc-mips", "skj-kp-mips-sf",
-      "ps1", { "psx.a", NULL } },
+         (libpsx.a) with C, so kp_crt0 is NULL (the shared crt is used).  Pascal
+         compiles straight to asm; Kobold compiles source to asm in one step. A
+         Kobold program that `uses psx` resolves the unit from <libdir>/ps1 and
+         links the psx.a binding archive.  psx.a carries each subsystem leaf
+         (gpu, pad, spu, ...) as its own object member, so the linker pulls only
+         the subsystems the program calls rather than the whole binding. */
+      "skj-pc-mips", "skj-kpc-mips", NULL,
+      "ps1", { "psx.a", NULL },
+      /* ps1 Pascal rides the PSX SDK runtime (libpsx.a), not the generic
+         Pascal runtime */
+      { NULL } },
 };
 #define NTARGETS ((int)(sizeof(targets) / sizeof(targets[0])))
 
@@ -415,6 +436,7 @@ main(int argc, char **argv)
     char link_objs[MAXARGV][1024];
     int nlink = 0;
     int any_kp = 0;                 /* a Kobold object is in the link */
+    int any_pas = 0;                /* a Pascal object is in the link */
 
     for (int s = 0; s < nsrcs; s++) {
         char *st = stem(srcs[s]);
@@ -446,6 +468,7 @@ main(int argc, char **argv)
             /* pc -o out.s in.pas */
             if (!t->pc)
                 die("target '%s' has no Pascal front end", t->names[0]);
+            any_pas = 1;
             const char *av[MAXARGV];
             int n = 0;
             av[n++] = tool_path(t->pc);
@@ -507,7 +530,14 @@ main(int argc, char **argv)
         char libc[1024];
         char rtbuf[8][1024];
         char kplbuf[3][1024];
-        snprintf(crt0, sizeof crt0, "%s/%s/%s", libd, t->names[0], t->crt0);
+        char paslbuf[3][1024];
+        /* The self-contained freestanding Kobold tier (ColdFire, RISC-V) links
+           its own crt (kp_crt0) and the freestanding runtime (kp_link), with no
+           libc and no C runtime helpers.  A target without a kp_crt0 (e.g. ps1)
+           keeps the shared crt and the ordinary runtime set. */
+        int kp_free = any_kp && t->kp_crt0;
+        snprintf(crt0, sizeof crt0, "%s/%s/%s", libd, t->names[0],
+                 kp_free ? t->kp_crt0 : t->crt0);
 
         const char *av[MAXARGV];
         int n = 0;
@@ -529,10 +559,23 @@ main(int argc, char **argv)
                 av[n++] = kplbuf[k];
             }
         }
+        /* A Pascal program links its runtime (and the divide helpers the crt
+           does not carry) after the program objects that reference the
+           __pascal_* helpers.  The objects are loose, so order among them does
+           not matter; they only need to precede nothing that would re-resolve
+           them. */
+        if (any_pas && !kp_free) {
+            for (int k = 0; t->pas_rt[k] && k < 3; k++) {
+                snprintf(paslbuf[k], sizeof paslbuf[0], "%s/%s/%s",
+                         libd, t->names[0], t->pas_rt[k]);
+                av[n++] = paslbuf[k];
+            }
+        }
         /* The libc archive sits after the program objects (which reference it)
            and before the runtime helpers (which it may reference), so the
-           pull-only archive linker resolves each in one left-to-right pass. */
-        if (!freestanding && t->libc) {
+           pull-only archive linker resolves each in one left-to-right pass.  The
+           freestanding Kobold tier brings its own runtime and no libc. */
+        if (!freestanding && !kp_free && t->libc) {
             /* fini.o is force-linked (the crt's weak __libc_fini resolves to
                it), then the pull-only archive. */
             snprintf(fini, sizeof fini, "%s/%s/fini.o", libd, t->names[0]);
@@ -541,10 +584,12 @@ main(int argc, char **argv)
             av[n++] = libc;
         }
         int nrt = 0;
-        for (int k = 0; t->runtime[k]; k++) {
-            snprintf(rtbuf[nrt], sizeof rtbuf[0], "%s/%s/%s",
-                     libd, t->names[0], t->runtime[k]);
-            av[n++] = rtbuf[nrt++];
+        if (!kp_free) {
+            for (int k = 0; t->runtime[k]; k++) {
+                snprintf(rtbuf[nrt], sizeof rtbuf[0], "%s/%s/%s",
+                         libd, t->names[0], t->runtime[k]);
+                av[n++] = rtbuf[nrt++];
+            }
         }
         av[n] = NULL;
         if (run(av, -1) != 0) die("link failed");

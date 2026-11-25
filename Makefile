@@ -5796,6 +5796,19 @@ check-pc-kpcom: build/skj-kpc-rv build/skj-kp-jit-rv
 build/pascal_rt.o: runtime/pascal_rt.c | build
 	$(M68K_CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<
 
+## Per-arch freestanding Pascal runtime, built by the skj toolchain, for the
+## skjcc driver's Pascal link on the general targets.  The freestanding path
+## (no PAS_HOST) is self-contained: a bump arena and extern read/write, no libc.
+build/x86_64/pascal_rt.o: runtime/pascal_rt.c build/skj-cc-x86-64 build/skj-as-x86-64 | build/x86_64
+	@./build/skj-cc-x86-64 -o build/x86_64/pascal_rt.s runtime/pascal_rt.c
+	@./build/skj-as-x86-64 -o $@ build/x86_64/pascal_rt.s
+build/arm64/pascal_rt.o: runtime/pascal_rt.c build/skj-cc-arm64 build/skj-as-aarch64 | build/arm64
+	@./build/skj-cc-arm64 -o build/arm64/pascal_rt.s runtime/pascal_rt.c
+	@./build/skj-as-aarch64 -o $@ build/arm64/pascal_rt.s
+build/mips/pascal_rt.o: runtime/pascal_rt.c build/skj-cc-mips build/skj-as-mips | build/mips
+	@./build/skj-cc-mips -o build/mips/pascal_rt.s runtime/pascal_rt.c
+	@./build/skj-as-mips -o $@ build/mips/pascal_rt.s
+
 ## Vendored UTF-8 decoder (freestanding), for R7 code-point string ops
 build/utf8.o: runtime/utf8.c runtime/utf8.h | build
 	$(M68K_CC) -std=c99 -O2 -Wall -ffreestanding -c -o $@ $<
@@ -7005,13 +7018,17 @@ test-rv-sandbox-io: build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-ru
 ## the first use: a Make prerequisite list is expanded as the rule is read, so a
 ## variable referenced before its definition expands empty and the stale crt0.o
 ## it should have rebuilt is used as-is.
-DRIVER_LIB_CF   := build/lib/coldfire/crt0.o build/lib/coldfire/half.o build/lib/coldfire/va_cf.o build/lib/coldfire/fini.o build/lib/coldfire/libc.a
-DRIVER_LIB_RV   := build/lib/riscv/crt0.o build/lib/riscv/va_rv.o build/lib/riscv/soft64_div.o build/lib/riscv/fini.o build/lib/riscv/libc.a
-DRIVER_LIB_MIPS := build/lib/mips/crt0.o build/lib/mips/half.o build/lib/mips/va_mips.o build/lib/mips/soft64_div.o build/lib/mips/fini.o build/lib/mips/libc.a
+## The pascal_rt.o (and, on the 64-bit targets, soft64.o) entries let the driver
+## link a .pas source.  RISC-V has no skj-pc-rv, so no Pascal runtime is staged.
+## The kp_crt.o + libkpaot-free.a entries let it link a .kp source on the two
+## self-contained freestanding Kobold targets (ColdFire and RISC-V).
+DRIVER_LIB_CF   := build/lib/coldfire/crt0.o build/lib/coldfire/half.o build/lib/coldfire/va_cf.o build/lib/coldfire/fini.o build/lib/coldfire/libc.a build/lib/coldfire/pascal_rt.o build/lib/coldfire/kp_crt.o build/lib/coldfire/libkpaot-free.a
+DRIVER_LIB_RV   := build/lib/riscv/crt0.o build/lib/riscv/va_rv.o build/lib/riscv/soft64_div.o build/lib/riscv/fini.o build/lib/riscv/libc.a build/lib/riscv/kp_crt.o build/lib/riscv/libkpaot-free.a
+DRIVER_LIB_MIPS := build/lib/mips/crt0.o build/lib/mips/half.o build/lib/mips/va_mips.o build/lib/mips/soft64_div.o build/lib/mips/fini.o build/lib/mips/libc.a build/lib/mips/pascal_rt.o
 ## The 64-bit hosted targets have no libc archive (dev/test tier); the driver
 ## links the crt and runtime helpers only.
-DRIVER_LIB_X64  := build/lib/x86-64/crt0.o build/lib/x86-64/half.o build/lib/x86-64/va.o
-DRIVER_LIB_A64  := build/lib/arm64/crt0.o build/lib/arm64/va.o
+DRIVER_LIB_X64  := build/lib/x86-64/crt0.o build/lib/x86-64/half.o build/lib/x86-64/va.o build/lib/x86-64/pascal_rt.o build/lib/x86-64/soft64.o
+DRIVER_LIB_A64  := build/lib/arm64/crt0.o build/lib/arm64/va.o build/lib/arm64/pascal_rt.o build/lib/arm64/soft64.o
 
 ## The coop_echo guest for test-coop-read, built through the skjcc driver for
 ## each sandbox core.  Placed here (not beside test-coop-read) so DRIVER_LIB_*
@@ -7123,20 +7140,34 @@ uninstall:
 ## then the crt + runtime helpers.  The program returns 45; x86-64 runs
 ## natively or under qemu-x86_64, arm64 under qemu-aarch64.
 PHONY += test-cc-driver-x86-64
-test-cc-driver-x86-64: build/skjcc $(DRIVER_LIB_X64) | build
+test-cc-driver-x86-64: build/skjcc build/skj-pc-x86-64 $(DRIVER_LIB_X64) | build
 	@./build/skjcc -target x86-64 -o build/drv_x86_64 tests/ld/driver_ret.c
 	@$(QEMU_X64) ./build/drv_x86_64; ec=$$?; \
 	 if [ "$$ec" = 45 ]; then \
 	     echo "PASS: skjcc -target x86-64 (cc -> skj-as-x86-64 -> skj-ld-x86-64, exit 45)"; \
 	 else echo "FAIL: skjcc -target x86-64 driver (exit $$ec)"; exit 1; fi
+	@# Pascal through the driver: .pas routes to skj-pc-x86-64 and links the
+	@# Pascal runtime plus soft64.o (the 64-bit crt carries no divide helpers).
+	@./build/skjcc -target x86-64 -o build/drv_x86_64_pas tests/driver_hello.pas
+	@$(QEMU_X64) ./build/drv_x86_64_pas; ec=$$?; \
+	 if [ "$$ec" = 42 ]; then \
+	     echo "PASS: skjcc -target x86-64 Pascal (skj-pc-x86-64 + pascal_rt + soft64, exit 42)"; \
+	 else echo "FAIL: skjcc -target x86-64 Pascal (exit $$ec)"; exit 1; fi
 
 PHONY += test-cc-driver-arm64
-test-cc-driver-arm64: build/skjcc $(DRIVER_LIB_A64) | build
+test-cc-driver-arm64: build/skjcc build/skj-pc-arm64 $(DRIVER_LIB_A64) | build
 	@./build/skjcc -target arm64 -o build/drv_arm64 tests/ld/driver_ret.c
 	@$(QEMU_A64) ./build/drv_arm64; ec=$$?; \
 	 if [ "$$ec" = 45 ]; then \
 	     echo "PASS: skjcc -target arm64 (cc -> skj-as-aarch64 -> skj-ld-arm64, exit 45)"; \
 	 else echo "FAIL: skjcc -target arm64 driver (exit $$ec)"; exit 1; fi
+	@# Pascal through the driver: .pas routes to skj-pc-arm64 and links the
+	@# Pascal runtime plus soft64.o.
+	@./build/skjcc -target arm64 -o build/drv_arm64_pas tests/driver_hello.pas
+	@$(QEMU_A64) ./build/drv_arm64_pas; ec=$$?; \
+	 if [ "$$ec" = 42 ]; then \
+	     echo "PASS: skjcc -target arm64 Pascal (skj-pc-arm64 + pascal_rt + soft64, exit 42)"; \
+	 else echo "FAIL: skjcc -target arm64 Pascal (exit $$ec)"; exit 1; fi
 
 ## Guest libc file I/O + argv (continuing the sandbox openat work): a C program
 ## built through the skjcc driver (crt + libc) slurps an input file with the
@@ -8991,6 +9022,37 @@ build/lib/riscv/soft64_div.o: build/rv/soft64_div.o
 build/lib/mips/soft64_div.o: build/mips/soft64_div.o
 	@mkdir -p $(@D) && cp $< $@
 
+## The Pascal runtime the skjcc driver links for a .pas source, staged per
+## target.  The ColdFire copy is the generic m68k object the PC test binaries
+## use; the others are built by the skj toolchain above.  The 64-bit targets
+## also stage soft64.o for the divide family their crt lacks (cf and mips get it
+## from the crt and the mips runtime respectively).
+build/lib/coldfire/pascal_rt.o: build/pascal_rt.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/mips/pascal_rt.o: build/mips/pascal_rt.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/x86-64/pascal_rt.o: build/x86_64/pascal_rt.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/x86-64/soft64.o: build/x86_64/soft64.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/arm64/pascal_rt.o: build/arm64/pascal_rt.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/arm64/soft64.o: build/arm64/soft64.o
+	@mkdir -p $(@D) && cp $< $@
+
+## The Kobold freestanding tier the skjcc driver links for a .kp source: the
+## Kobold crt (kp_crt.o, distinct from the C crt0) and the no-libc runtime
+## archive (libkpaot-free.a).  Staged for the two targets with a self-contained
+## freestanding Kobold path and a skj-kpc-<arch>: ColdFire and RISC-V.
+build/lib/coldfire/kp_crt.o: build/kpfree-cf/kp_crt_cf.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/coldfire/libkpaot-free.a: build/libkpaot-cf-free.a
+	@mkdir -p $(@D) && cp $< $@
+build/lib/riscv/kp_crt.o: build/kpfree-rv/kp_crt_rv.o
+	@mkdir -p $(@D) && cp $< $@
+build/lib/riscv/libkpaot-free.a: build/libkpaot-rv-free.a
+	@mkdir -p $(@D) && cp $< $@
+
 ## The coroutine context switch (co_switch), the one arch-specific piece of the
 ## libc coroutine primitive (libc/coro.c), assembled per target.  The rv, x86-64
 ## and arm64 switches already exist for the Kobold runtime and are reused as-is;
@@ -9111,9 +9173,9 @@ build/lib/mips/fini.o: build/skj-cc-mips build/skj-as-mips libc/fini.c $(LIBC_HD
 ## the -S / -c stages and a two-file link.
 PHONY += test-cc-driver
 test-cc-driver: build/skjcc \
-                build/skj-cc build/skj-as build/skj-ld $(DRIVER_LIB_CF) \
-                build/skj-cc-rv build/skj-as-rv build/skj-ld-rv $(DRIVER_LIB_RV) \
-                build/skj-cc-mips build/skj-as-mips build/skj-ld-mips $(DRIVER_LIB_MIPS) | build
+                build/skj-cc build/skj-as build/skj-ld build/skj-pc build/skj-kpc-cf $(DRIVER_LIB_CF) \
+                build/skj-cc-rv build/skj-as-rv build/skj-ld-rv build/skj-kpc-rv $(DRIVER_LIB_RV) \
+                build/skj-cc-mips build/skj-as-mips build/skj-ld-mips build/skj-pc-mips $(DRIVER_LIB_MIPS) | build
 	@mkdir -p build/driver
 	@./build/skjcc -target coldfire -o build/driver/hello_cf tests/driver_hello.c
 	@$(QEMU) ./build/driver/hello_cf; ec=$$?; \
@@ -9153,7 +9215,31 @@ test-cc-driver: build/skjcc \
 	@./build/skjcc -target coldfire -ffreestanding -o build/driver/free_cf tests/driver_hello.c
 	@$(QEMU) ./build/driver/free_cf; ec=$$?; \
 	 [ $$ec -eq 42 ] || { echo "FAIL: driver -ffreestanding coldfire (exit $$ec)"; exit 1; }
-	@echo "PASS: cross driver (build+run, -S, -c, multi-file, hosted libc, -ffreestanding)"
+	@# Pascal through the driver: the .pas extension routes to skj-pc-<arch> and
+	@# links the Pascal runtime (and the divide helpers the crt lacks).  Covered
+	@# on coldfire and mips here; x86-64/arm64 in their own driver tests.
+	@./build/skjcc -target coldfire -o build/driver/pas_cf tests/driver_hello.pas
+	@$(QEMU) ./build/driver/pas_cf; ec=$$?; \
+	 [ $$ec -eq 42 ] || { echo "FAIL: driver Pascal coldfire (exit $$ec)"; exit 1; }
+	@./build/skjcc -target mips -o build/driver/pas_mips tests/driver_hello.pas
+	@$(QEMU_MIPS) ./build/driver/pas_mips; ec=$$?; \
+	 [ $$ec -eq 42 ] || { echo "FAIL: driver Pascal mips (exit $$ec)"; exit 1; }
+	@# A target without a Pascal front end (riscv) must refuse cleanly.
+	@if ./build/skjcc -target riscv -o build/driver/pas_rv tests/driver_hello.pas 2>/dev/null; then \
+	     echo "FAIL: driver Pascal riscv should have been refused"; exit 1; fi
+	@# Kobold through the driver: the .kp extension routes to skj-kpc-<arch> and
+	@# links the Kobold crt and the freestanding runtime (no libc), on the two
+	@# self-contained targets.  mips has no freestanding Kobold runtime, so it
+	@# must refuse cleanly.
+	@./build/skjcc -target coldfire -o build/driver/kp_cf tests/driver_hello.kp
+	@$(QEMU) ./build/driver/kp_cf; ec=$$?; \
+	 [ $$ec -eq 42 ] || { echo "FAIL: driver Kobold coldfire (exit $$ec)"; exit 1; }
+	@./build/skjcc -target riscv -o build/driver/kp_rv tests/driver_hello.kp
+	@$(QEMU_RV) ./build/driver/kp_rv; ec=$$?; \
+	 [ $$ec -eq 42 ] || { echo "FAIL: driver Kobold riscv (exit $$ec)"; exit 1; }
+	@if ./build/skjcc -target mips -o build/driver/kp_mips tests/driver_hello.kp 2>/dev/null; then \
+	     echo "FAIL: driver Kobold mips should have been refused"; exit 1; fi
+	@echo "PASS: cross driver (build+run, -S, -c, multi-file, hosted libc, -ffreestanding, Pascal, Kobold)"
 
 ## The Phase A C standard library (doc/tools/libc.md): headers, string/ctype, the
 ## snprintf formatter, and stdlib numeric/sort.  Each target compiles the libc
