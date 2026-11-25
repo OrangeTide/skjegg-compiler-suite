@@ -2161,7 +2161,11 @@ emit_function(FILE *out, struct ir_func *fn)
         if (i->dst >= 0 && i->dst < fn->ntemps && ir_op_is_i64_def(i->op))
             temp_is_i64[i->dst] = 1;
 
-    fprintf(out, "\n\t.text\n\t.align 2\n");
+    if (target_function_sections)
+        fprintf(out, "\n\t.section\t.text.%s,\"ax\",@progbits\n\t.align 2\n",
+                fn->name);
+    else
+        fprintf(out, "\n\t.text\n\t.align 2\n");
     if (!fn->is_local)
         fprintf(out, "\t.globl %s\n", fn->name);
     /* STT_FUNC + a size so a debugger maps an address to this function and a

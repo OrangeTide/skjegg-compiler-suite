@@ -6,6 +6,9 @@
    end's driver raises it before target_emit. */
 int target_aot_trap_guarded = 0;
 
+/* Opt-in -ffunction-sections (see ir.h).  Off by default. */
+int target_function_sections = 0;
+
 struct ir_func *
 ir_new_func(struct arena *a, const char *name)
 {

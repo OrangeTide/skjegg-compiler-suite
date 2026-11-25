@@ -126,6 +126,12 @@ ld_write_exec(struct linker *ld, const char *path)
                 continue;
             if (g->type != STT_FUNC && g->binding != STB_GLOBAL)
                 continue;
+            /* --gc-sections: a symbol whose defining section was dropped is
+               gone; do not re-emit it at a stale address. */
+            if (g->obj_idx >= 0 && g->sec_idx >= 0 &&
+                g->sec_idx < ld->objs[g->obj_idx].nsections &&
+                ld->objs[g->obj_idx].sections[g->sec_idx].dead)
+                continue;
             if ((g->binding == STB_LOCAL) != (pass == 0))
                 continue;
             symsel[nsymsel++] = s;

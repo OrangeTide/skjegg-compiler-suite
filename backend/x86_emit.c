@@ -1317,7 +1317,10 @@ emit_function(FILE *out, struct ir_func *fn)
     narg = 0;
     label_prefix = ++fn_serial;
 
-    fprintf(out, "\n.text\n");
+    if (target_function_sections)
+        fprintf(out, "\n.section .text.%s,\"ax\",@progbits\n", fn->name);
+    else
+        fprintf(out, "\n.text\n");
     if (!fn->is_local)
         fprintf(out, ".globl %s\n", fn->name);
     fprintf(out, "%s:\n", fn->name);

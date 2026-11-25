@@ -469,4 +469,11 @@ void wasm_set_output_format(const char *outpath);
    Defined in ir.c so every driver links one copy. */
 extern int target_aot_trap_guarded;
 
+/* Opt-in -ffunction-sections.  0 (the default) emits a single .text per object,
+   byte-identical to before.  Set to 1 before target_emit to put each function in
+   its own .section .text.<fn>, so a later --gc-sections link can drop an
+   unreferenced one.  A mode, not per-call data, so it rides a flag; defined in
+   ir.c so every driver links one copy. */
+extern int target_function_sections;
+
 #endif /* IR_H */

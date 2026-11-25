@@ -6,6 +6,26 @@ notes; the detail there is shallower than for recent releases.
 
 ## November 2026
 
+### 0.70.0
+
+Opt-in linker dead-strip (`--gc-sections`) across all five ELF backends.
+
+#### Added
+- `--gc-sections` linker dead-strip, opt-in and off by default so an ordinary
+  link stays byte-for-byte unchanged. Compiling with `-ffunction-sections`
+  (accepted by `skj-cc` on every backend and by `skj-pc`) puts each function in
+  its own `.section .text.<fn>`; linking with `--gc-sections` then marks from the
+  entry point and every ordinary section, follows each live section's
+  relocations, and drops any per-function section nothing reaches, so an uncalled
+  function's code, relocations and symbols all fall out. Supported on all five
+  ELF targets: ColdFire (`skj-ld`), RISC-V (`skj-ld-rv`), MIPS (`skj-ld-mips`),
+  x86-64 (`skj-ld-x86-64`) and AArch64 (`skj-ld-arm64`). The five in-tree
+  assemblers gain growable named-section tables that place a `.text.<fn>` in its
+  own ELF section (with its relocations and, on AArch64, its literal pool), and
+  the shared linker core marks and sweeps once for every target. Each backend
+  has a `test-cc-gc-sections-<arch>` lane proving an uncalled function is dropped
+  and the result still runs. See `doc/tools/toolchain.md`.
+
 ### 0.69.0
 
 Separate compilation for Pascal: a `unit`/`uses` module system for `skj-pc`.

@@ -244,6 +244,107 @@ process_assigns(struct linker *ld, struct ld_output_sec *os,
     }
 }
 
+/****************************************************************
+ * --gc-sections dead-strip
+ ****************************************************************/
+
+/* A per-function split section the backend emits under -ffunction-sections
+   (.text.<fn>, .rodata.<fn>, ...): a drop candidate.  A plain .text/.data from
+   an object built without the flag is never a candidate, so it always stays. */
+static int
+is_gc_candidate(const char *name)
+{
+    static const char *const pre[] = {
+        ".text.", ".rodata.", ".data.", ".bss.",
+    };
+    for (size_t k = 0; k < sizeof pre / sizeof pre[0]; k++) {
+        size_t plen = strlen(pre[k]);
+        if (strncmp(name, pre[k], plen) == 0 && name[plen] != '\0')
+            return 1;
+    }
+    return 0;
+}
+
+/* Mark-sweep the input sections (shared by every ELF target, gated by
+   ld->gc_sections).  Every non-candidate alloc section and the entry section
+   are roots; a live section's relocations keep their targets' defining sections
+   alive, to a fixpoint.  A candidate section no root can reach stays dead and is
+   skipped at placement, so its code, relocations and symbols fall out. */
+static void
+gc_mark_sections(struct linker *ld)
+{
+    int total = 0;
+    for (int oi = 0; oi < ld->nobjs; oi++)
+        total += ld->objs[oi].nsections;
+    if (total == 0)
+        return;
+
+    int (*stack)[2] = arena_alloc(&ld->arena, (size_t)total * sizeof *stack);
+    int sp = 0;
+
+    for (int oi = 0; oi < ld->nobjs; oi++) {
+        struct ld_object *obj = &ld->objs[oi];
+        for (int s = 0; s < obj->nsections; s++) {
+            struct ld_input_sec *isec = &obj->sections[s];
+            int alloc = (isec->flags & SHF_ALLOC) &&
+                        (isec->type == SHT_PROGBITS ||
+                         isec->type == SHT_NOBITS);
+            if (alloc && is_gc_candidate(isec->name)) {
+                isec->dead = 1;                 /* provisionally droppable */
+            } else {
+                isec->dead = 0;                 /* a root */
+                if (alloc) {
+                    stack[sp][0] = oi;
+                    stack[sp][1] = s;
+                    sp++;
+                }
+            }
+        }
+    }
+
+    /* the entry section is a root even if it was split out */
+    if (ld->script.entry) {
+        int ei = sym_find(ld, ld->script.entry);
+        if (ei >= 0 && ld->syms[ei].obj_idx >= 0) {
+            int oi = ld->syms[ei].obj_idx;
+            int s = ld->syms[ei].sec_idx;
+            if (s >= 0 && s < ld->objs[oi].nsections &&
+                ld->objs[oi].sections[s].dead) {
+                ld->objs[oi].sections[s].dead = 0;
+                stack[sp][0] = oi;
+                stack[sp][1] = s;
+                sp++;
+            }
+        }
+    }
+
+    while (sp > 0) {
+        int oi = stack[--sp][0];
+        int s = stack[sp][1];
+        struct ld_object *obj = &ld->objs[oi];
+        for (int ri = 0; ri < obj->nrelocs; ri++) {
+            struct ld_reloc *rel = &obj->relocs[ri];
+            if (rel->section != s)
+                continue;
+            int gi = obj->sym_map[rel->sym_idx];
+            if (gi < 0)
+                continue;
+            struct ld_symbol *g = &ld->syms[gi];
+            int toi = g->obj_idx;
+            int ts = g->sec_idx;
+            if (toi < 0 || ts < 0 || ts >= ld->objs[toi].nsections)
+                continue;
+            struct ld_input_sec *tis = &ld->objs[toi].sections[ts];
+            if (tis->dead) {
+                tis->dead = 0;
+                stack[sp][0] = toi;
+                stack[sp][1] = ts;
+                sp++;
+            }
+        }
+    }
+}
+
 /* Arch-neutral layout: symbol collection, section placement, final symbol
  * addresses and entry resolution.  Shared by the m68k and RISC-V linkers; the
  * relocation application that follows is target-specific. */
@@ -253,6 +354,9 @@ ld_layout(struct linker *ld)
     struct ld_script *sc = &ld->script;
 
     collect_symbols(ld);
+
+    if (ld->gc_sections)
+        gc_mark_sections(ld);
 
     /* advance region cursors past ELF/phdr headers (included in segment) */
     int nphdrs = sc->nphdrs > 0 ? sc->nphdrs : 1;
@@ -306,6 +410,8 @@ ld_layout(struct linker *ld)
                     struct ld_input_sec *isec = &obj->sections[s];
                     if (isec->matched)
                         continue;
+                    if (isec->dead)
+                        continue;       /* --gc-sections dropped it */
                     if (isec->type != SHT_PROGBITS &&
                         isec->type != SHT_NOBITS)
                         continue;
@@ -516,8 +622,15 @@ ld_write_map(struct linker *ld, const char *path)
         arena_alloc(&ld->arena, (size_t)ld->nsyms * sizeof *order);
     int n = 0;
     for (int i = 0; i < ld->nsyms; i++) {
-        if (ld->syms[i].defined && ld->syms[i].name[0] != '\0')
-            order[n++] = &ld->syms[i];
+        struct ld_symbol *g = &ld->syms[i];
+        if (!g->defined || g->name[0] == '\0')
+            continue;
+        /* --gc-sections: skip a symbol whose defining section was dropped */
+        if (g->obj_idx >= 0 && g->sec_idx >= 0 &&
+            g->sec_idx < ld->objs[g->obj_idx].nsections &&
+            ld->objs[g->obj_idx].sections[g->sec_idx].dead)
+            continue;
+        order[n++] = g;
     }
     qsort(order, (size_t)n, sizeof *order, map_sym_cmp);
 

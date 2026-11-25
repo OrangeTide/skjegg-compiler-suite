@@ -116,7 +116,13 @@ struct a64_litref {
 
 struct a64_asm {
     struct lexer lex;
-    struct section sections[ASEC_COUNT];
+    /* Sections 0..ASEC_COUNT-1 are the fixed base sections (indices match the
+       a64_section_id enum); indices >= ASEC_COUNT are extra named sections
+       created by `.section .text.<fn>` under -ffunction-sections.  A grown array
+       keeps the existing &a->sections[id] indexing valid while allowing more. */
+    struct section *sections;
+    int nsections;
+    int sections_cap;
     int cur_section;
     struct symtab st;
     int pass;
@@ -147,6 +153,11 @@ struct a64_asm {
 /* Lifecycle and the two-pass driver (as/aarch64_parse.c). */
 void a64_init(struct a64_asm *a, const char *src);
 void a64_free(struct a64_asm *a);
+
+/* Find or create an extra named section (.text.<fn> etc.) and return its index.
+   `kind` (enum sec_kind) fixes the ELF flags/type.  A bare base section name
+   (".text", ".data", ".rodata", ".bss") returns the fixed base index. */
+int a64_section_named(struct a64_asm *a, const char *name, int kind);
 void a64_assemble(struct a64_asm *a);
 
 /* Encode one instruction into the current section (as/aarch64_encode.c).  In

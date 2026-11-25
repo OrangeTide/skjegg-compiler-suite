@@ -17,7 +17,7 @@ usage(FILE *out, int code)
 {
     fprintf(out,
             "usage: skj-ld-mips [-V] [-T script.ld] [-e entry] [-f fmt]"
-            " [-Map map] -o output input.o [...]\n"
+            " [-Map map] [--gc-sections] -o output input.o [...]\n"
             "\n"
             "MIPS I static linker.  Reads ELF32 little-endian EM_MIPS\n"
             "relocatable objects and writes an executable.\n"
@@ -38,6 +38,7 @@ main(int argc, char **argv)
     const char **inputs;
     int ninputs;
     int psexe;                  /* 0 ELF (default), 1 PS-EXE */
+    int gc_sections;
     struct linker ld;
 
     util_set_progname("skj-ld-mips");
@@ -49,6 +50,7 @@ main(int argc, char **argv)
     inputs = NULL;
     ninputs = 0;
     psexe = 0;
+    gc_sections = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-V") == 0) {
             printf("skj-ld-mips %s\n", SKJ_VERSION);
@@ -75,6 +77,8 @@ main(int argc, char **argv)
         } else if (strcmp(argv[i], "-Map") == 0) {
             if (++i >= argc) usage(stderr, 1);
             map_path = argv[i];
+        } else if (strcmp(argv[i], "--gc-sections") == 0) {
+            gc_sections = 1;
         } else if (argv[i][0] == '-') {
             die("unknown option: %s", argv[i]);
         } else {
@@ -94,6 +98,7 @@ main(int argc, char **argv)
     util_die_active = 1;
 
     memset(&ld, 0, sizeof(ld));
+    ld.gc_sections = gc_sections;
     arena_init(&ld.arena);
     util_cleanup_push(cleanup_ld, &ld);
 

@@ -404,7 +404,10 @@ emit_string(struct a64_asm *a, int nul)
 static void
 set_section(struct a64_asm *a, int sec)
 {
-    if (a->cur_section == ASEC_TEXT && a->nlits > 0)
+    /* Any pending literal pool must land in the section its ldr-literals read
+       from, before the switch.  A per-function .text.<fn> (named section) is a
+       text section too, so flush on any pending pool, not only base .text. */
+    if (a->nlits > 0)
         a64_flush_litpool(a, a->pass == 2);
     a->cur_section = sec;
 }
@@ -468,10 +471,18 @@ handle_directive(struct a64_asm *a, const char *dir)
         if (l->tok.type == T_DOT_IDENT || l->tok.type == T_IDENT) {
             const char *n = l->tok.str;
             if (n[0] == '.') {              /* ELF section name */
-                if (strncmp(n, ".text", 5) == 0)        set_section(a, ASEC_TEXT);
-                else if (strncmp(n, ".rodata", 7) == 0) set_section(a, ASEC_RODATA);
-                else if (strncmp(n, ".data", 5) == 0)   set_section(a, ASEC_DATA);
-                else if (strncmp(n, ".bss", 4) == 0)    set_section(a, ASEC_BSS);
+                /* A `.text.<fn>` / `.rodata.<fn>` name (a base-section prefix
+                   plus a dot) is its own output section under -ffunction-sections,
+                   so --gc-sections can drop it; the linker script globs it back.
+                   A bare base name maps to the fixed base section as before. */
+                if (strncmp(n, ".text", 5) == 0)
+                    set_section(a, a64_section_named(a, n, SECK_TEXT));
+                else if (strncmp(n, ".rodata", 7) == 0)
+                    set_section(a, a64_section_named(a, n, SECK_RODATA));
+                else if (strncmp(n, ".data", 5) == 0)
+                    set_section(a, a64_section_named(a, n, SECK_DATA));
+                else if (strncmp(n, ".bss", 4) == 0)
+                    set_section(a, a64_section_named(a, n, SECK_BSS));
             } else {                        /* Mach-O `__SEG,__sect` */
                 lex_next(l);
                 if (l->tok.type == T_COMMA)
@@ -804,13 +815,11 @@ run_pass(struct a64_asm *a)
         if (l->tok.type == T_NEWLINE) lex_next(l);
     }
 
-    /* flush any trailing literal pool at end of the text section */
-    if (a->nlits > 0) {
-        int save = a->cur_section;
-        a->cur_section = ASEC_TEXT;
+    /* Flush any trailing literal pool at end of input.  set_section flushes on
+       leaving a text section, so a pool pending here belongs to the current
+       section (base .text, or a per-function .text.<fn>); flush it there. */
+    if (a->nlits > 0)
         a64_flush_litpool(a, a->pass == 2);
-        a->cur_section = save;
-    }
 }
 
 /****************************************************************
@@ -825,6 +834,12 @@ a64_init(struct a64_asm *a, const char *src)
     arena_init(&a->arena);
     a->lex.arena = &a->arena;
     a->st.arena = &a->arena;
+    /* Allocate the fixed base sections (indices 0..ASEC_COUNT-1); extra named
+       sections append past ASEC_COUNT. */
+    a->sections_cap = ASEC_COUNT + 8;
+    a->sections = xmalloc(a->sections_cap * sizeof(struct section));
+    memset(a->sections, 0, a->sections_cap * sizeof(struct section));
+    a->nsections = ASEC_COUNT;
     for (k = 0; k < ASEC_COUNT; k++)
         a->sections[k].little_endian = 1;
     /* AArch64 GAS has no single-char line comment (# is the immediate sigil);
@@ -834,14 +849,46 @@ a64_init(struct a64_asm *a, const char *src)
     lex_init(&a->lex, src, '\0', 0);
 }
 
+int
+a64_section_named(struct a64_asm *a, const char *name, int kind)
+{
+    int i;
+
+    /* A bare base-section name maps to its fixed index; the ELF writer names
+       those itself, so they carry no per-section name. */
+    if (strcmp(name, ".text") == 0)   return ASEC_TEXT;
+    if (strcmp(name, ".data") == 0)   return ASEC_DATA;
+    if (strcmp(name, ".rodata") == 0) return ASEC_RODATA;
+    if (strcmp(name, ".bss") == 0)    return ASEC_BSS;
+
+    for (i = ASEC_COUNT; i < a->nsections; i++)
+        if (a->sections[i].name && strcmp(a->sections[i].name, name) == 0)
+            return i;
+
+    if (a->nsections == a->sections_cap) {
+        a->sections_cap *= 2;
+        a->sections = realloc(a->sections,
+                              a->sections_cap * sizeof(struct section));
+        if (!a->sections)
+            die("out of memory");
+    }
+    i = a->nsections++;
+    memset(&a->sections[i], 0, sizeof(struct section));
+    a->sections[i].name = arena_strdup(&a->arena, name);
+    a->sections[i].kind = kind;
+    a->sections[i].little_endian = 1;
+    return i;
+}
+
 void
 a64_free(struct a64_asm *a)
 {
     int k;
-    for (k = 0; k < ASEC_COUNT; k++) {
+    for (k = 0; k < a->nsections; k++) {
         free(a->sections[k].data);
         free(a->sections[k].relocs);
     }
+    free(a->sections);
     free(a->st.syms);
     free(a->numlabels);
     free(a->lits);
@@ -930,12 +977,12 @@ a64_assemble(struct a64_asm *a)
     int k;
 
     a->pass = 1;
-    for (k = 0; k < ASEC_COUNT; k++) { a->sections[k].len = 0; a->sections[k].nrelocs = 0; }
+    for (k = 0; k < a->nsections; k++) { a->sections[k].len = 0; a->sections[k].nrelocs = 0; }
     lex_rewind(&a->lex);
     run_pass(a);
 
     a->pass = 2;
-    for (k = 0; k < ASEC_COUNT; k++) { a->sections[k].len = 0; a->sections[k].nrelocs = 0; }
+    for (k = 0; k < a->nsections; k++) { a->sections[k].len = 0; a->sections[k].nrelocs = 0; }
     lex_rewind(&a->lex);
     run_pass(a);
 }

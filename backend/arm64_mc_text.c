@@ -554,7 +554,11 @@ target_emit(FILE *out, struct ir_program *prog)
     for (fn = prog->funcs; fn; fn = fn->next) {
         char err[128];
 
-        fputs("\n\t.text\n\t.align 2\n", out);
+        if (target_function_sections)
+            fprintf(out, "\n\t.section\t.text.%s%s,\"ax\",@progbits\n\t.align 2\n",
+                    sympfx(), fn->name);
+        else
+            fputs("\n\t.text\n\t.align 2\n", out);
         if (!fn->is_local)
             fprintf(out, "\t.globl %s%s\n", sympfx(), fn->name);
         fprintf(out, "%s%s:\n", sympfx(), fn->name);

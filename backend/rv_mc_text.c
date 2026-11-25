@@ -892,7 +892,11 @@ target_emit(FILE *out, struct ir_program *prog)
         char err[128];
         int fserial = ++serial;
 
-        fprintf(out, "\n\t.text\n\t.align 2\n");
+        if (target_function_sections)
+            fprintf(out, "\n\t.section\t.text.%s,\"ax\",@progbits\n\t.align 2\n",
+                    fn->name);
+        else
+            fprintf(out, "\n\t.text\n\t.align 2\n");
         if (!fn->is_local)
             fprintf(out, "\t.globl %s\n", fn->name);
         /* STT_FUNC + a size so a debugger maps an address to this function and

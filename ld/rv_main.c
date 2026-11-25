@@ -17,7 +17,7 @@ usage(FILE *out, int code)
 {
     fprintf(out,
             "usage: skj-ld-rv [-V] [-T script.ld] [-e entry] [-Map map]"
-            " -o output input.o [...]\n"
+            " [--gc-sections] -o output input.o [...]\n"
             "\n"
             "RISC-V RV32 static linker.  Reads ELF32 little-endian EM_RISCV\n"
             "relocatable objects and writes an ET_EXEC based at 0x10000 for\n"
@@ -34,6 +34,7 @@ main(int argc, char **argv)
     const char *map_path;
     const char **inputs;
     int ninputs;
+    int gc_sections;
     struct linker ld;
 
     util_set_progname("skj-ld-rv");
@@ -44,6 +45,7 @@ main(int argc, char **argv)
     map_path = NULL;
     inputs = NULL;
     ninputs = 0;
+    gc_sections = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-V") == 0) {
             printf("skj-ld-rv %s\n", SKJ_VERSION);
@@ -62,6 +64,8 @@ main(int argc, char **argv)
         } else if (strcmp(argv[i], "-Map") == 0) {
             if (++i >= argc) usage(stderr, 1);
             map_path = argv[i];
+        } else if (strcmp(argv[i], "--gc-sections") == 0) {
+            gc_sections = 1;
         } else if (argv[i][0] == '-') {
             die("unknown option: %s", argv[i]);
         } else {
@@ -81,6 +85,7 @@ main(int argc, char **argv)
     util_die_active = 1;
 
     memset(&ld, 0, sizeof(ld));
+    ld.gc_sections = gc_sections;
     arena_init(&ld.arena);
     util_cleanup_push(cleanup_ld, &ld);
 

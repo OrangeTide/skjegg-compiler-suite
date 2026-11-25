@@ -83,7 +83,13 @@ enum mips_section_id {
 
 struct mips_asm {
     struct lexer lex;
-    struct section sections[MSEC_COUNT];
+    /* Sections 0..MSEC_COUNT-1 are the fixed base sections (indices match the
+       mips_section_id enum); indices >= MSEC_COUNT are extra named sections
+       created by `.section .text.<fn>` under -ffunction-sections.  A grown array
+       keeps the existing &a->sections[id] indexing valid while allowing more. */
+    struct section *sections;
+    int nsections;
+    int sections_cap;
     int cur_section;
     struct symtab st;
     int pass;
@@ -112,6 +118,11 @@ struct mips_asm {
 
 void mips_init(struct mips_asm *a, const char *src);
 void mips_free(struct mips_asm *a);
+
+/* Find or create an extra named section (.text.<fn> etc.) and return its index.
+   `kind` (enum sec_kind) fixes the ELF flags/type.  A bare base section name
+   (".text", ".data", ".rodata", ".bss") returns the fixed base index. */
+int mips_section_named(struct mips_asm *a, const char *name, int kind);
 void mips_assemble(struct mips_asm *a);
 
 /* Build the DWARF .debug_* sections from the .loc rows (after assemble). */

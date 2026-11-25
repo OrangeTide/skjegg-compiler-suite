@@ -58,6 +58,8 @@ main(int argc, char **argv)
             return 0;
         } else if (strcmp(argv[i], "-g") == 0) {
             pascal_debug = 1;
+        } else if (strcmp(argv[i], "-ffunction-sections") == 0) {
+            target_function_sections = 1;
         } else if (strcmp(argv[i], "--emit-unit") == 0) {
             emit_unit = 1;
         } else if (strcmp(argv[i], "--meta") == 0 && i + 1 < argc) {

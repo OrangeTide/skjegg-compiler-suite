@@ -145,6 +145,13 @@ program that uses both, then run the program: a unit exports a const, a record
 type, and routines, with a transitive interface dependency and a diamond that
 injects the shared unit once. The two lanes prove units are not ILP32-bound.
 
+`make test-pc-gc-sections` (ColdFire, in `make check`) proves the linker
+dead-strip: `skj-pc -ffunction-sections` puts each function in its own
+`.text.<fn>` section, and a `skj-ld --gc-sections` link drops a function the
+program never calls, producing a smaller binary that still runs correctly. The
+`-ffunction-sections` flag is off by default, so ordinary output is unchanged.
+See `doc/tools/toolchain.md` for the whole pipeline.
+
 ## Roadmap
 
 The direction is a general-purpose Pascal large enough to compile real programs,

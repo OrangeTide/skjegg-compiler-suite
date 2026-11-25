@@ -125,7 +125,13 @@ struct rv_locrow {
 
 struct rv_asm {
     struct lexer lex;
-    struct section sections[RSEC_COUNT];
+    /* Sections 0..RSEC_COUNT-1 are the fixed base sections (indices match the
+       rv_section_id enum); indices >= RSEC_COUNT are extra named sections created
+       by `.section .text.<fn>` under -ffunction-sections.  A grown array keeps
+       the existing &a->sections[id] indexing valid while allowing more. */
+    struct section *sections;
+    int nsections;
+    int sections_cap;
     int cur_section;
     struct symtab st;
     int pass;
@@ -154,6 +160,11 @@ struct rv_asm {
 
 void rv_init(struct rv_asm *a, const char *src);
 void rv_free(struct rv_asm *a);
+
+/* Find or create an extra named section (.text.<fn> etc.) and return its index.
+   `kind` (enum sec_kind) fixes the ELF flags/type.  A bare base section name
+   (".text", ".data", ".rodata", ".bss") returns the fixed base index. */
+int rv_section_named(struct rv_asm *a, const char *name, int kind);
 char *rv_expand_macros(struct arena *a, const char *src);
 void rv_assemble(struct rv_asm *a);     /* sizing + relaxation + emit passes */
 void rv_note_branch(struct rv_asm *a, int section, uint32_t offset,

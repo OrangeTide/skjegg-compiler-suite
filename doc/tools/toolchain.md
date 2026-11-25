@@ -125,6 +125,29 @@ the bit-packed instruction relocations). Executable addresses stay in the low
 tools, with no external assembler or linker. **`skj-ar`** is the archiver that
 builds the `libc.a` and runtime archives.
 
+### Dead-strip (`--gc-sections`)
+
+The linker can drop functions nothing reaches. It is opt-in and off by default,
+so an ordinary link is byte-for-byte unchanged. Two steps turn it on. First
+compile with `-ffunction-sections` (accepted by `skj-cc` on every backend and by
+`skj-pc`), which puts each function in its own `.section .text.<fn>` instead of
+one shared `.text`. Then link with `--gc-sections`, which marks from the entry
+point and every ordinary (non-split) section, follows each live section's
+relocations to the sections they reference, and discards any per-function
+section left unmarked. The dropped function's code, relocations and symbols all
+fall out of the output.
+
+All five ELF targets support it: ColdFire (`skj-ld`), RISC-V (`skj-ld-rv`), MIPS
+(`skj-ld-mips`), x86-64 (`skj-ld-x86-64`) and AArch64 (`skj-ld-arm64`). On
+AArch64 each function's literal pool lands in that function's own section, so it
+is dropped with the function.
+
+A plain `.text` from an object built without `-ffunction-sections` is never a
+drop candidate, so mixing split and unsplit objects is safe: only the
+split-out functions can be removed. The default linker script globs
+`*(.text .text.*)` back into one output section, so the per-function pieces
+coalesce with no script change whether or not the strip runs.
+
 ## Running and debugging
 
 - **`skj-run`** is the emulator. It executes a linked guest, maps guest system

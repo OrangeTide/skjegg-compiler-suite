@@ -59,7 +59,13 @@ enum section_id {
 
 struct assembler {
     struct lexer lex;
-    struct section sections[SEC_COUNT];
+    /* Sections 0..SEC_COUNT-1 are the fixed base sections (indices match the
+       section_id enum); indices >= SEC_COUNT are extra named sections created by
+       `.section .text.<fn>` under -ffunction-sections.  A grown array keeps all
+       the existing &a->sections[id] indexing valid while allowing more. */
+    struct section *sections;
+    int nsections;
+    int sections_cap;
     int cur_section;
     struct symtab st;
     int pass;
@@ -82,6 +88,11 @@ void cf_emit_debug(struct assembler *a);
 
 void as_init(struct assembler *a, const char *src);
 void as_free(struct assembler *a);
+
+/* Find or create an extra named section (.text.<fn> etc.) and return its index.
+   `kind` (enum sec_kind) fixes the ELF flags/type.  A bare base section name
+   (".text", ".data", ".rodata", ".bss") returns the fixed base index. */
+int as_section_named(struct assembler *a, const char *name, int kind);
 void as_pass1(struct assembler *a);
 void as_pass2(struct assembler *a);
 

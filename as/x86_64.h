@@ -85,7 +85,13 @@ struct x64_numlabel {
 
 struct x86_64_asm {
     struct lexer lex;
-    struct section sections[XSEC_COUNT];
+    /* Sections 0..XSEC_COUNT-1 are the fixed base sections (indices match the
+       x64_section_id enum); indices >= XSEC_COUNT are extra named sections
+       created by `.section .text.<fn>` under -ffunction-sections.  A grown array
+       keeps the existing &a->sections[id] indexing valid while allowing more. */
+    struct section *sections;
+    int nsections;
+    int sections_cap;
     int cur_section;
     struct symtab st;
     int pass;
@@ -98,6 +104,11 @@ struct x86_64_asm {
 /* Lifecycle and the two-pass driver (as/x86_64_parse.c). */
 void x86_64_init(struct x86_64_asm *a, const char *src);
 void x86_64_free(struct x86_64_asm *a);
+
+/* Find or create an extra named section (.text.<fn> etc.) and return its index.
+   `kind` (enum sec_kind) fixes the ELF flags/type.  A bare base section name
+   (".text", ".data", ".rodata", ".bss") returns the fixed base index. */
+int x86_64_section_named(struct x86_64_asm *a, const char *name, int kind);
 void x86_64_assemble(struct x86_64_asm *a);
 
 /* Encode one instruction into the current section (as/x86_64_encode.c).  In

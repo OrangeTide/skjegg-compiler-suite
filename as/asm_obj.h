@@ -25,6 +25,18 @@ struct reloc {
     int type;               /* target relocation type (0 = default) */
 };
 
+/* Section class, for the per-function sections an assembler emits under
+   -ffunction-sections (.text.<fn>, .rodata.<fn>, ...): it fixes the ELF flags
+   and type (text = AX PROGBITS, rodata = A PROGBITS, data = WA PROGBITS, bss =
+   WA NOBITS) for a dynamically named section, the way the fixed base sections
+   are hardcoded in each ELF writer. */
+enum sec_kind {
+    SECK_TEXT,
+    SECK_RODATA,
+    SECK_DATA,
+    SECK_BSS,
+};
+
 struct section {
     uint8_t *data;
     int len;
@@ -34,6 +46,9 @@ struct section {
     struct reloc *relocs;
     int nrelocs;
     int reloc_cap;
+    const char *name;       /* ELF name of an extra named section (.text.<fn>);
+                               NULL for a fixed base section the writer names */
+    int kind;               /* enum sec_kind, for a named section's ELF flags */
 };
 
 void sec_emit8(struct section *s, uint8_t val);

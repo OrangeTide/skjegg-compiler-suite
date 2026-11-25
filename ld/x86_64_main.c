@@ -17,7 +17,7 @@ usage(FILE *out, int code)
 {
     fprintf(out,
             "usage: skj-ld-x86-64 [-V] [-T script.ld] [-e entry] [-Map map]"
-            " -o output input.o [...]\n"
+            " [--gc-sections] -o output input.o [...]\n"
             "\n"
             "x86-64 static linker.  Reads ELFCLASS64 little-endian EM_X86_64\n"
             "relocatable objects and writes an ET_EXEC based at 0x400000 for\n"
@@ -34,6 +34,7 @@ main(int argc, char **argv)
     const char *map_path;
     const char **inputs;
     int ninputs;
+    int gc_sections;
     struct linker ld;
 
     util_set_progname("skj-ld-x86-64");
@@ -44,6 +45,7 @@ main(int argc, char **argv)
     map_path = NULL;
     inputs = NULL;
     ninputs = 0;
+    gc_sections = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-V") == 0) {
             printf("skj-ld-x86-64 %s\n", SKJ_VERSION);
@@ -62,6 +64,8 @@ main(int argc, char **argv)
         } else if (strcmp(argv[i], "-Map") == 0) {
             if (++i >= argc) usage(stderr, 1);
             map_path = argv[i];
+        } else if (strcmp(argv[i], "--gc-sections") == 0) {
+            gc_sections = 1;
         } else if (argv[i][0] == '-') {
             die("unknown option: %s", argv[i]);
         } else {
@@ -80,6 +84,7 @@ main(int argc, char **argv)
     util_die_active = 1;
 
     memset(&ld, 0, sizeof(ld));
+    ld.gc_sections = gc_sections;
     arena_init(&ld.arena);
     ld.ehdr_size = 64;          /* ELF64 header + 56-byte program headers */
     ld.phent_size = 56;

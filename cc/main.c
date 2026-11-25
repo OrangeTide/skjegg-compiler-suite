@@ -121,6 +121,8 @@ main(int argc, char **argv)
             preprocess_only = 1;
         } else if (strcmp(argv[i], "-g") == 0) {
             cc_debug = 1;
+        } else if (strcmp(argv[i], "-ffunction-sections") == 0) {
+            target_function_sections = 1;
         } else if (argv[i][0] == '-') {
             /* ignore unknown options silently */
         } else {

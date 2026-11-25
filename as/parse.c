@@ -336,10 +336,19 @@ handle_directive(struct assembler *a, const char *dir)
         lex_next(&a->lex);
         if (a->lex.tok.type == T_DOT_IDENT || a->lex.tok.type == T_IDENT) {
             const char *n = a->lex.tok.str;
-            if (strncmp(n, ".text", 5) == 0)        a->cur_section = SEC_TEXT;
-            else if (strncmp(n, ".rodata", 7) == 0) a->cur_section = SEC_RODATA;
-            else if (strncmp(n, ".data", 5) == 0)   a->cur_section = SEC_DATA;
-            else if (strncmp(n, ".bss", 4) == 0)    a->cur_section = SEC_BSS;
+            /* A `.text.<fn>` / `.rodata.<fn>` / `.data.<fn>` name (a base-section
+               prefix followed by '.') is its own output section, so --gc-sections
+               can drop it on its own; the default linker script globs it back
+               into the matching output section.  A bare base name, or anything
+               else, maps to the fixed base section as before. */
+            if (strncmp(n, ".text", 5) == 0)
+                a->cur_section = as_section_named(a, n, SECK_TEXT);
+            else if (strncmp(n, ".rodata", 7) == 0)
+                a->cur_section = as_section_named(a, n, SECK_RODATA);
+            else if (strncmp(n, ".data", 5) == 0)
+                a->cur_section = as_section_named(a, n, SECK_DATA);
+            else if (strncmp(n, ".bss", 4) == 0)
+                a->cur_section = as_section_named(a, n, SECK_BSS);
             else a->cur_section = SEC_DATA;
         }
         skip_to_eol(&a->lex);
@@ -923,7 +932,43 @@ as_init(struct assembler *a, const char *src)
     arena_init(&a->arena);
     a->lex.arena = &a->arena;
     a->st.arena = &a->arena;
+    /* Allocate the fixed base sections (indices 0..SEC_COUNT-1); extra named
+       sections append past SEC_COUNT. */
+    a->sections_cap = SEC_COUNT + 8;
+    a->sections = xmalloc(a->sections_cap * sizeof(struct section));
+    memset(a->sections, 0, a->sections_cap * sizeof(struct section));
+    a->nsections = SEC_COUNT;
     lex_init(&a->lex, src, '|', 0);
+}
+
+int
+as_section_named(struct assembler *a, const char *name, int kind)
+{
+    int i;
+
+    /* A bare base-section name maps to its fixed index; the ELF writer names
+       those itself, so they carry no per-section name. */
+    if (strcmp(name, ".text") == 0)   return SEC_TEXT;
+    if (strcmp(name, ".data") == 0)   return SEC_DATA;
+    if (strcmp(name, ".rodata") == 0) return SEC_RODATA;
+    if (strcmp(name, ".bss") == 0)    return SEC_BSS;
+
+    for (i = SEC_COUNT; i < a->nsections; i++)
+        if (a->sections[i].name && strcmp(a->sections[i].name, name) == 0)
+            return i;
+
+    if (a->nsections == a->sections_cap) {
+        a->sections_cap *= 2;
+        a->sections = realloc(a->sections,
+                              a->sections_cap * sizeof(struct section));
+        if (!a->sections)
+            die("out of memory");
+    }
+    i = a->nsections++;
+    memset(&a->sections[i], 0, sizeof(struct section));
+    a->sections[i].name = arena_strdup(&a->arena, name);
+    a->sections[i].kind = kind;
+    return i;
 }
 
 void
@@ -931,10 +976,11 @@ as_free(struct assembler *a)
 {
     int k;
 
-    for (k = 0; k < SEC_COUNT; k++) {
+    for (k = 0; k < a->nsections; k++) {
         free(a->sections[k].data);
         free(a->sections[k].relocs);
     }
+    free(a->sections);
     free(a->locrows);
     free(a->st.syms);
     free(a->lex.str_buf);
@@ -955,7 +1001,7 @@ as_pass2(struct assembler *a)
 {
     int k;
 
-    for (k = 0; k < SEC_COUNT; k++)
+    for (k = 0; k < a->nsections; k++)
         a->sections[k].len = 0;
 
     a->pass = 2;

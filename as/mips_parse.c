@@ -384,10 +384,19 @@ handle_directive(struct mips_asm *a, const char *dir)
         lex_next(l);
         if (l->tok.type == T_DOT_IDENT || l->tok.type == T_IDENT) {
             const char *n = l->tok.str;
-            if (strncmp(n, ".text", 5) == 0)        a->cur_section = MSEC_TEXT;
-            else if (strncmp(n, ".rodata", 7) == 0) a->cur_section = MSEC_RODATA;
-            else if (strncmp(n, ".data", 5) == 0)   a->cur_section = MSEC_DATA;
-            else if (strncmp(n, ".bss", 4) == 0)    a->cur_section = MSEC_BSS;
+            /* A `.text.<fn>` / `.rodata.<fn>` / `.data.<fn>` name (a base-section
+               prefix followed by '.') is its own output section, so --gc-sections
+               can drop it on its own; the default linker script globs it back
+               into the matching output section.  A bare base name maps to the
+               fixed base section as before. */
+            if (strncmp(n, ".text", 5) == 0)
+                a->cur_section = mips_section_named(a, n, SECK_TEXT);
+            else if (strncmp(n, ".rodata", 7) == 0)
+                a->cur_section = mips_section_named(a, n, SECK_RODATA);
+            else if (strncmp(n, ".data", 5) == 0)
+                a->cur_section = mips_section_named(a, n, SECK_DATA);
+            else if (strncmp(n, ".bss", 4) == 0)
+                a->cur_section = mips_section_named(a, n, SECK_BSS);
             else a->cur_section = MSEC_DATA;
         }
         skip_to_eol(l);
@@ -707,6 +716,12 @@ mips_init(struct mips_asm *a, const char *src)
     a->lex.arena = &a->arena;
     a->st.arena = &a->arena;
     a->cur_section = MSEC_TEXT;
+    /* Allocate the fixed base sections (indices 0..MSEC_COUNT-1); extra named
+       sections append past MSEC_COUNT. */
+    a->sections_cap = MSEC_COUNT + 8;
+    a->sections = xmalloc(a->sections_cap * sizeof(struct section));
+    memset(a->sections, 0, a->sections_cap * sizeof(struct section));
+    a->nsections = MSEC_COUNT;
     for (k = 0; k < MSEC_COUNT; k++)
         a->sections[k].little_endian = 1;
     /* fill the delay slots in the .set reorder regions before lexing */
@@ -716,15 +731,47 @@ mips_init(struct mips_asm *a, const char *src)
     a->lex.dollar_reg = 1;
 }
 
+int
+mips_section_named(struct mips_asm *a, const char *name, int kind)
+{
+    int i;
+
+    /* A bare base-section name maps to its fixed index; the ELF writer names
+       those itself, so they carry no per-section name. */
+    if (strcmp(name, ".text") == 0)   return MSEC_TEXT;
+    if (strcmp(name, ".data") == 0)   return MSEC_DATA;
+    if (strcmp(name, ".rodata") == 0) return MSEC_RODATA;
+    if (strcmp(name, ".bss") == 0)    return MSEC_BSS;
+
+    for (i = MSEC_COUNT; i < a->nsections; i++)
+        if (a->sections[i].name && strcmp(a->sections[i].name, name) == 0)
+            return i;
+
+    if (a->nsections == a->sections_cap) {
+        a->sections_cap *= 2;
+        a->sections = realloc(a->sections,
+                              a->sections_cap * sizeof(struct section));
+        if (!a->sections)
+            die("out of memory");
+    }
+    i = a->nsections++;
+    memset(&a->sections[i], 0, sizeof(struct section));
+    a->sections[i].name = arena_strdup(&a->arena, name);
+    a->sections[i].kind = kind;
+    a->sections[i].little_endian = 1;
+    return i;
+}
+
 void
 mips_free(struct mips_asm *a)
 {
     int k;
 
-    for (k = 0; k < MSEC_COUNT; k++) {
+    for (k = 0; k < a->nsections; k++) {
         free(a->sections[k].data);
         free(a->sections[k].relocs);
     }
+    free(a->sections);
     free(a->st.syms);
     free(a->lex.str_buf);
     free(a->locrows);
@@ -798,14 +845,14 @@ mips_assemble(struct mips_asm *a)
     int k;
 
     /* pass 1: sizing, to place labels */
-    for (k = 0; k < MSEC_COUNT; k++)
+    for (k = 0; k < a->nsections; k++)
         a->sections[k].len = 0;
     a->pass = 1;
     reset_lexer(a);
     run_pass(a);
 
     /* pass 2: emit real bytes and relocations */
-    for (k = 0; k < MSEC_COUNT; k++)
+    for (k = 0; k < a->nsections; k++)
         a->sections[k].len = 0;
     a->pass = 2;
     reset_lexer(a);

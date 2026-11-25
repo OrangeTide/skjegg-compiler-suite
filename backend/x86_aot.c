@@ -336,7 +336,11 @@ target_emit(FILE *out, struct ir_program *prog)
         char err[128];
         int rc;
 
-        fputs("\n.text\n", out);
+        if (target_function_sections)
+            fprintf(out, "\n.section .text.%s,\"ax\",@progbits\n",
+                    asm_sym(fn->name));
+        else
+            fputs("\n.text\n", out);
         if (!fn->is_local)
             fprintf(out, ".globl %s\n", asm_sym(fn->name));
         fprintf(out, "%s:\n", asm_sym(fn->name));

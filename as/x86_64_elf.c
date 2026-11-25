@@ -167,6 +167,17 @@ xsec_shndx(int xsec)
     }
 }
 
+/* Like xsec_shndx but also maps an extra named section (index >= XSEC_COUNT) to
+   its appended progbits header, which sits right after the fixed SH_* headers
+   (one per named section, in section-index order). */
+static int
+xshndx_of(int xsec)
+{
+    if (xsec >= XSEC_COUNT)
+        return SH_COUNT + (xsec - XSEC_COUNT);
+    return xsec_shndx(xsec);
+}
+
 /****************************************************************
  * ELF writer
  ****************************************************************/
@@ -181,18 +192,38 @@ x86_64_elf_write(struct x86_64_asm *a, FILE *out)
     uint8_t shdr[SH_COUNT][64];
     uint64_t offset;
     int nsyms_local, nsyms_total;
-    int k;
-    int sec_sym[XSEC_COUNT];
+    int k, j;
+    int *sec_sym;               /* esym index of each section's STT_SECTION sym */
     int *sym_map;
     struct elf_sym *esyms;
     int nesyms = 0, esym_cap;
     int len[XSEC_COUNT];
     int nrel[XSEC_COUNT];
 
+    /* Extra named sections (.text.<fn> etc.) under -ffunction-sections: each
+       gets one appended progbits header (at SH_COUNT + its position) and, when
+       it has relocations, one appended rela header after all the progbits ones.
+       When there are none the file is byte-identical to the fixed-layout form. */
+    int nextra = a->nsections - XSEC_COUNT;
+    int n_named_rela = 0;
+    int *nprog_name = nextra ? xmalloc(nextra * sizeof(int)) : NULL;
+    int *nrela_name = nextra ? xmalloc(nextra * sizeof(int)) : NULL;
+    int *nrela_sh   = nextra ? xmalloc(nextra * sizeof(int)) : NULL;
+    uint64_t *noff      = nextra ? xmalloc(nextra * sizeof(uint64_t)) : NULL;
+    uint64_t *nrela_off = nextra ? xmalloc(nextra * sizeof(uint64_t)) : NULL;
+    uint8_t **nrela_buf = nextra ? xmalloc(nextra * sizeof(uint8_t *)) : NULL;
+    int *nrela_size = nextra ? xmalloc(nextra * sizeof(int)) : NULL;
+    uint8_t (*nshdr)[64] = NULL;
+
+    sec_sym = xmalloc(a->nsections * sizeof(int));
+
     for (k = 0; k < XSEC_COUNT; k++) {
         len[k] = a->sections[k].len;
         nrel[k] = a->sections[k].nrelocs;
     }
+    for (j = 0; j < nextra; j++)
+        if (a->sections[XSEC_COUNT + j].nrelocs)
+            n_named_rela++;
 
     strtab_init(&shstrtab);
     shname[SH_NULL] = 0;
@@ -208,10 +239,30 @@ x86_64_elf_write(struct x86_64_asm *a, FILE *out)
     shname[SH_NOTE_GNU_STACK] = strtab_add(&shstrtab, ".note.GNU-stack");
     shname[SH_SHSTRTAB] = strtab_add(&shstrtab, ".shstrtab");
 
+    /* Names for the appended named sections (and their rela sections), after
+       all the fixed names so the base shstrtab bytes are unchanged.  Assign the
+       rela header indices in the same pass: SH_COUNT + nextra onward. */
+    {
+        int rsh = SH_COUNT + nextra;
+        for (j = 0; j < nextra; j++) {
+            struct section *s = &a->sections[XSEC_COUNT + j];
+            nprog_name[j] = strtab_add(&shstrtab, s->name);
+            if (s->nrelocs) {
+                char rbuf[256];
+                snprintf(rbuf, sizeof(rbuf), ".rela%s", s->name);
+                nrela_name[j] = strtab_add(&shstrtab, rbuf);
+                nrela_sh[j] = rsh++;
+            } else {
+                nrela_name[j] = 0;
+                nrela_sh[j] = -1;
+            }
+        }
+    }
+
     /* Symbol table: null, section syms, local defined, global/undefined. */
     strtab_init(&strtab);
     sym_map = xmalloc((a->st.nsyms ? a->st.nsyms : 1) * sizeof(int));
-    esym_cap = 1 + XSEC_COUNT + a->st.nsyms;
+    esym_cap = 1 + a->nsections + a->st.nsyms;
     esyms = xmalloc(esym_cap * sizeof(struct elf_sym));
 
     memset(&esyms[nesyms], 0, sizeof(struct elf_sym));
@@ -222,6 +273,14 @@ x86_64_elf_write(struct x86_64_asm *a, FILE *out)
             .st_name = 0, .st_value = 0, .st_size = 0,
             .st_info = ELF64_ST_INFO(STB_LOCAL, STT_SECTION),
             .st_other = 0, .st_shndx = (uint16_t)xsec_shndx(k),
+        };
+        sec_sym[k] = nesyms++;
+    }
+    for (k = XSEC_COUNT; k < a->nsections; k++) {
+        esyms[nesyms] = (struct elf_sym){
+            .st_name = 0, .st_value = 0, .st_size = 0,
+            .st_info = ELF64_ST_INFO(STB_LOCAL, STT_SECTION),
+            .st_other = 0, .st_shndx = (uint16_t)xshndx_of(k),
         };
         sec_sym[k] = nesyms++;
     }
@@ -236,7 +295,7 @@ x86_64_elf_write(struct x86_64_asm *a, FILE *out)
             .st_info = ELF64_ST_INFO(STB_LOCAL,
                 a->st.syms[k].is_func ? STT_FUNC : STT_NOTYPE),
             .st_other = 0,
-            .st_shndx = (uint16_t)xsec_shndx(a->st.syms[k].section),
+            .st_shndx = (uint16_t)xshndx_of(a->st.syms[k].section),
         };
         sym_map[k] = nesyms++;
     }
@@ -250,7 +309,7 @@ x86_64_elf_write(struct x86_64_asm *a, FILE *out)
         if (!a->st.syms[k].defined)
             shndx = SHN_UNDEF;
         else
-            shndx = (uint16_t)xsec_shndx(a->st.syms[k].section);
+            shndx = (uint16_t)xshndx_of(a->st.syms[k].section);
         esyms[nesyms] = (struct elf_sym){
             .st_name = (uint32_t)strtab_add(&strtab, a->st.syms[k].name),
             .st_value = a->st.syms[k].defined ? a->st.syms[k].value : 0,
@@ -294,6 +353,30 @@ x86_64_elf_write(struct x86_64_asm *a, FILE *out)
         }
     }
 
+    /* Named-section RELA buffers (same encoding as the base loop above). */
+    for (j = 0; j < nextra; j++) {
+        struct section *s = &a->sections[XSEC_COUNT + j];
+        int i;
+        nrela_size[j] = s->nrelocs * 24;
+        nrela_buf[j] = s->nrelocs ? xmalloc(nrela_size[j]) : NULL;
+        for (i = 0; i < s->nrelocs; i++) {
+            struct reloc *r = &s->relocs[i];
+            uint8_t *p = nrela_buf[j] + i * 24;
+            int elf_sym_idx = sym_map[r->sym_idx];
+            int64_t addend = r->addend;
+
+            if (a->st.syms[r->sym_idx].defined
+                && !a->st.syms[r->sym_idx].global) {
+                addend += (int64_t)a->st.syms[r->sym_idx].value;
+                elf_sym_idx = sec_sym[a->st.syms[r->sym_idx].section];
+            }
+            put64(p + 0, r->offset);
+            put64(p + 8, ((uint64_t)elf_sym_idx << 32)
+                         | (uint64_t)(uint32_t)r->type);
+            put64(p + 16, (uint64_t)addend);
+        }
+    }
+
     /* File layout: ehdr, .text, .rodata, .data, .symtab, .strtab,
        .rela.text, .rela.rodata, .rela.data, .shstrtab, section headers. */
     int symtab_size = nsyms_total * 24;
@@ -307,12 +390,27 @@ x86_64_elf_write(struct x86_64_asm *a, FILE *out)
     sec_off[XSEC_DATA] = offset;   offset += (uint64_t)len[XSEC_DATA];
     sec_off[XSEC_BSS] = offset;    /* NOBITS: no file bytes */
 
+    /* Named-section bytes follow the base section bytes (SECK_BSS carries none,
+       like the base .bss).  Empty when there are no named sections. */
+    for (j = 0; j < nextra; j++) {
+        struct section *s = &a->sections[XSEC_COUNT + j];
+        noff[j] = offset;
+        if (s->kind != SECK_BSS)
+            offset += (uint64_t)s->len;
+    }
+
     symtab_off = offset;           offset += (uint64_t)symtab_size;
     strtab_off = offset;           offset += (uint64_t)strtab.len;
 
     rela_off[XSEC_TEXT] = offset;   offset += (uint64_t)rela_size[XSEC_TEXT];
     rela_off[XSEC_RODATA] = offset; offset += (uint64_t)rela_size[XSEC_RODATA];
     rela_off[XSEC_DATA] = offset;   offset += (uint64_t)rela_size[XSEC_DATA];
+
+    /* Named-section RELA buffers follow the base rela buffers. */
+    for (j = 0; j < nextra; j++) {
+        nrela_off[j] = offset;
+        offset += (uint64_t)nrela_size[j];
+    }
 
     shstrtab_off = offset;         offset += (uint64_t)shstrtab.len;
     shdr_off = offset;
@@ -331,7 +429,7 @@ x86_64_elf_write(struct x86_64_asm *a, FILE *out)
     put32(ehdr + 48, 0);           /* e_flags */
     put16(ehdr + 52, 64);          /* e_ehsize */
     put16(ehdr + 58, 64);          /* e_shentsize */
-    put16(ehdr + 60, SH_COUNT);    /* e_shnum */
+    put16(ehdr + 60, (uint16_t)(SH_COUNT + nextra + n_named_rela)); /* e_shnum */
     put16(ehdr + 62, SH_SHSTRTAB); /* e_shstrndx */
 
     memset(shdr, 0, sizeof(shdr));
@@ -420,6 +518,41 @@ x86_64_elf_write(struct x86_64_asm *a, FILE *out)
     put64(shdr[SH_SHSTRTAB] + 32, (uint64_t)shstrtab.len);
     put64(shdr[SH_SHSTRTAB] + 48, 1);
 
+    /* Appended named-section headers: the progbits headers (one per named
+       section, in order) then the rela headers (for those with relocs). */
+    if (nextra) {
+        nshdr = xmalloc((size_t)(nextra + n_named_rela) * 64);
+        memset(nshdr, 0, (size_t)(nextra + n_named_rela) * 64);
+        for (j = 0; j < nextra; j++) {
+            struct section *s = &a->sections[XSEC_COUNT + j];
+            uint64_t flags;
+            uint32_t type;
+            switch (s->kind) {
+            case SECK_TEXT:   flags = SHF_ALLOC | SHF_EXECINSTR; type = SHT_PROGBITS; break;
+            case SECK_RODATA: flags = SHF_ALLOC;                 type = SHT_PROGBITS; break;
+            case SECK_BSS:    flags = SHF_WRITE | SHF_ALLOC;     type = SHT_NOBITS;   break;
+            default:          flags = SHF_WRITE | SHF_ALLOC;     type = SHT_PROGBITS; break;
+            }
+            put32(nshdr[j] + 0, (uint32_t)nprog_name[j]);
+            put32(nshdr[j] + 4, type);
+            put64(nshdr[j] + 8, flags);
+            put64(nshdr[j] + 24, noff[j]);
+            put64(nshdr[j] + 32, (uint64_t)s->len);
+            put64(nshdr[j] + 48, sec_addralign(s));
+            if (nrela_sh[j] >= 0) {
+                uint8_t *rh = nshdr[nrela_sh[j] - SH_COUNT];
+                put32(rh + 0, (uint32_t)nrela_name[j]);
+                put32(rh + 4, SHT_RELA);
+                put64(rh + 24, nrela_off[j]);
+                put64(rh + 32, (uint64_t)nrela_size[j]);
+                put32(rh + 40, SH_SYMTAB);                     /* sh_link */
+                put32(rh + 44, (uint32_t)xshndx_of(XSEC_COUNT + j)); /* sh_info */
+                put64(rh + 48, 8);
+                put64(rh + 56, 24);
+            }
+        }
+    }
+
     /* Emit the file */
     fwrite(ehdr, 1, 64, out);
     if (len[XSEC_TEXT] > 0)
@@ -428,6 +561,13 @@ x86_64_elf_write(struct x86_64_asm *a, FILE *out)
         fwrite(a->sections[XSEC_RODATA].data, 1, len[XSEC_RODATA], out);
     if (len[XSEC_DATA] > 0)
         fwrite(a->sections[XSEC_DATA].data, 1, len[XSEC_DATA], out);
+
+    /* Write named-section bytes (PROGBITS kinds only; NOBITS carries none). */
+    for (j = 0; j < nextra; j++) {
+        struct section *s = &a->sections[XSEC_COUNT + j];
+        if (s->kind != SECK_BSS && s->len > 0)
+            fwrite(s->data, 1, s->len, out);
+    }
 
     for (k = 0; k < nsyms_total; k++) {
         uint8_t sbuf[24];
@@ -444,15 +584,34 @@ x86_64_elf_write(struct x86_64_asm *a, FILE *out)
     if (rela_size[XSEC_DATA] > 0)
         fwrite(rela_buf[XSEC_DATA], 1, rela_size[XSEC_DATA], out);
 
+    /* Write named-section RELA buffers (in the same order the offsets used). */
+    for (j = 0; j < nextra; j++)
+        if (nrela_size[j] > 0)
+            fwrite(nrela_buf[j], 1, nrela_size[j], out);
+
     fwrite(shstrtab.data, 1, shstrtab.len, out);
 
+    /* Section header table: the fixed headers, then the named ones. */
     for (k = 0; k < SH_COUNT; k++)
         fwrite(shdr[k], 1, 64, out);
+    for (k = 0; k < nextra + n_named_rela; k++)
+        fwrite(nshdr[k], 1, 64, out);
 
     free(sym_map);
     free(esyms);
+    free(sec_sym);
     for (k = 0; k < XSEC_COUNT; k++)
         free(rela_buf[k]);
+    for (j = 0; j < nextra; j++)
+        free(nrela_buf[j]);
+    free(nprog_name);
+    free(nrela_name);
+    free(nrela_sh);
+    free(noff);
+    free(nrela_off);
+    free(nrela_buf);
+    free(nrela_size);
+    free(nshdr);
     free(strtab.data);
     free(shstrtab.data);
 }

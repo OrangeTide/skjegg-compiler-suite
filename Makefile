@@ -3448,7 +3448,7 @@ PHONY += FORCE
 FORCE:
 
 PHONY += check
-check: build/skj-mooc build/skj-pc build/skj-bc $(SCM_TESTS:tests/%.scm=build/%) $(MOO_TESTS:tests/%.moo=build/%) $(MOO_TOY_TESTS:tests/%.moo=build/%) $(PAS_TESTS_NOFLOAT:tests/%.pas=build/%) $(BAS_TESTS_CF:tests/%.bas=build/%) test-basic-bmi test-basic-module test-basic-import test-basic-import-qual test-basic-opaque test-basic-opaque-qual test-basic-external test-basic-handle-types test-basic-example test-pc-units
+check: build/skj-mooc build/skj-pc build/skj-bc $(SCM_TESTS:tests/%.scm=build/%) $(MOO_TESTS:tests/%.moo=build/%) $(MOO_TOY_TESTS:tests/%.moo=build/%) $(PAS_TESTS_NOFLOAT:tests/%.pas=build/%) $(BAS_TESTS_CF:tests/%.bas=build/%) test-basic-bmi test-basic-module test-basic-import test-basic-import-qual test-basic-opaque test-basic-opaque-qual test-basic-external test-basic-handle-types test-basic-example test-pc-units test-pc-gc-sections
 	@sh tests/run-tests.sh "$(QEMU)"
 
 ## RISC-V per-test rules: tests/<name>.scm -> build/rv/<name>.s -> .o -> binary
@@ -3463,8 +3463,42 @@ build/rv/start.o: runtime/start_rv.S runtime/crt_entry_rv.S runtime/syscall_rv.S
 build/rv/%: build/rv/%.o build/rv/start.o
 	$(RV_LD) -m elf32lriscv -o $@ build/rv/start.o $<
 
+## --gc-sections dead-strip on RISC-V.  ccgc_dead.c defines two functions and
+## calls only one; built with -ffunction-sections (skj-cc-rv) and assembled by
+## skj-as-rv, each lands in its own .text.<fn>.  A --gc-sections link (skj-ld-rv)
+## drops the uncalled function; the plain link keeps it.  main returns used(41),
+## so the process exits 42 either way.
+build/rv/ccgc_dead.fs.s: tests/ccgc_dead.c build/skj-cc-rv | build/rv
+	./build/skj-cc-rv -ffunction-sections -o $@ $<
+
+build/rv/ccgc_dead.fs.o: build/rv/ccgc_dead.fs.s build/skj-as-rv | build/rv
+	./build/skj-as-rv -o $@ $<
+
+build/rv/ccgc_dead.nogc: build/rv/ccgc_dead.fs.o build/rv/start.o build/skj-ld-rv | build/rv
+	./build/skj-ld-rv -Map build/rv/ccgc_dead.nogc.map -o $@ \
+	    build/rv/start.o build/rv/ccgc_dead.fs.o
+
+build/rv/ccgc_dead.gc: build/rv/ccgc_dead.fs.o build/rv/start.o build/skj-ld-rv | build/rv
+	./build/skj-ld-rv --gc-sections -Map build/rv/ccgc_dead.gc.map -o $@ \
+	    build/rv/start.o build/rv/ccgc_dead.fs.o
+
+PHONY += test-cc-gc-sections-rv
+test-cc-gc-sections-rv: build/rv/ccgc_dead.nogc build/rv/ccgc_dead.gc
+	@grep -qw unused build/rv/ccgc_dead.nogc.map \
+	   || { echo "FAIL: gc-sections rv (plain link should keep unused)"; exit 1; }
+	@! grep -qw unused build/rv/ccgc_dead.gc.map \
+	   || { echo "FAIL: gc-sections rv (--gc-sections should drop unused)"; exit 1; }
+	@n=$$(wc -c < build/rv/ccgc_dead.nogc); g=$$(wc -c < build/rv/ccgc_dead.gc); \
+	 [ "$$g" -lt "$$n" ] \
+	   || { echo "FAIL: gc-sections rv (gc link $$g not smaller than plain $$n)"; exit 1; }
+	@$(QEMU_RV) build/rv/ccgc_dead.nogc; a=$$?; \
+	 $(QEMU_RV) build/rv/ccgc_dead.gc;   b=$$?; \
+	 [ "$$a" = 42 ] && [ "$$b" = 42 ] \
+	   && echo "PASS: --gc-sections drops an unreferenced function (RISC-V)" \
+	   || { echo "FAIL: gc-sections rv (exit $$a / $$b, want 42/42)"; exit 1; }
+
 PHONY += check-rv
-check-rv: build/skj-sc-rv $(RV_SCM_TESTS:tests/%.scm=build/rv/%)
+check-rv: build/skj-sc-rv $(RV_SCM_TESTS:tests/%.scm=build/rv/%) test-cc-gc-sections-rv
 	@sh tests/run-tests.sh "$(QEMU_RV)" build/rv
 
 ## BASIC on RISC-V (skj-bc-rv). The front end emits rv32 asm with hardware float
@@ -3691,7 +3725,40 @@ build/mips/start_psx.o: runtime/start_psx.S | build/mips
 build/mips/%: build/mips/%.o build/mips/start.o
 	$(MIPS_LD) -o $@ build/mips/start.o $<
 
-check-mips: build/skj-sc-mips $(MIPS_SCM_TESTS:tests/%.scm=build/mips/%)
+## --gc-sections dead-strip on MIPS.  Same ccgc_dead.c fixture as rv: built with
+## -ffunction-sections (skj-cc-mips) and assembled by skj-as-mips, each function
+## lands in its own .text.<fn>; a --gc-sections link (skj-ld-mips) drops the
+## uncalled one.  main returns used(41), so the process exits 42 either way.
+build/mips/ccgc_dead.fs.s: tests/ccgc_dead.c build/skj-cc-mips | build/mips
+	./build/skj-cc-mips -ffunction-sections -o $@ $<
+
+build/mips/ccgc_dead.fs.o: build/mips/ccgc_dead.fs.s build/skj-as-mips | build/mips
+	./build/skj-as-mips -o $@ $<
+
+build/mips/ccgc_dead.nogc: build/mips/ccgc_dead.fs.o build/mips/start.o build/skj-ld-mips | build/mips
+	./build/skj-ld-mips -Map build/mips/ccgc_dead.nogc.map -o $@ \
+	    build/mips/start.o build/mips/ccgc_dead.fs.o
+
+build/mips/ccgc_dead.gc: build/mips/ccgc_dead.fs.o build/mips/start.o build/skj-ld-mips | build/mips
+	./build/skj-ld-mips --gc-sections -Map build/mips/ccgc_dead.gc.map -o $@ \
+	    build/mips/start.o build/mips/ccgc_dead.fs.o
+
+PHONY += test-cc-gc-sections-mips
+test-cc-gc-sections-mips: build/mips/ccgc_dead.nogc build/mips/ccgc_dead.gc
+	@grep -qw unused build/mips/ccgc_dead.nogc.map \
+	   || { echo "FAIL: gc-sections mips (plain link should keep unused)"; exit 1; }
+	@! grep -qw unused build/mips/ccgc_dead.gc.map \
+	   || { echo "FAIL: gc-sections mips (--gc-sections should drop unused)"; exit 1; }
+	@n=$$(wc -c < build/mips/ccgc_dead.nogc); g=$$(wc -c < build/mips/ccgc_dead.gc); \
+	 [ "$$g" -lt "$$n" ] \
+	   || { echo "FAIL: gc-sections mips (gc link $$g not smaller than plain $$n)"; exit 1; }
+	@$(QEMU_MIPS) build/mips/ccgc_dead.nogc; a=$$?; \
+	 $(QEMU_MIPS) build/mips/ccgc_dead.gc;   b=$$?; \
+	 [ "$$a" = 42 ] && [ "$$b" = 42 ] \
+	   && echo "PASS: --gc-sections drops an unreferenced function (MIPS)" \
+	   || { echo "FAIL: gc-sections mips (exit $$a / $$b, want 42/42)"; exit 1; }
+
+check-mips: build/skj-sc-mips $(MIPS_SCM_TESTS:tests/%.scm=build/mips/%) test-cc-gc-sections-mips
 	@sh tests/run-tests.sh "$(QEMU_MIPS)" build/mips
 
 ## BASIC on MIPS / PlayStation (skj-bc-mips, soft-float, the R3051 has no FPU).
@@ -4875,7 +4942,40 @@ build/arm64/%: build/arm64/%.o build/arm64/start.o
 	$(A64_LD) -o $@ build/arm64/start.o $<
 
 PHONY += check-arm64
-check-arm64: build/skj-sc-arm64 $(A64_SCM_TESTS:tests/%.scm=build/arm64/%)
+## --gc-sections dead-strip on AArch64.  Same ccgc_dead.c fixture: built with
+## -ffunction-sections (skj-cc-arm64) and assembled by skj-as-aarch64, each
+## function lands in its own .text.<fn> (with its literal pool); a --gc-sections
+## link (skj-ld-arm64) drops the uncalled one.  main returns used(41) -> exit 42.
+build/arm64/ccgc_dead.fs.s: tests/ccgc_dead.c build/skj-cc-arm64 | build/arm64
+	./build/skj-cc-arm64 -ffunction-sections -o $@ $<
+
+build/arm64/ccgc_dead.fs.o: build/arm64/ccgc_dead.fs.s build/skj-as-aarch64 | build/arm64
+	./build/skj-as-aarch64 -o $@ $<
+
+build/arm64/ccgc_dead.nogc: build/arm64/ccgc_dead.fs.o build/arm64/start_aapcs.o build/skj-ld-arm64 | build/arm64
+	./build/skj-ld-arm64 -Map build/arm64/ccgc_dead.nogc.map -o $@ \
+	    build/arm64/start_aapcs.o build/arm64/ccgc_dead.fs.o
+
+build/arm64/ccgc_dead.gc: build/arm64/ccgc_dead.fs.o build/arm64/start_aapcs.o build/skj-ld-arm64 | build/arm64
+	./build/skj-ld-arm64 --gc-sections -Map build/arm64/ccgc_dead.gc.map -o $@ \
+	    build/arm64/start_aapcs.o build/arm64/ccgc_dead.fs.o
+
+PHONY += test-cc-gc-sections-arm64
+test-cc-gc-sections-arm64: build/arm64/ccgc_dead.nogc build/arm64/ccgc_dead.gc
+	@grep -qw unused build/arm64/ccgc_dead.nogc.map \
+	   || { echo "FAIL: gc-sections arm64 (plain link should keep unused)"; exit 1; }
+	@! grep -qw unused build/arm64/ccgc_dead.gc.map \
+	   || { echo "FAIL: gc-sections arm64 (--gc-sections should drop unused)"; exit 1; }
+	@n=$$(wc -c < build/arm64/ccgc_dead.nogc); g=$$(wc -c < build/arm64/ccgc_dead.gc); \
+	 [ "$$g" -lt "$$n" ] \
+	   || { echo "FAIL: gc-sections arm64 (gc link $$g not smaller than plain $$n)"; exit 1; }
+	@$(A64_RUN) build/arm64/ccgc_dead.nogc; a=$$?; \
+	 $(A64_RUN) build/arm64/ccgc_dead.gc;   b=$$?; \
+	 [ "$$a" = 42 ] && [ "$$b" = 42 ] \
+	   && echo "PASS: --gc-sections drops an unreferenced function (AArch64)" \
+	   || { echo "FAIL: gc-sections arm64 (exit $$a / $$b, want 42/42)"; exit 1; }
+
+check-arm64: build/skj-sc-arm64 $(A64_SCM_TESTS:tests/%.scm=build/arm64/%) test-cc-gc-sections-arm64
 	@sh tests/run-tests.sh "$(QEMU_A64)" build/arm64
 
 ## x86-64 per-test rules: tests/<name>.scm -> build/x86_64/<name>.s -> .o -> binary
@@ -4900,7 +5000,40 @@ build/x86_64/%: build/x86_64/%.o build/x86_64/start.o
 	$(X64_LD) -m elf_x86_64 -o $@ build/x86_64/start.o $<
 
 PHONY += check-x86-64
-check-x86-64: build/skj-sc-x86-64 $(X64_SCM_TESTS:tests/%.scm=build/x86_64/%)
+## --gc-sections dead-strip on x86-64.  Same ccgc_dead.c fixture: built with
+## -ffunction-sections (skj-cc-x86-64) and assembled by skj-as-x86-64, each
+## function lands in its own .text.<fn>; a --gc-sections link (skj-ld-x86-64)
+## drops the uncalled one.  main returns used(41), so the process exits 42.
+build/x86_64/ccgc_dead.fs.s: tests/ccgc_dead.c build/skj-cc-x86-64 | build/x86_64
+	./build/skj-cc-x86-64 -ffunction-sections -o $@ $<
+
+build/x86_64/ccgc_dead.fs.o: build/x86_64/ccgc_dead.fs.s build/skj-as-x86-64 | build/x86_64
+	./build/skj-as-x86-64 -o $@ $<
+
+build/x86_64/ccgc_dead.nogc: build/x86_64/ccgc_dead.fs.o build/x86_64/start_sysv.o build/skj-ld-x86-64 | build/x86_64
+	./build/skj-ld-x86-64 -Map build/x86_64/ccgc_dead.nogc.map -o $@ \
+	    build/x86_64/start_sysv.o build/x86_64/ccgc_dead.fs.o
+
+build/x86_64/ccgc_dead.gc: build/x86_64/ccgc_dead.fs.o build/x86_64/start_sysv.o build/skj-ld-x86-64 | build/x86_64
+	./build/skj-ld-x86-64 --gc-sections -Map build/x86_64/ccgc_dead.gc.map -o $@ \
+	    build/x86_64/start_sysv.o build/x86_64/ccgc_dead.fs.o
+
+PHONY += test-cc-gc-sections-x86-64
+test-cc-gc-sections-x86-64: build/x86_64/ccgc_dead.nogc build/x86_64/ccgc_dead.gc
+	@grep -qw unused build/x86_64/ccgc_dead.nogc.map \
+	   || { echo "FAIL: gc-sections x86-64 (plain link should keep unused)"; exit 1; }
+	@! grep -qw unused build/x86_64/ccgc_dead.gc.map \
+	   || { echo "FAIL: gc-sections x86-64 (--gc-sections should drop unused)"; exit 1; }
+	@n=$$(wc -c < build/x86_64/ccgc_dead.nogc); g=$$(wc -c < build/x86_64/ccgc_dead.gc); \
+	 [ "$$g" -lt "$$n" ] \
+	   || { echo "FAIL: gc-sections x86-64 (gc link $$g not smaller than plain $$n)"; exit 1; }
+	@$(QEMU_X64) build/x86_64/ccgc_dead.nogc; a=$$?; \
+	 $(QEMU_X64) build/x86_64/ccgc_dead.gc;   b=$$?; \
+	 [ "$$a" = 42 ] && [ "$$b" = 42 ] \
+	   && echo "PASS: --gc-sections drops an unreferenced function (x86-64)" \
+	   || { echo "FAIL: gc-sections x86-64 (exit $$a / $$b, want 42/42)"; exit 1; }
+
+check-x86-64: build/skj-sc-x86-64 $(X64_SCM_TESTS:tests/%.scm=build/x86_64/%) test-cc-gc-sections-x86-64
 	@sh tests/run-tests.sh "$(QEMU_X64)" build/x86_64
 
 ## TinScheme compiler.  The front end plus IR is shared; only the backend and
@@ -5926,6 +6059,40 @@ test-pc-units-x86-64: build/x86_64/pcunit_use
 	@$(QEMU_X64) build/x86_64/pcunit_use > build/x86_64/pcunit_use.out; \
 	 diff tests/pcunit_use.expected build/x86_64/pcunit_use.out \
 	    && echo "PASS: pascal units LP64 (x86-64, uses + transitive dep + diamond)"
+
+## --gc-sections dead-strip on ColdFire.  pcgc_dead.pas defines two functions
+## and calls only one.  Built with -ffunction-sections (skj-pc) and assembled by
+## skj-as, each lands in its own .text.<fn>; a --gc-sections link (skj-ld) then
+## drops the unreachable Unused.  The lane asserts: the plain link keeps `unused`,
+## the gc link drops it and is smaller, and both still run to the same output.
+build/pcgc_dead.fs.s: tests/pcgc_dead.pas build/skj-pc | build
+	./build/skj-pc -ffunction-sections -o $@ $<
+
+build/pcgc_dead.fs.o: build/pcgc_dead.fs.s build/skj-as | build
+	./build/skj-as -o $@ $<
+
+build/pcgc_dead.nogc: build/pcgc_dead.fs.o build/start.o build/pascal_rt.o build/skj-ld | build
+	./build/skj-ld -Map build/pcgc_dead.nogc.map -o $@ \
+	    build/start.o build/pascal_rt.o build/pcgc_dead.fs.o
+
+build/pcgc_dead.gc: build/pcgc_dead.fs.o build/start.o build/pascal_rt.o build/skj-ld | build
+	./build/skj-ld --gc-sections -Map build/pcgc_dead.gc.map -o $@ \
+	    build/start.o build/pascal_rt.o build/pcgc_dead.fs.o
+
+PHONY += test-pc-gc-sections
+test-pc-gc-sections: build/pcgc_dead.nogc build/pcgc_dead.gc
+	@grep -qw unused build/pcgc_dead.nogc.map \
+	   || { echo "FAIL: gc-sections (plain link should keep unused)"; exit 1; }
+	@! grep -qw unused build/pcgc_dead.gc.map \
+	   || { echo "FAIL: gc-sections (--gc-sections should drop unused)"; exit 1; }
+	@n=$$(wc -c < build/pcgc_dead.nogc); g=$$(wc -c < build/pcgc_dead.gc); \
+	 [ "$$g" -lt "$$n" ] \
+	   || { echo "FAIL: gc-sections (gc link $$g not smaller than plain $$n)"; exit 1; }
+	@$(QEMU) build/pcgc_dead.nogc > build/pcgc_dead.nogc.out; \
+	 $(QEMU) build/pcgc_dead.gc  > build/pcgc_dead.gc.out; \
+	 diff tests/pcgc_dead.expected build/pcgc_dead.nogc.out \
+	   && diff tests/pcgc_dead.expected build/pcgc_dead.gc.out \
+	   && echo "PASS: --gc-sections drops an unreferenced function (ColdFire)"
 
 ## Typed opaque handles are nominal: a handle of one opaque TYPE used where
 ## another is expected is a compile error. Each basic_err_handle_*.bas is a

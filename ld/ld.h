@@ -74,6 +74,8 @@ struct ld_input_sec {
     uint32_t align;
     uint32_t assigned_vaddr;
     int matched;
+    int dead;           /* --gc-sections: a per-function split section the mark
+                           sweep found unreachable; skipped at placement */
 };
 
 struct ld_reloc {
@@ -219,6 +221,10 @@ struct linker {
        ELF64 linkers set 64 / 56. */
     uint32_t ehdr_size;
     uint32_t phent_size;
+    /* --gc-sections: 1 drops per-function split sections (.text.<fn> etc.) that
+       the mark sweep from the entry point and the non-split roots cannot reach.
+       0 (the default) keeps every input section, a byte-for-byte unchanged link. */
+    int gc_sections;
     struct arena arena;
 };
 
